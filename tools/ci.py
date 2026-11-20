@@ -14,16 +14,26 @@ CI 流水线:
 import argparse
 import json
 import os
+import pathlib
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 from _safepath import safe_open
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 KERNEL = os.path.join(ROOT, "kernel", "fujo-kernel.bin")
 # 端口可覆盖: 同机并行跑多个 agent 时避免互抢 (FUJO_MON_PORT / FUJO_SER_PORT)
 MON_PORT = int(os.environ.get("FUJO_MON_PORT", "4568"))
@@ -81,11 +91,15 @@ BOOT_S = 7.5
 KEY_HZ = 0.10
 
 # L0/L1 静态门禁 (docs/141, docs/143): 先于 QEMU 矩阵, 失败即中止 — 接口漂移不该等到运行期。
-STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potato_cross",
+STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_test",
+                 "potato_cross",
                  # 编译期子集解释器 (S4.0, docs/184 §9)
                  "loment_ct_test",
                  # `comefor` 的 token 层展开 (S4.1, docs/184 §9)
                  "loment_comefor_test",
+                 # `choose` 的联动矩阵（`#940`）：每个合法格都要有子系统真的响应它，
+                 # 每对冲突都要被点名拒绝 —— 格子从 `CORE_DIMS`/`CORE_CONFLICTS` 推出来。
+                 "loment_choose_matrix_test",
                  # 外部代码块的字节保真 (S1, docs/185)
                  "loment_extblock_test",
                  # 多语言程序 (docs/183 §8.2 的 S2 判据)
@@ -96,6 +110,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_pytrans_test",
                  # Java 翻成 Loment: 跑出的数 == javac 编那份 Java 跑出的数 (docs/188 §7.1)
                  "loment_jtrans_test",
+                 # Java AOT: 真 javac class -> Loment IR -> PE (docs/282/283)
+                 "loment_java_test",
                  # C# 翻成 Loment: 跑出的数 == dotnet 编那份 C# 跑出的数 (docs/188 §7.1)
                  "loment_cstrans_test",
                  # C++ 翻成 Loment: 跑出的数 == g++ 编那份 C++ 跑出的数 (docs/188 §7.1)
@@ -114,15 +130,124 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_potato_emit_test",
                  # `choose write grammar`: 读法由声明决定、出厂锁的取值表、声明先抹掉
                  "loment_grammar_test",
+                 # `lmgr`: 38 槽注册表与 19 项能力表，以及二进制如实说出去（docs/303）
+                 "lmgr_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
+                 # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界**只许出诊断**。
+                 # 每条都跑种子链出来的自举驱动（真入口），不是拿 Python 实现代替。
+                 "loment_crash_test",
+                 # `lms` 这一维：档 + 七个细开关 + 叠加规则（`docs/253` §9 / §11.4）
+                 "loment_lms_test",
+                 # GC 证明面的量尺（`docs/210` §7）—— 语料跑成 alpha、加总 gc_ladder。
+                 "loment_gc_surface_test",
+                 # 逐站点说出"为什么落到那一层"（`docs/229`）—— 判据 A 是与编译器的**对账**：
+                 # 这份报告的四层直方图必须逐份等于 `_count_gc_ladder()`，漂了就红。
+                 "loment_gc_why_test",
                  "loment_rule_parity", "loment_seed_test", "loment_fmt_test", "loment_doc_test",
+                 # 独立语义 oracle（`docs/349`）：Loment 写的源解释器与规范表对拍 ——
+                 # 这条是唯一一条**不靠"两个实现一致"**的判据。
+                 "loment_oracle_test",
+                 # 渠道（`docs/231` §5 判据 D/F）：发行版种子可重算、且与 dev 只差一个字节；
+                 # 发行版驱动器拒 `choose vm`、dev 收（后者要 clang + WSL，没有就 SKIP）。
+                 "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
+                 # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
+                 "loment_update_test",
+                 # 发布侧的热更新清单（`#1153`）：字段全部由树算出来，稳定版也带、准入拒绝。
+                 "loment_hotfix_test",
+                 # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录、不开 socket。
+                 "loment_staging_test",
+                 # 热线与投影（`#1156`）：只重放声明为 fix 的提交；digest 关拦标错的功能。
+                 "loment_projection_test",
+                 # 投影清单（`#1157`）：点名装了什么、剔除了什么；回滚不是升级。
+                 "loment_hotline_test",
+                 # 投影树 → 热更新件（`#1155`）：两份真 hotswap 档拼出的装载件过准入。
+                 "loment_hotart_test",
+                 # 端到端（`#1155`）：真的 `loment lsp` 在事件循环顶部换掉自己。
+                 "loment_lsp_hot_test",
+                 # 稳定性模拟（`#1152` 追加）：连换六次、两槽轮流、被拒的一轮不扰动。
+                 "loment_hotstress_test",
+                 # 热更新的元数据（`#1149`）：帧布局哈希 + 调用点表，且采集是加性的。
+                 "loment_hotmeta_test",
+                 # 热更新构建档（`#1150`）：槽表 + 入口闸；默认档与 origin/main 逐字节对拍，
+                 # 两档行为在 WSL 里比 stdout 与退出码。
+                 "loment_hotswap_test",
+                 # 双槽装载器参考模型（`#1151`）：重定位表、装槽、翻转、拒绝面。
+                 "loment_hotload_test",
+                 # 固定核（`loment/lib/hotswap.lomt`）在真进程里换掉自己（`#1151`）。
+                 "loment_hotcore_test",
+                 # 构建管线（`#1151`）：`loment build --profile hotswap` 的启动器转发与拒绝。
+                 "loment_hotbuild_test",
+                 # LVM 的 T0（`docs/243`）：同一批程序，**原生产物与 VM** 比 stdout 字节 + 退出码。
+                 "lvm_test",
+                 # LVM 自举镜像的**孪生判据**（`docs/243` §5）：同一份 `.ll` 喂参考实现与
+                 # `loment/tools/lvm.lomt`（走种子自举链编成 ELF），比 stdout 字节 + 退出码。
+                 # 它同时也在测**自举链把镜像编得对不对**。没有 clang 就 SKIP（不假装成立）。
+                 "lvm_twin_test",
+                 # 镜像的 T2（`docs/267`）：原生/镜像 T0/镜像 T2 逐字节同、剖面非空且同、
+                 # 执行期解码 0 次（反向一半也断言）、更快（判符号）、与参考孪生。
+                 "lvm_mirror_t2_test",
+                 # LVM 的 T1（`docs/247`）：反馈剖面 —— 确定性 / 关上什么都不写 /
+                 # 块次数 == 出边和（对语料每一份）/ 循环次数已知的夹具逐条对上。
+                 "lvm_profile_test",
+                 # LVM 的 T2（`docs/259`）：基线编译 —— 原生/T0/T2 三者逐字节同、
+                 # 剖面在换引擎后逐字节同、**执行期解码次数为 0**（确定性）、T2 比 T0 快（判符号）。
+                 "lvm_t2_test",
+                 # LVM 的 A0 寄存器分配与取帧重建（`docs/248` §3.1，issue #648/#649）：
+                 # 语料逐字节同、比槽机快（判符号）、守卫之前落槽（读计划）、
+                 # 被守卫的值只住在寄存器里、删掉落槽就答错（证伪）。
+                 "lvm_a0_test",
+                 # LVM 的 A4 超级指令（`docs/266`）：fused 与 T0 逐字节同（含剖面）、
+                 # 报告按解析顺序、热点选择、分派密集夹具上更快（判符号）。
+                 "lvm_fusion_test",
+                 # LVM 的紧凑形（`docs/250`）：文本/紧凑形逐字节同（含剖面）、体积变小、
+                 # 加载更快、错形点名拒。
+                 "lvm_compact_test",
+                 # LVM 的编译产物缓存（`docs/265`）：冷/热两趟逐字节同（stdout/rc/剖面）、
+                 # 旧缓存点名拒、热的那一趟 0 次解码、形/魔数/截断三种坏头都拒。
+                 "lvm_cache_test",
+                 # `lompi/store/**` 的孪生（#679 / #719）：每一份当根单元，两边的接受集
+                 # 相同、IR 逐字节相同；已知缺口是一张只许变短的棘轮。
+                 "loment_store_twin_test",
+                 # 原生面的**独立** oracle（#772）：期望值由规范模型给出，不问参考实现
+                 # 也不问自举侧 —— 两侧一致但与规范不同时判红（孪生判据看不见这一类）。
+                 "loment_spec_oracle_test",
+                 # LVM 的 T3（`docs/261`）：守卫特化 + 去优化 —— 语料不变、夹具恰好去优化
+                 # 一次且副作用只发生一次、反例零去优化。
+                 "lvm_t3_test",
+                 # LVM 的失败面（`docs/262`）：三档都不挂死、五种拒绝都点名、上限写在纸上。
+                 "lvm_stability_test",
+                 # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
+                 # ⚠ 挂在独占那一片之外：它跑 T0 的重的那份（~7s），但**不写仓库共享位置**。
+                 "lvm_perf_test",
+                 # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
+                 "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
                  "loment_ffi_test",
+                 # 世界端口的量尺 (docs/219 S0): 目标文件/归档的端口表 + 四个类别,
+                 # 含 `dlsym`(按名解析) 与内联 `syscall`(符号表看不见) 两个证伪对。
+                 "loment_ports_test",
+                 # 对外端口的第一条腿 (docs/222): `--hosted` 真的链上系统 libz,
+                 # 一份 Loment 源 compress/uncompress 逐字节回原文; 附一条证伪。
+                 "loment_hosted_test",
                  "loment_rel_test",
                  "loment_editors_test",
-                 "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
+                 # **`loment_release` 与 `loment_manual` 从 2026-10-16 起不在这里。**
+                 # 它们的无参模式是"入库生成物 == 当前树"的**新鲜度**判据，而那条判据
+                 # 只在**唯一权威的那棵树**（`main`）上为真。以前靠"每个 PR 都重算一遍"
+                 # 把它变成处处为真，代价是那两个文件是**全树台账**（每一行都是别人的
+                 # 文件）⇒ 两个并发 PR 写相邻行 ⇒ **必冲突**（实测见
+                 # `.github/workflows/manifest.yml` 文件头那节）。
+                 #
+                 # 替代它的不是"少了条判据"，是**换了一处执行**：`manifest.yml` 的
+                 # `emit-main` 在每一次合并后重算（与门禁同时起跑），而
+                 # `loment_tools_test` 里那两条新判据钉住这套安排本身 ——
+                 # PR 侧不许再提交整树生成物、main 侧的写者必须存在且不排在门禁后面。
+                 #
+                 # **工具本身没删**：`--check` 仍可自查一份 checkout，孪生对拍
+                 # （`loment_rel_test`）也照跑 —— 那是审计主张 C9/C23 的量尺。
+                 "vscode_ext_test", "loment_filetype_test", "loment_status",
                  # 调试器 (docs/190): 无头 DAP 往返 —— 断点命中源行、单步按行走、落不上的要说
                  "loment_dap_test",
                  "fuai_contract_check", "loment_eol", "loment_dist_test",
@@ -136,21 +261,87 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # 英文版的翻译戳 (docs/i18n/glossary.md §2): 中文源一改, 戳过期就红。
                  # **体例里点名了这条判据的名字, 而文件此前不存在** —— 写在文档里、没人执行。
                  "loment_i18n_test",
+                 # `docs/NNN` 的编号：**不许出现新的撞号**，且基线只许变短
+                 # (2026-10-11 实测 main 上有 7 个号被两份以上文档共用) —— `tools/loment_docs.py`
+                 "loment_docs_test",
+                 # AI slop 的机械代理判据（`docs/319`）：范围、空转测试、复制粘贴、
+                 # 无调用点的公开 API、注释复述。模型只做提示，不在这里跑。
+                 "loment_slop_test",
+                 # `lom/` 那道禁区自己的判据（把 gate.yml 里那段脚本抠出来跑）
+                 "loment_door_test",
+                 # 准入判定（`docs/238`）：两个实现逐字节相同 + 那条不对称
+                 "loment_admit_test",
+                 # 零宽那一帧的静态规则 + 两条证伪（`docs/240`）
+                 "loment_zwframe_test",
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
+                 # 固定容量盘点 (docs/345): 那两个数与那份名单不可漂
+                 "loment_caps_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",
+                 # 自举侧完整正则引擎（docs/NNN）：UTF-8 / {n,m} / 惰性 / 前后瞻 / 捕获，
+                 # 与 CPython `re` 在 1.4 万条语料上逐字节对拍。
+                 "loment_regex_test",
+                 # `#343` 那一类的**计数**（`#369`）：编译器不作声地死掉 —— 两条不变量
+                 # （非零退出要带一条诊断、不许被信号打死）过一层语料，**两份实现都问**
+                 # （参考实现是 Python，发不出信号；用户真正跑的是自举驱动）。缺口记成账，
+                 # 只许变短。实测约 17s（含一次 种子 -> clang -> stage1）。
+                 "loment_invariant_test",
                  # std 核的行为判据 (docs/180): lib/ 里的函数算得对不对
                  "loment_std_test",
+                 # 密码学原语（docs/328）：Python 独立实现对拍。
+                 "loment_crypto_test",
+                 # 八个领域包的行为判据 (docs/317): math/science/engineering/world/
+                 # dev/lowlevel/system/baremetal, 对照物是 Python 与已知常量。
+                 "loment_domains_test",
+                 # IR 缓存 (docs/325): 命中/失效/关闭/坏条目四条 —— 缓存错编是最坏的错。
+                 "loment_cache_test",
+                 # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
+                 # 与 `loment_std_test` 的分界是**对照物**: 那边是 Python, 这边是 libc 自己。
+                 "loment_libl_test",
+                 # LibL 家族第三个包 internet (docs/241): 对照物是 CPython 标准库
+                 # (ipaddress / urllib.parse / http.client) + **真起一个 http.server**。
+                 "loment_internet_test",
+                 # 第四个包 os (docs/242): 探针编成 ELF 与 CPython 的 os/time **在同一个
+                 # Linux 环境里**对跑 (Windows 走 WSL, Linux 直接跑)。
+                 "loment_os_test",
+                 # M84 真线程 (docs/245): 探针编 ELF, **真的起 N 个线程**在共享内存上
+                 # 累加 (WSL/原生 Linux), 负例在编译期。与 os 那条同一个环境借口。
+                 "loment_thread_test",
                  # LumtUI (docs/196): GUI 库的三把尺子 —— .fuc 与 lom/fuc.lom 逐字节、
                  # 布局/命中/焦点与独立推出的期望一致、字体与 FreeType 对
                  "loment_lumtui_test",
                  "loment_lompi_test", "lompi_sync", "loment_publish",
+                 # 发布口跟上了没 (docs/222): `loment lompicheck` 的映射与比对。
+                 # **联网那条可跳**，且不断言"两边一致"（掉队是开发侧该跑 `--push`，
+                 # 不是这份 PR 的错）—— 见那份判据的文件头。
+                 "lompicheck_test",
+                 # 在源码里注册一条 `loment` 命令 (docs/223): 声明扫描 /
+                 # `--print-command` / 两个启动器的命名分流 / 生成的进程入口真跑一遍。
+                 "loment_register_test",
                  # 多语法前端 (docs/179, docs/175 §6 第 4 条): 外源源码 -> 接口单元
                  # -> L1 调用 -> 链外部目标文件 -> 跑出预期退出码
                  "loment_multisyntax_test",
+                 # 教材 (docs 之外的 `book/`)：书与 by-example 的每个 `rust,run` 块
+                 # 真编真跑、练习答案逐字节对上 —— 教材也会腐烂。
+                 "loment_book_test",
+                 # 线上书 (GitHub Pages): 同一份纯 Python 渲染器出站, 判据钉住
+                 # 每章一页、站内链接、代码块转义与目录高亮。
+                 "loment_book_site_test",
                  # 六门表层语法**各一个大型项目**（带正文、能真跑）: 前门翻出来的 Loment
                  # 跑出的数 == 对照组（clang/g++/javac/go/CPython/rustc）== 独立期望值
-                 "loment_multisyntax_projects_test")
+                 "loment_multisyntax_projects_test",
+                 # **超大型**: 100 个 Python 语法模块、1000 个函数, 一次编一次跑;
+                 # 语料是生成物, 判据逐字节钉住它不漂
+                 "loment_megaproject_test",
+                 # 权威状态在 `origin`、不在本地树那一条 (CLAUDE.md 第一节): 判据在临时
+                 # 夹具仓里验"工具报的是权威那一份还是工作树那一份", 并钉住"无法判定"
+                 # 必须是**可见的** rc=2, 不能伪装成同步
+                 "loment_state_test",
+                 # 开发套件 (docs/302): 贡献者的 doctor/gate/bootstrap, 以及
+                 # `.devcontainer` 与门禁镜像摘要三方一致 —— 抬 tag 漏改一处就红。
+                 "loment_dev_test",
+                 # 源码参数台 (docs/310): 参数解析/拼接/新增/矩阵 + CLI 干跑 + 前端资源。
+                 "loment_studio_test")
 
 
 #: **不能与别的检查同时跑**的那几条 —— 它们**写仓库里的共享位置**。
@@ -158,6 +349,260 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
 #: 一次脏树就够), 而好几条判据要读 `lompi/`。并行调度时这一组单独串行跑。
 #: (`loment_dist_test` 用的 `loment/build/dist` 只有它自己碰, 不必独占。)
 EXCLUSIVE_STATIC = ("lompi_sync",)
+
+#: 各条判据在 **CI runner**（ubuntu-latest, 4 vCPU, 片内 `-j 4`）上的实测耗时, 秒。
+#:
+#: **量法（2026-10-18, `#435`）**：取三次**成功**门禁 run 的 artifact ——
+#: `39162110108` / `39163005969` / `39159523472` —— 每个套件那一行
+#: `:: [static] <名> PASS <秒>s` 的**中位数**（三份里都出现过的名字, 没有缺失）。
+#: 这些数是在片内并行下量的, 所以**本身就含同片争用**：拿它均分是对的,
+#: 拿它当"这条判据单独要多久"是错的。重量的做法与那几个 run 的原始数据见 `docs/213` §10。
+#:
+#: **每一个 `STATIC_CHECKS` 都必须在这里有一行**（`unpriced_checks()` 钉住）——
+#: 这正是 `#435` 的成因：`loment_elf_test` 没有条目, 按 `SHARD_DEFAULT_S` 的 8 秒算,
+#: 实际 245～617 秒, 把 6/6 那片拖到 30 分钟。**新加判据要量一次再填**;
+#: 确实还量不出（比如没在 runner 上跑过）就放进 `SHARD_COST_EXEMPT` 并写清理由。
+SHARD_COST = {
+    "fuai_contract_check": 0.0,
+    "lom_audit": 0.0,
+    "lomc_test": 3.6,
+    "loment_admit_test": 2.2,
+    # 教材: 28 个可运行块 + 10 份练习答案。本机 20s 左右（Windows PE 链接慢一点）。
+    "loment_book_test": 120.0,
+    "loment_book_site_test": 2.0,
+    "loment_capasserts_test": 4.0,
+    "loment_caps_test": 99.9,
+    "lmgr_test": 6.0,
+    "loment_channel_test": 92.8,
+    "loment_choose_matrix_test": 16.7,
+    "loment_cli_test": 29.5,
+    "loment_comefor_test": 14.5,
+    "loment_cpptrans_test": 0.1,
+    "loment_crash_test": 26.1,   # 种子 -> 驱动（clang -O1）一次, 九条判据共用
+    "loment_cstrans_test": 0.0,
+    "loment_ct_test": 1.6,
+    "loment_ctrans_test": 63.5,
+    "loment_dap_test": 0.0,
+    # 开发套件 (docs/302): 纯函数的体检 + 四条命令形状 + 镜像摘要三方一致, 本机实测 0.4s。
+    "loment_dev_test": 0.4,
+    "loment_dist_test": 170.2,
+    "loment_doc_test": 57.3,
+    "loment_docs_test": 0.1,
+    "loment_slop_test": 9.0,
+    "loment_door_test": 0.2,
+    "loment_editors_test": 0.3,
+    # `#435` 的主角：55 条判据（那一轮 34 条）, **每条都编一个 ELF 再执行**。量到
+    # 245 / 387 / 617s（三次 run）, 中位数 387s —— 而它此前连条目都没有。
+    "loment_elf_test": 387.4,
+    "loment_eol": 0.2,
+    "loment_eol_test": 2.4,
+    # 2026-11-18 起 build_lomenterr 走自举链：冷构建 ~133s（种子 -> stage1 -> IR -> lomelf）。
+    "loment_err_test": 150.0,
+    "loment_regex_test": 30.0,
+    "loment_extblock_test": 1.2,
+    "loment_ffi_test": 1.9,
+    "loment_filetype_test": 0.0,
+    "loment_fmt_test": 45.0,
+    "loment_gc_surface_test": 90.9,
+    "loment_gc_why_test": 0.8,
+    "loment_genesis_test": 0.4,
+    "loment_gotrans_test": 5.8,
+    "loment_grammar_test": 2.1,
+    "loment_hosted_test": 3.6,
+    "loment_i18n_test": 0.0,
+    "loment_internet_test": 8.9,
+    "loment_invariant_test": 72.5,
+    "loment_json_test": 2.3,
+    "loment_jtrans_test": 0.0,
+    "loment_java_test": 3.0,
+    "loment_lib_test": 7.4,
+    "loment_libl_test": 1.9,
+    # `lms` 这一维与七级（`docs/253` §9 / `docs/270`）。2026-11 加了 #1024/#1027 的
+    # 四产物格子（原生 / T0 / T2 / T3 × LMS 形状、入口 A、耗尽墙）：本机实测 20.8s。
+    # 它进的是分片均分，不是判据预算；CI 上量出来再改这一格。
+    "loment_lms_test": 20.8,
+    "loment_lomc_test": 9.5,
+    "loment_lompi_test": 220.0,
+    "loment_lomtfrom_test": 6.8,
+    "loment_lsp_test": 47.0,
+    "loment_lumtui_test": 4.9,
+    "loment_megaproject_test": 16.6,
+    "loment_multilang_test": 0.0,
+    "loment_multisyntax_projects_test": 0.0,
+    "loment_multisyntax_test": 0.4,
+    "loment_net_test": 0.0,
+    "loment_nltrans_test": 0.4,
+    "loment_os_test": 40.6,
+    "loment_p7_test": 0.8,
+    "loment_p8_test": 173.6,
+    "loment_p9_test": 2.7,
+    "loment_pe_test": 4.1,
+    "loment_pkg_test": 3.9,
+    "loment_ports_test": 0.3,
+    "loment_potato_emit_test": 90.6,
+    "loment_publish": 0.5,
+    "loment_pytrans_test": 0.3,
+    "loment_register_test": 0.8,
+    "loment_rel_test": 268.7,
+    "loment_rule_parity": 4.3,
+    "loment_oracle_test": 12.0,
+    # 2026-11-08（#1505）：种子 5.71 MB 时本机实测 434s（7:14，WSL 走 genesis）。
+    # 旧值 63.9 是种子 4 MB 时代的数 —— 实测差了一个数量级，与"没量过"一样误导。
+    "loment_seed_test": 434.0,
+    "loment_sign_test": 0.1,
+    "loment_src": 1.3,
+    "loment_state_test": 0.3,
+    "loment_status": 0.0,
+    "loment_status_test": 2.3,
+    # 2026-10-21（#1147）：本机 Windows 实测 9.4s（每支拷一棵 3 MB 的树 + openssl 真签真验）。
+    "loment_update_test": 9.4,
+    # 2026-11-03（#1153）：本机 Windows 实测 1.2s（七棵树拷出来各算一遍 + 一次真签真验）。
+    "loment_hotfix_test": 1.2,
+    # 2026-11-03（#1154）：本机 Windows 实测 1.0s（四棵树 + 几份真签名候选）。
+    "loment_staging_test": 1.0,
+    # 2026-11-03（#1156）：本机 Windows 实测 2.0s（每支建一棵 git 仓库 + 真 cherry-pick）。
+    "loment_projection_test": 2.0,
+    # 2026-11-03（#1157）：本机 Windows 实测 2.2s（同上 + 真签名候选 + status）。
+    "loment_hotline_test": 2.2,
+    # 2026-11-03（#1155）：本机 Windows 实测 1.6s（每支编两份小程序）。
+    "loment_hotart_test": 1.6,
+    # 2026-11-03（#1152）：本机 Windows 实测 9.0s（十七份源各编一次 + 两次真进程）。
+    # 循环钉在 16：原来每装一次泄漏 4 KiB，第 14 次撞上 64 KiB 的堆（docs/292 §2）。
+    "loment_hotstress_test": 9.0,
+    # 2026-11-04（#1155）：本机 Windows 实测 25s（两棵树的 LSP 各编一次 + 真 LSP 会话）。
+    "loment_lsp_hot_test": 25.0,
+    # 2026-10-21（#1149）：本机 Windows 实测 0.8s（四份小源各编一次 + 一次 CLI）。
+    "loment_hotmeta_test": 0.8,
+    # 2026-10-21（#1150）：本机 Windows 实测 1.7s（含一次 WSL 跑两个 ELF）。
+    "loment_hotswap_test": 1.7,
+    # 2026-10-22（#1151）：本机 Windows 实测 1.1s（两份小源各编一次 + 一次 WSL 真跑）。
+    "loment_hotload_test": 1.1,
+    # 2026-10-22（#1151）：本机 Windows 实测 2.3s（三次真进程，每次两份小源各编一次）。
+    "loment_hotcore_test": 2.3,
+    # 2026-10-22（#1151）：本机 Windows 实测 1.5s（启动器在 WSL 的原生 /tmp 里真跑三次）。
+    "loment_hotbuild_test": 1.5,
+    "loment_std_test": 3.1,
+    "loment_crypto_test": 25.0,
+    # 2026-11-09: 本机六组探针（每组一次 clang 链接 + 一次 WSL 真跑），约 12s。
+    "loment_domains_test": 40.0,
+    # 2026-11-09: 四次小规模 emit（命中/失效/关闭/坏条目），本机实测 1s 内。
+    "loment_cache_test": 1.0,
+    "loment_store_twin_test": 261.6,
+    "loment_studio_test": 3.0,
+    # 2026-10-19（#772）：本机实测 13.2s（建一次 stage1 + 两个编译器各跑一个 21 格的
+    # 程序，Windows 侧）。CI 上还没量到，先按 15 记，量到后替换。
+    "loment_spec_oracle_test": 15.0,
+    "loment_syscalls_test": 1.4,
+    "loment_thread_test": 3.6,
+    "loment_tools_test": 10.0,
+    "loment_trans_test": 111.1,
+    "loment_zwframe_test": 2.5,
+    "lomentc_test": 10.5,
+    # 2026-11-08（LSPE v2）：本机 Windows 实测 4.9s（36 条判据 + 两条棘轮的语料扫描）。
+    "lspe_test": 5.0,
+    "lompi_sync": 0.0,
+    "lompicheck_test": 1.1,
+    "lvm_cache_test": 1.0,
+    "lvm_compact_test": 51.3,
+    "lvm_perf_test": 25.0,
+    "lvm_profile_test": 22.9,
+    "lvm_stability_test": 10.0,
+    "lvm_fusion_test": 32.0,
+    "lvm_t2_test": 138.6,
+    "lvm_a0_test": 12.0,
+    "lvm_t3_test": 24.7,
+    "lvm_test": 20.3,
+    "lvm_twin_test": 29.2,
+    "lvm_mirror_t2_test": 60.0,
+    "potato_cross": 0.0,
+    "potato_test": 9.5,
+    "vscode_ext_test": 1.2,
+}  # 99 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+
+#: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
+#: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按
+#: `SHARD_DEFAULT_S` 算（可能把一片拖长）, 但那是登记过的选择, 不是静默的默认值。
+SHARD_COST_EXEMPT: frozenset[str] = frozenset()
+
+#: 没登记耗时的判据按这个算 —— **正常情况下不该发生**：`unpriced_checks()` 会断言。
+SHARD_DEFAULT_S = 8.0
+
+
+def unpriced_checks() -> list[str]:
+    """`STATIC_CHECKS` 里既没有实测耗时、也没明确豁免的那几条。
+
+    `#435`：分片表是一个**关于树的断言**, 而此前没有任何东西检查它 —— 没登记的名字
+    静默按 8 秒算, 于是 `loment_elf_test`（245～617s）把一片拖到 30 分钟。这个函数
+    就是那个断言的执行点：`shards()` 与 `loment_tools_test` 的判据都问它。
+    """
+    return [n for n in STATIC_CHECKS
+            if n not in SHARD_COST and n not in SHARD_COST_EXEMPT]
+
+
+#: **整条跑、且各占一片**的那几条 —— 它们是长尾（一条就 150s+）, 与任何别的判据同片
+#: 都不会更快（墙钟是 max 不是 sum）。
+#:
+#: **为什么独占还更划算**: 它们是**单线程长跑**, 跟三条重判据挤同一台 4 vCPU 的 runner
+#: 时会互相拖 —— 实测独占一个安静的 runner 之后 `loment_seed_test` 从 **244s 掉到 172s**、
+#: `loment_p8_test` 从 229s 掉到 156s（docs/213 §5）。**这才是这条名单现在的理由**;
+#: 以前还有一条"独占之后那一片的工具链可以压到最小", 那个随工具链做成镜像而作废了
+#: （各片现在是同一份镜像, 没有"档位"可言）。
+#: 往这里加一条之前: 先确认它真的是**长尾单线程**（否则切成两片更划算）。
+#: 它们各自成片、不参与均分, 但**照样有实测条目**（`docs/213` §10）—— 那份数既是记录,
+#: 也是"哪天不独占了一片"时的分片依据。
+ISOLATED_STATIC = ("loment_seed_test", "loment_p8_test", "loment_channel_test")
+
+
+def shards(n: int) -> list[list[str]]:
+    """把 `STATIC_CHECKS` 切成 `n` 片: 独占的、长尾的各自成片, 其余按实测耗时贪心均分。
+
+    **为什么是计算出来的而不是手写一张表**: 门禁的分片表一旦手写, 新增一条判据时
+    它就会**静默落在所有分片之外** —— 那条判据从此不跑, 而门禁照样绿。这正是
+    "加语法构造要清点所有读 L1 源的入口"那类洞的分片版。计算出来的表是
+    `STATIC_CHECKS` 的一个**划分**, 覆盖是构造性的; 下面那条断言是防止将来改写时
+    把它悄悄破坏（`--shard-plan` 也会跑一遍）。
+
+    片序（`n` 足够大时）: **片 0** = `EXCLUSIVE_STATIC` —— 它们写仓库共享位置, 不能与
+    别的判据同时跑, 而摊到并行 job 上之后"同时"还包括**别的 job**, 所以那一片自己
+    一个 job（`gate.yml` 里其余分片 `needs:` 它）; 接着每一条 `ISOLATED_STATIC`
+    各占一片; 最后才是均分出来的片。`n` 不够分时**直接断言失败**, 不静默合并 ——
+    静默合并会把"那几条独占一片"这件事悄悄变成"它们与什么都有的一片挤在一起"。
+
+    `n <= 1` 时退化成"整道门禁一片"（就是老行为）。
+    """
+    if n <= 1:
+        return [list(STATIC_CHECKS)]
+    # `#435`: 分片表必须覆盖全表 —— 没登记的名字会按 `SHARD_DEFAULT_S` 静默算, 而
+    # 一条被低估的重判据能把整片的墙钟拖长一个数量级（`loment_elf_test` 就是这样）。
+    unpriced = unpriced_checks()
+    assert not unpriced, (
+        f"这些判据没有实测耗时（`#435`）：{unpriced} —— 量一次填进 SHARD_COST, "
+        f"或者放进 SHARD_COST_EXEMPT 并写清理由; 别让它们按 {SHARD_DEFAULT_S}s 静默算")
+    excl = [x for x in STATIC_CHECKS if any(e in x for e in EXCLUSIVE_STATIC)]
+    iso = [x for x in STATIC_CHECKS if x in ISOLATED_STATIC]
+    rest = [x for x in STATIC_CHECKS if x not in excl and x not in iso]
+    n_rest = n - 1 - len(iso)
+    # `n` 太小时**直接失败并说清为什么** —— 静默退回"分不开就合一片"会把上面那两件
+    # 事（独占、长尾各占一片）悄悄取消掉, 而调用方（`gate.yml`）是按片号取名字的:
+    # 合掉之后 `--shard K/N` 取到的就不是它以为的那一片。
+    assert n_rest >= 1, (f"要 {n} 片分不开: 独占的 {len(excl)} 条 + 长尾的 {len(iso)} 条"
+                         f"各占一片（共 {1 + len(iso)} 片）, 剩下 {len(rest)} 条还得有地方放"
+                         f" —— 至少 {2 + len(iso)} 片")
+    buckets: list[list[str]] = [[] for _ in range(n_rest)]
+    load = [0.0] * len(buckets)
+    # **按耗时从大到小**装进当前最轻的那片: 先放大件, 大小件之间的空隙才填得满。
+    for name in sorted(rest, key=lambda x: -SHARD_COST.get(x, SHARD_DEFAULT_S)):
+        i = load.index(min(load))
+        buckets[i].append(name)
+        load[i] += SHARD_COST.get(name, SHARD_DEFAULT_S)
+    out = [excl] + [[x] for x in iso] + buckets
+    # 守卫: 这必须是一个**划分** —— 一条不漏、一条不重
+    flat = [x for b in out for x in b]
+    assert len(out) == n, f"切出 {len(out)} 片, 要 {n} 片"
+    assert len(flat) == len(set(flat)), f"分片里有重复: {len(flat)} vs {len(set(flat))}"
+    assert sorted(flat) == sorted(STATIC_CHECKS), "分片不是 STATIC_CHECKS 的划分"
+    assert all(b for b in out), "有分片是空的"
+    return out
 
 
 def _sweep_wsl_tmp() -> None:
@@ -172,7 +617,7 @@ def _sweep_wsl_tmp() -> None:
     见 `FUJO_MON_PORT`)。按时间清就没有这个口子。
     """
     try:
-        subprocess.run(["wsl", "-e", "bash", "-lc",
+        subprocess.run([*_WSLCMD, "bash", "-lc",
                         "find /tmp -maxdepth 1 -name 'loment-*' -mmin +60 -delete "
                         "2>/dev/null || true"],
                        capture_output=True, timeout=120, shell=False)
@@ -180,19 +625,381 @@ def _sweep_wsl_tmp() -> None:
         pass
 
 
-def _report(r: tuple[str, bool, str, float]) -> None:
+def count_skips(text: str) -> int:
+    """数一条检查的输出里"跳过的判据"有几条（`#371`）。
+
+    各套件的写法是 `print("      SKIP: …"); return` —— 在运行器的 `try/except` 里那是
+    **正常返回**，于是被记成 PASS、那一行报满。判据只认**行首**是 `SKIP` 的行：
+    说明文字里提到 SKIP 的不算。
+    """
+    return sum(1 for ln in text.splitlines() if ln.lstrip().startswith("SKIP"))
+
+
+#: 判据条数地板。一行 `套件 条数`；数值 = `len(该套件的 TESTS)`。与环境无关，所以**精确相等**。
+ROOT_FLOORS = ".github/gate-floors.txt"
+#: 允许跳过的判据。一行 `套件 判据名 # 环境/仓库: 理由`；`*` = 整条套件被跳过。
+ROOT_SKIPS = ".github/gate-skips.txt"
+#: 已知红项。一行 `套件 判据名 # 环境/仓库: 理由`；`*` = **整条套件级红**（崩溃/超时，
+#: 没有可点名的判据 —— 它**不**表示"这条套件里的任何一条都算已知红"，见 `baseline_new`）。
+ROOT_BASELINE = ".github/gate-baseline.txt"
+
+_SKIP_LINE_RE = re.compile(r"^\s*SKIP\s+([^:]+):\s*(.*)$")
+_PASS_LINE_RE = re.compile(r"^\s*PASS\s+(\S+)\s*$")
+#: 各套件输出里 `  FAIL  <判据名>: …` 的判据名 —— 与 `loment_suite.run` 的输出契约一致。
+_FAIL_CRIT_RE = re.compile(r"^\s*FAIL\s+(\S+):", re.M)
+#: `loment_dist_test` 的收尾清单是 `  FAIL  <判据名>  [<detail>]`（名字可带空格、无冒号）。
+#: 不认它的话，那条套件的**任何**一条判据失败都会退化成 `(套件, "*")` —— 日志里只剩一个
+#: `*`，"新红复跑"也就说不出是哪一条（实测：2026-10-20 #1069 的分片 8 连红两次，
+#: 工件的 `re_*.log` 里只有 `[failed=*]`）。两种形状都认，名字按出现顺序去重。
+_FAIL_CRIT_BRACKET_RE = re.compile(r"^\s*FAIL\s{2,}(\S.*?)\s{2,}\[", re.M)
+#: `:: [static] …` 那一行末尾的机器可读失败名单（`format_line` 打出来的）。
+_FAILED_FIELD_RE = re.compile(r"\[failed=([^\]]*)\]")
+
+
+def failed_criteria(out: str) -> tuple[str, ...]:
+    """一条检查的输出里**点名失败**的判据（按出现顺序去重）。
+
+    `#769`：基线原来按**套件名**匹配 —— 一条套件只要在基线里，它里面**任何**一条判据
+    回归都被豁免。逐条匹配要能拿到"这个套件红的是哪几条"，而 `loment_suite.run` 的
+    输出契约里正好有那行 `  FAIL  <判据名>: …`（老循环也打这个形状）。
+    """
+    names = [m.group(1) for m in _FAIL_CRIT_RE.finditer(out)]
+    names += [m.group(1) for m in _FAIL_CRIT_BRACKET_RE.finditer(out)]
+    return tuple(dict.fromkeys(names))
+
+
+def read_budget(floors_path=None, skips_path=None) -> tuple[dict[str, int], set[tuple[str, str]]]:
+    """读两份预算：`(地板, 允许的跳过)`。
+
+    地板：`套件 条数` —— 条数是 `len(TESTS)`，**与环境无关**，所以必须精确相等。
+    跳过：`套件 判据名` —— 实际跳过必须是它的**子集**。
+
+    `#` 起头是注释，行尾 `#` 之后也是注释（两条纪律与 `.github/gate-baseline.txt` 同一套）。
+    文件不见了**不跳过**：门禁不猜，直接判失败。
+
+    `floors_path` / `skips_path` 可以把**对照面**（base 分支上取下来的那两份）喂进来 ——
+    `#418` 的 `--budget-vs` 就是这么用的。默认是树里那两份。
+    """
+    floors: dict[str, int] = {}
+    skips: set[tuple[str, str]] = set()
+    base = pathlib.Path(__file__).resolve().parent.parent
+    for given, rel, keep in ((floors_path, ROOT_FLOORS, "floor"),
+                             (skips_path, ROOT_SKIPS, "skip")):
+        p = pathlib.Path(given) if given else base / rel
+        if not p.exists():
+            raise FileNotFoundError(f"{rel} 不见了 —— 门禁不猜，直接判失败")
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            body = ln.split("#", 1)[0].strip()
+            if not body:
+                continue
+            parts = body.split()
+            if len(parts) != 2:
+                raise ValueError(f"{rel}: 这一行要写成 `套件 值`: {ln!r}")
+            suite, val = parts
+            if keep == "floor":
+                floors[suite] = int(val)
+            else:
+                skips.add((suite, val))
+    return floors, skips
+
+
+def check_budget_against_base(base_floors: dict[str, int],
+                              base_skips: set[tuple[str, str]],
+                              floors: dict[str, int],
+                              skips: set[tuple[str, str]]) -> list[str]:
+    """`#418`：预算只能**收紧**, 不能比对照面（base 分支）松。返回问题清单。
+
+    树内的两道棘轮（`check_budget`）是**同一份提交里的两个数**比 —— 删一条判据再把
+    地板改小, 两边一起说谎, 它就绿了。这里补上缺的那一半：
+
+      * 地板的**每一条**都要还在, 而且**不许降**（`base_floors[s] <= floors[s]`）。
+        新套件（对照面里没有的）可以加 —— 那是收紧;
+      * 跳过表只许**变短**：`skips - base_skips` 非空就红。新增一条跳过等于把
+        "给既有判据加个环境门"或"新判据生来就跳过"登记成合法 —— 那正是要堵的路。
+
+    与 `.github/gate-baseline.txt` 的棘轮同一个形状（`comm -13` 只认"新增"）;
+    **取不到对照面时由调用方 fail closed**, 这里只比两份已读出来的预算。
+    """
+    bad: list[str] = []
+    for suite, was in sorted(base_floors.items()):
+        if suite not in floors:
+            bad.append(f"{suite}: 对照面里有这个套件, 现在整条从 {ROOT_FLOORS} 里没了 —— "
+                       f"删掉整条套件不是解法（要不跑它就说明为什么, 单独开 issue）")
+        elif floors[suite] < was:
+            bad.append(f"{suite}: 地板比对照面**降了**（{was} -> {floors[suite]}）—— "
+                       f"删判据、再把地板改小, 两边一起改就绿了; 这不是解法")
+    for suite, crit in sorted(skips - base_skips):
+        bad.append(f"{suite} 的 {crit}: 这条跳过**对照面里没有** —— 跳过表只许变短; "
+                   f"给既有判据加环境门、再把豁免登记进来, 不是解法")
+    return bad
+
+
+# ---------------------------------------------------------------- 已知红基线（`#769`）
+#
+# 基线的一行是 `套件 判据名`（`*` = 整条套件级红：崩溃/超时，**没有**可点名的判据）。
+# 原先那版只取行首第一个词（套件名），于是**一条套件只要在基线里，它里面任何一条判据
+# 回归都被豁免** —— 133 条判据（14.3%）落在这种整条豁免里，包括唯一那条种子容量判据
+# （`loment_genesis_test::test_seed_fits_lomelf_input_buffer`）与镜像链接器的对拍判据
+# （`loment_elf_test::test_lomelf_selfhost_matches_reference`）。
+#
+# 覆盖关系（`covers`）是这一版的关键：
+#   * `(套件, 判据)` 被覆盖 ⇔ 基线里有**这条判据**，或基线里有 `(套件, *)`（旧格式的
+#     整条豁免 —— 只在跟**对照面**比"只许变短"时认它，好让"细化为逐条"不算变长）；
+#   * `(套件, *)` 被覆盖 ⇔ 基线里**也有** `(套件, *)`。反过来不成立：一条逐条豁免
+#     **不能**授权一条新的整条豁免（那是变粗，不是变短）。
+
+def read_baseline(path=None) -> set[tuple[str, str]]:
+    """读基线：`{(套件, 判据名), …}`。旧格式的一列行（只有套件名）读成 `(套件, "*")`。
+
+    旧格式的兼容是**为对照面**准备的：PR 的 base 分支上那份基线还是整条豁免，
+    "只许变短"的棘轮要读得懂它，否则细化这一笔自己先判失败。
+    """
+    p = pathlib.Path(path) if path else pathlib.Path(__file__).resolve().parent.parent / ROOT_BASELINE
+    if not p.exists():
+        raise FileNotFoundError(f"{p} 不见了 —— 门禁不猜，直接判失败")
+    base: set[tuple[str, str]] = set()
+    for ln in p.read_text(encoding="utf-8").splitlines():
+        body = ln.split("#", 1)[0].strip()
+        if not body:
+            continue
+        parts = body.split()
+        if len(parts) == 1:
+            base.add((parts[0], "*"))          # 旧格式：整条套件
+        elif len(parts) == 2:
+            base.add((parts[0], parts[1]))
+        else:
+            raise ValueError(f"{ROOT_BASELINE}: 这一行要写成 `套件 判据名`: {ln!r}")
+    return base
+
+
+def baseline_red(gate_out: str) -> set[tuple[str, str]]:
+    """从合并后的 `gate.out` 读出**这一轮红在哪几条判据上**。
+
+    一条 `:: [static] … FAIL` 行末尾带着 `[failed=名字,…]`（`format_line` 打的）。
+    没有那个字段、或字段是 `*`，说明红是**套件级**的（崩溃/超时/导入失败）——
+    那时没有任何判据名可点，只能记 `(套件, "*")`。
+    """
+    red: set[tuple[str, str]] = set()
+    for ln in gate_out.splitlines():
+        m = _STATIC_LINE_RE.match(ln)
+        if not m or " FAIL " not in ln:
+            continue
+        suite = m.group(1)
+        fm = _FAILED_FIELD_RE.search(ln)
+        names = [] if not fm else [n.strip() for n in fm.group(1).split(",") if n.strip()]
+        if not names or names == ["*"]:
+            red.add((suite, "*"))
+        else:
+            red.update((suite, n) for n in names)
+    return red
+
+
+def _covers(base: set[tuple[str, str]], pair: tuple[str, str]) -> bool:
+    suite, crit = pair
+    if crit == "*":
+        return (suite, "*") in base       # 整条豁免只能由整条豁免授权
+    return pair in base or (suite, "*") in base
+
+
+def baseline_new(red: set[tuple[str, str]], base: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """这一轮红、而基线**没有逐条授权**的那些 —— 它们才是要判失败的"新红"。"""
+    return sorted(p for p in red if not _covers(base, p))
+
+
+def baseline_gone(red: set[tuple[str, str]], base: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """基线里有、这一轮**不再红**的那些（只在 summary 里提醒"该变短了"）。"""
+    return sorted(p for p in base if not _covers(red, p))
+
+
+def baseline_growth(old: set[tuple[str, str]], new: set[tuple[str, str]]) -> list[tuple[str, str]]:
+    """`new` 里**超出 `old` 授权**的那些 —— 非空 = 基线变长了（不许）。"""
+    return sorted(p for p in new if not _covers(old, p))
+
+
+def format_pairs(pairs) -> str:
+    """`套件<TAB>判据名` 一行一条 —— workflow 用 `cut -f1` / `awk -F'\\t'` 读。"""
+    return "".join(f"{s}\t{c}\n" for s, c in sorted(pairs))
+
+
+def _read_text(path) -> str:
+    return pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+
+
+def read_criterion_lines(out: str) -> tuple[list[str], list[str], bool]:
+    """从一条套件的输出里读 `(通过的判据, 跳过的判据, 是否整条套件级跳过)`。
+
+    判据名出自 `loment_suite.run` 打的那两行。**整条套件级跳过**（`loment_hosted_test`
+    那种循环之前就 `return 0` 的）一行判据都不打，只有一句 `套件: SKIP —— …`，
+    所以那一路靠"输出里有 SKIP 而没有任何判据行"来认。
+    """
+    lines = out.splitlines()
+    passed = [m.group(1) for ln in lines if (m := _PASS_LINE_RE.match(ln))]
+    skipped = [m.group(1) for ln in lines if (m := _SKIP_LINE_RE.match(ln))]
+    level = (not passed and not skipped
+             and any(ln.lstrip().startswith("SKIP") for ln in lines))
+    return passed, skipped, level
+
+
+def check_budget(results, floors, skips, *, in_ci: bool) -> list[str]:
+    """两道棘轮。返回**问题清单**（非空 = 门禁判失败）。
+
+    1. **地板**：`len(TESTS)` 与签名文件精确相等。少了 = 有人删了判据；多了 = 有人加了
+       判据没更新地板。两个方向都红 —— 否则那份文件会说谎。
+    2. **跳过**：实际跳过 ⊆ 预算，多出来一条就红。这条挡的正是 `CONTRIBUTING.md` 禁止的
+       那种做法：**给一条既有判据加个环境门让它不跑**，或者新写一条永远跳过的判据。
+       反过来（预算里有、这次没跳）只在 CI 里 `::notice` —— 本机有没有 clang/WSL 与 runner
+       不同，本机看到子集是正常的。
+
+    问题清单里**带上可以直接粘进预算文件的行**：门禁得能教会你怎样让它满意，否则第一次
+    落地的代价就是猜。
+    """
+    bad: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for r in results:
+        if r.declared:
+            want = floors.get(r.name)
+            if want is None:
+                bad.append(f"{r.name}: 不在 {ROOT_FLOORS} 里（新套件？给它记一行："
+                           f"`{r.name} {r.declared}`）")
+            elif r.declared != want:
+                how = "少了" if r.declared < want else "多了"
+                bad.append(f"{r.name}: 判据条数 {how}（{want} -> {r.declared}）—— "
+                           f"少了是有人删判据；多了是没更新 {ROOT_FLOORS}")
+        if r.level_skip:
+            key = (r.name, "*")
+            seen.add(key)
+            if key not in skips:
+                bad.append(f"{r.name}: 整条套件被跳过，而它不在 {ROOT_SKIPS} 里 —— "
+                           f"补一行 `{r.name} *  # 环境: …`")
+            continue
+        # **跳过必须有名字**，否则它对这个预算**完全不可见** —— 那正是本版要堵的形状
+        # （一层安全检查看不见的洞）。没搬上 `loment_suite.run` 的套件打的还是
+        # `SKIP <原因>` 那种没名字的写法：`count_skips` 数得到，而这里认不出来。
+        # 把它们改成 `  SKIP  <判据名>: <原因>`（搬上共享运行器，或者照这个形状改名）。
+        unnamed = r.skips - len(r.skipped)
+        if unnamed > 0:
+            bad.append(f"{r.name}: 打了 {r.skips} 条 SKIP，其中 {unnamed} 条**没有名字** —— "
+                       f"它们对预算不可见。跳过要写成 `  SKIP  <判据名>: <原因>`"
+                       f"（把那些判据搬上 `loment_suite.run`，或者照这个形状改名）")
+        for crit in r.skipped:
+            key = (r.name, crit)
+            seen.add(key)
+            if key not in skips:
+                bad.append(f"{r.name} 的 {crit}: 跳过了而没登记 —— 要么让它跑起来，要么补一行 "
+                           f"`{r.name} {crit}  # 环境/仓库: 为什么它在这台机器上跑不了`")
+    if in_ci:
+        # **只对"这一趟真的跑了那个套件、而它没跳"的条目打 notice。** 原先这里是
+        # `skips - seen` 直接滤，而 `seen` 只装**这一趟的结果**里的跳过 —— 分片跑的时候，
+        # 表里所有**不在这一片**的条目都会被点成"这次没跳"。后果不是噪音而是**反的**：
+        # 那句"照 notice 把表削短"会变成"把整张表删光"（实测：合并 `#382` 之后那一轮，
+        # 六个分片的 notice 合起来正好覆盖整张 140 条的表）。一条会教人做错事的提示，
+        # 与判据说谎是同一类问题。
+        ran = {r.name for r in results}
+        for suite, crit in sorted(skips - seen):
+            if suite not in ran:
+                continue          # 这一片根本没跑那个套件 —— 不是"它没跳"
+            print(f"::notice::{ROOT_SKIPS} 里的 {suite} {crit} 这次**没跳** —— 修好了就删掉它")
+    return bad
+
+
+#: 各片 artifact 的目录名：`gate-log-<片号>`（可带后缀）。**`gate-log-merged` 不匹配** ——
+#: 那是聚合 job 自己上传的全量副本, 正是 `#443` 双重计数的来源。
+_SHARD_ARTIFACT_RE = re.compile(r"^gate-log-(\d+)(?:[-_. ].*)?$")
+_STATIC_LINE_RE = re.compile(r"^:: \[static\] (\S+)\b")
+
+
+def merge_shard_logs(root, expected=STATIC_CHECKS) -> tuple[str, list[str]]:
+    """把各片 artifact 目录合成一份 `gate.out`：返回 `(合并后的文本, 问题清单)`。
+
+    `#443`：原先聚合那步是 `cat shards/gate-log-*/*.out` 再**数行数**。两个坑：
+
+      * `gate-log-merged` 也匹配 `gate-log-*` —— 它是聚合 job 上一次 attempt 上传的
+        **全量副本**；`gh run rerun --failed` 之后它还在, 于是每条判据被算两遍
+        （实测 174 = 2×87）；
+      * 就算目录只有各片, 行数相等也**不能**证明"每条判据恰好一次"：重复一条 +
+        漏掉另一条, 行数照样对。
+
+    所以这里按**判据名**取并集：只认 `gate-log-<片号>` 目录, 同名的判据**后者覆盖前者**
+    （目录按片号、再按名字排序, 于是新 attempt 的那份赢）, 再要求并集**恰好**等于
+    `STATIC_CHECKS` —— 少一条是有一片没跑完, 多一条是 `STATIC_CHECKS` 之外的东西混进来了。
+
+    问题清单非空时调用方判失败；文本照常返回（能合的部分先打出来看）。
+    """
+    root = pathlib.Path(root)
+    if not root.is_dir():
+        return "", [f"{root} 不存在 —— 一个分片 artifact 都没下载到"]
+    dirs = [p for p in root.iterdir()
+            if p.is_dir() and _SHARD_ARTIFACT_RE.match(p.name)]
+    dirs.sort(key=lambda p: (int(_SHARD_ARTIFACT_RE.match(p.name).group(1)), p.name))
+    if not dirs:
+        return "", [f"{root} 下没有 `gate-log-<片号>` 目录 —— 一个分片 artifact 都没下载到"]
+    problems: list[str] = []
+    by_name: dict[str, str] = {}
+    for d in dirs:
+        out = d / "gate.out"
+        if not out.is_file():
+            problems.append(f"{d.name}: 没有 gate.out（这一片没跑到合成？）")
+            continue
+        for ln in out.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = _STATIC_LINE_RE.match(ln)
+            if m:
+                by_name[m.group(1)] = ln          # 后出现的覆盖先出现的（新 attempt 赢）
+    missing = [n for n in expected if n not in by_name]
+    extra = sorted(set(by_name) - set(expected))
+    if missing:
+        problems.append(f"少了 {len(missing)} 条判据（有一片没跑完或没上传）："
+                        f"{' '.join(missing)}")
+    if extra:
+        problems.append(f"多了 {len(extra)} 条 `STATIC_CHECKS` 之外的判据：{' '.join(extra)}")
+    text = "".join(by_name[n] + "\n" for n in expected if n in by_name)
+    return text, problems
+
+
+def format_line(name: str, ok: bool, tail: str, dt: float, skips: int,
+                failed: tuple[str, ...] = ()) -> str:
+    """`:: [static] …` 那一行的**纯函数**版本 —— 判据能直接钉它的形状。
+
+    跳过的条数**只在非零时出现**：大多数检查一条都不跳，给它加个 `0 SKIP` 只是噪音。
+
+    `#769`：失败时再带一个**机器可读**的 `[failed=…]`。基线要按判据逐条匹配，
+    而 `tail` 是给人读的一句话（可能被截断、也可能含 `；`），拿它解析名字不可靠。
+    没有点名判据的失败（崩溃/超时/导入失败）打成 `[failed=*]` —— 那是**整条套件级红**，
+    与"某一条已知红"不是一回事。
+    """
+    mark = f"  {skips} SKIP" if skips else ""
+    if not ok:
+        mark += f"  [failed={','.join(failed) if failed else '*'}]"
+    return f":: [static] {name:14s} {'PASS' if ok else 'FAIL'}  {dt:6.1f}s{mark}  {tail}"
+
+
+class Result(NamedTuple):
+    """一条检查的结果。**前五项的位置与老的 5 元组一致** —— 按索引取的那几处不用改。"""
+
+    name: str
+    ok: bool
+    tail: str
+    dt: float
+    skips: int
+    passed: tuple[str, ...]      # 真跑过且通过的判据名
+    skipped: tuple[str, ...]     # 打了 SKIP 的判据名（运行器会连名字一起打）
+    declared: int                # `len(TESTS)`；没有 TESTS 的 driver 脚本是 0
+    level_skip: bool             # 整条套件级跳过（循环之前就 return 0 那种）
+    failed: tuple[str, ...] = () # 点名失败的判据（`#769`）；空 = 套件级失败
+
+
+def _report(r: "Result") -> None:
     """一行结果。**只在一处打** —— 两个路径各打一次会变成打两遍 (上一版就是这么错的)。"""
-    name, ok, tail, dt = r
-    print(f":: [static] {name:14s} {'PASS' if ok else 'FAIL'}  {dt:6.1f}s  {tail}", flush=True)
+    print(format_line(r.name, r.ok, r.tail, r.dt, r.skips, r.failed), flush=True)
 
 
-def _run_one_check(name: str) -> tuple[str, bool, str, float]:
+def _run_one_check(name: str) -> Result:
     """在**当前进程**里跑一条检查。`-j` 时它是进程池的工作单元 (所以必须在模块级)。"""
     import contextlib
     import io
 
     buf = io.StringIO()
     t0 = time.perf_counter()
+    mod = None
     try:
         mod = __import__(name)
         old_argv, sys.argv = sys.argv, [name]  # 防 argparse 读 ci.py 的 argv
@@ -205,17 +1012,35 @@ def _run_one_check(name: str) -> tuple[str, bool, str, float]:
         rc = 1
         buf = io.StringIO(f"{type(e).__name__}: {e}")
     dt = time.perf_counter() - t0
-    tail = buf.getvalue().strip().splitlines()
-    return name, rc == 0, (tail[-1] if tail else ""), dt
+    out = buf.getvalue()
+    tail = out.strip().splitlines()
+    passed, skipped, level = read_criterion_lines(out)
+    try:
+        declared = len(getattr(mod, "TESTS", None) or ())
+    except Exception:                                                # noqa: BLE001
+        declared = 0
+    # `#371`: 跳过被记成**通过**, 所以那个数得单独数出来报 —— 否则这一行报的是
+    # "没抛异常的总数"。CI 是 ubuntu 容器, 里面没有 `wsl`, 于是 104 条判据在 runner 上
+    # 一条都不跑而门禁全绿 (最重的是 `loment_elf_test`: 运行时护栏整条在里面)。
+    # `#769`: 基线要逐条判据匹配，所以把点名失败的那几条一起带出去。`rc != 0` 而没有
+    # 任何 `FAIL <名>:` 行 = 套件级失败（崩溃/超时），`failed` 保持空 —— 调用方把它记成
+    # `(套件, "*")`，与"这条套件里某一条已知红"分开。
+    failed = failed_criteria(out) if rc != 0 else ()
+    return Result(name, rc == 0, (tail[-1] if tail else ""), dt, count_skips(out),
+                  tuple(passed), tuple(skipped), declared, level, failed)
 
 
-def run_static(only: tuple[str, ...] = (), jobs: int = 1):
-    """跑各检查脚本的 main()。返回 [(name, ok, tail, dt)], **顺序 = STATIC_CHECKS 顺序**。
+def run_static(only: tuple[str, ...] = (), jobs: int = 1, names: list[str] | None = None):
+    """跑各检查脚本的 main()。返回 [(name, ok, tail, dt, skips)], **顺序 = STATIC_CHECKS 顺序**。
 
     **每条都计时**: 不看这个数就没法谈"门禁太慢"是慢在哪 —— 41 条里往往几条吃掉大半。
     计时结果按耗时排序打出来 (见 `main`), 于是"该优化哪条"是个实测结论而不是猜。
 
     `only` 非空时只跑名字里含这些子串的那几条 —— 优化门禁时得能单独把一条跑起来看。
+
+    `names` 直接给**这一轮要跑的名字表**（`--shard K/N` 走这条）, 与 `only` 二选一;
+    它来自 `shards()` 的某一格, 所以**不需要**在这里再校验覆盖 —— 那里已经断言过
+    "分片是 `STATIC_CHECKS` 的一个划分"。
 
     **`jobs > 1` 时并行跑**。41 条彼此独立, 串行跑纯是浪费; 墙钟时间从"和"变成
     "最慢的那条"。两条前提:
@@ -224,7 +1049,8 @@ def run_static(only: tuple[str, ...] = (), jobs: int = 1):
       * 但 WSL 的 `/tmp` 与仓库是**共享**的, 所以 (a) 各模块的 WSL 临时文件名都带了
         进程号 (见那些模块里的 `_T`), (b) `EXCLUSIVE_STATIC` 里那几条独占着跑。
     """
-    names = [n for n in STATIC_CHECKS if not only or any(o in n for o in only)]
+    if names is None:
+        names = [n for n in STATIC_CHECKS if not only or any(o in n for o in only)]
     if only:
         print(f"fujoci: --only-static 只跑 {len(names)}/{len(STATIC_CHECKS)} 条", flush=True)
 
@@ -320,36 +1146,162 @@ def main():
                     help="只跑 L0 静态门禁 (lomc_test / lom_audit / fuai_contract), 不启 QEMU")
     ap.add_argument("--only-static", action="append", default=[], metavar="SUBSTR",
                     help="只跑静态门禁里名字含 SUBSTR 的那几条 (可重复) —— 优化门禁用")
+    ap.add_argument("--shard", metavar="K/N", default=None,
+                    help="只跑第 K 片（共 N 片, K 从 1 数）—— 把整道门禁摊到 N 个并行 job 上, "
+                         "见 shards()。`K/N` 里 N 必须等于 `--shard-plan` 给的那个 N")
+    ap.add_argument("--shard-plan", type=int, metavar="N", default=None,
+                    help="只打印 N 片的分法（每片一行: 片号 + 条数 + 名字）, 不跑任何判据")
+    ap.add_argument("--merge-shards", metavar="DIR", default=None,
+                    help="把 DIR 下各片 artifact(`gate-log-<片号>/gate.out`) 合成一份 gate.out "
+                         "打到 stdout; 按**判据名**取并集并要求恰好覆盖 STATIC_CHECKS (`#443`)")
+    ap.add_argument("--budget-vs", nargs=2, metavar=("FLOORS", "SKIPS"), default=None,
+                    help="把树里的判据预算与对照面（那两份文件）比: 只许收紧 (`#418`)")
+    ap.add_argument("--baseline-red", metavar="GATE_OUT", default=None,
+                    help="从合并后的 gate.out 读出这一轮红的 (套件,判据) 对 (`#769`)")
+    ap.add_argument("--baseline-pairs", metavar="BASELINE", default=None,
+                    help="把基线文件格式化成 (套件,判据) 对（旧格式的一列行读成 `套件 *`）")
+    ap.add_argument("--baseline-new", nargs=2, metavar=("GATE_OUT", "BASELINE"), default=None,
+                    help="这一轮**基线没逐条授权**的红 (= 判失败的那一份)")
+    ap.add_argument("--baseline-gone", nargs=2, metavar=("GATE_OUT", "BASELINE"), default=None,
+                    help="基线里有、这一轮不再红的那些 (只提醒「该变短了」)")
+    ap.add_argument("--baseline-growth", nargs=2, metavar=("OLD", "NEW"), default=None,
+                    help="NEW 超出 OLD 授权的那些对; 非空 = 基线变长了（不许, 退出码 1）")
     default_jobs = max(1, min(8, (os.cpu_count() or 4)))
     ap.add_argument("-j", "--jobs", type=int, default=default_jobs,
                     help=f"静态门禁并行度 (默认 {default_jobs}; 1 = 串行同进程)")
     a = ap.parse_args()
 
+    if a.shard_plan is not None:
+        for i, b in enumerate(shards(a.shard_plan)):
+            print(f"shard {i + 1}/{a.shard_plan} ({len(b)} 条): {' '.join(b)}")
+        return 0
+
+    # `#443`: 聚合那一步只做一件事 —— 把各片 artifact 合成一份 gate.out。合成与
+    # "覆盖是不是恰好一次"的判断都在这一个函数里, 因为它必须能在判据里被复现
+    # （workflow 里的 shell 没法用夹具喂两个 attempt 的产物）。
+    if a.merge_shards is not None:
+        text, problems = merge_shard_logs(a.merge_shards)
+        sys.stdout.write(text)
+        n = sum(1 for ln in text.splitlines() if _STATIC_LINE_RE.match(ln))
+        print(f"fujoci: 合成 {n} 条（应 {len(STATIC_CHECKS)} 条）", file=sys.stderr)
+        for b in problems:
+            print(f"::error::{b}", file=sys.stderr)
+        return 1 if problems else 0
+
+    # `#418`: 预算的**另一半**棘轮。树内那两条（`check_budget`）比的是同一份提交里
+    # 的两个数 —— 一起改就绿了。这里比的是**对照面**（base 分支）与这一棵树。
+    if a.budget_vs is not None:
+        try:
+            base_floors, base_skips = read_budget(*a.budget_vs)
+            floors, skips = read_budget()
+        except (OSError, ValueError) as e:
+            print(f"::error::判据预算对照面读不出来 —— 门禁不猜, 按失败处理：{e}")
+            return 1
+        bad = check_budget_against_base(base_floors, base_skips, floors, skips)
+        if bad:
+            print(f"fujoci: 判据预算比对照面松了 {len(bad)} 条：")
+            for b in bad:
+                print(f"  - {b}")
+            print("::error::判据预算只许收紧 —— 见上面每一行")
+            return 1
+        print(f"fujoci: 判据预算只许收紧: OK（套件 {len(base_floors)} -> {len(floors)}，"
+              f"跳过 {len(base_skips)} -> {len(skips)}）")
+        return 0
+
+    # `#769`: 已知红基线的逐条匹配。workflow 把这几个子命令的输出当作文件内容用，
+    # 于是"怎么解析"只有这一份实现（shell 里 `awk '{print $3}'` 那种按列猜的写法
+    # 在判据名带 `；`/被截断时会静默失配）。
+    if a.baseline_red is not None:
+        sys.stdout.write(format_pairs(baseline_red(_read_text(a.baseline_red))))
+        return 0
+    if a.baseline_pairs is not None:
+        sys.stdout.write(format_pairs(read_baseline(a.baseline_pairs)))
+        return 0
+    if a.baseline_new is not None:
+        red = baseline_red(_read_text(a.baseline_new[0]))
+        sys.stdout.write(format_pairs(baseline_new(red, read_baseline(a.baseline_new[1]))))
+        return 0
+    if a.baseline_gone is not None:
+        red = baseline_red(_read_text(a.baseline_gone[0]))
+        sys.stdout.write(format_pairs(baseline_gone(red, read_baseline(a.baseline_gone[1]))))
+        return 0
+    if a.baseline_growth is not None:
+        old, new = (read_baseline(p) for p in a.baseline_growth)
+        grew = baseline_growth(old, new)
+        if grew:
+            sys.stdout.write(format_pairs(grew))
+            print(f"fujoci: 基线比对照面长了 {len(grew)} 条 —— 只许变短", file=sys.stderr)
+            return 1
+        print(f"fujoci: 基线只许变短: OK（对照面 {len(old)} 条 -> 这一棵树 {len(new)} 条）",
+              file=sys.stderr)
+        return 0
+
+    # `--shard K/N` -> 这一片的名字表。**必须经过 `shards(N)`** —— 分片的划分与它的
+    # 覆盖守卫都只在那一个地方（手写名字表会静默漏掉新判据, 见 `shards` 的说明）。
+    picked: list[str] | None = None
+    if a.shard:
+        k_s, _, n_s = a.shard.partition("/")
+        try:
+            k, n = int(k_s), int(n_s)
+        except ValueError:
+            ap.error(f"--shard 要写成 K/N（如 2/6）, 得到 {a.shard!r}")
+        allp = shards(n)
+        if not 1 <= k <= len(allp):
+            ap.error(f"--shard {a.shard}: K 要在 1..{len(allp)} 之间")
+        picked = allp[k - 1]
+        print(f"fujoci: 分片 {k}/{n} —— {len(picked)} 条: {' '.join(picked)}", flush=True)
+
     if a.static_only:
         _sweep_wsl_tmp()
     wall0 = time.perf_counter()
-    static = run_static(tuple(a.only_static), a.jobs)     # 每条结果它自己打 (见 _report)
+    static = run_static(tuple(a.only_static), a.jobs, picked)   # 每条结果它自己打 (见 _report)
     wall = time.perf_counter() - wall0
     # **耗时榜**: 优化门禁只能优化"实测最慢的那几条"。41 条里往往 5 条吃掉八成 ——
     # 没有这张榜，"哪条慢"就永远是个印象 (而印象通常错)。
     # **"总和"与"墙钟"分开报**: 并行之后这两个数不是一回事, 而"还能不能再快"看的是墙钟
     # 与**最慢那条**的差 —— 差越小, 说明并行已经榨干, 该去优化那条本身了。
-    slow_total = sum(dt for *_x, dt in static)
-    slowest = max((dt for *_x, dt in static), default=0.0)
+    slow_total = sum(r[3] for r in static)
+    slowest = max((r[3] for r in static), default=0.0)
     print("-" * 60)
     print(f"fujoci: 静态门禁 墙钟 {wall:.1f}s / 各条合计 {slow_total:.1f}s "
           f"/ 最慢一条 {slowest:.1f}s（-j {a.jobs}）")
     print("  最慢的 8 条：")
-    for name, _ok, _tail, dt in sorted(static, key=lambda r: -r[3])[:8]:
-        pct = (dt / slow_total * 100) if slow_total else 0
-        print(f"    {name:24s} {dt:7.1f}s  {pct:4.1f}%")
-    if any(not ok for _, ok, _t, _d in static):
+    for r in sorted(static, key=lambda x: -x.dt)[:8]:
+        pct = (r.dt / slow_total * 100) if slow_total else 0
+        print(f"    {r.name:24s} {r.dt:7.1f}s  {pct:4.1f}%")
+    # **预算要在"有红就中止"那一步之前查。** 原先它在下面那个 `return 1` 之后，于是
+    # **最需要它的时候它不跑**：任何一条套件红（哪怕那条红早就登记在基线里、根本不算新红）
+    # 都会从这里中止，把预算那整段跳过 —— 跳过表与地板在那一次跑里**完全没有约束力**。
+    # 2026-10-15 实测到的形状：第 5 片有 109 条判据跳过，一条都没量到，就因为该片有一条
+    # 基线内的红。这与本版要堵的是同一个洞（"没跑"却在某条路径上不算账）。
+    budget_bad: list[str] = []
+    if a.static_only:
+        print("-" * 60)
+        print(f"fujoci: 静态门禁 {sum(1 for r in static if r.ok)}/{len(static)} PASS")
+        # `#371`: **"PASS" 不等于"跑了"**。跳过被运行器记成通过, 所以这里单独报一次总数 ——
+        # 不报的话, 那一行读起来就是覆盖面, 而 runner 上有一整族判据根本不执行。
+        skipped = sum(r.skips for r in static)
+        if skipped:
+            print(f"fujoci: 其中 {skipped} 条判据**没跑**（环境不满足, 见各行的 `N SKIP`）"
+                  f"—— 这一行才是覆盖面")
+        # **"没跑"本身也要有代价**：签入的预算说清哪些跳过是接受的（`.github/gate-skips.txt`）
+        # 与每个套件该有多少条判据（`.github/gate-floors.txt`）。多出来的跳过、被删掉的判据，
+        # 在这一步判失败 —— 否则"把判据改得永远不跑"与"把判据删掉"都是能过的。
+        floors, budget_skips = read_budget()
+        budget_bad = check_budget(static, floors, budget_skips,
+                                  in_ci=bool(os.environ.get("GITHUB_ACTIONS")))
+        if budget_bad:
+            print("-" * 60)
+            print(f"fujoci: 判据预算对不上 {len(budget_bad)} 条：")
+            for b in budget_bad:
+                print(f"  - {b}")
+    if any(not r.ok for r in static):
         print("-" * 60)
         print("fujoci: 静态门禁失败 — 中止 (接口漂移优先于运行时回归)")
         return 1
+    if budget_bad:
+        return 1
     if a.static_only:
-        print("-" * 60)
-        print(f"fujoci: 静态门禁 {sum(1 for _, ok, _t, _d in static if ok)}/{len(static)} PASS")
         return 0
 
     cases = []

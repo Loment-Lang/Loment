@@ -32,6 +32,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc   # noqa: E402
 import lomelf    # noqa: E402
 import lomc      # noqa: E402
@@ -47,11 +48,18 @@ def test(fn):
 
 # ---------------------------------------------------------------- 跑起来的脚手架
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True, text=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True, text=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -59,6 +67,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -79,7 +89,7 @@ def _run_raw(exe: Path, td: Path) -> bytes:
     out = td / "stdout.bin"
     s = _wsl_path(exe)
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {s} && {s} > {_wsl_path(out)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {s} && {s} > {_wsl_path(out)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     assert r.stdout.strip() == "0", f"退出码 {r.stdout!r} / stderr {r.stderr[:300]}"
     return out.read_bytes()
@@ -138,6 +148,7 @@ def _fnv1a(data: bytes) -> int:
 #: 两边都按这个描述各写一遍, 于是"库有没有重述 L0"这件事才量得准。
 FUC_PROBE = r'''
 module lumtui_fuc_probe
+choose runtime
 
 use lumtui
 use lumtui_doc
@@ -247,6 +258,7 @@ def test_fuc_bytes_match_lom_single_source():
 
 LAYOUT_PROBE = r'''
 module lumtui_layout_probe
+choose runtime
 
 use lumtui
 use lumtui_doc
@@ -367,6 +379,7 @@ def test_layout_matches_independent_expectation():
 
 MATH_PROBE = r'''
 module lumtui_math_probe
+choose runtime
 
 use lumtui_math
 use "loment/lib/num.lomt"
@@ -532,6 +545,7 @@ def _have_pillow() -> bool:
 #: 步进在字体单位下是整数, 与 FreeType 对得上**没有舍入** —— 这是最硬的一条。
 FONT_PROBE = r'''
 module lumtui_font_probe
+choose runtime
 
 use lumtui
 use lumtui_font
@@ -856,17 +870,7 @@ def test_demo_runs_and_renders():
 
 def main() -> int:
     ok = 0
-    for fn in TESTS:
-        print(f"[TEST] {fn.__name__}")
-        try:
-            fn()
-            ok += 1
-        except AssertionError as e:
-            print(f"      FAIL: {e}")
-        except Exception as e:  # noqa: BLE001
-            print(f"      ERROR: {type(e).__name__}: {e}")
-    print(f"{ok}/{len(TESTS)} passed")
-    return 0 if ok == len(TESTS) else 1
+    return loment_suite.run(TESTS, "loment_lumtui_test")
 
 
 if __name__ == "__main__":

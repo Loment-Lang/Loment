@@ -1,0 +1,6 @@
+choose write grammar tur
+module gdecl
+
+fn main() -> u32 {
+    return 7;
+}

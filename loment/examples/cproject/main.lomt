@@ -9,6 +9,7 @@
 // 跨类型转换在这门语言里只能在原生侧写（`as`）—— C 写法里既没有隐式转换
 // 也没有 `(T)x`，两个口径不同的整型根本碰不到一起。
 module cproj
+choose runtime
 
 use "bitkit.lomt"
 use "numkit.lomt"

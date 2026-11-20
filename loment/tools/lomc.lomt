@@ -15,6 +15,7 @@
 // 符号+量值实现 (与 Python 的 int_lit 一致)。
 
 module lomc
+choose runtime
 
 use lexer
 use json
@@ -343,7 +344,12 @@ fn v_hex(dst: ptr, neg: u32, mag: u64, bits: u32) -> u32 {
     let rev: ptr = ptr_add(dst, 64);
     let d: u32 = 0;
     let x: u64 = mag;
-    while x > 0 {
+    // `|| d == 0` 是**值 0 那一格**: 没有它时数字位一个都不写, 只留下 `width - 1` 个补零
+    // —— `u8` 的 0 于是发成 `0x0`（Python 侧是 `0x00`）, `u32` 的 0 会发成 `0x0000000`。
+    // **2026-10-11 由 `lom/net.lom` 首次撞上**（`Surface.other = 0`）: 既有的三份 `.lom`
+    // 里没有一个**值为 0** 的变体或常量, 所以它一直没露头 —— 而 `loment_lomc_test` 的
+    // 判据（那四份 `.lom` 逐一与 Python 版逐字节比）本来就该抓到它。
+    while x > 0 || d == 0 {
         store8(rev, d, str_byte(hexs, (x % 16) as u32) as u8);
         x = x / 16;
         d = d + 1;
@@ -631,7 +637,8 @@ fn p_int(mem: ptr, src: ptr, toks: ptr) -> u64 {
     return v_pack(neg, (mag % 4294967296) as u32, (mag / 4294967296) as u32);
 }
 
-/// 字符串字面量 (解码转义) -> 池 (off,len)。_ESCAPES: n/t/"/\ 其余取原字符。
+/// 字符串字面量 (解码转义) -> 池 (off,len)。转义表与 `lomc._ESCAPES` 同一份:
+/// `n` `t` `r` `0`；其余 (`\\` `\"` 以及**未知** —— 后者由 checker 报 E019) 取原字符。
 fn p_string(mem: ptr, src: ptr, toks: ptr) -> u64 {
     let i: u32 = cur(mem);
     if tk_kind(toks, i) != 2 {
@@ -651,6 +658,8 @@ fn p_string(mem: ptr, src: ptr, toks: ptr) -> u64 {
             let d: u32 = e;
             if e == 110 { d = 10; }
             if e == 116 { d = 9; }
+            if e == 114 { d = 13; }
+            if e == 48 { d = 0; }
             store8(tmp, o, d as u8);
             o = o + 1;
             k = k + 2;

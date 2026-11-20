@@ -198,7 +198,7 @@ _BUILTINS = {
     "str_ptr": "ptr", "alloc": "ptr", "free": "u32", "load8": "u32",
     "store8": "u32", "ptr_add": "ptr", "ptr_sub": "ptr", "slice_len": "u32",
     "panic": "u32", "atomic_add": "u32", "get_bits": "u8", "set_bits": "u8",
-    "inb": "u32", "outb": "u32", "syscall4": "i64", "syscall6": "i64",
+    "inb": "u32", "outb": "u32", "syscall4": "i64", "syscall6": "i64", "syscall7": "i64",
 }
 
 #: **保留词**。它们进了语法之后就不能再当名字用 —— 一份 `let has be 3` 会让解析器

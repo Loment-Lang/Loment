@@ -1,0 +1,26 @@
+// loment/examples/net_ladder/main.lomt — 宽度档各来一站（docs/237）
+//
+// 这一份唯一的用处：让 v14 的 `net_ladder` 四个数**都非零**，于是两个实现数出来的那份
+// **组成**逐字节可比（`loment_potato_emit_test` 的 `EXTRA_COVERED`）。
+//
+// 树里别处**一处联网站点都没有**（`docs/218` §1④ 实测 0 处），所以不摆这一份，
+// "四档到底数没数对"从来没被比过 —— 与 `gc_ladder` 那份钉子（`examples/gc_ladder`）
+// 同一个理由、同一个位置形状。
+//
+// **它不跑**：那一格的判据只编、只比对象。这里的实参写的是形状，不是能用的服务端。
+
+module net_ladder
+
+fn main() -> i32 {
+    // w0：同机上的一对端点 —— 没有陌生对端可以进来
+    let pair: i64 = syscall6(53, 2, 1, 0, 0, 0);
+    // w1：一条有界连接 —— 客户端，对端是它自己挑的那一个
+    let s: i64 = syscall6(41, 2, 1, 0, 0, 0);
+    let r: i64 = syscall6(42, 0, 0, 16, 0, 0);
+    // w2：多条并发 —— 多路复用本身不搬字节
+    let p: i64 = syscall6(7, 0, 0, 0, 0, 0);
+    // w3：接受任意对端 —— 对端由别人挑
+    let b: i64 = syscall6(49, 0, 0, 16, 0, 0);
+    let l: i64 = syscall6(50, 0, 8, 0, 0, 0);
+    return ((pair + s + r + p + b + l) & 1) as i32;
+}

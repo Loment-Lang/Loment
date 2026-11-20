@@ -43,9 +43,21 @@ ZCode 的 `app.asar` 头里**每个文件都带 SHA256 完整性哈希**：
 
 ### 3.1 编辑用 VS Code（真支持）
 
-`editors/vscode/`：两套 TextMate 语法（`.lomt` / `.lom`）+ LSP（补全/跳转/诊断/格式化）
-+ 6 个命令；打包 `tools/vscode_ext.py`，体检 `--doctor`，验收 `vscode_ext_test` 6/6。
-高亮本身用 VS Code 同款引擎逐 token 核过（docs/148 §0.1）。
+`editors/vscode/`：两套 TextMate 语法（`.lomt` / `.lom`）+ **七门外门表层语法各一套**
+（`loment-<规范名>`）+ LSP（补全/跳转/诊断/格式化）+ 8 个命令；打包 `tools/vscode_ext.py`，
+体检 `--doctor`，`--install` 侧载（本机 `code --install-extension` 起不来，见 `docs/235`），
+验收 `vscode_ext_test` 16/16。高亮本身用 VS Code 同款引擎逐 token 核过（docs/148 §0.1）。
+
+**2026-10-13 起它在商店上了**：`hooyan2022.loment`（<https://marketplace.visualstudio.com/items?itemName=hooyan2022.loment>，
+装法 `code --install-extension hooyan2022.loment`）—— 发布那一套（账号、PAT、四个前置件、
+边界）记在 `docs/171` §5。
+
+**七门表层语法**（2026-10-12，`docs/235`）：一份源的文件头写了 `choose write grammar python`
+（c / cpp / java / csharp / go / natural 同理）时，扩展读那一行、把文档切到 `loment-<规范名>`，
+并**借宿主的语法**上色（`source.python` / `source.c` …）—— 没装对应宿主扩展时优雅退化
+（只剩声明那一行着色）。项目在 `loment.conf` 里把 L1 后缀改成自定义的（`source_ext`），
+那些文件也认成 Loment。**外门那几种不接语言服务**：两个 LSP 都按原生 Loment 解析这类源，
+接上去只会报假错（另记 issue）。
 
 ### 3.2 展示用 `rust` 围栏（内置查看器立刻着色）
 

@@ -1,0 +1,18 @@
+// loment/examples/register_hello.lomt — 同一条命令，写成 `register` 块（`docs/223` 形态 A）
+//
+// 与 `cmd_hello.lomt` 是**同一件事的两种写法**：块把名字与入口绑在一起 —— 名字是**语法**
+// 的一部分，不再是从函数体里**扫**出来的一个字符串。编出来的产物同样是 `loment-<名字>`。
+//
+// 块里是**那个入口函数**（恰好一个 —— 放别的东西是形状不对）。命令体必须是
+// `fn command_main(argv: ptr, argc: u32) -> u32`，而且这一层同样**不写 `_start`**
+// （进程入口由工具链生成，见 `docs/223` §3.2）。
+module register_hello
+
+register reghello {
+    pub fn command_main(argv: ptr, argc: u32) -> u32 {
+        // 把 cmdline 的头四个字节打出来（够看出它确实是命令行），再用 argc 当退出码 ——
+        // 与 `cmd_hello.lomt` 逐字一样，好让两种写法跑出**同一个结果**。
+        syscall4(1, 1, argv as u64, 4);
+        return argc;
+    }
+}

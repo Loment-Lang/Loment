@@ -1,0 +1,22 @@
+module pos_revision
+
+// `docs/320` S1：合法的对象代程序 —— 读代、带代守卫、翻代。
+// 自举检查器与参考实现都必须零诊断（`test_m81_loment_checker_matches_python` 的正例）。
+choose runtime
+
+capability blk : disk[0..7] revision
+
+pub fn take(i: u32) -> u64 {
+    let g: u64 = generation blk(i);
+    return g;
+}
+
+pub fn use_it(i: u32, g: u64) -> u32 {
+    guard blk(i, g);
+    return 1;
+}
+
+pub fn drop_it(i: u32) -> u32 {
+    retire blk(i);
+    return 0;
+}

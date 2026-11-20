@@ -28,6 +28,7 @@
 //   * 只收参考侧文件头列的那个子集；struct/enum/match/泛型/capability 都**不收**。
 
 module interp
+choose runtime
 
 use bytes
 use lexer

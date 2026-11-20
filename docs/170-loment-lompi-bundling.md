@@ -1,6 +1,6 @@
 # 170 · lompi 随 Loment 一起发行
 
-> 版本 `0.1.4` · lompi `0.1.0`（完全稳定）· 实现 `loment/tools/lomcli.lomt` 之外
+> 版本 `0.1.4` · lompi `0.2.0` · 实现 `loment/tools/lomcli.lomt` 之外
 > · 判据 `tools/loment_lompi_test.py` · 同步 `tools/lompi_sync.py`
 > · 边界见 `docs/169 §2`（`loment` 的命令面里**不出现** lompi）
 
@@ -11,6 +11,34 @@
 `loment help` / `loment commands` 里没有它，`loment <任何东西>` 也不转发给它。
 
 它是**用 Loment 写的**，由同一条自举链编出来，所以"随包发行"这件事本身是可复现的。
+
+## 0.1 命令面照 pip, `<store>` 可以省
+
+命令面按 pip 摆（对照表在 lompi 指南 §11），但**每条取 store 的命令都不必写 store**：
+
+```
+lompi index fixture/store     ==  lompi index            # 省掉就用全局 store
+lompi show  fixture/store x   ==  lompi show  x
+lompi obj   add  fixture/store k.o  ==  lompi obj add k.o
+```
+
+省掉时用的是 `lompi config` 打的那一行 `store:`（全局根下的 `store\`，全局根本身也是从
+`argv[0]` 反推的，见 §5）。**两条路走的是同一段代码**：命令行给了就照抄，没给就推一个，
+再往下就没有分支了。
+
+为什么要这样：pip 的使用者从来不需要知道 site-packages 在哪。要求每条命令都自带 store
+路径，等于把"你的库装在哪"变成每次调用的必填项 —— 而那是机器该记住的事，不是人该背的。
+`list` 是 `index` 的同义词（pip 的习惯动词）。
+
+**两个版本号是两件事**，别看成同一个：`lompi version` 打的 `0.2.0` 是**这个工具自己**的
+版本；`lompi/store/<name>/0.1.0/` 里那个 `0.1.0` 是**随包标准库**（`std`/`host`）自己的
+包版本。升 lompi 不该动后者 —— 动了就要同时改 `loment_release.GLOBS` 与
+`loment/tools/lomrel.lomt` 里那两个写死的 glob（判据见 `loment_lompi_test` 的
+`LPI_VERSION` / `STORE_VERSION` 一对常量）。
+
+打包侧的 `--opt`（`python tools/loment_dist.py --emit --opt`）让 **ELF 那一半**改走
+`clang -O2`（docs/212 §5A）；没有 clang 就**降级并说明**，包照样出得来。PE 那一半不走
+这条路 —— 这个包的 PE 形状是自举链接器出的，不是 clang 出的。
 
 ## 1. 正本在外面，仓里只放快照（三组配对）
 
@@ -87,7 +115,7 @@ python tools/lompi_sync.py --status       # 只打印两边的摘要与各自哈
 | 组 | 判的 |
 |---|---|
 | 编得出来 | 参考实现能**检查**它（这条曾经是红的，见 §5）；发行包同一条路（stage1 + lomelf）能编出来 |
-| 跑得对 | **`lpi_test.lomt` 逐模块自检全绿**（7 个模块，退出码即结论）；`index` 列出夹具里的 5 个包，且**同名不同版本给不同内容哈希**；`check` 有**分辨力**（合法库退 0 说 OK，现造的坏库退 1）；`show` 报完整 64 位内容哈希；`version` 与源码真源一致且钉在 0.1.0 |
+| 跑得对 | **`lpi_test.lomt` 逐模块自检全绿**（7 个模块，退出码即结论）；`index` 列出夹具里的 5 个包，且**同名不同版本给不同内容哈希**；`check` 有**分辨力**（合法库退 0 说 OK，现造的坏库退 1）；`show` 报完整 64 位内容哈希；`version` 与源码真源一致且钉在 `LPI_VERSION` |
 | 边界 | `lompi` 不出现在 `lomcli.lomt` 的命令目录 / help 总览，也不出现在两个启动器里 |
 | 装法 | 包里有指南；两个安装器都按 loment 那套处理它，**且带自己的标记**；卸载摘得掉；五个脚本纯 ASCII |
 | 标准库 | 137 个文件一件不少地进包、进 `_fresh_sources`（**源码直出**，漏重打包就红）；发布清单逐条覆盖 store；两个安装器都**问 `lompi config`** 而不是自己推规则；端到端**真装一遍**再让 lompi 自己去 `index` 那个 store |

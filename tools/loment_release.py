@@ -44,37 +44,126 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # Python 判据仍在仓里，六门表层语法的翻译器也还没有 Loment 孪生（`docs/189`）。
 # 那句话的对外版本写在 README 的 `## Status`（与 `tools/loment_publish.py` 里那份
 # 逐字同源）—— **改版本号时一起改**，`loment_publish` 的判据会核。
-RELEASE = "0.1.4"
-RELEASE_NAME = "0.1.4"  # 人读显示名 (发行包/文档用同一个真源)
+# 2026-10-10 升到 **0.1.4.5-pre**（用户定的）：**预告版** —— 这一版的用处不是"装完的东西",
+# 而是**提前把 0.1.4.5 要装的三件事宣告出去**（用户原话：pre-release 不要求做完，
+# 只要告诉大家我们准备发这个版本了）。三件事：LomentGC 四层梯全量上线 / 网络在
+# 两个平台都能用 / lompi 升到 0.2.0 Alpha。**正文里"已落地"与"预告"要分清**
+# （`.github/release-notes/v0.1.4.5-pre.md` 里逐条标了），别把预告写成既成事实。
+# tag = `v0.1.4.5-pre`。**`-pre` 后缀同时也是"宣告版"的记号**：`release.yml` 整个跳过
+# 带 `-pre` 的 tag（它只发通知、不出包），所以那一版**没有产物**，由人直接建：
+# `gh release create v0.1.4.5-pre --prerelease --notes-file .github/release-notes/v0.1.4.5-pre.md`。
+# 2026-10-12 升到 **0.1.4.5**（用户定的）：**正式版** —— 宣告到此兑现，这一版**出五件产物**
+# （Linux `tar.gz` / Windows `zip` / Windows 自解压 `setup.exe` / skill `zip` / `SHA256SUMS`）。
+# tag = `v0.1.4.5`，由 `release.yml` 在 **`windows-latest`** 上出包 —— 第五件要走 Windows 自带的
+# `iexpress`，ubuntu runner 上出不来（那正是文件头原先记着的未解问题，2026-10-10 挪 runner 解决，
+# 并在真 runner 上 `dry_run` 打通一次）。**正文口径按 `-pre` 那份重新核一遍**
+# （`.github/release-notes/v0.1.4.5.md`）：当时在 review 的已经合了，仍然是设计稿的别写成既成事实。
+# 2026-10-12 升到 **0.1.4.5-quickfix**（用户定的名字：**Loment 0.1.4.5 QuickFix**）：**补丁** ——
+# 0.1.4.5 发出去两小时后发现：**双击安装包全程没有一个可见窗口**。实测那条路是通的（包解开了、
+# `install.cmd` 真跑了、东西也真装上了），只是"装好了"与"什么都没发生"长得一模一样，还留下
+# 卡在 `pause` 的僵尸 `cmd`。这一版补上安装器的**脸**：`welcome.ps1` —— 渐入圆角标 +
+# `Welcome to Loment` → 选装到哪 → 进度（流式显示 `install.ps1` 的输出）→ 完成回执，**等你手动关**。
+# **工具链本身一个字没动**（那八个二进制与 0.1.4.5 逐字节相同），所以这是补丁不是新版。
+# tag = `v0.1.4.5-quickfix`（`release.yml` 只对 `-pre` 结尾的 tag 整条跳过；这一版带产物，
+# 与那种"只发通知"的宣告版不是一回事）。
+RELEASE = "0.1.5.1"
+RELEASE_NAME = "0.1.5.1"  # 人读显示名 (发行包/文档用同一个真源)
+
+# 报错器 (`lomenterr`) **自己的版本号** —— 与语言版本是**两条线** (2026-10-13 用户定)。
+#
+# **为什么它该有自己的版本**: `lomenterr` 是一件**独立交付的程序**, 不是编译器的一部分 ——
+# 它有自己的命令行面 (`--short`/`--json`/`--max`/`errconfig`), 自己的判据, 自己的孪生
+# (`loment/tools/lomerrcheck.lomt`), 而且它的改动**与语言面无关**: 2026-09-18 到 10-13 之间
+# 它改了七八轮 (四段说明卡 -> 六语言方言 -> 双语默认英文 -> 三个出口 -> 逐条建议),
+# 而语言版本在这段时间里只动过一次。把两件事捆在一个号上, 就只能记成"语言又升了一版",
+# 那既不真, 也让人没法说"我用的是哪个报错器"。
+#
+# **两条线各自独立, 但只有一处真源**: 这个常量是报错器版本的**唯一**来源 ——
+# `loment_diag.py --dump-surface` 把它导进 `surface_data` (报错器用它打 `lomenterr version`),
+# 文档里那份 (README / wiki) 由判据核。**不许在别处再写一遍字面量** (本仓那条老账:
+# 同一份清单抄第二遍, 两处迟早不同)。
+#
+# 这条线对应的是报错器的三次交付 (逐条记在 `docs/182`):
+#   0.1.0  编译期落地 —— 渲染器本身, 接进工具链与两个启动器
+#   0.1.1  说明卡 + 六语言方言卡 + 上色 + 语法声明优先
+#   0.1.2  双语 (默认英文) + 三个出口 (`--short`/`--json`) + 逐条建议
+#   0.1.3  报错码细分: 27 个族码 -> 208 个码, 每条诊断一个码 + 一套自己的卡 (`docs/329`)
+LOMENTERR = "0.1.3"
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
-    "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
+    "tools/lomentc_test.py", "tools/lspe_test.py", "tools/lspe_ratchet.py",
+    # E8 的反证探针登记表（`docs/262` §5.4 / `#766`）：机械生成，检查漏探针的判据也靠它。
+    "tools/lspe_probes.py",
+    # AI slop 的机械代理判据（`docs/319`）：检查器 + 它自己的判据。
+    "tools/loment_slop.py", "tools/loment_slop_test.py",
+    "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",
     "tools/potato_llm_arm.py",
-    "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py", "tools/lomdoc.py",
+    "tools/potato_assert.py", "tools/loment.py", "tools/flomtc.py", "tools/lomfmt.py",
+    # 修改件 (`.lomf`, docs/257): 套用器 + 树里那些补丁。**补丁本身也进清单** ——
+    # 它是"这一笔改了什么"的记录, 丢了就等于那一笔无从复核 (docs/179 §7.3 那条)。
+    "tools/lomf.py", "loment/patches/*.lomf", "tools/lomdoc.py",
     "tools/lompkg.py", "tools/lomlib.py", "tools/loment_lib_test.py",
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者
     "tools/loment_std_test.py",
+    # 密码学原语的行为判据（docs/328）：Python 侧独立实现同一批算法对拍。
+    "tools/loment_crypto_test.py",
+    # 领域包的行为判据 (docs/317/318/319): 八个领域包逐个探针对 Python 对跑
+    "tools/loment_domains_test.py",
+    # IR 缓存 (docs/325): 实现 + 判据
+    "tools/loment_cache.py", "tools/loment_cache_test.py",
+    # LibL 的 libc 面 (docs/232): 与真 glibc 逐字节对跑
+    "tools/loment_libl_test.py",
+    # LibL 家族第三个包 internet (docs/241): 对 CPython 标准库 + 真 http.server 对跑
+    "tools/loment_internet_test.py",
+    # 第四个包 os (docs/242): 与 CPython 的 os/time/signal **在同一个 Linux 环境里**对跑
+    "tools/loment_os_test.py",
+    # 真线程 thread_spawn (docs/245): 探针编成 ELF **真的起 N 个线程**在共享内存上累加,
+    # 另外拿 gettid 证伪"顺序跑下来也能凑出同样的和"那条。负例在编译期 (入口名/形参个数)。
+    "tools/loment_thread_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
     "tools/loment_cli_test.py",
+    # 开发套件 (docs/302): 给"改 Loment 本身"的人的 doctor/gate/bootstrap。
+    # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注解。
+    "tools/loment_dev.py", "tools/loment_dev_test.py",
+    # 固定容量盘点 (docs/345 那件事的"数"): 自举侧有多少个固定容量、几个越界时说不出话
+    "tools/loment_caps.py", "tools/loment_caps_test.py",
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
     # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
     "tools/loment_err_test.py",
+    "tools/loment_regex_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
-    # lompi 的标准库: 随 Loment 一起装 (std 127 模块 + host, 共 137 个文件, 用户 2026-09-16)。
+    # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os + 八个领域包, 共 217 个文件 ——
+    # 数见 `loment_lompi_test.STORE_FILES`; 用户 2026-09-16 定的随包形状)。
     # **版本号是故意写死的**: 自举那边 (loment/tools/lomrel.lomt) 的 glob 只认"一段目录 +
     # 一个名字模式", `**` 在那边展开不出递归 (实测只给一层, 于是把 std/ host/ 两个**目录**
     # 当文件收了进来)。升版本要同时改两份清单 —— `loment_lompi_test` 里那条
     # `test_release_manifest_covers_every_store_file` 就是钉这个的: 库改版而清单没跟上,
     # `loment_release --check` 会**看不见文件而照样绿**, 那条会红。
-    "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*",
+    "lompi/store/std/0.1.0/*", "lompi/store/host/0.1.0/*", "lompi/store/internet/0.1.0/*",
+    "lompi/store/os/0.1.0/*",
+    "lompi/store/math/0.1.0/*",
+    "lompi/store/science/0.1.0/*",
+    "lompi/store/engineering/0.1.0/*",
+    "lompi/store/world/0.1.0/*",
+    "lompi/store/dev/0.1.0/*",
+    "lompi/store/lowlevel/0.1.0/*",
+    "lompi/store/system/0.1.0/*",
+    "lompi/store/baremetal/0.1.0/*",
+    # Win32 的声明面（docs/328）：extern fn，PE 目标。
+    "lompi/store/windows/0.1.0/*",
     "tools/lompi_sync.py", "tools/loment_lompi_test.py",
     # 发布口 (docs/171): 把单仓里的 Loment / lompi 切出来推到各自的私有库
     "tools/loment_publish.py",
+    # 发布口跟上了没 (docs/222): `loment lompicheck` —— 一条**注册出来的**用户命令,
+    # 联网把 `FujoJTOP/lompi` 与 `FujoJTOP/loment` 的文件树逐条比。
+    # **位置必须与自举那份 `lomrel.lomt` 逐行对齐**（那份只认名字, 没有注释可依）。
+    "tools/lompicheck_test.py",
+    "tools/loment_register_test.py",
     "tools/loment_diag.py", "tools/loment_build.py",
     "tools/loment_lsp.py", "tools/loment_tools_test.py", "tools/loment_boot.py",
     # 编译期子集解释器 (S4.0, docs/184 §9): 参考侧解释器 + 它的判据 + 语料。
@@ -84,20 +173,68 @@ GLOBS = [
     "tools/loment_interp.py", "tools/loment_ct_test.py",
     # `comefor` 的 token 层展开 (S4.1, docs/184 §9): 展开器 + 判据 + 最小方言演示。
     "tools/loment_comefor.py", "tools/loment_comefor_test.py",
+    # `choose` 的联动矩阵（`#940`）。**与 lomrel.lomt 同一位置**。
+    "tools/loment_choose_matrix_test.py",
+    # 语义 oracle（`docs/349`）：Loment 写的源解释器 + 它的判据。
+    # **与 lomrel.lomt 同一位置** —— 两处的条目顺序就是清单的顺序。
+    "tools/loment_oracle.py", "tools/loment_oracle_test.py",
+    # 规范/语义源（`docs/349`）：`.lls` 引擎与 10 份语料。**在账上、但发行版不编译它**
+    # （渠道锁，`docs/231` §2.6）—— 清单是仓的账，不是发行包的打包清单。
+    "semantics/*.lls", "semantics/corpus/*.lomt",
     # 外部代码块的字节保真 (S1, docs/185)
     "tools/loment_extblock_test.py",
     "tools/loment_p7_test.py", "tools/loment_p8_test.py", "tools/loment_p9_test.py",
+    # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界只许出诊断。**与
+    # `loment/tools/lomrel.lomt` 同一位置** —— 两处逐条同序是判据。
+    "tools/loment_crash_test.py",
+    # GC 证明面的量尺（`docs/210` §7）：把语料跑成 `gc_auto_alpha`，加总 v10 的 `gc_ladder`。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
+    "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
+    # `#343` 那一类的计量器（`#369`）：两条不变量（非零退出要带诊断、不许被信号打死）
+    # 过一层语料，缺口的**账**在判据里，只许变短。
+    "tools/loment_invariant_test.py",
+    # 各判据套件共用的运行器 (`#371`): 门禁要看"哪条判据跳过了"，它跟 `ci.py` 是一对，
+    # 所以排在它旁边（**位置必须与自举那份 `lomrel.lomt` 逐行对齐**）。
+    # （合 main 时两条各插在同一处：两条都留，只要两份清单次序一致。）
+    "tools/loment_suite.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
     "tools/loment_dap.py", "tools/loment_dap_test.py",
     "tools/mono_trace.py",
     "tools/loment_ir_diff.py", "tools/loment_rule_parity.py",
+    # `lms` 这一维与七级的判据（`docs/253` §9 / `docs/270`）。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_lms_test.py",
+    # 渠道常量（`docs/231` §2.2）：参考实现侧那份恒为 dev；**自举侧那一份在
+    # `loment/selfhost/checker.lomt` 里**（一个常量一行），打包期由 `loment_dist.py` 换掉。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_channel.py", "tools/loment_channel_test.py",
     "tools/loment_seed.py", "tools/loment_seed_test.py",
+    # 插值的前端改写（`docs/341`）：编译器装载器的第二个读者，判据跟着它走。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/loment_fstr.py",
     "tools/loment_fmt_test.py", "tools/loment_audit.py",
     "tools/loment_doc_test.py", "tools/loment_json_test.py",
-    "tools/lomelf.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
+    "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
+    # LVM 的 T0（`docs/243`）：那份 IR 的**第四个读者**（解释器）+ 它那条判据
+    # （同一批程序，原生产物与 VM 比 stdout 字节 + 退出码）。**两处清单插入同一位置**。
+    "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py", "tools/lvm_profile_test.py",
+    "tools/lvm_t2.py", "tools/lvm_t2_test.py",
+    "tools/lvm_compact.py", "tools/lvm_compact_test.py",
+    "tools/lvm_cache.py", "tools/lvm_cache_test.py",
+    "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
+    "tools/loment_store_twin_test.py",
+    "tools/loment_spec_oracle_test.py",
+    "tools/lvm_t3.py", "tools/lvm_t3_test.py",
+    "tools/lvm_stability_test.py",
+    "tools/lvm_a0_test.py",
+    "tools/lvm_perf_test.py",
+    # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
+    # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
+    "tools/loment_net_test.py",
     # 多语法前端 (docs/179): 形式对象 -> L1 接口单元, 及其端到端判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 清单的条目顺序就是这份 GLOBS 的顺序,
     # 两处插在不同位置会给出同集合不同顺序的两份清单, 判据报"落盘不同"而字节数一样。
@@ -106,8 +243,18 @@ GLOBS = [
     # Loment 跑出的数 == 对照组 == 独立期望值。**那批语料本身不进清单** —— 它要靠
     # `tools/` 才能跑，而 `tools/` 不随包发（与 `docs/179` §8 同一个理由）。
     "tools/loment_multisyntax_projects_test.py",
+    # **超大型**项目 (100 个 Python 语法模块、1000 个函数): 语料是**生成物**,
+    # 判据逐字节钉住它不漂。与上面那批同理, **语料本身不进清单** (tools/ 不随包发)。
+    "tools/loment_megaproject_test.py",
     # 多语言程序 (docs/183 §8.2 的 S2 判据): 三段各用一门语法写, 真编真链真跑。
     "tools/loment_multilang_test.py",
+    # 教材 (`book/`, `exercises/`): 书里每个可运行块真编真跑、练习答案逐字节对上。
+    # **书与练习本身不进清单** —— 理由同上, 它们靠 `tools/` 才能跑。
+    "tools/loment_book_test.py",
+    "tools/lomentlings.py",
+    # 线上书: 纯 Python 渲染器 + 判据, GitHub Pages 的 workflow 用的就是它。
+    "tools/loment_book_site.py",
+    "tools/loment_book_site_test.py",
     # 花括号族 (C/C++/Java/C#) 的**共享前端核** (docs/188 §7.1): 一份解析器 + 方言表。
     # 各门只给自己那张 `Dialect`。
     "tools/trans_core.py",
@@ -120,6 +267,15 @@ GLOBS = [
     # Java 翻成 Loment (docs/188 §7.1 六门里的第三门; 花括号族第二张方言表)。
     "tools/jtrans.py",
     "tools/loment_jtrans_test.py",
+    # Java AOT：class -> IR + 接口（docs/281/282）与它的判据。
+    "tools/lomjava.py",
+    "tools/loment_java_test.py",
+    # `jrt`（最小 Java 运行期）的生成器；产物随包发在 share/loment/jrt/ 下。
+    "tools/loment_jrt.py",
+    # 发布侧 AOT：jar -> lompi `kind java` 包（接口 + 预编译 IR + link.txt）。
+    "tools/loment_java_pkg.py",
+    # 真实 jar 语料的扫描器（jar 本身不入树，坐标与哈希在 java-corpus.txt 里）。
+    "tools/lomjava_corpus.py",
     # C# 翻成 Loment (六门里的第四门; 花括号族**多两层壳**的那一门)。
     "tools/cstrans.py",
     "tools/loment_cstrans_test.py",
@@ -149,12 +305,15 @@ GLOBS = [
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
     "tools/loment_status_test.py", "tools/loment_rel_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",
+    "loment/lib/jrt/*",
     "tools/loment_lsp_test.py", "tools/loment_editors_test.py",
     "editors/vim/*.md", "editors/vim/syntax/*.vim", "editors/vim/ftdetect/*.vim",
     "editors/vim/ftplugin/*.vim",
     "tools/loment_filetype.py", "tools/loment_filetype_test.py",
     # 行尾门禁 (docs/161): 本清单的 sha 对 CRLF 免疫, 但自举判据按原始字节读源码 —— 两者配对
     "tools/loment_eol.py",
+    # 域几何（docs/315）：树 / 图从代码里读出来的报告（判据在 lomentc_test）
+    "tools/loment_geometry.py",
     # 发行包 (docs/162): 命令安装 + 自解压安装包
     "tools/loment_dist.py", "tools/loment_dist_test.py",
     # 签名 (docs/163): Authenticode + SHA256SUMS 分离签名
@@ -164,8 +323,13 @@ GLOBS = [
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
     "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/tools/*.lomt",
+    # **LMS 第 6 级**（`docs/253` §5.5 / `docs/270` §4）：用 C 写的重启器。
+    # 它随包发 —— 信任地板的实物必须在产物里，不能只在仓库里。
+    "restarter/loment-restart.c",
     "editors/loment.ico",
     "editors/vscode/package.json", "editors/vscode/language-configuration.json",
+    "editors/vscode/language-configuration-python.json",
+    "editors/vscode/LICENSE", "editors/vscode/loment-icon.png",
     "editors/vscode/README.md", "editors/vscode/src/*.js",
     "editors/vscode/syntaxes/*.json",
     # 编译期子集语料 (S4.0): `loment_ct_test` 读它们, 判据随包发就得连语料一起发。
@@ -185,6 +349,10 @@ GLOBS = [
     # **一个目录**, 所以同样要逐条列 (单层的 `loment/examples/*.lomt` 收不到子目录)。
     "loment/examples/cproject/*.lomt",
     "loment/examples/cproject/README.md",
+    # `natural` 的构造示例（#350）：每份 `.nl` 与旁边翻译出来的 `.lomt` 都要随包发 ——
+    # 读者照着一份`.nl` 看 `.lomt`，而判据要求两份都在。
+    "loment/examples/natural/*.nl",
+    "loment/examples/natural/*.lomt",
     # 外部代码块的**词法**语料 (S1): 只喂两个词法器, 不是可编单元。
     "loment/extblock/*.lomt",
     # **词法**语料: 只有词法器才看得见的形状。**故意不放进 `loment/examples/`** ——
@@ -206,7 +374,11 @@ GLOBS = [
     # 自然语言写法的语料与它的**同源 Loment 孪生** (docs/197): 两份**必须是同一个
     # 程序**的两种拼法 —— 判据比的是"翻出来的 Loment 逐字节相同", 所以两份都得在。
     "loment/nltrans/*.nl", "loment/nltrans/*.lomt",
-    "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
+    # `#343` 那一类（"编译器不作声地死掉"）的**最小见证**（`#369`）：`#343` 表里每一格
+    # 各一只，是这一类**仅有的**目击者 —— 边界走查在判据里现生成，见证只能是文件。
+    "loment/invariants/*.lomt",
+    "loment/examples/*.lomt", "loment/selfhost/*.lomt",
+    "loment/lspe/*.py", "loment/lspe/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
     # 全是这条线的文档, 所以一条 `docs/*.md` 就够, 不必再按名字分段收。
@@ -227,9 +399,67 @@ GLOBS = [
     "tools/_safepath.py", "tools/fuai_contract_check.py", "tools/fuic.py",
     "tools/fujopack.py", "tools/lom_spec_emit.py", "tools/loment_bootstrap.py",
     "tools/loment_capasserts_test.py", "tools/loment_eol_test.py",
-    "tools/loment_ffi_test.py", "tools/loment_i18n_test.py",
+    "tools/loment_ffi_test.py", "tools/loment_hosted_test.py", "tools/loment_i18n_test.py",
+    # `docs/NNN-slug.md` 的**编号**：查重号 / 取空号 / 撞了改号（`docs/228` 那次撞号之后加的）。
+    # 判据是"基线只许变短"那一条，见 `loment_docs_test` 的 docstring。
+    "tools/loment_docs.py", "tools/loment_docs_test.py",
+    # store 模块索引（docs/328）：生成器与它产出的 docs/store-index.md。
+    "tools/loment_store_index.py",
+    # `lom/` 那道禁区（`docs/239` §5）：把 `gate.yml` 里那段脚本抠出来真跑 ——
+    # 门是 L0 契约唯一的守卫，改它等于改守卫，所以它自己也得有判据。
+    "tools/loment_door_test.py",
+    # 准入判定（`docs/238`）：判定是纯函数，两个实现逐字节相同。
+    "tools/loment_admit.py", "tools/loment_admit_test.py",
+    # 零宽那一帧（`docs/240`）：定长、没有载荷字段。
+    "tools/loment_zwframe.py", "tools/loment_zwframe_test.py",
+    # 世界端口的量尺 (`docs/219` S0) 与它的判据。**插入位置与
+    # `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐** (`loment_rel_test` 钉)。
+    "tools/loment_ports.py", "tools/loment_ports_test.py",
     "tools/loment_probe.py", "tools/loment_release.py", "tools/loment_status.py",
     "tools/loment_syscalls_test.py",
+    # 权威状态在 `origin` 那一条 (CLAUDE.md 第一节): 读 origin 的版本/tag/落后数, 让
+    # "先 fetch 再读状态"可执行。**这两行的位置与 `loment/tools/lomrel.lomt` 的
+    # `globs_text()` 逐行对齐** —— 两处插在不同位置会给出同集合不同顺序的两份清单,
+    # `loment_rel_test` 报"落盘不同"而字节数一样。
+    "tools/loment_state.py", "tools/loment_state_test.py",
+    # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
+    # **插入位置与 `loment/tools/lomrel.lomt` 的 `globs_text()` 逐行对齐**。
+    "tools/loment_update.py", "tools/loment_update_test.py",
+    # 发布侧的清单（`#1153`）：`hotfix.json` 由树算出来，先落盘再算校验和。**同位置**。
+    "tools/loment_hotfix.py", "tools/loment_hotfix_test.py",
+    # 暂存目录（`#1154`）：fetch 在进程外，换的那条路只看目录。**同位置**。
+    "tools/loment_staging.py", "tools/loment_staging_test.py",
+    # 热线与投影（`#1156`）：只重放声明为 fix 的提交。**同位置**。
+    "tools/loment_projection.py", "tools/loment_projection_test.py",
+    # 投影清单与 status（`#1157`）。**同位置**。
+    "tools/loment_hotline_test.py",
+    # 投影树 → 热更新件（`#1155`）：编两份 hotswap 档，拼装载件。**同位置**。
+    "tools/loment_hotart.py", "tools/loment_hotart_test.py",
+    # 稳定性模拟（`#1152` 追加）：一个进程连着换六次、两槽轮流。**同位置**。
+    "tools/loment_hotstress_test.py",
+    # 命令行与模拟器（`#1155`）：`loment hotupdate` 与假 Pre-Release 的搭建。**同位置**。
+    "tools/loment_hotupdate.py",
+    "tools/loment_demo_release.py",
+    # 真的 `loment lsp` 在安全点上换掉自己（`#1155`）。**同位置**。
+    "tools/loment_lsp_hot_test.py",
+    # 元数据（`#1149`）：帧布局哈希 + 调用点表。**插入位置与 lomrel.lomt 逐行对齐**。
+    "tools/loment_hotmeta_test.py",
+    # 构建档（`#1150`）：槽表 + 入口闸。**插入位置与 lomrel.lomt 逐行对齐**。
+    "tools/loment_hotswap_test.py",
+    # 双槽装载器参考模型（`#1151`）：重定位表、装槽、翻转。**同位置**。
+    "tools/loment_hotload.py", "tools/loment_hotload_exec.py",
+    "tools/loment_hotload_test.py", "tools/loment_hotcore_test.py",
+    "tools/loment_hotbuild_test.py",
+    # 源码参数台 (docs/310): Rust 后端 + 无构建步骤前端。位置与 lomrel.lomt 逐行对齐。
+    "editors/loment-studio/README.md", "editors/loment-studio/param-catalog.json",
+    "editors/loment-studio/Cargo.toml", "editors/loment-studio/Cargo.lock",
+    "editors/loment-studio/crates/params/src/*.rs",
+    "editors/loment-studio/crates/cli/src/*.rs",
+    "editors/loment-studio/crates/server/src/*.rs",
+    "editors/loment-studio/web/*", "editors/loment-studio/examples/*",
+    "tools/loment_studio_test.py",
+    # lmgr 套件（docs/303）：38 槽注册表与能力表。**与 lomrel.lomt 同一位置（末尾）**。
+    "tools/lmgr_test.py",
 ]
 
 
@@ -271,7 +501,11 @@ def checksums_text(doc: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_release")
-    ap.add_argument("--emit", action="store_true")
+    # 路径**可选** (与 `--checksums PATH` 同一形状): 给了就写那里, 不给还是仓库那条。
+    # 与自举那份 `lomrel.lomt` 的 `--emit` 逐字对齐 —— 两边都认这条可选路径,
+    # `loment_rel_test` 才能拿"各写一份进程私有路径, 再比字节"来验它。
+    ap.add_argument("--emit", nargs="?", const="", metavar="PATH",
+                    help="写发布清单 (默认 loment/build/release-manifest.json)")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--checksums", metavar="PATH", help="写 SHA256SUMS 风格清单 (M88)")
     a = ap.parse_args(argv)
@@ -281,14 +515,17 @@ def main(argv: list[str] | None = None) -> int:
         Path(a.checksums).write_text(checksums_text(want), encoding="utf-8", newline="\n")
         print(f"[OK] {a.checksums} ({len(want['files'])} 行)")
         return 0
-    if a.emit:
-        OUT.parent.mkdir(parents=True, exist_ok=True)
+    if a.emit is not None:
+        # 给没给路径决定写哪儿; 打出来的那一行**回显调用方给的那个串** (自举侧也是这么做的),
+        # 不给才回显仓库那条默认路径。
+        dest = Path(a.emit) if a.emit else OUT
+        dest.parent.mkdir(parents=True, exist_ok=True)
         # 显式 LF: 清单是机器读的工件 (行尾不该随宿主变), 见 loment_manual 同处注释
-        OUT.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
-                       encoding="utf-8", newline="\n")
-        print(f"[OK] {OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
+        dest.write_text(json.dumps(want, ensure_ascii=False, indent=1) + "\n",
+                        encoding="utf-8", newline="\n")
+        print(f"[OK] {a.emit or OUT.relative_to(ROOT)} ({len(want['files'])} 个工件)")
         return 0
-    if a.check or not (a.emit or a.checksums):
+    if a.check or (a.emit is None and not a.checksums):
         # 无参数 = 门禁模式 (与仓库其它工具同一约定: ci.py 的静态门禁按 main() 调用)
         if not OUT.exists():
             print(f"[ERR] {OUT.relative_to(ROOT)} 缺失 (运行 --emit)")

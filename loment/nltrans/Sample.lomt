@@ -4,6 +4,7 @@
 // 源对象: unit=sample language=loment potato=v6
 
 module sample
+choose runtime
 
 // ---- 常量
 pub const LIMIT: i64 = 3;

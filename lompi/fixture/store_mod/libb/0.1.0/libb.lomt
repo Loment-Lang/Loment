@@ -1,0 +1,5 @@
+module libb
+
+pub fn b() -> u32 {
+    return 1;
+}

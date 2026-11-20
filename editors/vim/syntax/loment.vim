@@ -16,7 +16,7 @@ if exists('b:current_syntax')
 endif
 
 " ---- 关键字 (与 TextMate 语法同一张表)
-syn keyword lomentKeyword let if else while for in match
+syn keyword lomentKeyword let if else while for in match lgc
 syn keyword lomentKeyword const return mut pub use module as
 " Loment 独有
 syn keyword lomentKeyword guard excluded interrupt
@@ -25,10 +25,13 @@ syn keyword lomentSelf self
 
 " ---- 类型 / 内建
 syn keyword lomentType u8 u16 u32 u64 i8 i16 i32 i64 bool str ptr
-syn keyword lomentBuiltin load8 load16 load32 store8 store16 store32
+" 内建表 == tools/lomentc.py 的 BUILTINS。load16/load32/store16/store32 **不在这里** ——
+" 它们是 loment/examples/bytes.lomt 里的普通函数, 不是内建 (2026-10-12 摘掉)。
+syn keyword lomentBuiltin load8 store8
 syn keyword lomentBuiltin alloc free panic
 syn keyword lomentBuiltin str_len str_byte str_ptr str_eq str_concat slice_len
-syn keyword lomentBuiltin syscall4 get_bits set_bits atomic_add ptr_add ptr_sub
+syn keyword lomentBuiltin syscall4 syscall6 syscall7 thread_spawn
+syn keyword lomentBuiltin get_bits set_bits atomic_add ptr_add ptr_sub inb outb
 
 " ---- 声明名: `fn add` / `struct Pair` / `capability blk` 里的那个名字
 " (nextgroup: 匹配完声明关键字后, 下一个词按 contained 项上色)
@@ -40,6 +43,24 @@ syn match lomentKeyword "\<capability\>" nextgroup=lomentCapName skipwhite
 syn match lomentFuncName "\w\+" contained
 syn match lomentTypeName "\w\+" contained
 syn match lomentCapName "\w\+" contained
+
+" ---- 开关 / 核心维 / 表层语法声明 (docs/182 / docs/188 / docs/185 / docs/223)
+" `set` `choose` `addin` `command` `foruse` `register` `write` `grammar` **都不是保留字**
+" (参考实现接受关键字做标识符: `fn set() -> u32` 合法), 所以按**形状**认, 不按词认 ——
+" 写成 syn keyword 会把 `let set: u32` 也染色。与 TextMate 语法同一条判据。
+" 通用形在前、具体形在后: Vim 同一起点上**后定义者胜**, 具体形要能盖住整句。
+syn match lomentKeyword "\<choose\>\s\+\w\+"
+syn match lomentKeyword "\<addin\>\s\+\w\+"
+syn match lomentKeyword "\<command\>\s\+\w\+"
+syn match lomentKeyword "\<foruse\>\s\+\w\+"
+syn match lomentKeyword "\<register\>\s\+\w\+"
+syn match lomentKeyword "\<choose\>\s\+write\s\+grammar\s\+\S\+"
+syn match lomentKeyword "\<set\>\s\+choose\>\s\+\w\+"
+syn match lomentKeyword "\<choose\>\s\+close\>\s\+\w\+"
+syn match lomentCore    "\<choose\>\s\+\%(std\|no_std\|gc_manual\|gc_auto\|gc_auto_alpha\|runtime\|no_runtime\)\>"
+" ---- LSPE 的词法旁路 (docs/262 §5.16 / #786): `lspe pass "reason" { … }`
+" `lspe` / `pass` 都不是保留字, 所以按**成对形状**认 (与 TextMate 语法同一条判据)。
+syn match lomentKeyword "\<lspe\>\s\+pass\>"
 
 " ---- 数字 (十进制 / 0x) 与字符串 (含转义; 跨行也可以)
 syn match lomentNumber "\<\d\+"
@@ -58,6 +79,7 @@ syn match lomentDocComment "///.*$" contains=lomentTodo
 syn region lomentComment start="/\*" end="\*/" contains=lomentTodo keepend
 
 hi def link lomentKeyword    Keyword
+hi def link lomentCore       Constant
 hi def link lomentBool       Boolean
 hi def link lomentSelf       Special
 hi def link lomentType       Type

@@ -13,8 +13,34 @@
 # `loment_dist.py --emit` 的起点是**已提交的种子**：`build_stage1` 用纯 Python 的
 # `_lomelf_link` 把 `loment/build/selfhost_driver.ll` 链成 stage1，再**直接执行**它
 # （Linux 那支缺可执行位就 `PermissionError`，2026-09-22 那条已经修过）。
-# 两个平台的包都由同一份 IR 各链一遍，所以自己就是 ELF 的 runner 上只要 Python。
+# 两个平台的包都由同一份 IR 各链一遍，所以 runner 上只要 Python。
 # **这与 `gate.yml` 里那套 LLVM 19 的安装是两回事** —— 别把它抄过来。
+#
+# ## 为什么 runner 是 **Windows**（2026-10-10 改）
+#
+# 第五件 `setup.exe` 由 `loment_dist.emit_exe()` 调 **Windows 自带的 `iexpress`** 做
+# （`shutil.which("iexpress") or r"C:\Windows\System32\iexpress.exe"`）。ubuntu 上找不到
+# 它 ⇒ SKIP ⇒ 只出四件，而最后那道 asset 核对**硬要求五件** ⇒ **先建好 release、再红**。
+# 这条流水线从写下到今天**一次都没成功跑过**（`v0.1.4` 那五件是本机手工出的）。
+#
+# 换到 `windows-latest` 不是绕路，是**回到这条链本来的设计**：`build_stage1` 刻意按宿主
+# 平台出 stage1（Windows 出 PE、Linux 出 ELF，见其 docstring），`emit_ir` 直接执行它，
+# `build_tools` 的 docstring 写着"两个平台的包都能从本机构建出来，不需要另一个平台、
+# 也不需要 WSL"。所以整条打包链在 Windows 上本来就是通的，iexpress 也在 `System32` 里。
+#
+# **实测（2026-10-10，本机 Windows）**：`python tools/loment_dist.py --emit` **52 秒**出齐
+# 五件（含 2.36 MB 的自解压 setup.exe），`--check` 报 4/4 一致。
+# **并已在真实的 `windows-latest` 上跑通一次**（`workflow_dispatch` + `dry_run=true`，
+# 借 `v0.1.4` 那个版本号对得上的 tag）：五件齐、`--check` 过、artifact 传上去了 ——
+# 这是这条流水线自写下以来的第一次成功运行。
+# **并且内容与 Linux 宿主出的一样**：把两边的包解开逐成员比，**每一个二进制成员逐字节
+# 相同**，权限位与时间戳全同 —— 差别只剩 `create_system` 那一个字节（见下条），已钉死。
+# 所以换 runner **不改发布出去的产物**，只改是谁把它压出来的。
+#
+# **换宿主带来第二个坑，已在作业级 `env` 里堵掉**：runner 的 python 按控制台代码页
+# （cp1252）编码 stdout，而这个仓的工具到处打中文 —— 第一次真跑（2026-10-10）就死在
+# `UnicodeEncodeError: 'charmap'` 上。本机是 GBK 控制台，编码得出来，所以本机看不见。
+# `PYTHONUTF8: 1` 把 stdio 与默认文件编码一起拉回 utf-8，与 Linux 一致。
 #
 # ## 硬判据：tag 必须等于仓里的版本号
 #
@@ -28,6 +54,31 @@
 # `--generate-notes` 兜底，并且 `::warning::` 点名** —— 自动生成的 notes 与 0.1.4 那份
 # 手写的正文不是一个量级，静默降级会让"这一版为什么发"这件事悄悄丢掉。
 # `.github/**` 不在 `loment_release.GLOBS` 里，所以往这里加文件不会让发布清单过期。
+#
+# ## tag 带 `-pre` = **宣告版**，这条流水线整个跳过（2026-10-10 用户定）
+#
+# 用户原话：「pre 版啥也没有，只是一个通知而已。」所以带 `-pre` 的 tag **不出包、不建
+# release** —— 那一版由人直接发：
+#
+#     gh release create vX.Y.Z-pre --prerelease \
+#       --notes-file .github/release-notes/vX.Y.Z-pre.md
+#
+# **一个 asset 都不挂**，正文就是那份人写的 notes。
+#
+# **为什么必须在这里挡**：`v0.1.4.5-pre` 同样匹配下面的 `v*`。不挡就会进这条流水线，
+# 而它按设计要出五件产物、最后那道核对**硬要求**五件 —— 于是会先建好 release、再红。
+#
+# ## 产物与宿主无关：`create_system` 必须钉死
+#
+# `loment_dist._zip` 早就写着 `zi.create_system = 3`（unix 权限位那一套）——那是**故意的**，
+# 它让"同一份输入在任何宿主上压出同一串字节"。2026-10-10 量出来：`skill_zip()` 那一条
+# 自己建的 `ZipFile` **漏了这个赋值**，于是 `ZipInfo.__init__` 按 `sys.platform` 填了默认值
+# （`'win32'` → 0 / 其余 → 3），skill.zip 的字节**随宿主变**。内容一个字节不差、只是容器里
+# 那一个字段不同 —— 但那足以让"同一 tag 在两个 runner 上出两个哈希"。
+# 已补上（`loment_dist.skill_zip`），实测 Windows 侧重出的 skill.zip 与 Linux 侧的逐字节相同。
+#
+# 剩下唯一随宿主变的是包内 `share/loment/version` 里那一行 `commit <sha>` —— 那**不是缺陷**：
+# 它记的就是"这个包从哪个 commit 出来的"（见文件头第一节），两个宿主在同一 commit 上出同一行。
 #
 # ## 边界
 #
@@ -51,9 +102,15 @@ on:
         description: '只构建、产物挂成 workflow artifact，不碰 GitHub Release'
         type: boolean
         default: false
+      hot_base:
+        description: '（热更新，`#1156`）基线的 tag，如 v0.1.5。给了才做投影并打热更新件'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+  #: 读这个 SHA 的 check-runs —— 「发出去的必须是通过门禁的那一笔」（`#889`）。
+  checks: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref }}
@@ -61,12 +118,33 @@ concurrency:
 
 jobs:
   dist:
-    runs-on: ubuntu-latest
+    # 宣告版（tag 带 `-pre`）整个跳过 —— 它只有正文，没有产物。见文件头那两节。
+    if: ${{ !endsWith(github.event.inputs.tag || github.ref_name, '-pre') }}
+    # Windows: 第五件 setup.exe 要 Windows 自带的 iexpress（见文件头那两节）。
+    runs-on: windows-latest
+    # Deployments 里的发版记录。环境只允许 `main` 与 `v*` 标签（仓库设置里那条
+    # deployment branch policy），所以这里没有额外的门 —— 它是记录，不是审批闸。
+    environment: release
+    # 下面那些 `run:` 全是 bash 写的；Windows runner 默认给 PowerShell，所以整片钉成 bash
+    # （runner 自带 Git Bash）。逐个步骤写 `shell: bash` 也行，钉在这里少一处漏掉的机会。
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Windows 的 python 默认按**控制台代码页**编码 stdout，而 runner 上那个是 cp1252
+      # ——这个仓的工具到处打中文（`字节`、`个工件`…），一打就 `UnicodeEncodeError`。
+      # 2026-10-10 第一次真跑这条流水线时正是死在这里，而本机（GBK 控制台）编码得出来，
+      # 所以本机一直看不见。UTF-8 模式把 stdio **与**默认文件编码一起拉回 utf-8，
+      # 与 Linux 那边一致 —— 换宿主本来就不该改行为。
+      PYTHONUTF8: "1"
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # **要提交历史**：下面那条"tag 的 commit 必须在 main 上"是 `merge-base` 判的，
+          # 浅克隆下它无从判起（`#889`）。
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -92,7 +170,58 @@ jobs:
           fi
           echo "tag $TAG / 版本 $want 一致"
 
+      # **发出去的必须是 main 上、而且是通过门禁的那一笔**（`#889`）。
+      #
+      # 在这之前，这一条流水线只认两件事：tag 拼成 `v…`，以及**它自己那棵树里**的
+      # `loment_release.RELEASE` 与 tag 相等 —— 于是任何写权限凭据把 tag 打在**任意**
+      # commit 上都能发一版，而 `releases/latest` 是全站与 README 指向的那一个链接。
+      # 产品就是产物，"main 是绿的"与"发出去的是 main"必须是同一句话。
+      - name: tag 必须落在 main 上，而且那一笔的门禁必须绿过
+        id: where
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # 只取这两个 ref：工作区是浅的也可能发生（fetch-depth 之外），显式再来一次。
+          git fetch -q --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/$TAG:refs/tags/$TAG"
+          sha=$(git rev-parse "$TAG^{commit}")
+
+          # (1) 祖先：tag 指着的那一笔必须已经合进 main
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::$TAG 指向 $sha，而这一笔**不在 main 上** —— 不发布。"
+            echo "::error::先合进 main，再在 main 的尖上打 tag。"
+            exit 1
+          fi
+          echo "祖先检查: $sha 在 main 上"
+
+          # (2) 门禁：这一笔的聚合检查必须 success —— 否则发布的是没被任何判据看过的树
+          got=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?filter=latest&per_page=100" \
+            --jq '[.check_runs[] | select(.name == "ci.py --static-only") | .conclusion] | last // "missing"')
+          if [ "$got" != "success" ]; then
+            echo "::error::$sha 的 \`ci.py --static-only\` 是 \`$got\` —— 不发布。"
+            echo "::error::先把门禁跑绿（或者等它跑完），再打 tag。"
+            exit 1
+          fi
+          echo "门禁检查: $sha 的 ci.py --static-only = success"
+
+          # (3) 附注 tag：轻量 tag 没有 tagger、签不了名，发布说明里也就没有"谁打的"
+          if [ "$(git cat-file -t "$TAG")" != "tag" ]; then
+            echo "::error::$TAG 是**轻量 tag** —— 请用 \`git tag -a\` 打附注 tag（要签名的再加 -s）。"
+            exit 1
+          fi
+          echo "tag 类型: 附注 (annotated)"
+
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: 构建发行包
+        env:
+          # `#1153`：清单里的 `release`/`prerelease` 必须跟着**真 tag**走，
+          # 不能从 `RELEASE` 猜（`-pre` 与稳定版差的就是这一位）。
+          LOMENT_RELEASE_TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -e
           python tools/loment_dist.py --emit
@@ -100,11 +229,68 @@ jobs:
           # 与安装脚本第一步做的是同一件事）。
           python tools/loment_dist.py --check
 
+      # 热更新件（`#1155`/`#1156`）：**只在给了 `hot_base` 时**才做，产物落在
+      # `loment/build/hot/` 并单独上传 —— 不进 `loment/dist/`，所以发行资产一个字节不变。
+      - name: 热更新投影与打包
+        if: ${{ github.event.inputs.hot_base != '' }}
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          BASE: ${{ github.event.inputs.hot_base }}
+        run: |
+          set -e
+          python tools/loment_projection.py --base "$BASE" --tip HEAD             --release "$TAG" --work-dir loment/build/hot-tree             --out loment/build/hot-projection.json
+          echo '--- 投影：'
+          cat loment/build/hot-projection.json
+          python tools/loment_hotart.py --old . --new loment/build/hot-tree             --entry loment/tools/lsp.lomt --release "$TAG" --out loment/build/hot             --projection loment/build/hot-projection.json || true
+          if [ ! -f loment/build/hot/candidate.hot ]; then
+            echo "这次发布没有 fix 提交（或全被剔除）—— 没有热更新件，这是对的"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.event.inputs.hot_base != '' }}
+        with:
+          name: loment-hot-${{ steps.ver.outputs.tag }}
+          path: loment/build/hot/*
+          if-no-files-found: warn
+
       - name: 产物与校验和
         run: |
           set -e
           ls -l loment/dist/
           cat loment/dist/SHA256SUMS
+
+      # `#419`: 完整性锚必须在归档**之外**。签名的是 `SHA256SUMS`（它覆盖每一件产物），
+      # 公钥与指纹也作为 asset 一起发 —— 下载者因此有了一个不由归档自身提供的核对点。
+      # 没有密钥就直接红：一个"没有签名锚"的 release 正是这个 issue 要堵的形状。
+      - name: 分离签名 SHA256SUMS（锚在归档之外）
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          SIGNING_KEY: ${{ secrets.LOMENT_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::error::没有 LOMENT_RELEASE_SIGNING_KEY —— 拒绝发布一个没有外部完整性锚的包"
+            exit 1
+          fi
+          # Git Bash 在 Windows 上把 `$RUNNER_TEMP` 看成 `D:\a\_temp`；把它拼进
+          # POSIX 路径会得到 `/d/a/.../D:\a\_temp/gnupg`，gpg 在那建不了 keyring
+          # （`no writable keyring found`，v0.1.5 与 v0.1.5.1 都死在这一步）。
+          # `mktemp -d` 在两个宿主上都给纯 POSIX 路径。
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --quiet --import
+          fpr=$(gpg --batch --with-colons --list-secret-keys \
+            | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ -z "$fpr" ]; then
+            echo "::error::导入了签名密钥但读不到指纹"; exit 1
+          fi
+          gpg --batch --yes --armor --detach-sign --local-user "$fpr" \
+            --output loment/dist/SHA256SUMS.asc loment/dist/SHA256SUMS
+          gpg --batch --yes --armor --export "$fpr" > loment/dist/loment-signing.asc
+          printf '%s\n' "$fpr" > loment/dist/FINGERPRINT
+          gpg --batch --verify loment/dist/SHA256SUMS.asc loment/dist/SHA256SUMS
+          echo "signed SHA256SUMS with $fpr"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -120,7 +306,8 @@ jobs:
           VER: ${{ steps.ver.outputs.ver }}
         run: |
           set -euo pipefail
-          # `-pre` 这种带 `-` 的 tag 出成 Pre-release（v0.1.4-pre 就是这么发的）。
+          # 带 `-` 的 tag 出成 Pre-release —— 这里能走到的是 `-alpha` / `-beta` 那一类；
+          # **`-pre` 到不了这里**（整个作业在文件头那条 `if` 上就被跳过了，那一版由人发）。
           risk=""
           case "$TAG" in *-*) risk="--prerelease" ;; esac
           notes=".github/release-notes/$TAG.md"
@@ -132,14 +319,47 @@ jobs:
             set -- --generate-notes
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在 —— 只覆盖 asset"
-            gh release upload "$TAG" loment/dist/* --clobber
-          else
-            gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
+            # `#438`: 已发布的 tag **不许原地改**。`--clobber` 会让同一个 tag 的
+            # 字节被悄悄换掉, 而 tag、release 页面和 GitHub 的记录都不说变过 ——
+            # 别人按 tag 记下的摘要或缓存就再也对不上。要重发就删掉 release 并
+            # 换一个新 tag; 那才是给外面的"字节变了"信号。
+            echo "::error::Release $TAG 已发布 —— 拒绝覆盖 asset (#438)。"
+            echo "::error::同一个 tag 必须指向同一组字节; 要重发就删掉 release 并换新 tag。"
+            exit 1
           fi
+          gh release create "$TAG" --title "Loment $VER" $risk "$@" loment/dist/*
+          # `#419`: 把摘要写进 release **正文** —— 正文与 asset 是两个渠道，用户拿到的
+          # 核对点因此不必来自被核对的归档。安装器打印的也是同一份摘要。
+          #
+          # **只列载荷**：锚文件自己的摘要（`SHA256SUMS` / 它的签名 / 公钥 / 指纹）是
+          # **自指**的 —— 把它们列在这里既没有锚定意义，又容易被读成"正文里有密钥"。
+          # 公钥与指纹的公开面是那三个 asset，正文只留一行指纹供人对照。
+          # 同一类坑：`$RUNNER_TEMP` 在 Git Bash 里是 `D:\...`。这里只在 shell 与
+          # `gh` 之间传，用工作区（POSIX 路径）最省事；`gh` 是原生程序，MSYS 会转。
+          gh release view "$TAG" --json body -q .body > "$PWD/body.md"
+          {
+            echo
+            echo "## Integrity anchors"
+            echo
+            echo "These digests are published here, outside the archives they describe."
+            echo "The installer prints the digest of \`SHA256SUMS\`; compare it with this block."
+            echo
+            echo '```'
+            (cd loment/dist && for f in *; do
+              case "$f" in
+                SHA256SUMS|SHA256SUMS.asc|loment-signing.asc|FINGERPRINT) continue ;;
+              esac
+              sha256sum "$f"
+            done)
+            echo '```'
+            echo
+            echo "Signing key fingerprint: \`$(cat loment/dist/FINGERPRINT)\`"
+          } >> "$PWD/body.md"
+          gh release edit "$TAG" --notes-file "$PWD/body.md"
 
       # 发布之后**回头核对**：文件到底上去没有。`gh release create` 不报错不等于
-      # 五个 asset 都在（0.1.4 那份是手工核过的，这里把那次核对固定下来）。
+      # 该有的 asset 都在（0.1.4 那份是手工核过的，这里把那次核对固定下来）。
+      # `#419` 之后是八件：签名、公钥与指纹**必须**在归档之外一起发。
       - name: 核对挂上去的 asset
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
@@ -151,6 +371,10 @@ jobs:
           have=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
           want=$(printf '%s\n' \
             "SHA256SUMS" \
+            "SHA256SUMS.asc" \
+            "loment-signing.asc" \
+            "FINGERPRINT" \
+            "hotfix.json" \
             "loment-$VER-linux-x64.tar.gz" \
             "loment-$VER-windows-x64-setup.exe" \
             "loment-$VER-windows-x64.zip" \
@@ -162,4 +386,4 @@ jobs:
             exit 1
           fi
           echo "$have"
-          echo "五个 asset 齐了"
+          echo "九个 asset 齐了（含 hotfix.json、归档之外的签名、公钥与指纹）"

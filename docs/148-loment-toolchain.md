@@ -12,6 +12,15 @@
 ## 0.1 语法高亮（`editors/vscode/syntaxes/`）
 
 两套 TextMate 语法：`loment.tmLanguage.json`（`.lomt`）与 `lom.tmLanguage.json`（`.lom`）。
+**2026-10-12 又加了七套**：`loment-<规范名>.tmLanguage.json`（c / cpp / java / csharp / go /
+python / natural）—— 一份源的文件头写了 `choose write grammar <别名>` 时用它们，规则只有两条
+（认那行声明 + `include` 宿主的 `source.c` / `source.python` / …），设计与理由见 `docs/235`。
+同一天把主语法补到当时的语言面：`choose write grammar` 声明、`set choose` / `choose` /
+`addin` / `command` / `foruse` / `register`（**按形状认，不按词认** —— 这几个词不是保留字，
+写成裸关键字会把 `let set: u32` 也染色）、核心维取值、内建 `syscall7`；并摘掉四条**不是内建**的
+`load16/load32/store16/store32`（那是 `loment/examples/bytes.lomt` 里的普通函数）与两个
+**不是类型**的 `usize`/`isize`（实测 `-> usize` 报"返回类型 usize 未声明"）。
+
 2026-09-11 做了一次"彻底"扫：**用 VS Code 同款引擎**（TextMate + Oniguruma）把语法跑成
 scope 流逐 token 核对，补掉了这些盲区：
 
@@ -202,7 +211,7 @@ powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译�
 ## 10. M64 诊断分类
 
 `tools/loment_diag.py` 对编译器消息做模式分类，20 类错误各有稳定错误码（E001–E020）与
-可执行建议；测试用 13 个反例片段断言**每条都被分类**（无 E999）且带建议。
+可执行建议；测试用 13 个反例片段断言**每条都被分类**（无 E0999）且带建议。
 
 两条与"分类表可信"直接相关的纪律：
 
@@ -212,7 +221,7 @@ powershell -File scripts/install-lsp.ps1      # 种子 + clang + stage1 编译�
   `字段 a 重复$` 必须锚定结尾（否则吃掉 E015 的 `重复初始化`）。
 - `test_m64_all_reference_messages_are_classified` 用 ast 抽出 `lomentc.py` 里**全部**
   `errs.append` 消息模板（81 条）逐条分类 —— 分类表漏一条，那条规则在"自举 vs 参考"的码集
-  对照里就两边都成 E999 被丢掉，**缺口会静默消失**。
+  对照里就两边都成 E0999 被丢掉，**缺口会静默消失**。
 
 ## 10b. M85 规则等价性对照
 

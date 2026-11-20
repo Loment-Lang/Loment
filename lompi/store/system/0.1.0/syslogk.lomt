@@ -1,0 +1,183 @@
+// system/syslogk.lomt — 内核环形日志 (dmesg) 的读取动作与 syslog 优先级编码
+//
+// 为什么系统工具需要它: 内核的日志缓冲区**只有一条系统调用**能读 (`syslog(2)`, 编号 103),
+// 它的第一个参数不是"要读多少"而是一个**动作**: 3 读全部、4 读并清空、5 清空、
+// 10 问容量、11 问还有多少没读。`dmesg` 这个命令本身就是这几个动作的壳。写成魔数
+// 之后, "读日志"和"清日志"看起来只差一个数字 —— 清掉就没了, 所以要名字。
+//
+// 另一半是 **facility / level**: syslog 的优先级是一个 8 位数, 高 5 位是设施
+// (daemon、auth、cron…), 低 3 位是级别 (emerg..debug)。journald 的用户态 socket
+// 也吃同一套编号 —— 所以这份表在两条路上都能用。
+//
+// 覆盖: READ_ALL / READ_CLEAR / CLEAR / SIZE_BUFFER / SIZE_UNREAD 五个动作、常见
+// facility 与全部八级 level、优先级的合成与拆分。**不做的**: `/dev/kmsg` 的逐条读
+// (那条路的问题是"读一条会不会阻塞")、journald 的字段查询。
+//
+// 命名: 公开 sk_*, 内部 skq_*。自检 test_syslogk_*。
+
+module syslogk
+
+/// 读全部 (不清空) —— `dmesg` 默认做的就是它。
+pub const SK_READ_ALL: u32 = 3;
+/// 读全部并清空。
+pub const SK_READ_CLEAR: u32 = 4;
+/// 清空。
+pub const SK_CLEAR: u32 = 5;
+/// 问: 缓冲区一共多大 (返回值就是字节数)。
+pub const SK_SIZE_BUFFER: u32 = 10;
+/// 问: 还有多少字节没读。
+pub const SK_SIZE_UNREAD: u32 = 11;
+
+pub const SK_FAC_KERN: u32 = 0;
+pub const SK_FAC_USER: u32 = 1;
+pub const SK_FAC_DAEMON: u32 = 3;
+pub const SK_FAC_AUTH: u32 = 4;
+pub const SK_FAC_SYSLOG: u32 = 5;
+pub const SK_FAC_LPR: u32 = 6;
+pub const SK_FAC_NEWS: u32 = 7;
+pub const SK_FAC_UUCP: u32 = 8;
+pub const SK_FAC_CRON: u32 = 9;
+pub const SK_FAC_AUTHPRIV: u32 = 10;
+pub const SK_FAC_FTP: u32 = 11;
+pub const SK_FAC_LOCAL0: u32 = 16;
+pub const SK_FAC_LOCAL7: u32 = 23;
+
+pub const SK_LVL_EMERG: u32 = 0;
+pub const SK_LVL_ALERT: u32 = 1;
+pub const SK_LVL_CRIT: u32 = 2;
+pub const SK_LVL_ERR: u32 = 3;
+pub const SK_LVL_WARNING: u32 = 4;
+pub const SK_LVL_NOTICE: u32 = 5;
+pub const SK_LVL_INFO: u32 = 6;
+pub const SK_LVL_DEBUG: u32 = 7;
+
+const SKQ_SYS_SYSLOG: u64 = 103;
+
+fn skq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// `syslog(action, buf, len)`。动作 3/4/5 忽略 buf; 动作 10/11 的返回值就是答案。
+pub fn sk_syslog(action: u32, buf: ptr, len: u64) -> i64 {
+    return syscall4(SKQ_SYS_SYSLOG, action as u64, buf as u64, len);
+}
+
+/// 读缓冲区容量 (字节)。
+pub fn sk_buffer_size() -> i64 {
+    return sk_syslog(SK_SIZE_BUFFER, 0 as ptr, 0);
+}
+
+/// 还差多少字节没读。
+pub fn sk_unread() -> i64 {
+    return sk_syslog(SK_SIZE_UNREAD, 0 as ptr, 0);
+}
+
+/// 只有动作 0..11 是定义过的 —— 其余值内核返回 EINVAL。
+pub fn sk_action_valid(action: u32) -> bool {
+    return action <= 11;
+}
+
+/// 设施号 -> 名字。未知返回 `"unknown"`。local0..local7 走区间。
+pub fn sk_facility_name(f: u32, out: ptr, cap: u32) -> u32 {
+    if f == SK_FAC_KERN { return skq_put(out, cap, 0, "kern"); }
+    if f == SK_FAC_USER { return skq_put(out, cap, 0, "user"); }
+    if f == SK_FAC_DAEMON { return skq_put(out, cap, 0, "daemon"); }
+    if f == SK_FAC_AUTH { return skq_put(out, cap, 0, "auth"); }
+    if f == SK_FAC_SYSLOG { return skq_put(out, cap, 0, "syslog"); }
+    if f == SK_FAC_LPR { return skq_put(out, cap, 0, "lpr"); }
+    if f == SK_FAC_NEWS { return skq_put(out, cap, 0, "news"); }
+    if f == SK_FAC_UUCP { return skq_put(out, cap, 0, "uucp"); }
+    if f == SK_FAC_CRON { return skq_put(out, cap, 0, "cron"); }
+    if f == SK_FAC_AUTHPRIV { return skq_put(out, cap, 0, "authpriv"); }
+    if f == SK_FAC_FTP { return skq_put(out, cap, 0, "ftp"); }
+    if f >= SK_FAC_LOCAL0 && f <= SK_FAC_LOCAL7 {
+        // local0..local7 只差最后一位数字。
+        let d: u32 = f - SK_FAC_LOCAL0;
+        let pos: u32 = skq_put(out, cap, 0, "local");
+        if pos < cap {
+            store8(out, pos, (48 + d) as u8);
+        }
+        return pos + 1;
+    }
+    return skq_put(out, cap, 0, "unknown");
+}
+
+fn skq_level_at(l: u32, out: ptr, cap: u32, pos: u32) -> u32 {
+    if l == SK_LVL_EMERG { return skq_put(out, cap, pos, "emerg"); }
+    if l == SK_LVL_ALERT { return skq_put(out, cap, pos, "alert"); }
+    if l == SK_LVL_CRIT { return skq_put(out, cap, pos, "crit"); }
+    if l == SK_LVL_ERR { return skq_put(out, cap, pos, "err"); }
+    if l == SK_LVL_WARNING { return skq_put(out, cap, pos, "warning"); }
+    if l == SK_LVL_NOTICE { return skq_put(out, cap, pos, "notice"); }
+    if l == SK_LVL_INFO { return skq_put(out, cap, pos, "info"); }
+    if l == SK_LVL_DEBUG { return skq_put(out, cap, pos, "debug"); }
+    return skq_put(out, cap, pos, "unknown");
+}
+
+/// 级别号 -> 名字。
+pub fn sk_level_name(l: u32, out: ptr, cap: u32) -> u32 {
+    return skq_level_at(l, out, cap, 0);
+}
+
+/// 合成优先级: `(facility << 3) | level` —— 这就是 BSD syslog 的那 8 位。
+pub fn sk_priority(facility: u32, level: u32) -> u32 {
+    return (facility << 3) | (level & 7);
+}
+
+/// 从优先级里取设施。
+pub fn sk_priority_facility(p: u32) -> u32 {
+    return p >> 3;
+}
+
+/// 从优先级里取级别。
+pub fn sk_priority_level(p: u32) -> u32 {
+    return p & 7;
+}
+
+/// 优先级 -> `"facility.level"` (例如 `daemon.notice`)。
+pub fn sk_priority_text(p: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = sk_facility_name(sk_priority_facility(p), out, cap);
+    pos = skq_put(out, cap, pos, ".");
+    return skq_level_at(sk_priority_level(p), out, cap, pos);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_syslogk_priority() -> bool {
+    let p: u32 = sk_priority(SK_FAC_DAEMON, SK_LVL_NOTICE);
+    return p == 29 && sk_priority_facility(p) == 3 && sk_priority_level(p) == 5;
+}
+
+fn test_syslogk_local() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = sk_facility_name(SK_FAC_LOCAL0 + 3, o, 16);
+    let want: str = "local3";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_syslogk_level_text() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = sk_level_name(SK_LVL_ERR, o, 16);
+    return n == 3 && load8(o, 0) == 101 && load8(o, 1) == 114 && load8(o, 2) == 114
+        && sk_action_valid(11) && !sk_action_valid(12);
+}

@@ -1,12 +1,13 @@
 // loment/tools/lomrel.lomt — Loment 版发布清单生成器 (无 Python, docs/167 Stage 3)
 //
 // 判据 (tools/loment_rel_test.py): 与 `tools/loment_release.py` 的 stdout / 落盘字节 / 退出码
-// **逐字节相同** (--emit / --checksums / --check / 无参数)。
+// **逐字节相同** (--emit [PATH] / --checksums PATH / --check / 无参数)。
 //
 // 本文件按**能编译的最小骨架起步**逐档长 (docs/167 记的教训: 盲写大段 = 镜像第一版的下场)。
 // 第一档只做: 参数解析 + 读一个文件 + 写一个文件。
 
 module lomrel
+choose runtime
 
 use bytes
 use sha256
@@ -19,23 +20,24 @@ const M_NAMES: u32 = 147456;       // 131072 本目录命中的名字 (1024 x 12
 const M_NOFF: u32 = 278528;        // 8192   名字长度 (2048 x 4)
 const M_POFF: u32 = 286720;        // 8192   路径在池里的偏移 (2048 x 4)
 const M_PATHS: u32 = 294912;       // 512 KiB 相对路径池
-const M_IN: u32 = 819200;          // 4 MiB 输入 (种子 selfhost_driver.ll 有 1.63 MB)
-const M_OUT: u32 = 5013504;        // 1 MiB 输出
-const M_SHA: u32 = 6062592;        // 1024 sha 状态
-const M_DIG: u32 = 6063616;        // 32 摘要
-const M_HEX: u32 = 6063648;        // 64 hex
+const M_IN: u32 = 819200;          // 6 MiB 输入 (种子 selfhost_driver.ll 有 4.15 MB)
+const M_OUT: u32 = 9207808;        // 1 MiB 输出
+const M_SHA: u32 = 10256384;        // 1024 sha 状态
+const M_DIG: u32 = 10257408;        // 32 摘要
+const M_HEX: u32 = 10257440;        // 64 hex
 // ---- 2026-09-20: 归一化副本从 2 MiB 抬到 4 MiB（`docs/200` §5）
+// ---- 2026-10-19: 输入与归一化副本 4 -> 6 MiB（`#777`，与 lomelf 同一条式子）
 //
 // 起因与 `lomelf` 那两处**同一个病**: 自举种子长过了这一格。原先这里只给 2 MiB，
 // 而清单里**有比它大的工件**（种子本身）—— 越界就写进紧挨着的 `M_CUR`（已装载的清单），
 // 于是症状是"从种子那一条起后面全对不上"，指不到现场。
 // 抬法: `NORM_CAP` 跟 `IN_CAP` **同值**（读得进来的就得归一化得了），`M_CUR` /
-// `ARENA` 依次后移。
-const M_NORM: u32 = 6063744;       // 4 MiB 归一化副本
-const M_CUR: u32 = 10258048;       // 1 MiB 现有 manifest
-const ARENA: u64 = 11534336;
+// `ARENA` 依次后移。2026-10-19 的 6 MiB 同样 1:1 抬两块，其余各块的相对间距不变。
+const M_NORM: u32 = 10257536;       // 6 MiB 归一化副本
+const M_CUR: u32 = 18646144;       // 1 MiB 现有 manifest
+const ARENA: u64 = 19694400;
 
-const NORM_CAP: u32 = 4194304;
+const NORM_CAP: u32 = 8388608;
 const CUR_CAP: u32 = 1048576;
 
 const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
@@ -43,7 +45,7 @@ const C_POOL: u32 = 4080;          // M_TMP 里的池游标格
 const DENT_CAP: u32 = 131072;
 const POOL_CAP: u32 = 524288;
 
-const IN_CAP: u32 = 4194304;
+const IN_CAP: u32 = 8388608;
 const OUT_CAP: u32 = 1048576;
 
 // ---------------------------------------------------------------- 系统调用
@@ -171,6 +173,11 @@ tools/lom_audit.py
 tools/lomc_test.py
 tools/lomentc.py
 tools/lomentc_test.py
+tools/lspe_test.py
+tools/lspe_ratchet.py
+tools/lspe_probes.py
+tools/loment_slop.py
+tools/loment_slop_test.py
 tools/potato.py
 tools/potato_test.py
 tools/potato_cross.py
@@ -179,21 +186,50 @@ tools/potato_measure.py
 tools/potato_llm_arm.py
 tools/potato_assert.py
 tools/loment.py
+tools/flomtc.py
 tools/lomfmt.py
+tools/lomf.py
+loment/patches/*.lomf
 tools/lomdoc.py
 tools/lompkg.py
 tools/lomlib.py
 tools/loment_lib_test.py
 tools/loment_std_test.py
+tools/loment_crypto_test.py
+tools/loment_domains_test.py
+tools/loment_cache.py
+tools/loment_cache_test.py
+tools/loment_libl_test.py
+tools/loment_internet_test.py
+tools/loment_os_test.py
+tools/loment_thread_test.py
 tools/loment_lumtui_test.py
 tools/loment_cli_test.py
+tools/loment_dev.py
+tools/loment_dev_test.py
+tools/loment_caps.py
+tools/loment_caps_test.py
 tools/loment_err_test.py
+tools/loment_regex_test.py
 lompi/*.lomt
 lompi/store/std/0.1.0/*
 lompi/store/host/0.1.0/*
+lompi/store/internet/0.1.0/*
+lompi/store/os/0.1.0/*
+lompi/store/math/0.1.0/*
+lompi/store/science/0.1.0/*
+lompi/store/engineering/0.1.0/*
+lompi/store/world/0.1.0/*
+lompi/store/dev/0.1.0/*
+lompi/store/lowlevel/0.1.0/*
+lompi/store/system/0.1.0/*
+lompi/store/baremetal/0.1.0/*
+lompi/store/windows/0.1.0/*
 tools/lompi_sync.py
 tools/loment_lompi_test.py
 tools/loment_publish.py
+tools/lompicheck_test.py
+tools/loment_register_test.py
 tools/loment_diag.py
 tools/loment_build.py
 tools/loment_lsp.py
@@ -203,13 +239,25 @@ tools/loment_interp.py
 tools/loment_ct_test.py
 tools/loment_comefor.py
 tools/loment_comefor_test.py
+tools/loment_choose_matrix_test.py
+tools/loment_oracle.py
+tools/loment_oracle_test.py
+semantics/*.lls
+semantics/corpus/*.lomt
 tools/loment_extblock_test.py
 tools/loment_p7_test.py
 tools/loment_p8_test.py
 tools/loment_p9_test.py
+tools/loment_crash_test.py
+tools/loment_gc_surface.py
+tools/loment_gc_surface_test.py
+tools/loment_gc_why.py
+tools/loment_gc_why_test.py
 tools/loment_syscalls.py
 tools/loment_manual.py
 tools/ci.py
+tools/loment_invariant_test.py
+tools/loment_suite.py
 tools/vscode_ext.py
 tools/vscode_ext_test.py
 tools/loment_dap.py
@@ -217,19 +265,49 @@ tools/loment_dap_test.py
 tools/mono_trace.py
 tools/loment_ir_diff.py
 tools/loment_rule_parity.py
+tools/loment_lms_test.py
+tools/loment_channel.py
+tools/loment_channel_test.py
 tools/loment_seed.py
 tools/loment_seed_test.py
+tools/loment_fstr.py
 tools/loment_fmt_test.py
 tools/loment_audit.py
 tools/loment_doc_test.py
 tools/loment_json_test.py
 tools/lomelf.py
+tools/loment_opt_obj.py
 tools/loment_elf_test.py
 tools/loment_pe_test.py
+tools/lvm.py
+tools/lvm_test.py
+tools/lvm_twin_test.py
+tools/lvm_profile_test.py
+tools/lvm_t2.py
+tools/lvm_t2_test.py
+tools/lvm_compact.py
+tools/lvm_compact_test.py
+tools/lvm_cache.py
+tools/lvm_cache_test.py
+tools/lvm_fusion_test.py
+tools/lvm_mirror_t2_test.py
+tools/loment_store_twin_test.py
+tools/loment_spec_oracle_test.py
+tools/lvm_t3.py
+tools/lvm_t3_test.py
+tools/lvm_stability_test.py
+tools/lvm_a0_test.py
+tools/lvm_perf_test.py
+tools/loment_net_test.py
 tools/lomt_from.py
 tools/loment_multisyntax_test.py
 tools/loment_multisyntax_projects_test.py
+tools/loment_megaproject_test.py
 tools/loment_multilang_test.py
+tools/loment_book_test.py
+tools/lomentlings.py
+tools/loment_book_site.py
+tools/loment_book_site_test.py
 tools/trans_core.py
 tools/ctrans.py
 tools/loment_ctrans_test.py
@@ -237,6 +315,11 @@ tools/pytrans.py
 tools/loment_pytrans_test.py
 tools/jtrans.py
 tools/loment_jtrans_test.py
+tools/lomjava.py
+tools/loment_java_test.py
+tools/loment_jrt.py
+tools/loment_java_pkg.py
+tools/lomjava_corpus.py
 tools/cstrans.py
 tools/loment_cstrans_test.py
 tools/cpptrans.py
@@ -257,6 +340,7 @@ tools/loment_rel_test.py
 tools/loment_pkg_test.py
 tools/loment_lomc_test.py
 loment/lib/*.lomt
+loment/lib/jrt/*
 tools/loment_lsp_test.py
 tools/loment_editors_test.py
 editors/vim/*.md
@@ -266,6 +350,7 @@ editors/vim/ftplugin/*.vim
 tools/loment_filetype.py
 tools/loment_filetype_test.py
 tools/loment_eol.py
+tools/loment_geometry.py
 tools/loment_dist.py
 tools/loment_dist_test.py
 tools/loment_sign.py
@@ -277,9 +362,13 @@ scripts/install-lsp.ps1
 loment/build/selfhost_driver.ll
 loment/build/genesis/*
 loment/tools/*.lomt
+restarter/loment-restart.c
 editors/loment.ico
 editors/vscode/package.json
 editors/vscode/language-configuration.json
+editors/vscode/language-configuration-python.json
+editors/vscode/LICENSE
+editors/vscode/loment-icon.png
 editors/vscode/README.md
 editors/vscode/src/*.js
 editors/vscode/syntaxes/*.json
@@ -292,6 +381,8 @@ loment/examples/multilang/03-java/*.lomt
 loment/examples/multilang/README.md
 loment/examples/cproject/*.lomt
 loment/examples/cproject/README.md
+loment/examples/natural/*.nl
+loment/examples/natural/*.lomt
 loment/extblock/*.lomt
 loment/lex/*.lomt
 loment/ctrans/*.c
@@ -302,8 +393,11 @@ loment/cpptrans/*.cpp
 loment/gotrans/*.go
 loment/nltrans/*.nl
 loment/nltrans/*.lomt
+loment/invariants/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
+loment/lspe/*.py
+loment/lspe/*.lomt
 loment/corpus.json
 lom/*.lom
 docs/*.md
@@ -318,11 +412,57 @@ tools/loment_bootstrap.py
 tools/loment_capasserts_test.py
 tools/loment_eol_test.py
 tools/loment_ffi_test.py
+tools/loment_hosted_test.py
 tools/loment_i18n_test.py
+tools/loment_docs.py
+tools/loment_docs_test.py
+tools/loment_store_index.py
+tools/loment_door_test.py
+tools/loment_admit.py
+tools/loment_admit_test.py
+tools/loment_zwframe.py
+tools/loment_zwframe_test.py
+tools/loment_ports.py
+tools/loment_ports_test.py
 tools/loment_probe.py
 tools/loment_release.py
 tools/loment_status.py
 tools/loment_syscalls_test.py
+tools/loment_state.py
+tools/loment_state_test.py
+tools/loment_update.py
+tools/loment_update_test.py
+tools/loment_hotfix.py
+tools/loment_hotfix_test.py
+tools/loment_staging.py
+tools/loment_staging_test.py
+tools/loment_projection.py
+tools/loment_projection_test.py
+tools/loment_hotline_test.py
+tools/loment_hotart.py
+tools/loment_hotart_test.py
+tools/loment_hotstress_test.py
+tools/loment_hotupdate.py
+tools/loment_demo_release.py
+tools/loment_lsp_hot_test.py
+tools/loment_hotmeta_test.py
+tools/loment_hotswap_test.py
+tools/loment_hotload.py
+tools/loment_hotload_exec.py
+tools/loment_hotload_test.py
+tools/loment_hotcore_test.py
+tools/loment_hotbuild_test.py
+editors/loment-studio/README.md
+editors/loment-studio/param-catalog.json
+editors/loment-studio/Cargo.toml
+editors/loment-studio/Cargo.lock
+editors/loment-studio/crates/params/src/*.rs
+editors/loment-studio/crates/cli/src/*.rs
+editors/loment-studio/crates/server/src/*.rs
+editors/loment-studio/web/*
+editors/loment-studio/examples/*
+tools/loment_studio_test.py
+tools/lmgr_test.py
 ";
 }
 
@@ -676,7 +816,7 @@ fn emit_json(mem: ptr, n: u32, out: ptr) -> u32 {
     k = put_str(k, out, " \"release\": \"");
     // 与 tools/loment_release.py 的 RELEASE 必须**逐字节一致** —— 版本名有两个实现,
     // 这里是自举镜像那一份; 判据 loment_rel_test 会对着比。
-    k = put_str(k, out, "0.1.4");
+    k = put_str(k, out, "0.1.5.1");
     k = put_str(k, out, "\",\n");
     k = put_str(k, out, " \"files\": [\n");
     let i: u32 = 0;
@@ -859,8 +999,10 @@ fn run(mem: ptr) -> u32 {
     store32(tmp, C_POOL, 0);
     let o1: u64 = argv_n(ab, 8192, 1);
     let n: u32 = expand_all(mem, tmp);
-    // 参数: --emit / --checksums PATH / --check
+    // 参数: --emit [PATH] / --checksums PATH / --check
     let emit_f: u32 = 0;
+    let emit_o: u32 = 0;
+    let emit_l: u32 = 0;
     let check_f: u32 = 0;
     let cks_f: u32 = 0;
     let cks_o: u32 = 0;
@@ -872,6 +1014,14 @@ fn run(mem: ptr) -> u32 {
         let ol: u32 = lo32(ax);
         if span_is(ab, oo, ol, "--emit") == 1 {
             emit_f = 1;
+            // 路径**可选** (与 `--checksums PATH` 同一形状): 给了就写那里, 不给还是仓库那条。
+            // 并发判据要它 —— `loment_rel_test` 现在两边各写一份进程私有路径再比字节, 不再去改
+            // 仓库里那条共享清单 (改它 = 在窗口里让别的判据读到半截文件)。
+            let a3: u64 = argv_n(ab, 8192, k + 1);
+            if a3 != 0 {
+                emit_o = hi32(a3);
+                emit_l = lo32(a3);
+            }
         }
         if span_is(ab, oo, ol, "--check") == 1 {
             check_f = 1;
@@ -919,7 +1069,12 @@ fn run(mem: ptr) -> u32 {
             return 2;
         }
         let pb: ptr = ptr_add(tmp, 4096 - 256);
-        cstr(pb, "loment/build/release-manifest.json");
+        if emit_o != 0 {
+            copy_bytes(pb, 0, ab, emit_o, emit_l);
+            store8(pb, emit_l, 0 as u8);
+        } else {
+            cstr(pb, "loment/build/release-manifest.json");
+        }
         let fd: i64 = open_wo(pb);
         if fd < 0 {
             wstr(2, "[ERR] 写不了清单\n");
@@ -928,7 +1083,11 @@ fn run(mem: ptr) -> u32 {
         write_all(fd as u64, outb, olen as u64);
         close_fd(fd);
         wstr(1, "[OK] ");
-        wstr(1, "loment/build/release-manifest.json");
+        if emit_o != 0 {
+            write_all(1, pb, emit_l as u64);
+        } else {
+            wstr(1, "loment/build/release-manifest.json");
+        }
         wstr(1, " (");
         wdec(1, tmp, n);
         wstr(1, " 个工件)\n");

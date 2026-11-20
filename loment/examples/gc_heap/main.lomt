@@ -1,0 +1,84 @@
+// loment/examples/gc_heap/main.lomt — 一份**真拿 `alloc` 在堆上建结构**的程序（`docs/210` §7）
+//
+// **为什么要有它**：`docs/210` §7 那两条（"证明面在真实代码里有多宽""收集器在真实工作量下
+// 什么样"）在**现有语料上问不出答案** —— 仓里自己的 Loment 代码一共只有 23 个 `alloc` 站点，
+// 而 `loment/lib` + `loment/selfhost` 那 28 份真代码里**一个都没有**（它们走 `sys_alloc`/`brk`）。
+// 尺子量到的 4/23 ≈ 17% 因此不是"证明面窄"，是**被量的东西太少**。
+//
+// 这一份就是那个前提：一个**真在堆上建结构**的工作量。形状是一张**单向链表**（节点 16 B：
+// `+0` 值、`+8` 下一个节点的地址 —— 指针用 `as u64` 存、`as ptr` 取回，`docs/210` §4.2 那条
+// "指针进得了堆块"说的就是这个形状）。
+//
+// 两样东西同时在堆上，正是分代那一档（§2.7）要处理的样子：
+//   * **一个长命的** `keep` —— 只在最开头分配一次，活到程序结束；
+//   * **每圈一个短命的** —— 插在 `keep` 前面，插完就没人指得到（链头是那个新的）。
+//
+// 末尾 `walk(keep)` 只该看见**一个**节点、值是 7 ⇒ 退出码 7 兼判"长命的那个没被误收"。
+// 120000 圈 × 16 B ≈ 1.9 MB 的请求过 64 KiB arena ⇒ 收集器必须反复跑。
+//
+// 三个档位各编一次、都在同一个 arena 里跑，谁跑得完、谁耗尽、各花多久，记在 `docs/210` §7。
+
+module gc_heap
+
+choose gc_auto_alpha
+choose runtime
+
+/// 一个节点 16 B：`+0` 值（1 字节）、`+8` 下一个节点的地址（8 字节，0 = 链尾）。
+const NODE: u32 = 16;
+
+/// 8 字节的写与读 —— `loment/examples/bytes.lomt` 只到 32 位，这里就地拼一把
+/// （也正是 `docs/210` §2.7 那条写屏障要盯的形状：一个 64 位值由 **8 条 `store8`** 写出来）。
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 在表头插一个节点，回新表头（地址按 `u64` 走 —— 语言里指针就这么存进堆块）。
+fn push(head: u64, v: u32) -> u64 {
+    let p: ptr = alloc(NODE);
+    store8(p, 0, (v & 255) as u8);
+    w64(p, 8, head);
+    return p as u64;
+}
+
+/// 从表头走到链尾，把 `+0` 那些字节加起来 —— 这是"活着的那些还在"的观测口。
+fn walk(head: u64) -> u32 {
+    let acc: u32 = 0;
+    let cur: u64 = head;
+    let rounds: u32 = 0;
+    while cur != 0 && rounds < 100000 {
+        let p: ptr = cur as ptr;
+        acc = acc + (load8(p, 0) as u32);
+        cur = r64(p, 8);
+        rounds = rounds + 1;
+    }
+    return acc;
+}
+
+fn _start() {
+    let keep: u64 = push(0, 7);          // 长命的：活到最后（末尾要读它）
+    let i: u32 = 0;
+    while i < 120000 {
+        let _t: u64 = push(keep, i + 1); // 短命的：插在 keep 前面，插完就没人指得到
+        i = i + 1;
+    }
+    let acc: u32 = walk(keep);
+    if acc == 7 {
+        syscall4(60, 7, 0, 0);
+    }
+    syscall4(60, 3, 0, 0);
+}

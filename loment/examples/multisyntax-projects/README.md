@@ -2,6 +2,10 @@
 
 > 目的：验证 `choose write grammar` 那套多语法系统**扛不扛得住一整份真项目**，
 > 而不是只扛得住小夹具。判据在 `tools/loment_multisyntax_projects_test.py`。
+>
+> 六门 = C / C++ / Java / Python / Go / **Tur**。`tur/` 那一门与另五门不同类：它是
+> **本语言自己的原生语法**（2026-11-03，`docs/295`），前门不经过翻译器。它的正文刻意
+> 只落在 Rust 的交集里，所以抹掉 `choose` / `module` 两行之后仍能交给 `rustc` 当对照组。
 
 ## 与 `loment/examples/multisyntax/` 的分工
 

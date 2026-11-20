@@ -21,9 +21,21 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import loment_json_test as J                                          # noqa: E402
+import lomentc  # noqa: E402
+import lomelf  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+STD_PKG = ROOT / "lompi" / "store" / "std" / "0.1.0"
+IS_WIN = sys.platform == "win32"
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 TESTS: list[tuple[str, object]] = []
 
 
@@ -35,6 +47,11 @@ def test(fn):
 #: 探针里的 `chk` 每个都打一行 `<标签> <值>`。Python 侧按同一顺序算一遍。
 PROBE = r'''
 module stdprobe
+
+// `runtime` 维从 `docs/227` 起是一条**保证**：探针用了 `alloc`，根单元就得声明它。
+// 仓内那个孪生 (`loment/tools/lomstdcheck.lomt:20`) 早就有一行，这个**生成的**探针
+// 漏了 —— 于是 `main` 上这条判据一直是红的（不是这一笔带出来的，是 #212 漏改）。
+choose runtime
 
 use "loment/lib/mem.lomt"
 use "loment/lib/num.lomt"
@@ -170,11 +187,238 @@ def _expected() -> str:
     return out.getvalue()
 
 
+# ---------------------------------------------------------------- store/std 的边界 (parse / bigint)
+
+#: `parse_i64` / `parse_i64_ok` 的用例（issue #720）。最后三个是"前缀"与"空"的语义。
+_PARSE_I64_CASES = [
+    "9223372036854775807",
+    "9223372036854775808",
+    "18446744073709551615",
+    "-9223372036854775808",
+    "-9223372036854775809",
+    "-42",
+    "+7",
+    "12ab",
+    "",
+]
+
+
+def _py_parse_i64(s: str) -> tuple[bool, int]:
+    """Python 侧独立算的期望：**有符号**范围 + 饱和；前缀语义与库一致。"""
+    import re as _re
+    neg = False
+    body = s
+    if body[:1] in ("+", "-"):
+        neg = body[0] == "-"
+        body = body[1:]
+    digits = _re.match(r"[0-9]*", body).group(0)
+    v = int(digits) if digits else 0
+    if neg:
+        v = -v
+    ok = bool(digits) and len(digits) == len(body) and -(2 ** 63) <= v <= 2 ** 63 - 1
+    sat = max(-(2 ** 63), min(2 ** 63 - 1, v))
+    return ok, sat
+
+
+def _edge_probe() -> str:
+    body = []
+    for i, s in enumerate(_PARSE_I64_CASES):
+        body.append(f'    let s{i}: str = "{s}";')
+        body.append(f'    ep_ok("p{i}_ok", parse_i64_ok(str_ptr(s{i}), 0, str_len(s{i})));')
+        body.append(f'    ep_line_i("p{i}_v", parse_i64(str_ptr(s{i}), 0, str_len(s{i})));')
+    return """
+module std_edge_probe
+choose runtime
+use parse
+use bigint
+use bigdec
+
+fn ep_w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn ep_dec(v: u64) -> u32 {
+    let b: ptr = alloc(32);
+    let n: u32 = 0;
+    let x: u64 = v;
+    if x == 0 {
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(b, n, (48 + (x % 10) as u32) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn ep_line(tag: str, v: u64) -> u32 {
+    let _a: u32 = ep_w(tag);
+    let _b: u32 = ep_w("|");
+    let _c: u32 = ep_dec(v);
+    return ep_w("\\n");
+}
+
+fn ep_flag(b: bool) -> u64 {
+    if b {
+        return 1;
+    }
+    return 0;
+}
+
+fn ep_ok(tag: str, b: bool) -> u32 {
+    return ep_line(tag, ep_flag(b));
+}
+
+fn ep_line_i(tag: str, v: i64) -> u32 {
+    let _a: u32 = ep_w(tag);
+    let _b: u32 = ep_w("|");
+    let m: u64 = v as u64;
+    if v < 0 {
+        let _s: u32 = ep_w("-");
+        m = (0 as u64) - (v as u64);
+    }
+    let _c: u32 = ep_dec(m);
+    return ep_w("\\n");
+}
+
+fn _start() {
+""" + "\n".join(body) + """
+    let a: ptr = alloc(64);
+    let q: ptr = alloc(64);
+    bigint_from_u64(a, 8, 1000000007);
+    bigint_from_u64(q, 8, 777);
+    let r: u32 = bigint_divmod_small(q, 8, a, 0);
+    let _d0: u32 = ep_line("div0_ret", r as u64);
+    let _d1: u32 = ep_line("div0_qlen", bigint_len(q) as u64);
+    let _d2: u32 = ep_line("div0_q", bigint_to_u64(q));
+    let r2: u32 = bigint_divmod_small(q, 8, a, 10);
+    let _d3: u32 = ep_line("div10_ret", r2 as u64);
+    let _d4: u32 = ep_line("div10_q", bigint_to_u64(q));
+    let b: ptr = alloc(64);
+    let q2: ptr = alloc(64);
+    bigint_from_u64(b, 8, 18446744073709551615);
+    let r3: u32 = bigint_divmod_small(q2, 8, b, 7);
+    let _d5: u32 = ep_line("big_ret", r3 as u64);
+    let _d6: u32 = ep_line("big_q", bigint_to_u64(q2));
+    // #722: bigdec 的零除数 —— 返回哨兵、结果成 0，不是 SIGILL。
+    let bd: ptr = alloc(bigdec_bytes(16));
+    let bdr: ptr = alloc(bigdec_bytes(16));
+    let bdt: ptr = alloc(bigint_dec_tmp_bytes(16));
+    bigdec_from_u64(bd, 16, 100, 2);
+    let rb: u32 = bigdec_div_small(bdr, 16, bd, 0, bdt, 16);
+    let _e0: u32 = ep_line("bd_div0_ret", rb as u64);
+    let bz: u32 = 0;
+    if bigdec_is_zero(bdr) {
+        bz = 1;
+    }
+    let _e1: u32 = ep_line("bd_div0_zero", bz as u64);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _have_linux() -> bool:
+    return (not IS_WIN) or shutil.which("wsl") is not None
+
+
+def _lx(p: Path) -> str:
+    s = p.resolve().as_posix()
+    if IS_WIN and len(s) > 1 and s[1] == ":":
+        s = "/mnt/" + s[0].lower() + s[2:]
+    return s
+
+
+def _compile_elf(src: str, td: Path, name: str) -> Path:
+    """用**仓内**参考编译器 + `lomelf` 出 ELF —— 这条路不需要 clang。"""
+    probe = ROOT / "loment" / "build" / "std_edge_probe.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    with probe.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(src)
+    try:
+        mod = lomentc.load(probe)
+        deps = lomentc.resolve_deps(mod, ROOT, probe.parent, entry=probe)
+        errs = lomentc.check(mod, deps=deps, _dep_pass=True)
+        assert not errs, f"std 边界探针检查不过: {errs[:3]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+    finally:
+        probe.unlink(missing_ok=True)
+    exe = td / f"{name}.elf"
+    exe.write_bytes(lomelf.compile_ll(ll)[0])
+    exe.chmod(0o755)
+    return exe
+
+
+def _run_linux(exe: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+    argv = [str(exe)] if not IS_WIN else [*_WSLCMD, _lx(exe)]
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", shell=False, timeout=timeout)
+
+
+def _edge_expected() -> str:
+    out: list[str] = []
+    for i, s in enumerate(_PARSE_I64_CASES):
+        ok, v = _py_parse_i64(s)
+        out.append(f"p{i}_ok|{1 if ok else 0}")
+        out.append(f"p{i}_v|{v}")
+    out += [
+        f"div0_ret|{2 ** 32 - 1}",
+        "div0_qlen|1",
+        "div0_q|777",
+        "div10_ret|7",
+        "div10_q|100000000",
+        f"big_ret|{(2 ** 64 - 1) % 7}",
+        f"big_q|{(2 ** 64 - 1) // 7}",
+        "bd_div0_ret|4294967295",
+        "bd_div0_zero|1",
+    ]
+    return "\n".join(out) + "\n"
+
+
+def _check_store_std_edges() -> None:
+    """`lompi/store/std` 的 parse / bigint 边界：与 Python 独立算的期望逐字节比。
+
+    * issue #720：`parse_i64_ok` 的界必须是**有符号**的；`parse_i64` 饱和、绝不反号。
+    * issue #721：`bigint_divmod_small(..., 0)` 返回 `BIG_DIV0`、商不动，不是 `ud2`。
+    """
+    if not _have_linux():
+        print("      SKIP: 无 WSL/Linux (store/std 边界)")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        exe = _compile_elf(_edge_probe(), td, "std_edge_probe")
+        r = _run_linux(exe, timeout=120)
+    assert r.returncode == 0, f"std 边界探针没跑完 (退出码 {r.returncode}): {r.stderr[-300:]}"
+    want = _edge_expected()
+    if r.stdout != want:
+        g, w = r.stdout.splitlines(), want.splitlines()
+        first = next((i for i in range(max(len(g), len(w)))
+                      if (g[i] if i < len(g) else None) != (w[i] if i < len(w) else None)), None)
+        raise AssertionError(
+            f"store/std 边界与 Python 不一致 @ 第 {first} 行: "
+            f"Loment={g[first] if first is not None and first < len(g) else '<无>'!r} "
+            f"Python={w[first] if first is not None and first < len(w) else '<无>'!r}")
+    print(f"      parse/bigint: {len(want.splitlines())} 项与 Python 一致 (issue #720/#721)")
+
+
 @test
 def test_std_modules_match_python():
-    """std 核的 mem / num 两模块: Loment 算的和 Python 算的**逐字节相同**。"""
+    """std 核的 mem / num 两模块: Loment 算的和 Python 算的**逐字节相同**。
+
+    同时量 `lompi/store/std` 的 parse / bigint 边界（issue #720 / #721）—— 那一条走
+    仓内 `lomelf`，不需要 clang。
+    """
+    _check_store_std_edges()
     if not (J._clang() and J._wsl()):
-        print("      SKIP: 无 clang/WSL")
+        print("      SKIP: mem/num 无 clang/WSL")
         return
     probe = ROOT / "loment" / "build" / "std_probe.lomt"
     probe.parent.mkdir(parents=True, exist_ok=True)
@@ -244,7 +488,7 @@ def test_std_twin_selfhost_compiles():
         binn = f"{J._T}stdcheck_s1.bin"
         script = (f"cp {J._wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {J._wsl_path(ROOT)} && {binn} loment/tools/lomstdcheck.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomstdcheck.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
@@ -265,24 +509,241 @@ def test_std_modules_are_checkable():
     print(f"      {len(libs)} 个 std 模块都过检查: {[p.stem for p in libs]}")
 
 
+# ---------------------------------------------------------------- 2026-11-08 新增的八份
+#
+# 与上面那份同一个形状：**Python 算同一串结果**，逐字节比。覆盖的是
+# `docs/314` 补的八份：pack / uuid / sha3 / blake2 / gzip / tar / jsonw / regex。
+
+NEW_PROBE = r'''
+module newstdprobe
+choose runtime
+
+use pack
+use uuid
+use sha3
+use blake2
+use gzip
+use tar
+use jsonw
+use regex
+use stdlib
+use stdio
+use string
+use hex
+
+fn say(tag: str, v: u64) {
+    let _a: u32 = print(tag);
+    let _b: u32 = print_num(v);
+    let _c: u32 = print("\n");
+}
+
+fn say_hex(tag: str, p: ptr, n: u32, hx: ptr) {
+    let _a: u32 = print(tag);
+    let m: u32 = hex_encode(hx, 0, p, 0, n);
+    let _b: i64 = syscall4(1, 1, hx as u64, m as u64);
+    let _c: u32 = print("\n");
+}
+
+fn _start() {
+    let vals: ptr = alloc(64);
+    let buf: ptr = alloc(64);
+    let out: ptr = alloc(64);
+    let hx: ptr = alloc(512);
+    let t: ptr = alloc(64);
+
+    // pack
+    mem_store64(vals, 0, 305419896);
+    mem_store64(vals, 8, 4660);
+    say("p_size=", pk_size(">IHH") as u64);
+    let pn: u32 = pk_pack(">IH", vals, 2, buf, 64);
+    let pi: u32 = pk_unpack(">IH", buf, pn, out, 8);
+    say("p_items=", pi as u64);
+    say("p_v0=", mem_load64(out, 0));
+    say("p_v1=", mem_load64(out, 8));
+    mem_store64(vals, 0, 4294967295);
+    let mn: u32 = pk_pack("<b", vals, 1, buf, 64);
+    let _mi: u32 = pk_unpack("<b", buf, mn, out, 8);
+    say("p_neg=", mem_load64(out, 0) & 255);
+
+    // uuid
+    let rnd: ptr = alloc(32);
+    let u: ptr = alloc(16);
+    let i: u32 = 0;
+    while i < 32 { store8(rnd, i, (i * 7 + 1) as u8); i = i + 1; }
+    let _v4: u32 = uuid_v4(u, rnd, 32);
+    say("u_ver=", uuid_version(u) as u64);
+    say("u_var=", uuid_variant(u) as u64);
+    say("u_fmt=", uuid_format(t, u) as u64);
+    say("u_parse=", uuid_parse(u, "03142536-4758-697a-8b9c-adbecfe0f102") as u64);
+    say("u_p0=", load8(u, 0) as u64);
+
+    // sha3
+    let d: ptr = alloc(64);
+    let z: ptr = alloc(1);
+    let ctx: ptr = alloc(600);
+    let s3: u32 = sha3_256(z, 0, d, ctx);
+    say_hex("s256=", d, s3, hx);
+    let abc: str = "abc";
+    let s5: u32 = sha3_512(str_ptr(abc), 3, d, ctx);
+    say_hex("s512abc=", d, s5, hx);
+
+    // blake2
+    let cb: ptr = alloc(400);
+    let b6: u32 = blake2b(d, 0, out, 64, cb);
+    say_hex("b2b=", out, b6, hx);
+    let cs: ptr = alloc(200);
+    let b8: u32 = blake2s(str_ptr(abc), 3, out, 32, cs);
+    say_hex("b2s=", out, b8, hx);
+
+    // gzip 往返
+    let src: ptr = alloc(64);
+    let gz: ptr = alloc(256);
+    let dec: ptr = alloc(64);
+    let olen: ptr = alloc(4);
+    let used: ptr = alloc(4);
+    let hello: str = "hello hello hello hello";
+    mem_copy(src, 0, str_ptr(hello), 0, 23);
+    let gn: u32 = gz_deflate(src, 23, gz, 256, 0);
+    let _gr: u32 = gz_inflate(gz, gn, dec, 64, olen, used);
+    let same: u32 = 0;
+    if mem_eq(src, 0, dec, 0, 23) { same = 1; }
+    say("gz_ok=", same as u64);
+    say("gz_len=", mem_load32(olen, 0) as u64);
+
+    // tar
+    let hdr: ptr = alloc(512);
+    let _tw: u32 = tar_write_header(hdr, "dir/hello.txt", 5, 420, TAR_REG, 1700000000);
+    say("t_chk=", tar_checksum_ok(hdr) as u64);
+    say("t_size=", tar_size(hdr));
+    say("t_name=", tar_name(hdr, t, 64) as u64);
+
+    // jsonw
+    let jc: ptr = alloc(4416);
+    let jb: ptr = alloc(512);
+    jw_init(jc, jb, 512);
+    jw_obj(jc);
+    jw_key(jc, "a"); jw_u64(jc, 7);
+    jw_key(jc, "b"); jw_str(jc, "x\"y");
+    jw_key(jc, "c"); jw_arr(jc); jw_bool(jc, 1); jw_null(jc); jw_end(jc);
+    jw_key(jc, "d"); jw_i64(jc, 0 as i64 - 5);
+    jw_end(jc);
+    let jn: u32 = jw_len(jc);
+    say_hex("j_hex=", jb, jn, hx);
+
+    // regex
+    let rc: ptr = alloc(re_ctx_bytes());
+    let r1: u32 = 0;
+    if re_match("[a-c]+", "abcabc", rc) { r1 = 1; }
+    let r2: u32 = 1;
+    if re_match("[a-c]+", "abcd", rc) { r2 = 0; }
+    let r3: u32 = 0;
+    if re_match("(ab|cd)+", "abcdab", rc) { r3 = 1; }
+    let r4: i64 = re_search("hello", "xx hello yy", rc);
+    let r5: u32 = 0;
+    if re_match("\\w+@\\w+\\.\\w+", "a@b.c", rc) { r5 = 1; }
+    let r6: u32 = 0;
+    if re_match("a{2,4}", "aaa", rc) { r6 = 1; }
+    say("r1=", r1 as u64);
+    say("r2=", r2 as u64);
+    say("r3=", r3 as u64);
+    say("r4=", r4 as u64);
+    say("r5=", r5 as u64);
+    say("r6=", r6 as u64);
+
+    // strtod / atof（LibL 的指针形状）与 printf 的浮点
+    let cbuf: ptr = alloc(64);
+    let endp: ptr = alloc(8);
+    let target: ptr = cstr_of(cbuf, "123.45xyz");
+    let sd: u64 = strtod(target, endp);
+    mem_store64(out, 0, sd);
+    say_hex("st=", out, 8, hx);
+    say("st_end=", (mem_load64(endp, 0) - (target as u64)));
+    let fmtb: ptr = alloc(64);
+    let ob: ptr = alloc(256);
+    let args: ptr = alloc(16);
+    mem_store64(args, 0, 0x40091eb851eb851f);
+    let ff: ptr = cstr_of(fmtb, "%.2f");
+    let fn: u32 = snprintf(ob, 256, ff, args, 1);
+    say_hex("pf=", ob, fn, hx);
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+
+def _new_expected() -> str:
+    import hashlib
+    import json
+
+    out = io.StringIO()
+
+    def say(tag, v):
+        out.write(f"{tag}{v}\n")
+
+    say("p_size=", 8)
+    say("p_items=", 2)
+    say("p_v0=", 305419896)
+    say("p_v1=", 4660)
+    say("p_neg=", 255)
+    say("u_ver=", 4)
+    say("u_var=", 1)
+    say("u_fmt=", 36)
+    say("u_parse=", 16)
+    say("u_p0=", 3)
+    say("s256=", hashlib.sha3_256(b"").hexdigest())
+    say("s512abc=", hashlib.sha3_512(b"abc").hexdigest())
+    say("b2b=", hashlib.blake2b(b"").hexdigest())
+    say("b2s=", hashlib.blake2s(b"abc").hexdigest())
+    say("gz_ok=", 1)
+    say("gz_len=", 23)
+    say("t_chk=", 1)
+    say("t_size=", 5)
+    say("t_name=", 13)
+    say("j_hex=", json.dumps({"a": 7, "b": 'x"y', "c": [True, None], "d": -5},
+                            separators=(",", ":")).encode().hex())
+    say("r1=", 1)
+    say("r2=", 1)
+    say("r3=", 1)
+    say("r4=", 3)
+    say("r5=", 1)
+    say("r6=", 1)
+    import struct as _s
+    say("st=", _s.pack("<d", 123.45).hex())
+    say("st_end=", 6)
+    say("pf=", b"3.14".hex())
+    return out.getvalue()
+
+
+@test
+def test_new_stdlib_modules_match_python():
+    """2026-11-08 新增的八份：Loment 算的与 Python 算的**逐字节相同**。"""
+    if not (J._clang() and J._wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "newstd_probe.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    with probe.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(NEW_PROBE)
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            td = Path(t)
+            elf = J._compile(probe, td, "newstd_probe")
+            got = J._run(elf, td)
+    finally:
+        probe.unlink(missing_ok=True)
+    want = _new_expected()
+    if got != want:
+        g, w = got.splitlines(), want.splitlines()
+        first = next((i for i in range(max(len(g), len(w)))
+                      if (g[i] if i < len(g) else None) != (w[i] if i < len(w) else None)), None)
+        raise AssertionError(
+            f"新库结果与 Python 不一致 @ 第 {first} 行: "
+            f"Loment={g[first] if first is not None and first < len(g) else '<无>'!r} "
+            f"Python={w[first] if first is not None and first < len(w) else '<无>'!r}")
+    print(f"      新库 8 模块：{len(want.splitlines())} 项与 Python 逐字节一致")
+
+
 def main(argv: list[str] | None = None) -> int:
-    only = argv[0] if argv else None
-    failed = []
-    for name, fn in TESTS:
-        if only and only not in name:
-            continue
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except AssertionError as e:
-            failed.append(name)
-            print(f"  FAIL  {name}: {e}")
-        except Exception as e:                                       # noqa: BLE001
-            failed.append(name)
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    n = len([x for x, _ in TESTS if not only or only in x])
-    print(f"\nloment_std_test: {n - len(failed)}/{n} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_std_test", only=(argv[0] if argv else None))
 
 
 if __name__ == "__main__":

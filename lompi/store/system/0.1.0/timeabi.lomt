@@ -1,0 +1,166 @@
+// system/timeabi.lomt — 内核时间结构体的**唯一一份**打包/解码
+//
+// 为什么系统工具需要它: `timespec`（秒 + 纳秒）、`timeval`（秒 + 微秒）、
+// `itimerspec`（两个 timespec）、`itimerval`（两个 timeval）这四种结构在
+// timerfd、futex、setitimer、周期定时器里各出现一次。它们是**内核 ABI**：
+// 字段顺序与宽度写错，系统调用不会报错，只会把纳秒当微秒、或者把秒写到纳秒的位置。
+// 每处各抄一份的结果就是"改了一处、漏了一处"。
+//
+// 布局（x86-64，全部小端）:
+//   timespec   16 字节: sec i64(0) | nsec i64(8)
+//   timeval    16 字节: sec i64(0) | usec i64(8)
+//   itimerspec 32 字节: interval timespec(0) | value timespec(16)
+//   itimerval  32 字节: interval timeval(0)  | value timeval(16)
+// 秒与微秒/纳秒都是 **i64**；把它们当 u32 写会在 49 天之后回绕。
+//
+// 不做的: 时间**换算**（毫秒 -> 秒/纳秒由调用方决定）、绝对/相对时间的语义
+// （那是 `TFD_TIMER_ABSTIME` 与 `FUTEX_CLOCK_REALTIME` 的事）、时区。
+// 本模块只回答"这 16/32 个字节里，第几个字节是哪个数"。
+//
+// 命名: 公开 ta_*, 内部 taq_。自检 test_timeabi_*。
+
+module timeabi
+
+/// `struct timespec` 的字节数。
+pub const TA_TS_BYTES: u32 = 16;
+/// `struct timeval` 的字节数。
+pub const TA_TV_BYTES: u32 = 16;
+/// `struct itimerspec` 的字节数。
+pub const TA_ITS_BYTES: u32 = 32;
+/// `struct itimerval` 的字节数。
+pub const TA_IVAL_BYTES: u32 = 32;
+
+fn taq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn taq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- timespec
+
+/// 往 16 字节里打一个 timespec，返回 16。
+pub fn ta_ts_pack(ts: ptr, sec: u64, nsec: u64) -> u32 {
+    let a: u32 = taq_st64(ts, 0, sec);
+    let _b: u32 = taq_st64(ts, a, nsec);
+    return TA_TS_BYTES;
+}
+
+pub fn ta_ts_sec(ts: ptr) -> u64 {
+    return taq_ld64(ts, 0);
+}
+
+pub fn ta_ts_nsec(ts: ptr) -> u64 {
+    return taq_ld64(ts, 8);
+}
+
+// ---------------------------------------------------------------- timeval
+
+/// 往 16 字节里打一个 timeval（微秒，不是纳秒），返回 16。
+pub fn ta_tv_pack(tv: ptr, sec: u64, usec: u64) -> u32 {
+    let a: u32 = taq_st64(tv, 0, sec);
+    let _b: u32 = taq_st64(tv, a, usec);
+    return TA_TV_BYTES;
+}
+
+pub fn ta_tv_sec(tv: ptr) -> u64 {
+    return taq_ld64(tv, 0);
+}
+
+pub fn ta_tv_usec(tv: ptr) -> u64 {
+    return taq_ld64(tv, 8);
+}
+
+// ---------------------------------------------------------------- itimerspec
+
+/// 往 32 字节里打一个 itimerspec（interval 在前、value 在后），返回 32。
+pub fn ta_its_pack(its: ptr, isec: u64, insec: u64, vsec: u64, vnsec: u64) -> u32 {
+    let a: u32 = taq_st64(its, 0, isec);
+    let b: u32 = taq_st64(its, a, insec);
+    let c: u32 = taq_st64(its, b, vsec);
+    let _d: u32 = taq_st64(its, c, vnsec);
+    return TA_ITS_BYTES;
+}
+
+pub fn ta_its_interval_sec(its: ptr) -> u64 {
+    return taq_ld64(its, 0);
+}
+
+pub fn ta_its_interval_nsec(its: ptr) -> u64 {
+    return taq_ld64(its, 8);
+}
+
+pub fn ta_its_value_sec(its: ptr) -> u64 {
+    return taq_ld64(its, 16);
+}
+
+pub fn ta_its_value_nsec(its: ptr) -> u64 {
+    return taq_ld64(its, 24);
+}
+
+// ---------------------------------------------------------------- itimerval
+
+/// 往 32 字节里打一个 itimerval（每段是"秒 + 微秒"），返回 32。
+pub fn ta_ival_pack(ival: ptr, isec: u64, iusec: u64, vsec: u64, vusec: u64) -> u32 {
+    let a: u32 = taq_st64(ival, 0, isec);
+    let b: u32 = taq_st64(ival, a, iusec);
+    let c: u32 = taq_st64(ival, b, vsec);
+    let _d: u32 = taq_st64(ival, c, vusec);
+    return TA_IVAL_BYTES;
+}
+
+pub fn ta_ival_interval_sec(ival: ptr) -> u64 {
+    return taq_ld64(ival, 0);
+}
+
+pub fn ta_ival_interval_usec(ival: ptr) -> u64 {
+    return taq_ld64(ival, 8);
+}
+
+pub fn ta_ival_value_sec(ival: ptr) -> u64 {
+    return taq_ld64(ival, 16);
+}
+
+pub fn ta_ival_value_usec(ival: ptr) -> u64 {
+    return taq_ld64(ival, 24);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_timeabi_timespec_roundtrip() -> bool {
+    let ts: ptr = alloc(TA_TS_BYTES);
+    let n: u32 = ta_ts_pack(ts, 4294967297, 999999999);
+    return n == 16 && ta_ts_sec(ts) == 4294967297 && ta_ts_nsec(ts) == 999999999
+        && load8(ts, 15) == 59 as u32;
+}
+
+fn test_timeabi_itimerspec_layout() -> bool {
+    let its: ptr = alloc(TA_ITS_BYTES);
+    let n: u32 = ta_its_pack(its, 1, 2, 3, 4);
+    return n == 32 && ta_its_interval_sec(its) == 1 && ta_its_interval_nsec(its) == 2
+        && ta_its_value_sec(its) == 3 && ta_its_value_nsec(its) == 4;
+}
+
+fn test_timeabi_itimerval_roundtrip() -> bool {
+    let iv: ptr = alloc(TA_IVAL_BYTES);
+    let n: u32 = ta_ival_pack(iv, 5, 500000, 6, 250000);
+    if n != 32 {
+        return false;
+    }
+    if ta_ival_interval_sec(iv) != 5 || ta_ival_interval_usec(iv) != 500000 {
+        return false;
+    }
+    return ta_ival_value_sec(iv) == 6 && ta_ival_value_usec(iv) == 250000;
+}

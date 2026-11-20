@@ -24,6 +24,7 @@
 // 无 Python 自举: 参考实现 + clang 链出 ELF, 或走种子 (`sh loment/bootstrap.sh`)。
 
 module lompkg
+choose runtime
 
 use json
 use sha256

@@ -1,4 +1,5 @@
 module lumtui_demo
+choose runtime
 
 // lumtui_demo.lomt — LumtUI 走一遍全程: 建文档 -> 布局 -> 绘制 -> 把帧缓冲打成 ASCII。
 //

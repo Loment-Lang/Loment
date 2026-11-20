@@ -58,6 +58,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import cstrans      # noqa: E402
 import jtrans       # noqa: E402
 import lomelf       # noqa: E402
@@ -67,6 +68,13 @@ import potato       # noqa: E402
 import potato_from  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 EX = ROOT / "loment" / "cstrans"
 JEX = ROOT / "loment" / "jtrans"
 
@@ -92,7 +100,7 @@ def _wsl() -> bool:
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -105,7 +113,7 @@ def _wsl_path(p: Path) -> str:
 
 def _run(exe: Path) -> int:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc",
+        [*_WSLCMD, "bash", "-lc",
          f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     return int(r.stdout.strip() or -1)
@@ -436,16 +444,7 @@ def test_out_of_subset_is_loud():
 
 
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_cstrans_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_cstrans_test")
 
 
 if __name__ == "__main__":

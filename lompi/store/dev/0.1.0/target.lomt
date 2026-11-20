@@ -1,0 +1,197 @@
+// dev/target.lomt — 目标三元组（arch-vendor-os-env）的拆分
+//
+// 为什么开发者工具需要它: 交叉编译、产物命名、CI 矩阵、依赖条件，全都在处理
+// `x86_64-unknown-linux-gnu` 这样的字符串。而 **三段式有歧义**：
+// `x86_64-unknown-linux` 是 arch-vendor-os，而 `x86_64-linux-gnu` 是 arch-os-env。
+// 写死"第 2 段是 vendor"会把后者读错。本模块用一张已知 OS 名字表消歧。
+//
+// 规则:
+//   4 段 -> arch-vendor-os-env
+//   3 段 -> 第 2 段是已知 OS 名 ? arch-os-env : arch-vendor-os
+//   2 段 -> arch-os（env 空）
+//   其它 -> TGT_ERR
+//
+// 不做的: 别名归一（`amd64` vs `x86_64`）、CPU 特性后缀（`+sse2`）、
+// 从当前平台推导 host 三元组（那要编译期信息）。
+//
+// 命名: 公开 tgt_*, 内部 tg_*。自检 test_target_*。
+
+module target
+
+use mem
+
+pub const TGT_ERR: u32 = 4294967295;
+
+fn tg_is_os(s: str, st: u32, ln: u32) -> bool {
+    if ln == 5 && str_byte(s, st) == 108 && str_byte(s, st + 1) == 105
+        && str_byte(s, st + 2) == 110 && str_byte(s, st + 3) == 117
+        && str_byte(s, st + 4) == 120 { return true; } // linux
+    if ln == 7 && str_byte(s, st) == 119 && str_byte(s, st + 1) == 105
+        && str_byte(s, st + 2) == 110 && str_byte(s, st + 3) == 100
+        && str_byte(s, st + 4) == 111 && str_byte(s, st + 5) == 119
+        && str_byte(s, st + 6) == 115 { return true; } // windows
+    if ln == 6 && str_byte(s, st) == 100 && str_byte(s, st + 1) == 97
+        && str_byte(s, st + 2) == 114 && str_byte(s, st + 3) == 119
+        && str_byte(s, st + 4) == 105 && str_byte(s, st + 5) == 110 { return true; } // darwin
+    if ln == 7 && str_byte(s, st) == 102 && str_byte(s, st + 1) == 114
+        && str_byte(s, st + 2) == 101 && str_byte(s, st + 3) == 101
+        && str_byte(s, st + 4) == 98 && str_byte(s, st + 5) == 115
+        && str_byte(s, st + 6) == 100 { return true; } // freebsd
+    if ln == 6 && str_byte(s, st) == 110 && str_byte(s, st + 1) == 101
+        && str_byte(s, st + 2) == 116 && str_byte(s, st + 3) == 98
+        && str_byte(s, st + 4) == 115 && str_byte(s, st + 5) == 100 { return true; } // netbsd
+    if ln == 7 && str_byte(s, st) == 111 && str_byte(s, st + 1) == 112
+        && str_byte(s, st + 2) == 101 && str_byte(s, st + 3) == 110
+        && str_byte(s, st + 4) == 98 && str_byte(s, st + 5) == 115
+        && str_byte(s, st + 6) == 100 { return true; } // openbsd
+    if ln == 7 && str_byte(s, st) == 97 && str_byte(s, st + 1) == 110
+        && str_byte(s, st + 2) == 100 && str_byte(s, st + 3) == 114
+        && str_byte(s, st + 4) == 111 && str_byte(s, st + 5) == 105
+        && str_byte(s, st + 6) == 100 { return true; } // android
+    if ln == 3 && str_byte(s, st) == 105 && str_byte(s, st + 1) == 111
+        && str_byte(s, st + 2) == 115 { return true; } // ios
+    if ln == 4 && str_byte(s, st) == 119 && str_byte(s, st + 1) == 97
+        && str_byte(s, st + 2) == 115 && str_byte(s, st + 3) == 105 { return true; } // wasi
+    if ln == 4 && str_byte(s, st) == 110 && str_byte(s, st + 1) == 111
+        && str_byte(s, st + 2) == 110 && str_byte(s, st + 3) == 101 { return true; } // none
+    return false;
+}
+
+fn tg_count(s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if str_byte(s, i) == 45 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 第 `idx` 段的范围，返回 `[起点:32][长度:32]`；越界返回 0。
+fn tg_span(s: str, idx: u32) -> u64 {
+    let n: u32 = str_len(s);
+    let st: u32 = 0;
+    let cur: u32 = 0;
+    let i: u32 = 0;
+    while i <= n {
+        if i == n || str_byte(s, i) == 45 {
+            if cur == idx {
+                return ((st as u64) << 32) | ((i - st) as u64);
+            }
+            cur = cur + 1;
+            st = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0 as u64;
+}
+
+/// 拆分三元组。写 8 个 u32: arch_off/len, vendor_off/len, os_off/len, env_off/len。
+pub fn tgt_parse(s: str, out: ptr) -> u32 {
+    let c: u32 = tg_count(s);
+    if c < 2 || c > 4 {
+        return TGT_ERR;
+    }
+    let a: u64 = tg_span(s, 0);
+    let b: u64 = tg_span(s, 1);
+    let mut_os: u32 = 1;
+    if c == 3 {
+        // 第 2 段（下标 1）是 OS 名 -> arch-os-env
+        let st: u32 = (b >> 32) as u32;
+        let ln: u32 = (b & 4294967295) as u32;
+        if tg_is_os(s, st, ln) {
+            mut_os = 1;
+        } else {
+            mut_os = 2;
+        }
+    } else if c == 2 {
+        mut_os = 1;
+    } else {
+        mut_os = 2; // 4 段: arch-vendor-os-env
+    }
+    // 统一按 (arch, vendor, os, env) 写
+    let arch: u64 = a;
+    let vendor: u64 = 0;
+    let os: u64 = 0;
+    let env: u64 = 0;
+    if c == 2 {
+        os = b;
+    } else if c == 3 {
+        if mut_os == 1 {
+            os = b;
+            env = tg_span(s, 2);
+        } else {
+            vendor = b;
+            os = tg_span(s, 2);
+        }
+    } else {
+        vendor = b;
+        os = tg_span(s, 2);
+        env = tg_span(s, 3);
+    }
+    mem_store32(out, 0, (arch >> 32) as u32);
+    mem_store32(out, 4, (arch & 4294967295) as u32);
+    mem_store32(out, 8, (vendor >> 32) as u32);
+    mem_store32(out, 12, (vendor & 4294967295) as u32);
+    mem_store32(out, 16, (os >> 32) as u32);
+    mem_store32(out, 20, (os & 4294967295) as u32);
+    mem_store32(out, 24, (env >> 32) as u32);
+    mem_store32(out, 28, (env & 4294967295) as u32);
+    return 0;
+}
+
+/// 取某一段（0 arch, 1 vendor, 2 os, 3 env）写进 out；返回长度。
+pub fn tgt_part(s: str, out: ptr, cap: u32, which: u32) -> u32 {
+    let o: ptr = alloc(32);
+    if tgt_parse(s, o) != 0 {
+        return 0;
+    }
+    let st: u32 = mem_load32(o, which * 8);
+    let ln: u32 = mem_load32(o, which * 8 + 4);
+    let m: u32 = ln;
+    if m > cap {
+        m = cap;
+    }
+    let i: u32 = 0;
+    while i < m {
+        store8(out, i, str_byte(s, st + i) as u8);
+        i = i + 1;
+    }
+    return ln;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_target_four() -> bool {
+    let o: ptr = alloc(32);
+    if tgt_parse("x86_64-unknown-linux-gnu", o) != 0 {
+        return false;
+    }
+    // arch len 6, vendor 7, os 5, env 3
+    return mem_load32(o, 4) == 6 && mem_load32(o, 12) == 7
+        && mem_load32(o, 20) == 5 && mem_load32(o, 28) == 3;
+}
+
+fn test_target_three_ambiguous() -> bool {
+    let o: ptr = alloc(32);
+    if tgt_parse("x86_64-linux-gnu", o) != 0 {
+        return false;
+    }
+    // arch-os-env: vendor 空，os=linux(5)，env=gnu(3)
+    if !(mem_load32(o, 12) == 0 && mem_load32(o, 20) == 5 && mem_load32(o, 28) == 3) {
+        return false;
+    }
+    if tgt_parse("aarch64-apple-darwin", o) != 0 {
+        return false;
+    }
+    return mem_load32(o, 12) == 5 && mem_load32(o, 20) == 6 && mem_load32(o, 28) == 0;
+}
+
+fn test_target_part() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = tgt_part("x86_64-unknown-linux-gnu", b, 16, 2);
+    return n == 5 && load8(b, 0) == 108 && load8(b, 1) == 105;
+}

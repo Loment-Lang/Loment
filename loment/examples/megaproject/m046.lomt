@@ -1,0 +1,81 @@
+choose write grammar python
+
+# m046.lomt —— 超大型项目的第 46 个模块（**Python 拼法**写的 Loment）。
+#
+# 10 个函数，名字一律带 `m046_` 前缀 —— **单元的发射符号是平的**（ABI），
+# 跨模块同名会被拒。生成器见 `tools/loment_megaproject_test.py`，判据钉着这份产物不漂。
+
+
+def m046_f0(x: int) -> int:
+    s = 0
+    for j in range(6):
+        s += x + j * 11
+    return s
+
+
+def m046_f1(x: int) -> int:
+    return m046_f0(x) * 11 // 8
+
+
+def m046_f2(x: int) -> int:
+    return ((x << 3) ^ (x >> 1)) & 1023
+
+
+def m046_f3(x: int) -> int:
+    if x > 100:
+        return x - 100
+    elif x > 10:
+        return x * 2
+    return x + 1
+
+
+def m046_f4(x: int) -> int:
+    if x <= 0:
+        return 0
+    return 1 + m046_f4(x - 1)
+
+
+def m046_f5(x: int) -> int:
+    t = 0
+    for a in range(3):
+        for b in range(3):
+            if a * b > 0:
+                t += a * b + x
+    return t
+
+
+def m046_f6(x: int) -> int:
+    c = x & 65535
+    n = 0
+    while n < 8:
+        if c & 1:
+            c = (c >> 1) ^ 0xB400
+        else:
+            c = c >> 1
+        n += 1
+    return c
+
+
+def m046_f7(x: int) -> int:
+    v = x & 255
+    s = v >> 1
+    while s != 0:
+        v = v ^ s
+        s = s >> 1
+    return v
+
+
+def m046_f8(x: int) -> int:
+    lo = x
+    hi = x
+    if 11 < lo:
+        lo = 11
+    if 11 > hi:
+        hi = 11
+    return hi - lo
+
+
+def m046_entry() -> int:
+    x = 11 + 11 + 6
+    return (m046_f1(x) + m046_f2(x) + m046_f3(x) + m046_f4(x % 7) + m046_f5(x)
+            + m046_f6(x) + m046_f7(x) + m046_f8(x) + 46) % 251

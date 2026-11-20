@@ -18,6 +18,7 @@
 //   ./fujofmt <文件.lomt> > 格式化后
 
 module lomfmt
+choose runtime
 
 use lexer
 
@@ -41,6 +42,20 @@ const S_NL: u32 = 24;              // 已输出行数
 const S_LBLANK: u32 = 28;          // 最后输出的是空行 (Python: out[-1] == "")
 const S_LBRACE: u32 = 32;          // 最后输出行正好是 `}` (Python: out[-1] == "}")
 const S_STOP: u32 = 36;            // 块类型栈顶
+// `#46`: 这一行**到现在为止**的记号是不是全是声明行首的修饰词
+//（`pub` / `extern`）。下一个顶层关键字要接在它后面，不另起一行。
+const S_LHEAD: u32 = 40;
+// `#45`: 注释表。词法器把注释跳过了，所以从**源码**单独扫一遍、按行号插回去。
+const S_CN: u32 = 44;              // 注释条目数
+const S_CNX: u32 = 48;             // 下一条待吐的**独占行**注释
+const S_CBLK: u32 = 52;            // 最近一块独占行注释在输出里的起点 (0 = 没有)
+const S_LLINE: u32 = 56;           // 上一个处理过的 token 的源码行
+// 缓冲行**已经带了行尾注释**（1 = 是）。注释一去这一行就到此为止：再往上追加 token
+// 就会被 `//` 吞掉。源码里两行各带一条行尾注释、而格式化把它们并成一行不是假想 ——
+// `codegen.lomt` 那个 `while` 条件就是（实测吞掉了 `|| tok_is(… "free")) {`）。
+const S_LCMT: u32 = 60;
+const CMT_CAP: u32 = 4096;         // 注释条目上限 (每条 16 字节)
+const OFF_CMT: u32 = 3080192;      // MEM_CAP - 65536: 行/起/长/种类 四格
 
 // ---------------------------------------------------------------- 成员表
 // 每个集合用 "\n" 分隔。L1 的 `const` 只收**整数字面量** (parse_const 走 int_lit),
@@ -64,7 +79,15 @@ fn T_TYPE_BODY() -> str { return "struct\nenum\ntrait\nmatch"; }
 fn T_BRACE_KW() -> str { return "struct\nenum\ntrait\nimpl\nfn\nif\nwhile\nfor\nmatch\nelse\ncapability"; }
 // **`choose` 原先就不在这张表里**（既有缺口, 与 `tools/lomfmt.py` 的 TOP_KW 同一处）:
 // 没有它, `choose std` 会被揉进上一行; 加开关之后 `set choose X { … }` 更是整块贴上去。
-fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt\nchoose\nset\naddin\ncomefor\nbyuse"; }
+// `register`（`docs/223` 形态 A）同理：它是**顶层**声明, 不进这张表就会被揉进上一行。
+fn T_TOP_KW() -> str { return "module\nuse\ncapability\nconst\nstruct\nenum\ntrait\nimpl\nfn\nexcluded\npub\ninterrupt\nchoose\nset\naddin\ncomefor\nbyuse\nregister"; }
+
+/// 声明行首的**修饰词**（`#46`）：它们不单独占一行，要与后面那一项连在一起。
+fn T_HEAD_MODS() -> str { return "pub
+extern"; }
+
+/// 单独一个 `pub`（`#46`：它不参与"顶层声明之间插空行"那一套分组）。
+fn T_PUB() -> str { return "pub"; }
 
 // ---------------------------------------------------------------- 系统调用
 
@@ -109,8 +132,21 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 面向用户的失败消息: `loment: <msg>` 换行。前缀是 **`loment`**(用户敲的那个命令),
+/// 不是 `fujofmt`/`lomfmt`(这个包里的格式化器组件名) —— issue #8。
 fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
     write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
+    return die(1);
+}
+
+/// 同 `fail`, 消息后面接一段**已经量好的字节** (路径)。
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, tail, n as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
     return die(1);
 }
 
@@ -184,6 +220,28 @@ fn tk_len(t: ptr, i: u32) -> u32 {
     return load32(t, i * 20 + 8);
 }
 
+fn tk_line(t: ptr, i: u32) -> u32 {
+    return load32(t, i * 20 + 12);
+}
+
+/// token 文本等于字面量。字符串 token 直接不算 (原文含引号, 会与关键字撞车)。
+fn tk_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
+    if tk_kind(t, i) == 2 {
+        return false;
+    }
+    if tk_len(t, i) != str_len(s) {
+        return false;
+    }
+    let k: u32 = 0;
+    while k < str_len(s) {
+        if load8(src, tk_start(t, i) + k) != str_byte(s, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
 /// token 的 val 与表成员 [off, off+len) 相等?
 /// 非字符串: val 就是原文切片; 字符串: val 是**转义解码后**的内容 (镜像 Python)。
 fn val_eq(src: ptr, t: ptr, i: u32, tbl: str, off: u32, len: u32) -> bool {
@@ -210,13 +268,10 @@ fn val_eq(src: ptr, t: ptr, i: u32, tbl: str, off: u32, len: u32) -> bool {
         if c == 92 && j + 1 < e {
             let x: u32 = load8(src, j + 1);
             c = x;                  // Python: _ESCAPES.get(x, x) —— 引号/反斜杠/未知都取原字符
-            if x == 110 {
-                c = 10;
-            } else {
-                if x == 116 {
-                    c = 9;
-                }
-            }
+            if x == 110 { c = 10; }
+            if x == 116 { c = 9; }
+            if x == 114 { c = 13; }   // `#36`: `\r` 原先不在表里, 被吃成字母 `r`
+            if x == 48 { c = 0; }     // `#33`: `\0` 仓库自己在用 (`proc.lomt` 的 "/bin/sh\0")
             j = j + 2;
         } else {
             j = j + 1;
@@ -270,6 +325,26 @@ fn v_find(src: ptr, t: ptr, i: u32, mg: u32, tbl: str) -> u32 {
 /// 值是否在集合（表）里。
 fn v_in(src: ptr, t: ptr, i: u32, mg: u32, tbl: str) -> bool {
     return v_find(src, t, i, mg, tbl) != 0;
+}
+
+/// 这个 token 的文本正好是 `w` 吗（`docs/341` 的插值前缀判据）。
+fn tk_word(src: ptr, t: ptr, i: u32, w: str) -> bool {
+    if tk_kind(t, i) != 0 {
+        return false;
+    }
+    let n: u32 = load32(t, i * 20 + 8);
+    if n != str_len(w) {
+        return false;
+    }
+    let j: u32 = 0;
+    let ok: bool = true;
+    while j < n {
+        if load8(src, load32(t, i * 20 + 4) + j) != str_byte(w, j) {
+            ok = false;
+        }
+        j = j + 1;
+    }
+    return ok;
 }
 
 /// 多字符运算符合并 id (0 = 不合并)。Python 版只看**相邻 token** 的 val, 不看源码是否连着。
@@ -386,6 +461,7 @@ fn line_tok(mem: ptr, i: u32) {
 
 /// Python 的 flush(): 有内容就按当前深度缩进输出一行。
 fn flush_line(mem: ptr) -> u32 {
+    store32(mem, S_LCMT, 0);
     let n: u32 = load32(mem, S_LLEN);
     if n == 0 {
         return 0;
@@ -410,13 +486,28 @@ fn flush_line(mem: ptr) -> u32 {
     store32(mem, S_NL, load32(mem, S_NL) + 1);
     store32(mem, S_LLEN, 0);
     store32(mem, S_LTN, 0);
+    store32(mem, S_CBLK, 0);      // 代码行落地 -> 最近的注释块不再"紧挨着下一行"
     return 1;
 }
 
-/// Python 的 out.append("")。
+/// Python 的 out.append("")。**但紧挨着的是一块注释时，空行插到那整块之前**
+/// （`#45`）：`///` 注释的是它**下面**那条声明，插在中间会把两者拆开。
 fn out_blank(mem: ptr) {
-    out_push_byte(mem, 10);
-    store32(mem, S_LBLANK, 1);
+    let cb: u32 = load32(mem, S_CBLK);
+    if cb > 0 {
+        let olen: u32 = load32(mem, S_OLEN);
+        let q: u32 = olen;
+        while q > cb {
+            store8(mem, OFF_OUT + q, load8(mem, OFF_OUT + q - 1) as u8);
+            q = q - 1;
+        }
+        store8(mem, OFF_OUT + cb, 10 as u8);
+        store32(mem, S_OLEN, olen + 1);
+        store32(mem, S_LBLANK, 0);
+    } else {
+        out_push_byte(mem, 10);
+        store32(mem, S_LBLANK, 1);
+    }
 }
 
 // ---------------------------------------------------------------- 块类型栈
@@ -488,13 +579,10 @@ fn emit_tok(mem: ptr, src: ptr, t: ptr, i: u32, mg: u32) -> u32 {
         if c == 92 && j + 1 < e {
             let x: u32 = load8(src, j + 1);
             c = x;                  // Python: _ESCAPES.get(x, x)
-            if x == 110 {
-                c = 10;
-            } else {
-                if x == 116 {
-                    c = 9;
-                }
-            }
+            if x == 110 { c = 10; }
+            if x == 116 { c = 9; }
+            if x == 114 { c = 13; }   // `#36`
+            if x == 48 { c = 0; }     // `#33`
             j = j + 2;
         } else {
             j = j + 1;
@@ -545,6 +633,23 @@ fn value_end(src: ptr, t: ptr, v: u32) -> bool {
     return false;
 }
 
+/// `t[i]` 是不是 `:=` 的**前半**（紧挨着 `=` 的 `:`，`docs/347`）。
+///
+/// 这一格要 `:` 前面留一个空格 —— `x: u32` 的"冒号前不留空格"说的是类型标注；
+/// `:=` 在这里是**一个算子**，`x:= n` 会读成"冒号后面少了一层"。
+fn glued_def(src: ptr, t: ptr, i: u32) -> u32 {
+    if tk_kind(t, i) != 3 || !tk_word(src, t, i, ":") {
+        return 0;
+    }
+    if tk_kind(t, i + 1) != 3 || !tk_word(src, t, i + 1, "=") {
+        return 0;
+    }
+    if load32(t, i * 20 + 4) + load32(t, i * 20 + 8) != load32(t, (i + 1) * 20 + 4) {
+        return 0;
+    }
+    return 1;
+}
+
 /// Python 的 _needs_space(pp, prev, cur)。
 fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
     if prev == 0 {
@@ -552,10 +657,37 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
     }
     let pi: u32 = enc_idx(prev);
     let pm: u32 = enc_mg(prev);
+    // 值表只对**标点**有意义：字符串的值是内容（`#640`），`"}"` 的值就是 `}`，
+    // 拿它去查"前不留空格"会把 `f(a, "}")` 排成 `f(a,"}")`。
+    if tk_kind(t, i) == 2 {
+        // **插值前缀与字符串是粘着的**（`docs/341`）：`f"…"` / `rf"…"` 在源里紧挨着，
+        // 中间插一个空格就把一条读法拆成两个 token（格式化后的文件编不过）。
+        let pk: u32 = tk_kind(t, pi);
+        if pk == 0 && load32(t, pi * 20 + 4) + load32(t, pi * 20 + 8)
+                == load32(t, i * 20 + 4) {
+            if tk_word(src, t, pi, "f") || tk_word(src, t, pi, "rf") {
+                return false;
+            }
+        }
+        return true;
+    }
+    if tk_kind(t, pi) == 2 {
+        if v_in(src, t, i, mg, T_NSB()) {
+            return false;
+        }
+        return true;
+    }
     if v_in(src, t, i, mg, T_NSB()) {
         return false;
     }
     if v_in(src, t, pi, pm, T_NSA()) {
+        return false;
+    }
+    if tk_word(src, t, pi, ":") && tk_word(src, t, i, "=")
+            && load32(t, pi * 20 + 4) + load32(t, pi * 20 + 8) == load32(t, i * 20 + 4) {
+        // `let x := e;`（`docs/347`）：**粘着的** `:` `=` 是一条读法（类型推断的另一种
+        // 拼法）。拆成 `: =` 就不是了（那是"`: ` 后面缺类型"的语法错）—— 与上面
+        // `f"…"` 的插值前缀同一条理由。
         return false;
     }
     if v_in(src, t, i, mg, T_LPAR_LBR()) {
@@ -587,6 +719,212 @@ fn needs_space(src: ptr, t: ptr, pp: u32, prev: u32, i: u32, mg: u32) -> bool {
 
 // ---------------------------------------------------------------- 主流程
 
+// ---------------------------------------------------------------- 注释 (`#45`)
+
+fn cmt_add(mem: ptr, line: u32, st: u32, n: u32, kind: u32) {
+    let c: u32 = load32(mem, S_CN);
+    // **满了就拒绝，不许悄悄丢**（`#45` 的口径）：一张装不下的注释表如果只是不再收，
+    // 格式化出来的文件就少了几条注释 —— 那正是这个工具要消灭的形状。`fail` 里是
+    // `die(1)`，**不会返回**，所以它下面那句 `store32` 够不着。
+    if c >= CMT_CAP {
+        let _g: u32 = fail("this source has more comments than the formatter can hold (4096) -- split the file");
+    } else {
+        let o: u32 = OFF_CMT + c * 16;
+        store32(mem, o, line);
+        store32(mem, o + 4, st);
+        store32(mem, o + 8, n);
+        store32(mem, o + 12, kind);
+        store32(mem, S_CN, c + 1);
+    }
+}
+
+/// 从**源码**里扫注释（词法流里没有它们）。kind: 0 = 独占一行, 1 = 行尾。
+/// 字符串里的 `//` 不算 —— 扫到 `"` 就跳到配对的 `"`（认 `\` 转义）。
+fn scan_comments(src: ptr, mem: ptr) {
+    let i: u32 = 0;
+    let line: u32 = 1;
+    let hascode: u32 = 0;
+    while i < SRC_CAP && load8(src, i) != 0 {
+        let c: u32 = load8(src, i);
+        if c == 10 {
+            line = line + 1;
+            hascode = 0;
+            i = i + 1;
+        } else if c == 32 || c == 9 || c == 13 {
+            i = i + 1;
+        } else if c == 34 {              // 字符串
+            i = i + 1;
+            hascode = 1;
+            let go: u32 = 1;
+            while i < SRC_CAP && go == 1 && load8(src, i) != 0 {
+                let d: u32 = load8(src, i);
+                if d == 92 {
+                    // 转义对里的第二个字节若是真换行，它也算一行（`lomc.lex` 按**原始
+                    // 字节里的换行数**数，`#481`）。
+                    if i + 1 < SRC_CAP && load8(src, i + 1) == 10 {
+                        line = line + 1;
+                    }
+                    i = i + 2;
+                } else if d == 34 {
+                    i = i + 1;
+                    go = 0;
+                } else {
+                    // **字符串里的换行也要计数**（`#481`）：`lomc.lex` 已经这样。原先这里
+                    // 明写"不计数"，那与旧词法器一致；词法器改了之后两边就整体错开 ——
+                    // 注释按行号挂，错位表现为注释被挪到别的语句上（`loment_fmt_test`
+                    // 在 `codegen.lomt` 上少 36 条注释）。
+                    if d == 10 {
+                        line = line + 1;
+                    }
+                    i = i + 1;
+                }
+            }
+        } else if c == 47 && i + 1 < SRC_CAP && load8(src, i + 1) == 47 {   // //
+            let j: u32 = i;
+            while j < SRC_CAP && load8(src, j) != 10 && load8(src, j) != 0 {
+                j = j + 1;
+            }
+            let e: u32 = j;
+            while e > i && (load8(src, e - 1) == 32 || load8(src, e - 1) == 9 || load8(src, e - 1) == 13) {
+                e = e - 1;
+            }
+            let kd: u32 = 0;
+            if hascode == 1 {
+                kd = 1;
+            }
+            cmt_add(mem, line, i, e - i, kd);
+            i = j;
+        } else if c == 47 && i + 1 < SRC_CAP && load8(src, i + 1) == 42 {   // /*
+            let l0: u32 = line;
+            let j: u32 = i + 2;
+            let go: u32 = 1;
+            while j + 1 < SRC_CAP && go == 1 && load8(src, j) != 0 {
+                if load8(src, j) == 42 && load8(src, j + 1) == 47 {
+                    j = j + 2;
+                    go = 0;
+                } else {
+                    if load8(src, j) == 10 {
+                        line = line + 1;
+                    }
+                    j = j + 1;
+                }
+            }
+            if go == 1 {
+                j = SRC_CAP;
+            }
+            let kd: u32 = 0;
+            if hascode == 1 {
+                kd = 1;
+            }
+            cmt_add(mem, l0, i, j - i, kd);
+            i = j;
+        } else {
+            hascode = 1;
+            i = i + 1;
+        }
+    }
+}
+
+/// 吐一条独占行注释（按当前深度缩进；块注释原文照抄）。
+fn emit_cmt_one(mem: ptr, src: ptr, ci: u32) {
+    let o: u32 = OFF_CMT + ci * 16;
+    let st: u32 = load32(mem, o + 4);
+    let n: u32 = load32(mem, o + 8);
+    if load32(mem, S_CBLK) == 0 {
+        store32(mem, S_CBLK, load32(mem, S_OLEN));
+    }
+    let d: u32 = load32(mem, S_DEPTH);
+    let q: u32 = 0;
+    while q < d * 4 {
+        out_push_byte(mem, 32);
+        q = q + 1;
+    }
+    out_push(mem, ptr_add(src, st), n);
+    out_push_byte(mem, 10);
+    store32(mem, S_LBLANK, 0);
+    store32(mem, S_LBRACE, 0);
+    store32(mem, S_NL, load32(mem, S_NL) + 1);
+}
+
+/// 还有没有 line < `tl` 的独占行注释没吐? (调用方据此先 flush 再吐)
+fn own_before(mem: ptr, tl: u32) -> u32 {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    while k < c {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o + 12) == 0 && load32(mem, o) < tl {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 第一条还没吐的、line < `tl` 的独占行注释的源码行（0 = 没有）。
+fn first_own_line(mem: ptr, tl: u32) -> u32 {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    while k < c {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o + 12) == 0 && load32(mem, o) < tl {
+            return load32(mem, o);
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 按源码顺序吐出所有 line < `tl` 的独占行注释（各条用 kind=2 记账）。
+fn emit_own_upto(mem: ptr, src: ptr, tl: u32) {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    while k < c {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o + 12) == 0 && load32(mem, o) < tl {
+            emit_cmt_one(mem, src, k);
+            store32(mem, o + 12, 2);
+        }
+        k = k + 1;
+    }
+}
+
+/// 把 `line` 那一行的行尾注释补到上一行末尾（Python: 追加到 line 或 out[-1]）。
+fn emit_trail(mem: ptr, src: ptr, line: u32) -> u32 {
+    let c: u32 = load32(mem, S_CN);
+    let k: u32 = 0;
+    let found: u32 = 0;
+    while k < c && found == 0 {
+        let o: u32 = OFF_CMT + k * 16;
+        if load32(mem, o) == line && load32(mem, o + 12) == 1 {
+            found = 1;
+        } else {
+            k = k + 1;
+        }
+    }
+    if found == 0 {
+        return 0;
+    }
+    let o: u32 = OFF_CMT + k * 16;
+    let st: u32 = load32(mem, o + 4);
+    let n: u32 = load32(mem, o + 8);
+    if load32(mem, S_LLEN) > 0 {
+        line_push_byte(mem, 32);
+        line_push(mem, ptr_add(src, st), n);
+        store32(mem, S_LCMT, 1);
+    } else {
+        let olen: u32 = load32(mem, S_OLEN);
+        if olen > 0 && load8(mem, OFF_OUT + olen - 1) == 10 {
+            store32(mem, S_OLEN, olen - 1);
+        }
+        out_push_byte(mem, 32);
+        out_push(mem, ptr_add(src, st), n);
+        out_push_byte(mem, 10);
+        store32(mem, S_LBLANK, 0);
+    }
+    store32(mem, o + 12, 2);
+    return 1;
+}
+
 /// 格式化: 返回输出长度 (输出在 mem + OFF_OUT)。
 pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     store32(mem, S_DEPTH, 0);
@@ -599,10 +937,48 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     store32(mem, S_LBLANK, 0);
     store32(mem, S_LBRACE, 0);
     store32(mem, S_STOP, 0);
+    store32(mem, S_LHEAD, 0);
+    store32(mem, S_CN, 0);
+    store32(mem, S_CNX, 0);
+    store32(mem, S_CBLK, 0);
+    store32(mem, S_LLINE, 0);
+    store32(mem, S_LCMT, 0);
+    scan_comments(src, mem);
     let i: u32 = 0;
     let pp: u32 = 0;
     let prev: u32 = 0;
     while i < n && tk_kind(t, i) != 4 {
+        // ---- 注释（`#45`）：行尾的补上一行，独占行的**先 flush 缓冲行再吐**
+        let tl: u32 = tk_line(t, i);
+        if load32(mem, S_LLINE) != 0 && tl > load32(mem, S_LLINE) {
+            let _tr: u32 = emit_trail(mem, src, load32(mem, S_LLINE));
+        }
+        // 行尾注释把这一行封住了 —— 再追加 token 就会被 `//` 吞掉。
+        if load32(mem, S_LCMT) == 1 {
+            flush_line(mem);
+        }
+        if own_before(mem, tl) == 1 {
+            // 缓冲行与注释的先后**按源码行号定**（与 Python 版同一条）：
+            // `module`（第 2 行）缓冲着、`///`（第 3 行）到了 ⇒ 行先出；
+            // `syscall4(...)`（第 6 行）缓冲着、注释在第 4-5 行 ⇒ 注释先出。
+            let fl: u32 = first_own_line(mem, tl);
+            let lstart: u32 = 0;
+            if load32(mem, S_LTN) > 0 {
+                lstart = tk_line(t, load32(mem, OFF_LTOK));
+            }
+            let line_first: u32 = 0;
+            if lstart != 0 && lstart < fl {
+                line_first = 1;
+            }
+            if line_first == 1 {
+                flush_line(mem);
+            }
+            emit_own_upto(mem, src, tl);
+            if line_first == 0 {
+                flush_line(mem);
+            }
+        }
+        store32(mem, S_LLINE, tl);
         let mg: u32 = merg_id(src, t, i, n);
         let step: u32 = 1;
         if mg != 0 {
@@ -617,36 +993,58 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
         }
         // ---- 顶层声明之间插空行
         if load32(mem, S_DEPTH) == 0 && top_id(src, t, i) != 0 {
-            flush_line(mem);
-            if load32(mem, S_NL) > 0 {
-                if load32(mem, S_LBLANK) == 0 {
-                    if load32(mem, S_LASTTOP) != 0 {
-                        if load32(mem, S_LASTTOP) != top_id(src, t, i) {
-                            out_blank(mem);
-                        } else {
-                            if load32(mem, S_LBRACE) == 1 {
+            // **修饰词不是声明本身的首词**（`#46`）：`pub fn f()` / `pub extern fn f()`
+            // 要待在**同一行**，起头的是 `fn` / `struct` …（空行与分组也按那一个算）。
+            // 判据是"这一行到现在**只有**修饰词"，而不是"刚看见 `pub`" —— 只认 `pub`
+            // 的话 `pub extern fn` 仍会被劈开（`extern` 不是顶层关键字，不触发这一支）。
+            let mods_only: u32 = 0;
+            if load32(mem, S_LTN) > 0 && load32(mem, S_LHEAD) == 1 {
+                mods_only = 1;
+            }
+            if mods_only == 0 {
+                flush_line(mem);
+            }
+            if !v_in(src, t, i, mg, T_PUB()) {
+                if load32(mem, S_NL) > 0 {
+                    if load32(mem, S_LBLANK) == 0 {
+                        if load32(mem, S_LASTTOP) != 0 {
+                            if load32(mem, S_LASTTOP) != top_id(src, t, i) {
                                 out_blank(mem);
+                            } else {
+                                if load32(mem, S_LBRACE) == 1 {
+                                    out_blank(mem);
+                                }
                             }
                         }
                     }
                 }
+                store32(mem, S_LASTTOP, top_id(src, t, i));
             }
-            store32(mem, S_LASTTOP, top_id(src, t, i));
         }
+        // 推这一格之前，这一行已经有几个记号 —— 下面那道 `S_LHEAD` 的更新要用它。
+        let head_was: u32 = load32(mem, S_LTN);
         let is_brace: u32 = 0;
         let is_close: u32 = 0;
         let is_semi: u32 = 0;
         let is_comma: u32 = 0;
-        if v_in(src, t, i, mg, T_LBRACE()) {
+        // **先看 kind，再看值**（`#640`）：字符串字面量的值是**不带引号的内容**，所以
+        // `"{"` 的值就是 `{`。只比值得话下面四支会把字面量当标点铺开 —— 引号一去，
+        // `lex_tok_is(src, toks, j, "{")` 就成了 `lex_tok_is(src, toks, j, {)`：
+        // 括号失衡、解析不了，而退出码是 0。语料里 8 份中了（含本文件自己）。
+        let is_str: u32 = 0;
+        if tk_kind(t, i) == 2 {
+            is_str = 1;
+        }
+        if is_str == 0 && v_in(src, t, i, mg, T_LBRACE()) {
             is_brace = 1;
         } else {
-            if v_in(src, t, i, mg, T_RBRACE()) {
+            if is_str == 0 && v_in(src, t, i, mg, T_RBRACE()) {
                 is_close = 1;
             } else {
-                if v_in(src, t, i, mg, T_SEMI()) {
+                if is_str == 0 && v_in(src, t, i, mg, T_SEMI()) {
                     is_semi = 1;
                 } else {
-                    if v_in(src, t, i, mg, T_COMMA()) {
+                    if is_str == 0 && v_in(src, t, i, mg, T_COMMA()) {
                         is_comma = 1;
                     }
                 }
@@ -692,7 +1090,9 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
                         pp = prev;
                         prev = enc(i, mg);
                     } else {
-                        if load32(mem, S_LLEN) > 0 && needs_space(src, t, pp, prev, i, mg) {
+                        if load32(mem, S_LLEN) > 0
+                                && (glued_def(src, t, i) == 1
+                                    || needs_space(src, t, pp, prev, i, mg)) {
                             line_push_byte(mem, 32);
                         }
                         emit_tok(mem, src, t, i, mg);
@@ -703,9 +1103,31 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
                 }
             }
         }
+        // **这一行到现在是不是只有修饰词**（`#46`）：空行起步的修饰词记 1，
+        // 之后**每个**记号都得还是修饰词才保持 1，否则归 0（括号/分号/逗号当然归 0）。
+        let hmod: u32 = 0;
+        if tk_kind(t, i) == 0 && v_in(src, t, i, 0, T_HEAD_MODS()) {
+            hmod = 1;
+        }
+        if head_was == 0 {
+            store32(mem, S_LHEAD, hmod);
+        } else {
+            if load32(mem, S_LHEAD) == 1 && hmod == 1 {
+                store32(mem, S_LHEAD, 1);
+            } else {
+                store32(mem, S_LHEAD, 0);
+            }
+        }
         i = i + step;
     }
+    if load32(mem, S_LLINE) != 0 {
+        let _tr: u32 = emit_trail(mem, src, load32(mem, S_LLINE));
+    }
     flush_line(mem);
+    // 文件末尾还留着的独占行注释
+    if own_before(mem, 4294967295) == 1 {
+        emit_own_upto(mem, src, 4294967295);
+    }
     // Python: while out and out[-1] == "": out.pop() —— 只清尾部的空行
     let olen: u32 = load32(mem, S_OLEN);
     let cut: u32 = olen;
@@ -721,6 +1143,48 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     return cut;
 }
 
+// ---------------------------------------------------------------- 别的写法要拦住
+
+/// 文件头是不是**别的表层写法**（`docs/182` §1.9 / `#115`）？是就返回 1。
+///
+/// `lomfmt` 是**独立入口**：它拿词法层直接读原文、**不走前门** —— 而一份 `.lomt`
+/// 里可以装六种写法的任何一种。对 C 那门后果很重：
+///
+///     choose write grammar c unsigned int f(unsigned int x) {   ← 声明与函数头揉成一行
+///
+/// 声明那一行整个是"**怎么读**"：前门按它定读法、再抹成等长空白 ⇒ **那一行上的
+/// 函数跟着一起消失**，单元变空，而这里**退 0** 把一份删掉了函数的源交出去 ——
+/// 而 `--write` 是**原地写回**，用户那份源就这么被改坏了（`#115` 的实测）。
+/// 同一份文件 `loment check` 是**响亮地拒**的 —— 一套工具链两个答案。
+///
+/// 所以与参考实现 `potato_from.refuse_foreign_grammar` 同一条：**认出非原生写法就拒**。
+/// `loment` / `rust` 是原生（`NATIVE_GRAMMARS`），照旧放行。
+///
+/// 找法与报错器的 `decl_at` 同一个形状：**只找那一行**（`choose write grammar <别名>`
+/// 三个词同行、别名紧跟着），而且它必须在 `module` 之前（`docs/188` §1）。
+fn foreign_grammar(src: ptr, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if tk_is(src, t, i, "module") == true {
+            return 0;                       // 声明必须写在 `module` 之前
+        }
+        if tk_is(src, t, i, "choose") == true && i + 3 < n
+                && tk_is(src, t, i + 1, "write") == true
+                && tk_is(src, t, i + 2, "grammar") == true
+                && tk_line(t, i) == tk_line(t, i + 1)
+                && tk_line(t, i) == tk_line(t, i + 2)
+                && tk_line(t, i) == tk_line(t, i + 3) {
+            if tk_is(src, t, i + 3, "loment") == true
+                    || tk_is(src, t, i + 3, "rust") == true {
+                return 0;                   // 原生写法，照旧放行
+            }
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn _start() -> u32 {
@@ -730,7 +1194,7 @@ fn _start() -> u32 {
     let argv_buf: u64 = sys_alloc(65536);
     let scrv: u64 = sys_alloc(8192);
     if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 {
-        return fail("fujofmt: brk failed\n");
+        return fail("out of memory (brk failed)");
     }
     let mem: ptr = memv as ptr;
     let src: ptr = srcv as ptr;
@@ -738,19 +1202,25 @@ fn _start() -> u32 {
     let scr: ptr = scrv as ptr;
     let av: u64 = argv1(argv_buf as ptr, 65536, scr);
     if av == 0 {
-        return fail("fujofmt: 用法: fujofmt <文件.lomt>\n");
+        return fail("usage: loment fmt <file.lomt>");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, scr);
     if fd < 0 {
-        return fail("fujofmt: 打不开输入文件\n");
+        return failp("cannot open the input file: ", ap, an);
     }
     let raw: u64 = read_all(fd as u64, src, SRC_CAP as u64);
     syscall4(3, fd as u64, 0, 0);
     let len: u32 = strip_cr(src, raw as u32);
     store8(src, len, 0 as u8);
     let cnt: u32 = lex(src, len, toks);
+    // **别的写法在这里拦住**（`#115`）—— 必须在**拿到词法流、动手重排之前**。
+    // `--write` 是**原地写回**：声明那一行一旦被当成正文重排，前门会把它抹成等长空白，
+    // 那一行上的函数跟着消失，而这里照旧退 0 —— 用户的源就这么被改坏了。
+    if foreign_grammar(src, toks, cnt) == 1 {
+        return fail("this source is written in another grammar (its header has `choose write grammar`) and this formatter takes the native spelling only -- hand the file to the compiler instead: `loment check <file>`");
+    }
     let m: u32 = format_src(src, toks, cnt, mem);
     write_all(1, ptr_add(mem, OFF_OUT), m as u64);
     return die(0);

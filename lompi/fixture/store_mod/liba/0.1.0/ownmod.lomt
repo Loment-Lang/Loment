@@ -1,0 +1,5 @@
+module ownmod
+
+pub fn o() -> u32 {
+    return 3;
+}

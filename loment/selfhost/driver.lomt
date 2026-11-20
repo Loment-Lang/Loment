@@ -1,5 +1,14 @@
 // loment/selfhost/driver.lomt — M83/M85: 独立的自举编译器 (docs/145/150)
 //
+// ---------------------------------------------------------------------------
+// HOLY SHIT, WHAT OF SHIT
+//
+// 这一份源码**就是**那门语言的编译器：它自己装载单元、自己解析、自己检查类型、自己
+// 发射 LLVM IR —— 全程不借任何别的语言。把它的产物交给 clang 得到的 stage1 还能再编
+// 它自己，一路到定点（docs/159）；而那个 IR 必须与参考实现**逐字节相同**（docs/158 §5）。
+// 编译器写自己、又被自己编译，两份实现的输出还要一个空格都不差。
+// ---------------------------------------------------------------------------
+//
 //   ./fujoc-s loment/examples/demo.lomt > demo.ll
 //
 // 它自己做**全部装载** —— 这是它不再是"被夹具喂单元的函数"的关键:
@@ -21,13 +30,19 @@
 // 写成"先写自己再回头看依赖"会让依赖落在后面, 与参考实现的顺序不符。
 
 module driver
+choose runtime
 
 // 尺寸都用 u32 字面量: 常量在表达式里**没有类型** (参考实现的 expr_type(Ident) 只看
 // 局部/参数), 所以 `(SLOT + 64) * 20` 会被算成 i32。要么显式 `as u64`, 要么把乘积
 // 预先算成常量 —— 后者更省事也更好读。
-const SLOT: u32 = 262144;        // 每层源文件槽 (够装最大的 codegen.lomt)
+// **这一格是被撞出来的**（2026-10-11）：`codegen.lomt` 涨到 262858 字节，而槽是 262144
+// —— 只差 714，症状是**自举段错误**（`loment_seed_test` 的退出码 139），不是一句报错。
+// 槽的用途就是「装得下最大的那份源」，所以源长了就抬它（同 `TB_LBL_MAX` 那两次）。
+const SLOT: u32 = 786432;
+//: 插值改写的一次性暂存（槽顶）。一段插值字符串超过它就报错，不静默截断。
+const IW_SCRATCH: u32 = 65536;        // 每层源文件槽 (够装最大的 codegen.lomt；2026-11-08 490 KB -> 抬到 768 KiB)
 const MAXDEPTH: u32 = 8;         // 依赖深度上限
-const UNIT_CAP: u32 = 8388608;   // 单元缓冲 (含顶部 MAXDEPTH*SLOT 的槽区)
+const UNIT_CAP: u32 = 12582912;  // 单元缓冲 (含顶部 MAXDEPTH*SLOT = 6 MiB 的槽区)
 const IR_CAP: u32 = 16777216;    // IR 输出缓冲 (上界 8*单元 + 8192, 留足余量)
 const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 // 小暂存的布局 (改了偏移必须所有用点一起改 —— 它们写在同一块内存上):
@@ -45,7 +60,11 @@ const SEEN_CAP: u32 = 65536;     // 已装载路径去重表
 //   [20224, 20480) 源后缀: loment.conf 里配的那个 (NUL), 空 = 用默认 .lomt
 //   [20480, 21504) --diag-out 路径 (NUL), 空 = 不吐结构化诊断 (docs/182 §5)
 //   [21504, 23904) addin 清单 (MAX_ADDIN 条, 每条 8 字节: 起点 + 长度)
-const SCR_CAP: u32 = 23904;
+//   [23904, 24160) 命令名 (`--print-command` 抄出来的那一个, 不补 NUL)
+//   [24160, 24164) 这一次的 `--diag-out` fd **加一** (0 = 没给) ← 见 `diagfd`
+//   [24164, 24168) 版次 (0 = tur2026.1, 1 = tur2026.2, 2 = tur2026.3) ← 见 `PROF_OFF`
+//   [24168, 24172) 根单元写的拼法 (0 = 没写, 1..8 = loment/tur/tur1/tur2026.1/tur2/tur2026.2/tur3/tur2026.3)
+const SCR_CAP: u32 = 27392;
 //: 单个文件的 `use` 条数上限 (路径形式 + 名字形式合起来算), **与参考实现同值**。
 //: 超限**报错退出**, 绝不静默丢 —— 原先进程按 8 条布局, 第 9 条起直接不要, 而参考实现
 //: 无上限: 同一份源码两个实现给出不同的单元 (2026-09-16 发现)。抬到 300 是让 std 那种
@@ -65,17 +84,52 @@ const DENT_OFF: u32 = 17728;     // 目录项缓冲
 const SUBP_OFF: u32 = 18752;     // 子路径暂存
 const EXT_OFF: u32 = 20224;      // 源后缀 (loment.conf)
 const DIAG_OFF: u32 = 20480;     // --diag-out 路径
+const DIAGFD_OFF: u32 = 24160;   // 这一次的 --diag-out fd **加一** (0 = 没给)
+const PROF_OFF: u32 = 24164;     // 版次 (docs/296/306): 0 = 2026.1, 1 = 2026.2, 2 = 2026.3
+const PROF_DEFAULT: u32 = 2;     // 缺省 = 最新版次 (potato_from.DEFAULT_EDITION)
+const DECLK_OFF: u32 = 24168;    // 根单元的拼法 (0 = 没写; 见 strip_grammar_decl)
+const FPROF_OFF: u32 = 24172;    // 这份文件自己声明的版次 (0xFFFFFFFF = 没写)
+//: 根单元/`addin` 写没写运行期那一维（docs/324）。位：1 = 写了 `runtime`，
+//: 2 = 写了 `no_runtime`，4 = 同包 `pkg.lomp` 的 `runtime()` 说 `runtime`。
+//: 两个都没写（低两位为 0）而包清单要运行期时，装载器在合并单元末尾补一行
+//: `choose runtime` —— 与参考实现的 `mod.chooses` 注入同义。
+const RTDECL_OFF: u32 = 24176;
+//: 同包 `pkg.lomp` 的 `choose()` 词表（空格分隔的 ASCII）—— `cfg_pkg_choose` 写它。
+const PKGCH_OFF: u32 = 24192;
+const PKGCH_CAP: u32 = 256;
+//: 编译缓存（`docs/325`）的暂存区。键 = 单元全文 + 版次 + **编译器自身**的哈希；
+//: 命中就跳过 codegen、把缓存里的 IR 字节流到 stdout。
+// 字符串常量不存在（`const` 只吃整数）—— 用两个小函数。
+fn cache_epoch() -> str {
+    return "loment-ir-cache-v1";
+}
+
+fn cache_default_dir() -> str {
+    return "/tmp/loment-cache";
+}
+const CACHE_DIG_OFF: u32 = 24576;   // 16B 主摘要（两条 64 位 FNV 车道）
+const CACHE_EDG_OFF: u32 = 24592;   // 16B 编译器摘要
+const CACHE_KEY_OFF: u32 = 24608;   // 32B hex 键 + NUL
+const CACHE_DIR_OFF: u32 = 26784;   // 目录（NUL）—— 键占 26688..26753
+const CACHE_DIR_CAP: u32 = 128;
+const CACHE_PATH_OFF: u32 = 26912;  // <dir>/ir/<key>.ll
+const CACHE_PATH_CAP: u32 = 200;
+const CACHE_TMP_OFF: u32 = 27112;   // <dir>/ir/<key>.ll.tmp
+const CACHE_TMP_CAP: u32 = 216;
+const CACHE_BUF: u32 = 65536;
 const ADDIN_OFF: u32 = 21504;    // addin 清单起点
+const CMD_OFF: u32 = 23904;      // 命令名 (`--print-command`)
 const DIAG_CAP: u32 = 1024;      // 路径上限
 const EXT_CAP: u32 = 256;        // 源后缀上限
 const DIR_CAP: u32 = 1024;       // 项目根 / 工具目录 / 版本名 各自的上限
 const DENT_CAP: u32 = 1024;      // 目录项缓冲上限 (PE 垫片一次只回一条记录)
 const SUBP_CAP: u32 = 1472;      // 子路径上限
-const TOKS_CAP: u32 = 5244160;   // (SLOT + 64) * 20 = 单文件词法缓冲
+const TOKS_CAP: u32 = 15729920;  // (SLOT + 64) * 20 = 单文件词法缓冲
 
 use lexer
 use codegen
 use checker
+use sha256
 use comefor
 // `--emit-potato`(`docs/189` S1): 形式对象是**另一条出口**, 与 IR 平行 —— 它**不经过**
 // codegen (参考实现的 `emit_potato` 也不经过 IR 后端), 所以聚合类型那种"后端编不了"的
@@ -127,8 +181,46 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 写**必须成功**的那几条流（`#674`）：短写 = 失败，说清楚并退非零。
+///
+/// `write_all` 只知道"写了多少"；"少了"这件事只有调用方在乎，而**产物**（stdout 上的
+/// IR / 形式对象）、`--print-command` 都属这一档 —— 它们是"编译成功"这句话的**实物**。
+/// 静默短写的形状是**编译器说产物存在而它不存在**：`loment ir FILE > out.ll` 落到
+/// `/dev/full`（或配额、NFS 掉了、管道那头关了）时从前退出 0、stderr 一个字没有，
+/// 而那条重定向的下一步**没有人替它检查**。参考实现在这里抛 `OSError` 退 1，
+/// 所以那还是一处两个实现的分歧。
+fn write_checked(fd: u64, p: ptr, n: u64, what: str) -> u32 {
+    if write_all(fd, p, n) == n {
+        return 0;
+    }
+    wstr(2, "loment: cannot write ");
+    wstr(2, what);
+    wstr(2, " -- the destination refused the bytes (a full disk, a quota, or a closed pipe\n");
+    return die(1);
+}
+
+/// 面向用户的失败消息: `loment: <msg>` 换行。**前缀与换行在这儿写死**, 50 个用点各写
+/// 一遍迟早写错 —— 其中一处写错了 `write_all(2, str_ptr("fujoc-s: 打不开 "), 20)`:
+/// 那句话是 19 字节, 手数的 20 把字符串常量的 NUL 一起写了出去, 用户拿到的是
+/// `打不开 \0路径` (issue #8)。
+///
+/// 前缀是 **`loment`**(用户敲的那个命令), 不是 `fujoc-s`(自举驱动的旧内部名)。
 fn fail(msg: str) -> u32 {
-    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    wstr(2, "loment: ");
+    wstr(2, msg);
+    wstr(2, "\n");
+    return die(1);
+}
+
+/// 同 `fail`, 消息后面还要接一段**不是字符串字面量**的字节 (路径 / 名字)。
+///
+/// 长度必须由调用方给, 所以这里没有"顺手用 str_len"的余地 —— 但 `tail` 是
+/// **已经量好的切片**, 不是字符串常量, 写出去的就是它自己, 不带任何尾巴。
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    wstr(2, "loment: ");
+    wstr(2, msg);
+    write_all(2, tail, n as u64);
+    wstr(2, "\n");
     return die(1);
 }
 
@@ -171,23 +263,72 @@ fn has_extblock(src: ptr, t: ptr, nt: u32) -> u32 {
 /// （`divzero` / `oom` / …），而 `fail` 只收一个现成的 `str`，拼不出来 —— 所以直接往
 /// stderr 写三段。种类名走 `cf_err_name`（`comefor` 转出来的 `interp` 那份表），
 /// **不另抄一份**：那张表正是"两边连错误的种类都要一致"的凭据。
-fn comefor_fail(re: u32, code: u32) -> u32 {
+fn comefor_fail(re: u32, code: u32, scr: ptr, dfd: i64, file: ptr, fnam: u32) -> u32 {
     if re == 7 {
-        let _a: u64 = wstr(2, "fujoc-s: comefor 的宏体没跑成: ");
+        let _a: u64 = wstr(2, "loment: the comefor macro body did not run: ");
         let _b: u64 = wstr(2, cf_err_name(code));
         let _c: u64 = wstr(2, "\n");
         return die(1);
     }
-    if re == 2 { return fail("fujoc-s: comefor 只能写在顶层 (docs/184 第 1 节)\n"); }
-    if re == 3 { return fail("fujoc-s: comefor 的体没闭合 (少一个 })\n"); }
-    if re == 4 { return fail("fujoc-s: comefor 的方言太多了 (上限 64 个)\n"); }
-    if re == 5 { return fail("fujoc-s: byuse 只能写在顶层 (与 comefor 同层)\n"); }
-    if re == 6 { return fail("fujoc-s: byuse 收的不是任何在用的方言\n"); }
-    if re == 9 { return fail("fujoc-s: comefor 的宏体太大 (上限 300 token)\n"); }
-    if re == 10 {
-        return fail("fujoc-s: comefor 的体里暂时不支持 use —— 帮手 fn 写在体里面\n");
+    if re == 2 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor must be written at the top level";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
     }
-    return fail("fujoc-s: comefor 吞掉的 token 比剩下的还多\n");
+    if re == 3 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor's body is not closed (missing a `}`)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 4 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "too many comefor dialects (limit is 64)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 5 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "byuse must be written at the top level (same level as comefor)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 6 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "byuse names a dialect that nothing is using";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 9 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor's macro body is too large (limit is 300 tokens)";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    if re == 10 {
+        // **两个受众都要有**（`#657`）：给人看的那一行在 stderr，结构化那一份
+        // 进 `--diag-out`。从前这九支只写 stderr —— 于是 `--json` / `--short`
+        // 拿到一个空文件配一个非零退出码，而那正是差错系统存在要避免的组合。
+        let m: str = "comefor's body does not take `use` yet -- write the helper fn inside the body";
+        wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+        return fail(m);
+    }
+    let m: str = "comefor consumed more tokens than were left";
+    wdiag_at(dfd, scr, file, fnam, 0, 999, str_ptr(m), str_len(m));
+    return fail(m);
 }
 
 /// 写一个 str 到 fd (长度交给 str_len —— 手数字节数会连字符串常量的 NUL 一起写出去)。
@@ -223,8 +364,7 @@ fn whex2(fd: u64, v: u32) -> u64 {
 ///
 /// 控制字节一律走 `\u00XX` 而**不是**替换成空格: 替换是**悄悄改内容**, 而这条链上
 /// 唯一的底气就是"报出来的东西和源码里的一致"。
-fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
-    let _q: u64 = wstr(fd, "\"");
+fn wjson_bytes(fd: u64, p: ptr, n: u32) -> u64 {
     let i: u32 = 0;
     while i < n {
         let c: u32 = load8(p, i) as u32;
@@ -240,6 +380,25 @@ fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
         }
         i = i + 1;
     }
+    return i as u64;
+}
+
+fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
+    let _q: u64 = wstr(fd, "\"");
+    let _b: u64 = wjson_bytes(fd, p, n);
+    return wstr(fd, "\"");
+}
+
+/// 同 `wjson_str`，但内容由**两段**拼成：一段字符串字面量（消息前缀）+ 一段来自源码的
+/// 字节（解析不到的名字）。两段之间没有分隔符 —— 调用方自己把冒号与空格写进前缀。
+///
+/// 为什么需要它（`#50`）：`use <名字>` 解析失败原先只把前缀写进 JSON，名字只出现在
+/// stderr 那行里。下游按 `message` 显示诊断时，看到的是"找不到，或是有歧义："，
+/// **没说是哪个名字** —— 而那正是用户要改的那一处。
+fn wjson_str2(fd: u64, p: ptr, n: u32, q: ptr, m: u32) -> u64 {
+    let _o: u64 = wstr(fd, "\"");
+    let _a: u64 = wjson_bytes(fd, p, n);
+    let _b: u64 = wjson_bytes(fd, q, m);
     return wstr(fd, "\"");
 }
 
@@ -249,6 +408,13 @@ fn wjson_str(fd: u64, p: ptr, n: u32) -> u64 {
 /// 那是 `docs/158` §4 记着的既有分叉, 判据比的是**码**。
 fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
          line: u32, code: u32, frag: ptr, fl: u32) -> u64 {
+    return wdiag_tail(fd, scr, file, fnam, line, code, frag, fl, frag, 0);
+}
+
+/// 同 `wdiag`，但 `message` 后面还接一段**不是字符串字面量**的字节（解析不到的名字）。
+/// 空尾巴（`tl == 0`）时与 `wdiag` 逐字节相同。
+fn wdiag_tail(fd: u64, scr: ptr, file: ptr, fnam: u32,
+              line: u32, code: u32, frag: ptr, fl: u32, tail: ptr, tl: u32) -> u64 {
     let _a: u64 = wstr(fd, "{\"file\":");
     let _b: u64 = wjson_str(fd, file, fnam);
     let _c: u64 = wstr(fd, ",\"line\":");
@@ -259,15 +425,166 @@ fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
     // `loment_diag.RULES`(唯一真源), 那里就是三位; CLI 显示成 `E22` 是**呈现层**的事。
     // 这条是判据**第一次跑就抓出来的**: 原先这里直接 wdec, 报
     // "自举 ['E22'] vs 参考 ['E022']" —— 同一件事两个实现给出不同的字符串。
+    // 2026-11-10 起码表细分（`docs/338`）：< 100 是 `E0xx`、>= 100 是 `E0xxx`，
+    // 所以 100..999 也要补一位。
     if code < 10 {
         let _p1: u64 = wstr(fd, "00");
-    } else if code < 100 {
-        let _p2: u64 = wstr(fd, "0");
+    } else {
+        if code < 1000 {
+            let _p2: u64 = wstr(fd, "0");
+        }
     }
     let _f: u64 = wdec(fd, scr, code);
     let _g: u64 = wstr(fd, "\",\"message\":");
-    let _h: u64 = wjson_str(fd, frag, fl);
+    let _h: u64 = wjson_str2(fd, frag, fl, tail, tl);
     return wstr(fd, "}\n");
+}
+
+/// 这一次的 `--diag-out` fd（`scr` 里存的是 fd **加一**，0 = 没给，见 `DIAGFD_OFF`）。
+///
+/// **为什么要经内存传、不当参数**：用它的地方散在 `load_file` 的递归里，而 `dfd` 是
+/// `main` 的局部量 —— 与 `snc` 那条同一个理由（Loment 没有 out 参数、没有可变全局，
+/// 按值传会让递归的兄弟各拿一份）。装载器本来就一路带着 `scr`。
+fn diagfd(scr: ptr) -> i64 {
+    let v: u32 = load32(scr, DIAGFD_OFF);
+    if v == 0 {
+        return 0 as i64 - 1;
+    }
+    let w: i64 = v as i64;
+    return w - 1;
+}
+
+/// 一条**没有源码位置**的失败：结构化那一份写进 `--diag-out`（`line` 0 = 没有位置，
+/// 报错器据此不印 `:行号`）。
+///
+/// 给人看的那一行仍由 `fail` / `failp` 打 —— **两个都要**：包里走启动器时由报错器
+/// 渲染，而直接跑 `loment-driver` 的人手上没有报错器，把话只留在 JSONL 里等于没报
+/// （参考实现也是两边都写，见 `lomentc.main`）。
+fn wdiag_at(fd: i64, scr: ptr, file: ptr, fnam: u32, line: u32, code: u32,
+            msgp: ptr, msgn: u32) {
+    if fd >= 0 {
+        let _r: u64 = wdiag(fd as u64, scr, file, fnam, line, code, msgp, msgn);
+    }
+}
+
+/// 同上，但 `message` 后面再接一段**已经量好的切片**（解析不到的名字）——
+/// 与 `failp` 那一对同一个理由：名字不在字符串字面量里，长度只能由调用方给。
+fn wdiag_at_tail(fd: i64, scr: ptr, file: ptr, fnam: u32, line: u32, code: u32,
+                 msgp: ptr, msgn: u32, tail: ptr, tl: u32) {
+    if fd >= 0 {
+        let _r: u64 = wdiag_tail(fd as u64, scr, file, fnam, line, code,
+                                 msgp, msgn, tail, tl);
+    }
+}
+
+/// 同上，位置那一格给 0（= 没有位置）。**指不出位置就别编一个** —— `lomenterr` 的
+/// `num_raw` 就是这个口径（`line`/`col` 为 0 = 没位置），而渲染器见 0 就不印 `:行号`。
+fn wdiag_file(fd: i64, scr: ptr, file: ptr, fnam: u32, code: u32, msgp: ptr, msgn: u32) {
+    wdiag_at(fd, scr, file, fnam, 0, code, msgp, msgn);
+}
+
+/// `wdiag_file` + 尾巴，理由同上。
+fn wdiag_file_tail(fd: i64, scr: ptr, file: ptr, fnam: u32, code: u32,
+                   msgp: ptr, msgn: u32, tail: ptr, tl: u32) {
+    wdiag_at_tail(fd, scr, file, fnam, 0, code, msgp, msgn, tail, tl);
+}
+
+/// 会把运行期拖进产物的构造 → **人话**（issue #321）。照抄参考实现 `tools/lomentc.py`
+/// 的 `_RUNTIME_SITES` —— 报文的正文要的是"除法 `/`"这一句，不是那一格 token 原文，而两边
+/// 要逐字节一致。不是那八个之一就回空串（**判据**：那说明这一格的 token 不在名单里，
+/// 报文才退回 token 原文；`E031` 这一档的正常输入永远命得中）。
+fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
+    if tok_is(slot, toks, tk, "/") { return "除法 `/`"; }
+    if tok_is(slot, toks, tk, "%") { return "取模 `%`"; }
+    if tok_is(slot, toks, tk, "alloc") { return "`alloc`"; }
+    if tok_is(slot, toks, tk, "free") { return "`free`"; }
+    if tok_is(slot, toks, tk, "str_concat") { return "`str_concat`"; }
+    if tok_is(slot, toks, tk, "str_eq") { return "`str_eq`"; }
+    if tok_is(slot, toks, tk, "panic") { return "`panic`"; }
+    if tok_is(slot, toks, tk, "guard") { return "`guard`（能力域守卫）"; }
+    if tok_is(slot, toks, tk, "tick") { return "`tick`（虚拟钟）"; }
+    if tok_is(slot, toks, tk, "quality") { return "`quality`（自适应域的质量）"; }
+    if tok_is(slot, toks, tk, "discharge") { return "`discharge`（可达域义务）"; }
+    if tok_is(slot, toks, tk, "revoke") { return "`revoke`（撤销）"; }
+    return "";
+}
+
+/// **解析类诊断的正文也要说到"是什么构造"**（`#702`）。
+///
+/// 这一格原先只印**那一格 token 原文**：裸 `return;` 报 `;`、120 层嵌套报 `{` ——
+/// 都"有声"，却没有一句说得出发生了什么。标准是 `#343` 的那条："每一条要么能跑，
+/// 要么失败时**点名构造**并**指到一行**"。
+///
+/// 只认这里能**确定**判定的形状（判据与 `checker.lomt` 的语法前置趟同源）：
+///   * `E23` = 嵌套深度上限，正文自带那半句（与参考实现同一个词「嵌套超过」）；
+///   * `E19` 的裸 `return;` —— 参考实现报「期望表达式，得到 ';'」；
+///   * `E19` 的裸块 `{` —— 参考实现报「期望表达式，得到 '{'」。
+///
+/// 其余的 `E19` 照旧退回 token 原文：那里分不出是哪一种语法错，编一句更具体的话
+/// 反而会**指错**（与"错要指在错的地方"同一条纪律）。
+fn err_phrase(slot: ptr, toks: ptr, tk: u32, code: u32) -> str {
+    // match 级诊断统一落在 `match` 那一行（`checker.chk_match`），token 就是 `match`：
+    // 具体是哪一种（无此变体 / 重复 / 不穷尽 / 载荷元数）在 token 上分不出来，正文给
+    // 一句通用说法，与参考实现那几条消息同一个意思。细分码 111–118 全属 E008。
+    if code >= 111 && code <= 118 && tok_is(slot, toks, tk, "match") {
+        return "match 的模式不合法，或漏了变体 —— 每个变体写一个臂，或用 `_` 通配";
+    }
+    if code == 23 {
+        return "嵌套超过 64 层 —— 编译器是递归下降的，再深就要把栈用穿了；把中间那几层提成函数，或把这段拆开";
+    }
+    // 效应五条细分码（`docs/346` A2b；与 `loment_diag.FINE` 210–214 同号）。
+    if code == 217 {
+        return "效应处理器的运行期还没有实现（docs/346 的 A3）—— 先删掉 perform / handle / resume，或等 A3";
+    }
+    if code == 218 {
+        return "效应行不能穿越 extern（docs/346 §6 R7）—— C 侧没有证据记录";
+    }
+    if code == 219 {
+        return "效应名重复定义 —— 同一个 effect 在一个单元里声明了两次";
+    }
+    if code == 220 {
+        return "同一效应里的操作重复定义 —— 一个 effect 体里有两个同名 fn";
+    }
+    if code == 221 {
+        return "effects 行引用了未声明的效应 —— 补一个 effect 声明，或改名字";
+    }
+    if code == 41 {
+        return "借用的区域不成立 —— 返回的借用只能来自形参；借用生命周期域里还有三条：共享域只能读、独占域不能再借、域里的借用不能带出；窗口下标不能越界，两半不能重叠；另外，借用作泛型实参（`Box<&T>` / `Box<[T]>`）自举侧还不收（`docs/299` / `docs/318`）";
+    }
+    if code == 19 {
+        if tok_is(slot, toks, tk, ";") && tk > 0 && tok_is(slot, toks, tk - 1, "return") {
+            return "期望表达式，得到 ';' —— 裸 `return;` 不是合法构造，`return` 必须带一个值";
+        }
+        if tok_is(slot, toks, tk, "{") && tk > 0
+                && (tok_is(slot, toks, tk - 1, "{") || tok_is(slot, toks, tk - 1, "}")
+                    || tok_is(slot, toks, tk - 1, ";")) {
+            return "期望表达式，得到 '{' —— 单独一层花括号不是语句";
+        }
+    }
+    return "";
+}
+
+/// `E031`（默认档下用了会拖运行期的构造）的**结构化**诊断 —— 正文是**一句话**，不是
+/// token（issue #321）。与参考实现 `check()` 里那条 f-string 逐字节同形：
+/// `{line}: 声明了 …—— {name}（…）。`
+/// +（`nsites > 1` 时）`这一类构造本单元另有 {nsites-1} 处。` + `要运行期就在根单元写 …`。
+/// 分段直接写 fd（**不另开缓冲**：`scr` 那块排得很密，没有 200 字节的连续空位）。
+fn wdiag_rt(fd: u64, scr: ptr, file: ptr, fnam: u32, line: u32, ph: str, nsites: u32) -> u64 {
+    let _a: u64 = wstr(fd, "{\"file\":");
+    let _b: u64 = wjson_str(fd, file, fnam);
+    let _c: u64 = wstr(fd, ",\"line\":");
+    let _d: u64 = wdec(fd, scr, line);
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E031\",\"message\":\"");
+    let _f: u64 = wdec(fd, scr, line);
+    let _g: u64 = wstr(fd, ": 声明了 `no_runtime`，但它会让产物带上运行期 —— ");
+    let _h: u64 = write_all(fd, str_ptr(ph), str_len(ph) as u64);
+    let _i: u64 = wstr(fd, "（`no_runtime` 是**保证**：产物里不许出现那段运行期）。");
+    if nsites > 1 {
+        let _j: u64 = wstr(fd, "这一类构造本单元另有 ");
+        let _k: u64 = wdec(fd, scr, nsites - 1);
+        let _l: u64 = wstr(fd, " 处。");
+    }
+    return wstr(fd, "要运行期就在根单元写 `choose runtime`；不要就把这个构造换掉\"}\n");
 }
 
 /// u32 十进制写到 fd (诊断里要报错误码与行号; 驱动器里没有 printf)。
@@ -363,6 +680,23 @@ fn streq(p: ptr, n: u32, s: str) -> u32 {
     let sp: ptr = str_ptr(s);
     while i < n {
         if (load8(p, i) as u32) != (load8(sp, i) as u32) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+
+/// `p[0..n]` 以字面量 `s` 结尾吗（发行版锁用它认 `.lls`）。
+fn has_suffix(p: ptr, n: u32, s: str) -> u32 {
+    let m: u32 = str_len(s);
+    if n < m {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < m {
+        if load8(p, n - m + i) != str_byte(s, i) {
             return 0;
         }
         i = i + 1;
@@ -530,10 +864,13 @@ fn decl_alias(buf: ptr, s: u32, e: u32) -> u32 {
     return blank_skip(buf, p, e);
 }
 
-fn strip_grammar_decl(buf: ptr, n: u32) -> u32 {
+fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u32) -> u32 {
     let saw_module: u32 = 0;
     let seen: u32 = 0;
     let i: u32 = 0;
+    // **这份文件自己写的是哪一版**（`FPROF_OFF`）：-1 = 没写。与整程序的
+    // `PROF_OFF` 分开 —— 碰撞闸要看的是"这份源有没有把读法钉在生效版次上"。
+    store32(scr, FPROF_OFF, 4294967295);
     while i < n {
         let e: u32 = i;
         while e < n && load8(buf, e) != 10 {
@@ -549,14 +886,35 @@ fn strip_grammar_decl(buf: ptr, n: u32) -> u32 {
                     && load8(buf, ae) != 59 {
                 ae = ae + 1;
             }
-            // **原生拼法有两个**（`potato_from.NATIVE_GRAMMARS`）：`loment` 与 `rust`。
-            // `rust` 在这里**不需要别的东西配** —— 它就是基础语法的一种拼法（用户
-            // 2026-09-22 的裁定），所以自举侧收它的**理由与收 `loment` 是同一条**：
-            // 抹掉那一行之后交给原生的 lexer/parser，**没有翻译器参与**。
-            // （别的拼法仍要等翻译器的 Loment 孪生，docs/189 §4.1。）
+            // **原生拼法是规范名 + 当年短名**（`potato_from.GRAMMAR_ALIASES` / `docs/296`
+            // §1.1）：`loment`、`tur`、`tur1`、`tur2026.1` 是 Tur 1；`tur2`、`tur2026.2`
+            // 是 Tur 2；`tur3`、`tur2026.3` 是 Tur 2026.3（`docs/309`，继承 2026.2 的
+            // 全部语法）。抹掉那一行之后交给原生的 lexer/parser，**没有翻译器参与**。
+            // （`rust` 已退回表层语法；别的拼法仍要等翻译器的 Loment 孪生，docs/189 §4.1。）
+            //
+            // **版次是整程序属性**：装载器把各单元拼成一条 token 流，之后一趟读到底，
+            // 所以只有根单元的声明算数（依赖本来也不许写 `choose`）。与参考实现一致 ——
+            // 那边每个 Module 各带 profile，但依赖的声明同样进不了编译。
             let nat: u32 = streq(ptr_add(buf, al), ae - al, "loment")
-                          + streq(ptr_add(buf, al), ae - al, "rust");
+                          + streq(ptr_add(buf, al), ae - al, "tur")
+                          + streq(ptr_add(buf, al), ae - al, "tur1")
+                          + streq(ptr_add(buf, al), ae - al, "tur2026.1")
+                          + streq(ptr_add(buf, al), ae - al, "tur2")
+                          + streq(ptr_add(buf, al), ae - al, "tur2026.2")
+                          + streq(ptr_add(buf, al), ae - al, "tur3")
+                          + streq(ptr_add(buf, al), ae - al, "tur2026.3");
             if saw_module == 0 && seen == 0 && nat != 0 {
+                // **先读版次与拼法，再抹**：抹成空白之后别名就没了。
+                let is2: u32 = streq(ptr_add(buf, al), ae - al, "tur2")
+                             + streq(ptr_add(buf, al), ae - al, "tur2026.2");
+                let is3: u32 = streq(ptr_add(buf, al), ae - al, "tur3")
+                             + streq(ptr_add(buf, al), ae - al, "tur2026.3");
+                let isl: u32 = streq(ptr_add(buf, al), ae - al, "loment");
+                let ist: u32 = streq(ptr_add(buf, al), ae - al, "tur");
+                let is1a: u32 = streq(ptr_add(buf, al), ae - al, "tur1");
+                let is1b: u32 = streq(ptr_add(buf, al), ae - al, "tur2026.1");
+                let is2a: u32 = streq(ptr_add(buf, al), ae - al, "tur2");
+                let is3a: u32 = streq(ptr_add(buf, al), ae - al, "tur3");
                 // **抹成等长空白**（保留换行 ⇒ 行号不漂，报错仍指得到那一行）
                 let z: u32 = i;
                 while z < e {
@@ -566,13 +924,1082 @@ fn strip_grammar_decl(buf: ptr, n: u32) -> u32 {
                     z = z + 1;
                 }
                 seen = 1;
+                // **这份文件声明的版次**（含 `loment` = 默认）。先记下来，
+                // 碰撞闸之后要拿它跟生效版次比（`load_file`）。
+                if is3 != 0 {
+                    store32(scr, FPROF_OFF, 2);
+                } else if is2 != 0 {
+                    store32(scr, FPROF_OFF, 1);
+                } else if (ist + is1a + is1b) != 0 {
+                    store32(scr, FPROF_OFF, 0);
+                } else {
+                    store32(scr, FPROF_OFF, PROF_DEFAULT);
+                }
+                if root != 0 {
+                    // **默认 = 最新那一版**（`potato_from.DEFAULT_EDITION`）：
+                    // `loment` 与没声明都不写 PROF，留在初值上。显式写了旧版次的
+                    // 才往下压 —— `tur` / `tur1` / `tur2026.1` 必须显式压回 0，
+                    // 因为缺省已经不是 Tur 1 了。
+                    if is3 != 0 {
+                        store32(scr, PROF_OFF, 2);      // tur3 / tur2026.3
+                    } else if is2 != 0 {
+                        store32(scr, PROF_OFF, 1);      // tur2 / tur2026.2
+                    } else if (ist + is1a + is1b) != 0 {
+                        store32(scr, PROF_OFF, 0);      // tur / tur1 / tur2026.1
+                    }
+                    // 拼法代号：编译期提示要把它展开成规范名（docs/296 §1.1）。
+                    if isl != 0 {
+                        store32(scr, DECLK_OFF, 1);
+                    } else if ist != 0 {
+                        store32(scr, DECLK_OFF, 2);
+                    } else if is1a != 0 {
+                        store32(scr, DECLK_OFF, 3);
+                    } else if is1b != 0 {
+                        store32(scr, DECLK_OFF, 4);
+                    } else if is2a != 0 {
+                        store32(scr, DECLK_OFF, 5);
+                    } else if is3a != 0 {
+                        store32(scr, DECLK_OFF, 7);
+                    } else if is3 != 0 {
+                        store32(scr, DECLK_OFF, 8);
+                    } else {
+                        store32(scr, DECLK_OFF, 6);
+                    }
+                }
             } else {
-                return fail("fujoc-s: 这份源的 `choose write grammar` 自举侧收不了 —— 只收 `choose write grammar loment` 这一种拼法（写在 `module` 之前、只写一次）。别的拼法/写法要等翻译器的 Loment 孪生（docs/189 §4.1），形状的规矩见 docs/188 §1。请用参考实现编译。\n");
+                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`, `tur3`, `tur2026.3`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
+                wdiag_file(diagfd(scr), scr, file, fnam, 23, str_ptr(dm), str_len(dm));
+                return fail(dm);
             }
         }
         i = e + 1;
     }
     return n;
+}
+
+// ---------------------------------------------------------------- 版次碰撞闸
+//
+// `potato_from.edition_collision_hits` 的自举孪生：无声明单元里**声明**了新版次的
+// 关键字时拒编译（`let break = 1; while c { break; }` 是静默改义的最小一例）。
+// 只看声明位置；**用**这些名字不触发 —— 循环里的 `break;` 正是新版次要的写法。
+
+/// 这个 token 是"被声明的新版关键字"吗？是就返回下标 + 1（0 = 不是）。
+fn coll_hit_at(src: ptr, toks: ptr, nt: u32, i: u32, prof: u32) -> u32 {
+    let p: ptr = ptr_add(src, load32(toks, i * 20 + 4));
+    let n: u32 = load32(toks, i * 20 + 8);
+    let hit: u32 = 0;
+    if prof >= 1 {
+        if streq(p, n, "break") != 0 || streq(p, n, "continue") != 0
+                || streq(p, n, "defer") != 0 || streq(p, n, "print_num") != 0 {
+            hit = 1;
+        }
+    }
+    if prof >= 2 && streq(p, n, "lgc") != 0 {
+        hit = 1;
+    }
+    if hit == 0 {
+        return 0;
+    }
+    // `let` / `const` / `fn` / `for` 后面的那个名字。
+    if i > 0 && load32(toks, (i - 1) * 20) == 0 {
+        let q: ptr = ptr_add(src, load32(toks, (i - 1) * 20 + 4));
+        let m: u32 = load32(toks, (i - 1) * 20 + 8);
+        if streq(q, m, "let") != 0 || streq(q, m, "const") != 0
+                || streq(q, m, "fn") != 0 || streq(q, m, "for") != 0 {
+            return i + 1;
+        }
+    }
+    // `(` / `,` 后面紧跟 `:` 的参数名（字段名也落这一格 —— 宁可多拒一次）。
+    if i > 0 && load32(toks, (i - 1) * 20) == 3
+            && load32(toks, (i - 1) * 20 + 8) == 1 {
+        let c0: u32 = load8(src, load32(toks, (i - 1) * 20 + 4));
+        if (c0 == 40 || c0 == 44) && i + 1 < nt && load32(toks, (i + 1) * 20) == 3
+                && load32(toks, (i + 1) * 20 + 8) == 1 {
+            let c1: u32 = load8(src, load32(toks, (i + 1) * 20 + 4));
+            if c1 == 58 {
+                return i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// 扫整条 token 流；返回第一个碰撞 token 的下标 + 1（0 = 没有）。
+fn coll_scan(src: ptr, toks: ptr, nt: u32, prof: u32) -> u32 {
+    let i: u32 = 0;
+    while i < nt {
+        if load32(toks, i * 20) == 0 {
+            let h: u32 = coll_hit_at(src, toks, nt, i, prof);
+            if h != 0 {
+                return h;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- Tur 2 纯糖（docs/296 §2.1）
+//
+// 与参考实现 `potato_from._tur2_sugar` **同一条规则表**：只改词、等长改写，行/列/偏移不动；
+// 只在算子/构造位置改，名字位置仍是标识符；`def` 只认顶层。词法 token 判位置
+// （字符串与注释里的同名文本不是 token）。两套实现的判据是产物逐字节相同。
+
+/// `toks[i]` 是单字节标点 `ch` 吗。
+fn sug_punct(src: ptr, toks: ptr, i: u32, ch: u32) -> u32 {
+    if load32(toks, i * 20) != 3 || load32(toks, i * 20 + 8) != 1 {
+        return 0;
+    }
+    if load8(src, load32(toks, i * 20 + 4)) == ch {
+        return 1;
+    }
+    return 0;
+}
+
+/// 不可能**结束**一个表达式的词（与参考实现 `_NOT_EXPR_END` 同一份）。
+fn sug_kw(p: ptr, n: u32) -> u32 {
+    return streq(p, n, "return") + streq(p, n, "if") + streq(p, n, "else")
+         + streq(p, n, "while") + streq(p, n, "for") + streq(p, n, "in")
+         + streq(p, n, "match") + streq(p, n, "let") + streq(p, n, "const")
+         + streq(p, n, "fn") + streq(p, n, "pub") + streq(p, n, "use")
+         + streq(p, n, "as") + streq(p, n, "mut") + streq(p, n, "and")
+         + streq(p, n, "or") + streq(p, n, "not") + streq(p, n, "def")
+         + streq(p, n, "elif") + streq(p, n, "guard") + streq(p, n, "capability")
+         + streq(p, n, "excluded") + streq(p, n, "revocable")
+         + streq(p, n, "struct") + streq(p, n, "enum") + streq(p, n, "trait")
+         + streq(p, n, "impl") + streq(p, n, "extern") + streq(p, n, "break")
+         + streq(p, n, "continue");
+}
+
+/// `toks[i]` 能**结束**一个表达式吗。
+fn sug_end(src: ptr, toks: ptr, i: u32) -> u32 {
+    let k: u32 = load32(toks, i * 20);
+    if k == 1 || k == 2 {
+        return 1;
+    }
+    if k == 0 {
+        if sug_kw(ptr_add(src, load32(toks, i * 20 + 4)), load32(toks, i * 20 + 8)) != 0 {
+            return 0;
+        }
+        return 1;
+    }
+    if sug_punct(src, toks, i, 41) == 1 || sug_punct(src, toks, i, 93) == 1 {
+        return 1;                      // ) ]
+    }
+    return 0;
+}
+
+/// `toks[i]` 能**开始**一个表达式吗。
+fn sug_start(src: ptr, toks: ptr, i: u32) -> u32 {
+    let k: u32 = load32(toks, i * 20);
+    if k == 0 || k == 1 || k == 2 {
+        return 1;
+    }
+    if sug_punct(src, toks, i, 40) == 1 || sug_punct(src, toks, i, 33) == 1
+            || sug_punct(src, toks, i, 45) == 1 {
+        return 1;                      // ( ! -
+    }
+    return 0;
+}
+
+/// `toks[i]` 是 `.` 吗（字段访问：`x.not` 里的 `not` 是字段名，不是算子）。
+fn sug_dot(src: ptr, toks: ptr, i: u32) -> u32 {
+    return sug_punct(src, toks, i, 46);
+}
+
+/// 把 Tur 2 的纯糖就地抹成基础拼法，返回改了几处。
+fn tur2_sugar(src: ptr, toks: ptr, nt: u32) -> u32 {
+    let edits: u32 = 0;
+    let depth: u32 = 0;
+    let i: u32 = 0;
+    while i < nt && load32(toks, i * 20) != 4 {
+        let k: u32 = load32(toks, i * 20);
+        if k == 3 {
+            if sug_punct(src, toks, i, 123) == 1 {
+                depth = depth + 1;
+            }
+            if sug_punct(src, toks, i, 125) == 1 {
+                depth = depth - 1;
+            }
+        } else if k == 0 {
+            let p: ptr = ptr_add(src, load32(toks, i * 20 + 4));
+            let ln: u32 = load32(toks, i * 20 + 8);
+            let at: u32 = load32(toks, i * 20 + 4);
+            if streq(p, ln, "def") == 1 {
+                if depth == 0 && i + 2 < nt && load32(toks, (i + 1) * 20) == 0
+                        && sug_punct(src, toks, i + 2, 40) == 1 {
+                    store8(src, at, 102 as u8);        // f
+                    store8(src, at + 1, 110 as u8);    // n
+                    store8(src, at + 2, 32 as u8);     // space
+                    edits = edits + 1;
+                }
+            } else if streq(p, ln, "elif") == 1 {
+                if i > 0 && sug_punct(src, toks, i - 1, 125) == 1
+                        && sug_start(src, toks, i + 1) == 1 {
+                    store8(src, at, 101 as u8);        // e
+                    store8(src, at + 1, 108 as u8);    // l
+                    store8(src, at + 2, 115 as u8);    // s
+                    store8(src, at + 3, 101 as u8);    // e
+                    edits = edits + 1;
+                }
+            } else if streq(p, ln, "and") == 1 || streq(p, ln, "or") == 1 {
+                if i > 0 && sug_dot(src, toks, i - 1) == 0 && sug_end(src, toks, i - 1) == 1
+                        && sug_start(src, toks, i + 1) == 1 {
+                    if streq(p, ln, "and") == 1 {
+                        store8(src, at, 38 as u8);     // &
+                        store8(src, at + 1, 38 as u8);
+                        store8(src, at + 2, 32 as u8);
+                    } else {
+                        store8(src, at, 124 as u8);    // |
+                        store8(src, at + 1, 124 as u8);
+                    }
+                    edits = edits + 1;
+                }
+            } else if streq(p, ln, "not") == 1 {
+                let pre: u32 = 0;
+                if i > 0 && (sug_dot(src, toks, i - 1) == 1 || sug_end(src, toks, i - 1) == 1) {
+                    pre = 1;
+                }
+                if pre == 0 && sug_start(src, toks, i + 1) == 1 {
+                    store8(src, at, 33 as u8);         // !
+                    store8(src, at + 1, 32 as u8);
+                    store8(src, at + 2, 32 as u8);
+                    edits = edits + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return edits;
+}
+
+// ---------------------------------------------------------------------------
+// 字符串插值的前端改写（`docs/341`）
+//
+// `f"a{x}b"` 不是语法构造，是**读法**：把整段（前缀 + 字符串）改写成
+// `str_concat(str_concat("a", str_show(x)), "b")`，于是后面每一层一行都不动。
+// 与参考实现 `tools/loment_fstr.py` **逐字节同输出** —— 那是 IR 逐字节相同的前提。
+//
+// **在原地改**（槽 [0, sunit) 是这份文件的源）：先量出新长度，再把尾巴挪开/挪拢
+// （`iw_move` 处理重叠），最后把改写结果写回去。往右挪是常态（孔比原文长）。
+//
+// 行号不变（改写从不插换行，跨行的插值字符串与跨行的孔一律拒），列号在参考侧由
+// `ColMap` 映射回去；自举侧的诊断本来只带行号。
+// ---------------------------------------------------------------------------
+
+/// 标识符字节：字母 / 数字 / `_`。
+fn iw_idb(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return 1;
+    }
+    if c >= 97 && c <= 122 {
+        return 1;
+    }
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    if c == 95 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 字节位置 → 行号（只在报错路径上跑，O(n) 无所谓）。
+fn iw_line(buf: ptr, pos: u32) -> u32 {
+    let i: u32 = 0;
+    let l: u32 = 1;
+    while i < pos {
+        if load8(buf, i) as u32 == 10 {
+            l = l + 1;
+        }
+        i = i + 1;
+    }
+    return l;
+}
+
+/// 改写期的错误：结构化诊断 + stderr + 退出。码 19 = 词法/解析期（`loment_diag` E019）。
+fn iw_die(buf: ptr, pos: u32, scr: ptr, file: ptr, fnam: u32, msg: str) -> u32 {
+    let ln: u32 = iw_line(buf, pos);
+    let dfd: i64 = diagfd(scr);
+    wdiag_at(dfd, scr, file, fnam, ln, 19, str_ptr(msg), str_len(msg));
+    failp(msg, file, fnam);
+    return die(1);
+}
+
+/// 普通字符串：`i` 在开引号，返回闭引号之后；0 = 没闭合。
+fn iw_str_end(buf: ptr, i: u32, n: u32) -> u32 {
+    let j: u32 = i + 1;
+    let r: u32 = 0;
+    while j < n && r == 0 {
+        let c: u32 = load8(buf, j) as u32;
+        if c == 92 && j + 1 < n {
+            j = j + 2;
+        } else if c == 34 {
+            r = j + 1;
+        } else {
+            j = j + 1;
+        }
+    }
+    return r;
+}
+
+/// `[]` 运算符里的符号（判调试图的 `=` 前面是不是算子）。
+fn iw_opsym(c: u32) -> u32 {
+    if c == 61 || c == 33 || c == 60 || c == 62 || c == 43 || c == 45
+            || c == 42 || c == 47 || c == 37 || c == 38 || c == 124 || c == 94 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 转义表（与 `lomc._ESCAPES` 同一条）：`\n \t \r \0 \\ \"`。
+fn iw_esc_ok(c: u32) -> u32 {
+    if c == 110 || c == 116 || c == 114 || c == 48 || c == 92 || c == 34 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 孔的终点。`j` 在 `{`。返回闭 `}` **之后**的下标；`n+1` = 没闭合；
+/// `n+2` = 跨行；`n+3` = 顶层 `:`（格式说明，下一阶段）。
+fn iw_hole_end(buf: ptr, j: u32, n: u32) -> u32 {
+    let k: u32 = j + 1;
+    let d: u32 = 0;
+    let r: u32 = 0;
+    while k < n && r == 0 {
+        let c: u32 = load8(buf, k) as u32;
+        if c == 10 {
+            r = n + 2;
+        } else if c == 34 {
+            let e: u32 = iw_str_end(buf, k, n);
+            if e == 0 {
+                r = n + 1;
+            } else {
+                k = e;
+            }
+        } else if c == 47 && k + 1 < n && load8(buf, k + 1) as u32 == 47 {
+            let e: u32 = k;
+            while e < n && load8(buf, e) as u32 != 10 {
+                e = e + 1;
+            }
+            k = e;
+        } else if c == 47 && k + 1 < n && load8(buf, k + 1) as u32 == 42 {
+            let e: u32 = k + 2;
+            let done: u32 = 0;
+            while e + 1 < n && done == 0 {
+                if load8(buf, e) as u32 == 42 && load8(buf, e + 1) as u32 == 47 {
+                    done = 1;
+                } else {
+                    e = e + 1;
+                }
+            }
+            if done == 0 {
+                r = n + 1;
+            } else {
+                k = e + 2;
+            }
+        } else if c == 123 || c == 40 || c == 91 {
+            d = d + 1;
+            k = k + 1;
+        } else if c == 125 || c == 41 || c == 93 {
+            if c == 125 && d == 0 {
+                r = k + 1;
+            } else {
+                d = d - 1;
+                k = k + 1;
+            }
+        } else {
+            k = k + 1;
+        }
+    }
+    if r == 0 {
+        r = n + 1;
+    }
+    return r;
+}
+
+/// 插值字符串的终点。`q` 在开引号；返回闭引号之后。错误在这里就报掉。
+fn iw_fs_end(buf: ptr, q: u32, n: u32, raw: u32, scr: ptr, file: ptr, fnam: u32) -> u32 {
+    let j: u32 = q + 1;
+    let r: u32 = 0;
+    while j < n && r == 0 {
+        let c: u32 = load8(buf, j) as u32;
+        if c == 10 {
+            return iw_die(buf, j, scr, file, fnam,
+                          "未闭合的插值字符串（v1 只收单行）");
+        } else if c == 34 {
+            r = j + 1;
+        } else if c == 92 && raw == 0 {
+            if j + 1 >= n {
+                return iw_die(buf, j, scr, file, fnam,
+                              "未闭合的插值字符串（v1 只收单行）");
+            }
+            if iw_esc_ok(load8(buf, j + 1) as u32) == 0 {
+                return iw_die(buf, j, scr, file, fnam,
+                              "未知转义 —— 只认 \\n \\t \\r \\0 \\\\ \\\"");
+            }
+            j = j + 2;
+        } else if c == 92 {
+            j = j + 1;
+        } else if c == 123 {
+            if j + 1 < n && load8(buf, j + 1) as u32 == 123 {
+                j = j + 2;
+            } else {
+                let he: u32 = iw_hole_end(buf, j, n);
+                if he > n {
+                    if he == n + 2 {
+                        return iw_die(buf, j, scr, file, fnam,
+                                      "孔不能跨行（v1 只收单行的插值字符串）");
+                    }
+                    return iw_die(buf, j, scr, file, fnam,
+                                  "未闭合的插值孔（少一个 `}`）");
+                }
+                j = he;
+            }
+        } else if c == 125 {
+            if j + 1 < n && load8(buf, j + 1) as u32 == 125 {
+                j = j + 2;
+            } else {
+                return iw_die(buf, j, scr, file, fnam,
+                              "单个 `}` 不是合法的插值 —— 字面量花括号写 `}}`");
+            }
+        } else {
+            j = j + 1;
+        }
+    }
+    if r == 0 {
+        return iw_die(buf, q, scr, file, fnam, "未闭合的插值字符串（v1 只收单行）");
+    }
+    return r;
+}
+
+/// 孔体里**顶层** `:` 的下标（格式说明的起点）；没有就返回 `b`。
+/// 切片 `a[1:2]` 的 `:` 在 `[` 里，不算；字符串与注释里的也不算。
+fn iw_spec_colon(buf: ptr, a: u32, b: u32) -> u32 {
+    let k: u32 = a;
+    let d: u32 = 0;
+    let r: u32 = b;
+    while k < b && r == b {
+        let c: u32 = load8(buf, k) as u32;
+        if c == 34 {
+            let e: u32 = iw_str_end(buf, k, b);
+            if e == 0 {
+                k = b;
+            } else {
+                k = e;
+            }
+        } else if c == 47 && k + 1 < b && load8(buf, k + 1) as u32 == 47 {
+            let e: u32 = k;
+            while e < b && load8(buf, e) as u32 != 10 {
+                e = e + 1;
+            }
+            k = e;
+        } else if c == 47 && k + 1 < b && load8(buf, k + 1) as u32 == 42 {
+            let e: u32 = k + 2;
+            let done: u32 = 0;
+            while e + 1 < b && done == 0 {
+                if load8(buf, e) as u32 == 42 && load8(buf, e + 1) as u32 == 47 {
+                    done = 1;
+                } else {
+                    e = e + 1;
+                }
+            }
+            if done == 0 {
+                k = b;
+            } else {
+                k = e + 2;
+            }
+        } else if c == 123 || c == 40 || c == 91 {
+            d = d + 1;
+            k = k + 1;
+        } else if c == 125 || c == 41 || c == 93 {
+            if d > 0 {
+                d = d - 1;
+            }
+            k = k + 1;
+        } else if c == 58 && d == 0 {
+            r = k;
+        } else {
+            k = k + 1;
+        }
+    }
+    return r;
+}
+
+/// 跳过前导空白（空格 / tab）。
+fn iw_lead(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = a;
+    while i < b && (load8(buf, i) as u32 == 32 || load8(buf, i) as u32 == 9) {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 去掉尾部空白后的终点。
+fn iw_trim(buf: ptr, a: u32, b: u32) -> u32 {
+    let e: u32 = b;
+    while e > a && (load8(buf, e - 1) as u32 == 32 || load8(buf, e - 1) as u32 == 9) {
+        e = e - 1;
+    }
+    return e;
+}
+
+/// 孔的转换：0 = 没有，115 = `!s`，114 = `!r`。
+fn iw_conv(buf: ptr, a: u32, b: u32) -> u32 {
+    let s: u32 = iw_lead(buf, a, iw_spec_colon(buf, a, b));
+    let e: u32 = iw_trim(buf, s, iw_spec_colon(buf, a, b));
+    if e >= s + 2 && load8(buf, e - 2) as u32 == 33 {
+        let c: u32 = load8(buf, e - 1) as u32;
+        if c == 115 || c == 114 {
+            return c;
+        }
+    }
+    return 0;
+}
+
+/// 去掉转换标记之后的终点。
+fn iw_no_conv(buf: ptr, a: u32, b: u32) -> u32 {
+    let s: u32 = iw_lead(buf, a, iw_spec_colon(buf, a, b));
+    let e: u32 = iw_trim(buf, s, iw_spec_colon(buf, a, b));
+    if e >= s + 2 && load8(buf, e - 2) as u32 == 33 {
+        let c: u32 = load8(buf, e - 1) as u32;
+        if c == 115 || c == 114 {
+            return iw_trim(buf, s, e - 2);
+        }
+    }
+    return e;
+}
+
+/// 调试图（`{expr=}`）？
+fn iw_dbg(buf: ptr, a: u32, b: u32) -> u32 {
+    let s: u32 = iw_lead(buf, a, b);
+    let e: u32 = iw_no_conv(buf, a, b);
+    if e >= s + 2 && load8(buf, e - 1) as u32 == 61 {
+        if iw_opsym(load8(buf, e - 2) as u32) == 0 {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/// 孔的表达式范围（去掉转换与 `=`）。低 32 位 = 起点，高 32 位 = 终点。
+fn iw_expr(buf: ptr, a: u32, b: u32) -> u64 {
+    let s: u32 = iw_lead(buf, a, b);
+    let e: u32 = iw_no_conv(buf, a, b);
+    if e >= s + 2 && load8(buf, e - 1) as u32 == 61 {
+        if iw_opsym(load8(buf, e - 2) as u32) == 0 {
+            e = iw_trim(buf, s, e - 1);
+        }
+    }
+    let eh: u64 = e as u64;
+    return eh * 4294967296 + (s as u64);
+}
+
+/// 格式说明的填充字符（缺省空格；前导 `0` 表示 48）。
+fn iw_spec_fill(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    if i < b && load8(buf, i) as u32 == 48 {
+        return 48;
+    }
+    return 32;
+}
+
+/// 格式说明的对齐：0 = 左、1 = 右（缺省）、2 = 居中。
+fn iw_spec_align(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    if i < b && load8(buf, i) as u32 == 48 {
+        i = i + 1;
+    }
+    if i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 60 {
+            return 0;
+        }
+        if c == 62 {
+            return 1;
+        }
+        if c == 94 {
+            return 2;
+        }
+    }
+    return 1;
+}
+
+/// 格式说明的宽度（十进制）。
+fn iw_spec_width(buf: ptr, a: u32, b: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    if i < b && load8(buf, i) as u32 == 48 {
+        i = i + 1;
+    }
+    if i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 60 || c == 62 || c == 94 {
+            i = i + 1;
+        }
+    }
+    let w: u32 = 0;
+    while i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c < 48 || c > 57 {
+            i = b;
+        } else {
+            w = w * 10 + (c - 48);
+            i = i + 1;
+        }
+    }
+    return w;
+}
+
+/// 格式说明的形状校验：`[0]?[<>^]?数字`。不合格就报错退出。
+fn iw_spec_check(buf: ptr, a: u32, b: u32, scr: ptr, file: ptr, fnam: u32) -> u32 {
+    let i: u32 = iw_lead(buf, a, b);
+    let e: u32 = iw_trim(buf, i, b);
+    if i >= e {
+        return iw_die(buf, a, scr, file, fnam, "格式说明是空的");
+    }
+    if load8(buf, i) as u32 == 48 {
+        i = i + 1;
+    }
+    if i < e {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 60 || c == 62 || c == 94 {
+            i = i + 1;
+        }
+    }
+    let d: u32 = 0;
+    while i < e {
+        let c: u32 = load8(buf, i) as u32;
+        if c < 48 || c > 57 {
+            return iw_die(buf, a, scr, file, fnam,
+                          "格式说明只认 `>W` / `<W` / `^W` / `0W`（可选前导 `0` 表示用 0 填充）");
+        }
+        d = d + 1;
+        i = i + 1;
+    }
+    if d == 0 {
+        return iw_die(buf, a, scr, file, fnam, "格式说明缺宽度");
+    }
+    let w: u32 = iw_spec_width(buf, a, b);
+    if w < 1 || w > 65535 {
+        return iw_die(buf, a, scr, file, fnam, "格式说明的宽度要在 1..65535 之间");
+    }
+    return 0;
+}
+
+/// 文本段（未改写）→ 普通字面量体里的长度。`{{` / `}}` 各收成一个；原始串里的 `\` 加倍。
+fn iw_seg_len(buf: ptr, a: u32, b: u32, raw: u32) -> u32 {
+    let i: u32 = a;
+    let n: u32 = 0;
+    while i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 123 && i + 1 < b && load8(buf, i + 1) as u32 == 123 {
+            n = n + 1;
+            i = i + 2;
+        } else if c == 125 && i + 1 < b && load8(buf, i + 1) as u32 == 125 {
+            n = n + 1;
+            i = i + 2;
+        } else if c == 92 && raw == 1 {
+            n = n + 2;
+            i = i + 1;
+        } else {
+            n = n + 1;
+            i = i + 1;
+        }
+    }
+    return n;
+}
+
+/// 写一个十进制整数（宽度 / 填充 / 对齐这些小常数）。
+fn iw_putd(dst: ptr, pos: u32, v: u32, w: u32) -> u32 {
+    let p: u32 = pos;
+    let d: u32 = 1;
+    let y: u32 = v / 10;
+    while y > 0 {
+        d = d + 1;
+        y = y / 10;
+    }
+    let dv: u32 = 1;
+    let k: u32 = 1;
+    while k < d {
+        dv = dv * 10;
+        k = k + 1;
+    }
+    k = 0;
+    while k < d {
+        p = iw_putb(dst, p, 48 + (v / dv) % 10, w);
+        dv = dv / 10;
+        k = k + 1;
+    }
+    return p;
+}
+
+/// 写一个字节；`w == 0` 只推进位置（量长度那一趟）。
+fn iw_putb(dst: ptr, pos: u32, c: u32, w: u32) -> u32 {
+    if w == 1 {
+        store8(dst, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+/// 写一个字符串常量。
+fn iw_puts(dst: ptr, pos: u32, s: str, w: u32) -> u32 {
+    let i: u32 = 0;
+    let p: u32 = pos;
+    while i < str_len(s) {
+        p = iw_putb(dst, p, str_byte(s, i) as u32, w);
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 写一段**用户原文**（调试图的 `expr=`）：`\` 与 `"` 要转义。
+fn iw_put_user(buf: ptr, a: u32, b: u32, dst: ptr, pos: u32, w: u32) -> u32 {
+    let i: u32 = a;
+    let p: u32 = pos;
+    while i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 92 {
+            p = iw_putb(dst, p, 92, w);
+            p = iw_putb(dst, p, 92, w);
+        } else if c == 34 {
+            p = iw_putb(dst, p, 92, w);
+            p = iw_putb(dst, p, 34, w);
+        } else {
+            p = iw_putb(dst, p, c, w);
+        }
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 写文本段（带两侧引号）。
+fn iw_put_seg(buf: ptr, a: u32, b: u32, raw: u32, dst: ptr, pos: u32, w: u32) -> u32 {
+    let p: u32 = iw_putb(dst, pos, 34, w);
+    let i: u32 = a;
+    while i < b {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 123 && i + 1 < b && load8(buf, i + 1) as u32 == 123 {
+            p = iw_putb(dst, p, 123, w);
+            i = i + 2;
+        } else if c == 125 && i + 1 < b && load8(buf, i + 1) as u32 == 125 {
+            p = iw_putb(dst, p, 125, w);
+            i = i + 2;
+        } else if c == 92 && raw == 1 {
+            p = iw_putb(dst, p, 92, w);
+            p = iw_putb(dst, p, 92, w);
+            i = i + 1;
+        } else {
+            p = iw_putb(dst, p, c, w);
+            i = i + 1;
+        }
+    }
+    return iw_putb(dst, p, 34, w);
+}
+
+/// 操作数个数（文本段非空算一个；孔算一个，带 `=` 的孔算两个）。
+fn iw_count(buf: ptr, q: u32, e: u32, raw: u32) -> u32 {
+    let i: u32 = q + 1;
+    let seg: u32 = i;
+    let nops: u32 = 0;
+    while i < e - 1 {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 92 && raw == 0 {
+            i = i + 2;
+        } else if c == 92 {
+            i = i + 1;
+        } else if c == 123 {
+            if i + 1 < e - 1 && load8(buf, i + 1) as u32 == 123 {
+                i = i + 2;
+            } else {
+                if iw_seg_len(buf, seg, i, raw) > 0 {
+                    nops = nops + 1;
+                }
+                let he: u32 = iw_hole_end(buf, i, e - 1);
+                if iw_dbg(buf, i + 1, he - 1) == 1 {
+                    nops = nops + 2;
+                } else {
+                    nops = nops + 1;
+                }
+                i = he;
+                seg = i;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    if iw_seg_len(buf, seg, e - 1, raw) > 0 {
+        nops = nops + 1;
+    }
+    return nops;
+}
+
+/// 整段的改写输出。`w == 0` 只量长度（返回长度）；`w == 1` 写进 `dst`、返回长度。
+fn iw_span(buf: ptr, q: u32, e: u32, raw: u32, dst: ptr, w: u32,
+           scr: ptr, file: ptr, fnam: u32) -> u32 {
+    let nops: u32 = iw_count(buf, q, e, raw);
+    let pos: u32 = 0;
+    if nops == 0 {
+        return iw_puts(dst, pos, "\"\"", w);
+    }
+    let k: u32 = 0;
+    while k + 1 < nops {
+        pos = iw_puts(dst, pos, "str_concat(", w);
+        k = k + 1;
+    }
+    let i: u32 = q + 1;
+    let seg: u32 = i;
+    let op: u32 = 0;
+    while i < e - 1 {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 92 && raw == 0 {
+            i = i + 2;
+        } else if c == 92 {
+            i = i + 1;
+        } else if c == 123 {
+            if i + 1 < e - 1 && load8(buf, i + 1) as u32 == 123 {
+                i = i + 2;
+            } else {
+                if iw_seg_len(buf, seg, i, raw) > 0 {
+                    if op > 0 {
+                        pos = iw_puts(dst, pos, ", ", w);
+                    }
+                    pos = iw_put_seg(buf, seg, i, raw, dst, pos, w);
+                    if op > 0 {
+                        pos = iw_puts(dst, pos, ")", w);
+                    }
+                    op = op + 1;
+                }
+                let he: u32 = iw_hole_end(buf, i, e - 1);
+                let xb: u64 = iw_expr(buf, i + 1, he - 1);
+                let k32: u64 = 4294967296;
+                let xs: u32 = (xb % k32) as u32;
+                let xe: u32 = (xb / k32) as u32;
+                if xs == xe {
+                    return iw_die(buf, i, scr, file, fnam, "插值孔里没有表达式");
+                }
+                if iw_dbg(buf, i + 1, he - 1) == 1 {
+                    if op > 0 {
+                        pos = iw_puts(dst, pos, ", ", w);
+                    }
+                    pos = iw_putb(dst, pos, 34, w);
+                    pos = iw_put_user(buf, xs, xe, dst, pos, w);
+                    pos = iw_putb(dst, pos, 61, w);
+                    pos = iw_putb(dst, pos, 34, w);
+                    if op > 0 {
+                        pos = iw_puts(dst, pos, ")", w);
+                    }
+                    op = op + 1;
+                }
+                let sc: u32 = iw_spec_colon(buf, i + 1, he - 1);
+                let has_spec: u32 = 0;
+                if sc < he - 1 {
+                    has_spec = 1;
+                }
+                if op > 0 {
+                    pos = iw_puts(dst, pos, ", ", w);
+                }
+                if has_spec == 1 {
+                    // `docs/341` §7：`str_pad(str_show(x), W, FILL, ALIGN)`
+                    let _chk: u32 = iw_spec_check(buf, sc + 1, he - 1, scr, file, fnam);
+                    pos = iw_puts(dst, pos, "str_pad(", w);
+                }
+                if iw_conv(buf, i + 1, he - 1) == 114 {
+                    pos = iw_puts(dst, pos, "str_repr(", w);
+                } else {
+                    pos = iw_puts(dst, pos, "str_show(", w);
+                }
+                let bi: u32 = xs;
+                while bi < xe {
+                    pos = iw_putb(dst, pos, load8(buf, bi) as u32, w);
+                    bi = bi + 1;
+                }
+                pos = iw_putb(dst, pos, 41, w);
+                if has_spec == 1 {
+                    pos = iw_puts(dst, pos, ", ", w);
+                    pos = iw_putd(dst, pos, iw_spec_width(buf, sc + 1, he - 1), w);
+                    pos = iw_puts(dst, pos, ", ", w);
+                    pos = iw_putd(dst, pos, iw_spec_fill(buf, sc + 1, he - 1), w);
+                    pos = iw_puts(dst, pos, ", ", w);
+                    pos = iw_putd(dst, pos, iw_spec_align(buf, sc + 1, he - 1), w);
+                    pos = iw_putb(dst, pos, 41, w);
+                }
+                if op > 0 {
+                    pos = iw_puts(dst, pos, ")", w);
+                }
+                op = op + 1;
+                i = he;
+                seg = i;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    if iw_seg_len(buf, seg, e - 1, raw) > 0 {
+        if op > 0 {
+            pos = iw_puts(dst, pos, ", ", w);
+        }
+        pos = iw_put_seg(buf, seg, e - 1, raw, dst, pos, w);
+        if op > 0 {
+            pos = iw_puts(dst, pos, ")", w);
+        }
+        op = op + 1;
+    }
+    return pos;
+}
+
+/// 重叠安全的区间移动（向右挪时从尾到头拷）。
+fn iw_move(buf: ptr, from: u32, to: u32, n: u32) {
+    if to > from {
+        let k: u32 = n;
+        while k > 0 {
+            k = k - 1;
+            store8(buf, to + k, load8(buf, from + k) as u8);
+        }
+    } else {
+        let k: u32 = 0;
+        while k < n {
+            store8(buf, to + k, load8(buf, from + k) as u8);
+            k = k + 1;
+        }
+    }
+}
+
+/// 把整份源里的插值字符串改写掉，返回新长度。
+fn interp_rewrite(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32) -> u32 {
+    let i: u32 = 0;
+    let len: u32 = n;
+    let depth: u32 = 0;
+    //: 上一个词 / 上上个词的区间（判 `let IDENT {` 的块体）。
+    let last_a: u32 = 0;
+    let last_b: u32 = 0;
+    let prev_a: u32 = 0;
+    let prev_b: u32 = 0;
+    while i < len {
+        let c: u32 = load8(buf, i) as u32;
+        if c == 10 {
+            i = i + 1;
+            last_a = 0;
+            last_b = 0;
+            prev_a = 0;
+            prev_b = 0;
+        } else if c == 47 && i + 1 < len && load8(buf, i + 1) as u32 == 47 {
+            let e: u32 = i;
+            while e < len && load8(buf, e) as u32 != 10 {
+                e = e + 1;
+            }
+            i = e;
+        } else if c == 47 && i + 1 < len && load8(buf, i + 1) as u32 == 42 {
+            let e: u32 = i + 2;
+            let done: u32 = 0;
+            while e + 1 < len && done == 0 {
+                if load8(buf, e) as u32 == 42 && load8(buf, e + 1) as u32 == 47 {
+                    done = 1;
+                } else {
+                    e = e + 1;
+                }
+            }
+            if done == 0 {
+                return iw_die(buf, i, scr, file, fnam, "未闭合的块注释");
+            }
+            i = e + 2;
+        } else if c == 34 {
+            let e: u32 = iw_str_end(buf, i, len);
+            if e == 0 {
+                return iw_die(buf, i, scr, file, fnam, "未闭合的字符串");
+            }
+            i = e;
+        } else if iw_idb(c) == 1 {
+            let j: u32 = i;
+            while j < len && iw_idb(load8(buf, j) as u32) == 1 {
+                j = j + 1;
+            }
+            let isf: u32 = 0;
+            let raw: u32 = 0;
+            if streq(ptr_add(buf, i), j - i, "f") == 1 {
+                isf = 1;
+            }
+            if streq(ptr_add(buf, i), j - i, "rf") == 1 {
+                isf = 1;
+                raw = 1;
+            }
+            if isf == 1 && j < len && load8(buf, j) as u32 == 34 {
+                let fe: u32 = iw_fs_end(buf, j, len, raw, scr, file, fnam);
+                let rl: u32 = iw_span(buf, j, fe, raw, buf, 0, scr, file, fnam);
+                let old: u32 = fe - i;
+                if rl + 44224 >= SLOT {
+                    return iw_die(buf, i, scr, file, fnam,
+                                  "this source is too large to rewrite for interpolation");
+                }
+                // **先抄到槽顶的暂存区再写**：输出通常比原文长，就地写会追上读游标、
+                // 把还没读到的那几字节盖掉（实测：`str_concat` 被写成 `r_concat`）。
+                if old > IW_SCRATCH {
+                    return iw_die(buf, i, scr, file, fnam,
+                                  "this interpolated string is too large to rewrite (64 KiB)");
+                }
+                if len + 44224 > SLOT - IW_SCRATCH {
+                    return iw_die(buf, i, scr, file, fnam,
+                                  "this source is too large to rewrite for interpolation (the 64 KiB scratch sits at the top of the slot)");
+                }
+                let sc2: ptr = ptr_add(buf, SLOT - IW_SCRATCH);
+                copy_bytes(sc2, 0 as u64, buf, i, old);
+                if rl > old || rl < old {
+                    iw_move(buf, fe, i + rl, len - fe);
+                }
+                let _wr: u32 = iw_span(sc2, j - i, fe - i, raw, ptr_add(buf, i), 1,
+                                       scr, file, fnam);
+                len = len - old + rl;
+                i = i + rl;
+                prev_a = last_a;
+                prev_b = last_b;
+                last_a = 0;
+                last_b = 0;
+            } else {
+                prev_a = last_a;
+                prev_b = last_b;
+                last_a = i;
+                last_b = j;
+                i = j;
+            }
+        } else if c == 123 {
+            // `let IDENT {` 的块体原样跳过（外部代码块，`docs/185`）。顶层
+            // `command X {` 那一支不在这里判 —— 自举侧整份源随后就被 `has_extblock` 拒。
+            let rawblk: u32 = 0;
+            if prev_b > prev_a && last_b > last_a && last_a >= prev_b {
+                if streq(ptr_add(buf, prev_a), prev_b - prev_a, "let") == 1 {
+                    rawblk = 1;
+                }
+            }
+            if rawblk == 1 {
+                let e: u32 = i + 1;
+                let d: u32 = 1;
+                while e < len && d > 0 {
+                    if load8(buf, e) as u32 == 123 {
+                        d = d + 1;
+                    }
+                    if load8(buf, e) as u32 == 125 {
+                        d = d - 1;
+                    }
+                    e = e + 1;
+                }
+                if d != 0 {
+                    return iw_die(buf, i, scr, file, fnam,
+                                  "外部代码块没闭合（少一个 `}`）");
+                }
+                i = e;
+            } else {
+                depth = depth + 1;
+                i = i + 1;
+            }
+        } else if c == 125 {
+            if depth > 0 {
+                depth = depth - 1;
+            }
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return len;
 }
 
 /// `use <名字>` 的搜索根 (与参考实现的 `lomentc.NAME_ROOTS` **必须逐条一致**)。
@@ -586,7 +2013,10 @@ fn name_root_at(r: u32) -> str {
     if r == 2 {
         return "loment/selfhost";
     }
-    return "loment/tools";
+    if r == 3 {
+        return "loment/tools";
+    }
+    return "loment/lspe";
 }
 
 /// NUL 串长度。
@@ -655,6 +2085,14 @@ fn dir_of(path: ptr, n: u32, dst: ptr, cap: u32) -> u32 {
 /// **PE 垫片每次只返回一条记录** (Linux 一次一批), 所以循环按"读一批走一批"写。
 fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
     let dent: ptr = ptr_add(scr, DENT_OFF);
+    // **目录路径比槽大 ⇒ 说出来**（`#345` 的 (a)）。原来这条循环只是**停**：截断过的路径
+    // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
+    // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
+    if dl >= DIR_CAP - 1 {
+        let dmsg: str = "a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
     let i: u32 = 0;
     while i < dl && i < DIR_CAP - 1 {
         store8(scr, i, load8(dirp, i) as u8);
@@ -768,6 +2206,13 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
         e = e + 1;
         j = j + 1;
     }
+    // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
+    // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
+    if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        let dmsg: str = "a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
     store8(w, e, 0 as u8);
     let fd: i64 = syscall4(257, (0 as u64) - 100, w as u64, 65536);
     if fd < 0 {
@@ -777,9 +2222,24 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
     return 1;
 }
 
+/// 工具链自己拥有的包名 (#980): 项目本地的 `deps/<名字>/` 不许顶掉它们。
+/// 与参考实现 `RESERVED_PACKAGE_NAMES`、lompi 的 `pkg_reserved_name` **一起改**。
+fn name_reserved(s: ptr, off: u32, len: u32) -> u32 {
+    let p: ptr = ptr_add(s, off);
+    if len == 3 && streq(p, 3, "std") == 1 { return 1; }
+    if len == 4 && streq(p, 4, "libl") == 1 { return 1; }
+    if len == 4 && streq(p, 4, "host") == 1 { return 1; }
+    if len == 8 && streq(p, 8, "internet") == 1 { return 1; }
+    if len == 2 && streq(p, 2, "os") == 1 { return 1; }
+    return 0;
+}
+
 /// `<名字>` 是否在 `<根>/deps/<名字>/<名字>.lomt` —— 项目本地的依赖 (lompi 落点)。
 /// 命中写进 tmp 并返回长度; 0 = 没这个目录。
 fn try_deps(root: ptr, rn: u32, src: ptr, off: u32, len: u32, tmp: ptr, scr: ptr) -> u32 {
+    if name_reserved(src, off, len) == 1 {
+        return 0;          // 工具链的名字: 让 store / 四根去解析 (#980)
+    }
     let d: u32 = 0;
     if rn > 0 {
         d = cat(tmp, d, root, rn);
@@ -824,12 +2284,9 @@ fn try_store(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32, tmp: ptr,
         return 0;
     }
     if nv > 1 {
-        let m1: str = "fujoc-s: 自带的库里 ";
-        let m2: str = " 有多个版本 —— 编译器不做版本选择, 要指定版本就用 deps/";
-        write_all(2, str_ptr(m1), str_len(m1) as u64);
+        let _m1: u64 = wstr(2, "loment: the bundled store has more than one version of ");
         write_all(2, ptr_add(src, off), len as u64);
-        write_all(2, str_ptr(m2), str_len(m2) as u64);
-        write_all(2, str_ptr("\n"), 1);
+        let _m2: u64 = wstr(2, " -- this compiler does not pick a version; pin one under deps/\n");
         die(1);
     }
     d = cat(tmp, d, str_ptr("/"), 1);
@@ -898,11 +2355,9 @@ fn try_pkg_module(base: ptr, bl: u32, versioned: u32, src: ptr, off: u32, len: u
         // 与参考实现同规矩: "先搜到哪个"不能变成隐藏语义。这里**硬失败**而不是
         // 返回 0 往下落 —— 往下落的话可能被内置四根里同名的一份接住, 那就成了
         // 静默用错模块 (比报错难查得多)。
-        let m1: str = "fujoc-s: 名字导入有歧义: ";
-        let m2: str = " —— 多个包里都有这个模块, 编译器不猜用哪一个 (改名或清掉多余那份)\n";
-        write_all(2, str_ptr(m1), str_len(m1) as u64);
+        let _m1: u64 = wstr(2, "loment: the name import is ambiguous: ");
         write_all(2, ptr_add(src, off), len as u64);
-        write_all(2, str_ptr(m2), str_len(m2) as u64);
+        let _m2: u64 = wstr(2, " -- more than one package holds this module, and the compiler does not guess which (rename it, or drop the extra copy)\n");
         die(1);
     }
     if hits == 0 {
@@ -952,7 +2407,9 @@ fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
 
 /// `use <名字>` -> 真实路径, 写进 dst, 返回长度 (0 = 找不到或有歧义)。
 /// **按层搜, 先命中先用** (与 `lomentc.resolve_name` 同规则):
-///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口)
+///   1.  `<项目根>/deps/<名字>/<名字>.lomt`   项目本地 (包入口) —— **保留名除外**:
+///       `std` / `libl` / `host` / `internet` / `os` 跳过 1 与 1b, 由 store / 四根解析
+///       (`name_reserved`, #980 —— 与参考实现的 `RESERVED_PACKAGE_NAMES` 一起改)
 ///   1b. `<项目根>/deps/<包>/<名字>.lomt`     **项目本地的包内模块**
 ///   2.  内置四根 `<根>/<名字>.lomt` —— **这一层命中必须唯一**
 ///   3.  `<store>/<名字>/<版本>/<名字>.lomt`  随包自带 (包入口)
@@ -963,6 +2420,8 @@ fn try_store_layers(td: ptr, tn: u32, dev: u32, src: ptr, off: u32, len: u32,
 /// 模块是包的私有名字空间, 让它盖住编译器自己的模块是灾难 (加这一层时真撞上了:
 /// `store/std/0.1.0/interp.lomt` 把 `loment/selfhost/interp.lomt` 顶掉, 驱动直接编不过)。
 /// 项目本地的 `deps/` 不在此列 —— 那是使用者**显式装的**, 理应先于工具链自带的任何东西。
+/// **例外 (#980)**: 导入方自己住在商店里时不看项目本地 —— 否则使用者的 `deps/mem`
+/// 能改掉标准库内部的 `use mem`。
 ///
 /// §归属 (2026-09-20): **第 2 层与第 3 层谁在前面, 看导入方自己住在哪边。** 这不是设计
 /// 出来的, 是加包内模块那一层时撞出来的 —— 两个方向都撞得上真东西:
@@ -989,18 +2448,25 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
     // 一边读 base 一边往 tmp 里拼候选路径, 两者不能是同一块。
     let base: ptr = ptr_add(scr, BASE_OFF);
     // 项目本地两层: 路径命中即返回, 不需要判唯一 (参考实现也是"先命中先用")。
-    let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
-    if r1 > 0 {
-        return cat(dst, 0, tmp, r1);
-    }
-    let bl1: u32 = 0;
-    if pn > 0 {
-        bl1 = cat(base, 0, proj, pn);
-    }
-    bl1 = catl(base, bl1, "/deps");
-    let r1b: u32 = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
-    if r1b > 0 {
-        return r1b;
+    // **导入方住在商店里时不看项目本地** (#980): store 包自己的 `use` 不能被使用者
+    // 的 `deps/` 劫持 —— 那会让标准库的内部模块也被顶掉。
+    if ins == 0 {
+        let r1: u32 = try_deps(proj, pn, src, off, len, tmp, scr);
+        if r1 > 0 {
+            return cat(dst, 0, tmp, r1);
+        }
+        let bl1: u32 = 0;
+        if pn > 0 {
+            bl1 = cat(base, 0, proj, pn);
+        }
+        bl1 = catl(base, bl1, "/deps");
+        let r1b: u32 = 0;
+        if name_reserved(src, off, len) == 0 {
+            r1b = try_pkg_module(base, bl1, 0, src, off, len, tmp, dst, scr);
+        }
+        if r1b > 0 {
+            return r1b;
+        }
     }
     // 导入方住在商店里: 商店两层提到四根前面 (§归属)。
     if ins == 1 {
@@ -1017,7 +2483,7 @@ fn resolve_use_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr, ins: u32) 
     let hits: u32 = 0;
     let hit_len: u32 = 0;
     let r: u32 = 0;
-    while r < 4 {
+    while r < 5 {
         let rp: str = name_root_at(r);
         let d: u32 = 0;
         let j: u32 = 0;
@@ -1200,6 +2666,13 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
         store8(dst, q, ch);
         q = q + 1;
     }
+    // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
+    // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
+    if q >= EXT_CAP - 1 && q < sl - 2 {
+        let dmsg: str = "the source extension in loment.conf is longer than 256 bytes";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
     store8(dst, q, 0 as u8);
     // 不以 `.` 开头、或带转义的, 一律当没配。转义那条是对着参考实现钉的: 这里拷的是**原始
     // 字节**(`\t` 两个字节), 参考实现的词法器给的却是**解码后**的值 —— 只在这一处会分叉,
@@ -1208,6 +2681,139 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
         return 0;
     }
     return q;
+}
+
+/// 从 `<dirp>/pkg.lomp` 读 `runtime()` 的取值：4 = `runtime`，0 = 没声明/不是它。
+///
+/// 与 `cfg_source_ext` 同一种形状（清单就是一份 Loment 源码），只认
+/// `pub fn runtime() -> str { return "runtime"; }` 里的那个字符串。读不出来当没声明。
+fn cfg_pkg_choose(dirp: ptr, dl: u32, scr: ptr, buf: ptr, toks: ptr) -> u32 {
+    let d: u32 = 0;
+    if dl > 0 {
+        d = cat(scr, d, dirp, dl);
+        d = catl(scr, d, "/");
+    }
+    d = catl(scr, d, "pkg.lomp");
+    store8(scr, d, 0 as u8);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, scr as u64, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let raw: u64 = read_all(fd as u64, buf, 65536);
+    syscall4(3, fd as u64, 0, 0);
+    if raw == 0 {
+        return 0;
+    }
+    let n: u32 = lex(buf, raw as u32, toks);
+    // 先找 `choose(`（docs/325），没有再退回旧的 `runtime()`。
+    let found: u32 = 4294967295;
+    let i: u32 = 0;
+    while i < n && found == 4294967295 {
+        if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "choose") == 1
+                && i + 1 < n && load32(toks, (i + 1) * 20) == 3
+                && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
+            found = i;
+        }
+        i = i + 1;
+    }
+    if found == 4294967295 {
+        i = 0;
+        while i < n && found == 4294967295 {
+            if load32(toks, i * 20) == 0 && tok_is(buf, toks, i, "runtime") == 1
+                    && i + 1 < n && load32(toks, (i + 1) * 20) == 3
+                    && ptr_eq_char(buf, load32(toks, (i + 1) * 20 + 4), 40) == 1 {
+                found = i;
+            }
+            i = i + 1;
+        }
+    }
+    if found == 4294967295 {
+        return 0;
+    }
+    let s: u32 = 4294967295;
+    let j: u32 = found + 1;
+    while j < n && s == 4294967295 {
+        if load32(toks, j * 20) == 2 {
+            s = j;
+        }
+        j = j + 1;
+    }
+    if s == 4294967295 {
+        return 0;
+    }
+    let st: u32 = load32(toks, s * 20 + 4);
+    let sl: u32 = load32(toks, s * 20 + 8);   // 含两端的引号
+    if sl < 3 {
+        return 0;
+    }
+    let dst: ptr = ptr_add(scr, PKGCH_OFF);
+    let m: u32 = sl - 2;
+    // 清单太长 ⇒ **放弃整份清单**，不截断注入：截断可能正好丢掉一维（`docs/325`）。
+    if m >= PKGCH_CAP {
+        return 0;
+    }
+    let q: u32 = 0;
+    while q < m {
+        store8(dst, q, load8(buf, st + 1 + q) as u8);
+        q = q + 1;
+    }
+    store8(dst, q, 0 as u8);
+    return q;
+}
+
+/// 一个核心词属于哪一维（`CORE_DIM_ORDER` 的位）。0 = 不认识。
+fn core_word_bit(p: ptr, n: u32) -> u32 {
+    if pkg_eq(p, n, "std") == 1 || pkg_eq(p, n, "no_std") == 1 {
+        return 1;
+    }
+    if pkg_eq(p, n, "gc_manual") == 1 || pkg_eq(p, n, "gc_auto") == 1
+            || pkg_eq(p, n, "gc_auto_alpha") == 1 || pkg_eq(p, n, "no_gc") == 1 {
+        return 2;
+    }
+    if pkg_eq(p, n, "runtime") == 1 || pkg_eq(p, n, "no_runtime") == 1 {
+        return 4;
+    }
+    if pkg_eq(p, n, "sealed") == 1 || pkg_eq(p, n, "hosted") == 1 {
+        return 8;
+    }
+    if pkg_eq(p, n, "vm") == 1 || pkg_eq(p, n, "no_vm") == 1 {
+        return 16;
+    }
+    if pkg_eq(p, n, "lms_full") == 1 || pkg_eq(p, n, "lms_forensic_admin") == 1
+            || pkg_eq(p, n, "lms_daily_admin") == 1
+            || pkg_eq(p, n, "lms_manage_only_admin") == 1
+            || pkg_eq(p, n, "lms_close_admin") == 1 {
+        return 32;
+    }
+    if pkg_eq(p, n, "lspe_open_admin") == 1 || pkg_eq(p, n, "lspe_close_admin") == 1 {
+        return 64;
+    }
+    if pkg_eq(p, n, "lifetime_no") == 1 || pkg_eq(p, n, "lifetime_auto") == 1
+            || pkg_eq(p, n, "lifetime_manual") == 1 {
+        return 128;
+    }
+    return 0;
+}
+
+fn pkg_eq(p: ptr, n: u32, lit: str) -> u32 {
+    if n != str_len(lit) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(lit, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn ptr_eq_char(src: ptr, off: u32, ch: u32) -> u32 {
+    if load8(src, off) == ch {
+        return 1;
+    }
+    return 0;
 }
 
 fn is_lomt(src: ptr, sp: u32, sl: u32) -> u32 {
@@ -1251,7 +2857,7 @@ fn resolve_addin_name(src: ptr, off: u32, len: u32, dst: ptr, scr: ptr) -> u32 {
 /// `fn`/`struct`/`use`, 就等于"用 `addin` 从另一个方向绕开库的纪律" —— `use` 那条路
 /// 禁 `choose`, 这条路就得禁**其余的一切**。两个方向都堵上, "装代码"与"装开关"才真的
 /// 是两件事。
-fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32) {
+fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32, scr: ptr) {
     let d: u32 = 0;
     let i: u32 = 0;
     // eof 由循环条件挡掉 —— Loment 里 `return;`(不带值) 不成立。
@@ -1268,7 +2874,7 @@ fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32) {
             } else if d > 0 {
                 i = i + 1;
             } else {
-                die_chooseset(path, n);
+                die_chooseset(path, n, scr);
             }
         } else if d > 0 {
             i = i + 1;
@@ -1292,52 +2898,127 @@ fn check_chooseset(src: ptr, toks: ptr, nt: u32, path: ptr, n: u32) {
                 // **报文里不逐个列核心模式的取值**：原先列的是
                 // `(std / no_std / gc_manual / gc_auto —— …)`，加 `runtime` 那一维时
                 // 它必然漏（而且不会有人注意到）。理由本身与维数无关，就只说理由。
-                let mc2: str = "fujoc-s: addin 拉进来的单元不许写核心模式 (它们声明的是整个程序的取值, 只有根单元能定): ";
-                write_all(2, str_ptr(mc2), str_len(mc2) as u64);
-                write_all(2, path, n as u64);
-                write_all(2, str_ptr("\n"), 1);
+                let dm: str = "a unit pulled in by `addin` must not declare a core mode (it declares the whole program's setting, and only the root unit may): ";
+                wdiag_file(diagfd(scr), scr, path, n, 22, str_ptr(dm), str_len(dm));
+                failp(dm, path, n);
                 die(1);
             }
             i = i + 2;
         } else {
-            die_chooseset(path, n);
+            die_chooseset(path, n, scr);
         }
     }
 }
 
+/// 把一个 token 的字节**抹成等长空白**（`load_file` 抹依赖写下的核心 `choose` 行用）。
+///
+/// 与 `choose write grammar` 那一行同一个手法：**长度不变**，所以行号、后面对得上的
+/// 偏移全都不动。刻意不删字节 —— 删了就要重排整块，而整块的位置是这套驱动的内存布局。
+/// **不调 `tok_start`/`tok_len`**：那两个住在 `parser.lomt`，而驱动不 `use parser`
+/// （它读 token 一律走裸 `load32(toks, i * 20 + …)`，与下面那些一样）。token 记录是
+/// 20 字节：kind +0 / start +4 / len +8 / line +12 / col +16。
+fn blank_tok(src: ptr, toks: ptr, i: u32) {
+    let st: u32 = load32(toks, i * 20 + 4);
+    let l: u32 = load32(toks, i * 20 + 8);
+    let k: u32 = 0;
+    while k < l {
+        store8(src, st + k, 32);
+        k = k + 1;
+    }
+}
+
 /// 「chooseset 白名单」那一条的报错出口。
-fn die_chooseset(path: ptr, n: u32) -> u32 {
-    let m: str = "fujoc-s: addin 拉进来的单元里只能写 choose 相关代码 (装代码请用 use): ";
-    write_all(2, str_ptr(m), str_len(m) as u64);
-    write_all(2, path, n as u64);
-    write_all(2, str_ptr("\n"), 1);
-    return die(1);
+fn die_chooseset(path: ptr, n: u32, scr: ptr) -> u32 {
+    let dm: str = "a unit pulled in by `addin` may hold `choose` code only (to pull in code, use `use`): ";
+    wdiag_file(diagfd(scr), scr, path, n, 22, str_ptr(dm), str_len(dm));
+    return failp(dm, path, n);
 }
 
 /// 父文件先读进自己的槽, 递归处理依赖, 最后才把自己补上去 —— 顺序=依赖在前。
 ///
 /// 形参不能叫 `entry`: LLVM 的块标签与局部值共用名字空间, 每个函数的第一块都叫
 /// `entry`, 于是 `%entry` 参数会让 clang 报 "unable to create block named 'entry'"。
+/// `--print-command FILE`（`docs/223`）：把这个单元注册的命令名打到 stdout；没声明就打
+/// 一个**空行**（调用方按"空 = 不是命令"处理）。
+///
+/// **单独一趟词法**：不装载依赖、不做 comefor 展开、不单态化 —— 前端只要一个名字，
+/// 走整条编译链是白花时间。与参考实现的 `lomentc --print-command` 同一个口径：
+/// 声明形状不对（写了标签却取不出字面量）**退出 1**，不能让构建前端照着写一个畸形产物名。
+fn print_command(path: ptr, n: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(path, n, scr);
+    if fd < 0 {
+        let dmsg: str = "--print-command cannot open the source file: ";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return failp(dmsg, path, n);
+    }
+    let sbuf: ptr = sys_alloc(262144 as u64) as ptr;
+    let tbuf: ptr = sys_alloc(262144 as u64) as ptr;
+    let raw: u64 = read_all(fd as u64, sbuf, 262144 as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if raw == 0 {
+        return write_checked(1, str_ptr("\n"), 1, "the command name");
+    }
+    let _nt: u32 = lex_cap(sbuf, raw as u32, tbuf, 65536 as u32);
+    let pk: u64 = lex_cmd_label(sbuf, tbuf, ptr_add(scr, CMD_OFF));
+    let lt: u32 = (pk / 4294967296) as u32;
+    let nl: u32 = (pk % 4294967296) as u32;
+    if lt == 0 {
+        return write_checked(1, str_ptr("\n"), 1, "the command name");
+    }
+    if nl == 0 {
+        let dmsg: str = "the command declaration has the wrong shape -- put the name inside `register <name> { ... }`, or return a string literal from the declaration";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
+    let _pc: u32 = write_checked(1, ptr_add(scr, CMD_OFF), nl as u64, "the command name");
+    return write_checked(1, str_ptr("\n"), 1, "the command name");
+}
+
 fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
              depth: u32, scr: ptr, toks: ptr, from_addin: u32) -> u64 {
+    // 这一路诊断的 fd 在 `scr` 里（`main` 开的，见 `diagfd`）。装载器整条递归都带着 `scr`,
+    // 所以不必再多传一个参数。
+    let dfd: i64 = diagfd(scr);
     if depth >= MAXDEPTH {
         // **报错, 不静默丢**（`docs/182` §1.10）。原来这里是 `return off` —— 依赖被悄悄
         // 丢掉、编译继续, 而参考实现 `resolve_deps` **根本没有上限**: 同一份源码, 链深
         // 过 8 层时两个实现给出**不同的单元**。这与 `MAX_USE` 那条是同一个形状 ——
         // 那次修的是**条数**, **深度**没跟着修。实测仓库里最深是 7
         // (`lompi/lpi_test.lomt`), 离静默截断只差一个 `use`。
-        let m0: str = "fujoc-s: 依赖嵌套超过 ";
-        write_all(2, str_ptr(m0), str_len(m0) as u64);
+        // 参考实现这一条是 E023（`依赖嵌套超过 8 层`），码与它对齐。
+        let dm: str = "dependency nesting exceeds the limit -- remove one intermediate facade (the limit matches the reference implementation)";
+        wdiag_at(dfd, scr, path, n, 1, 23, str_ptr(dm), str_len(dm));
+        wstr(2, "loment: dependency nesting exceeds ");
         wdec(2, scr, MAXDEPTH);
-        let m1: str = " 层 —— 拆掉一层中间门面 (上限与参考实现同值)\n";
-        write_all(2, str_ptr(m1), str_len(m1) as u64);
+        wstr(2, " levels -- remove one intermediate facade (the limit matches the reference implementation)\n");
         die(1);
     }
     if seen_has(seen, snc, path, n) == 1 {
         return off;
     }
     seen_add(seen, snc, path, n);
+    // **每个文件的尾区都在本层槽内、从 `nb` 之后开始**:
+    //   [nb, nb+19200)                 名字形式解析出的路径 (既有布局)
+    //   [nb+19200, nb+38400)           addin 路径 (既有布局)
+    //   [nb+38400, nb+40800)           本文件的 use 清单
+    //   [nb+40800, nb+43200)           本文件的 addin 清单
+    //   [nb+43200, nb+44224)           本文件路径的私有副本
+    // **清单必须按文件各一份**: 它们原来放在共享的 `scr` 里, 而递归装载会把父文件的
+    // 清单覆盖掉 —— 一份有两个 `use` 的文件, 第二个名字读出来是源里的中文注释
+    // (实测 #679: `f64fmt` 装载 `bigint.lomt` 时打不开一串乱码)。
     let slot: ptr = ptr_add(out, UNIT_CAP - (depth + 1) * SLOT);
+    // **本文件路径的私有副本**（槽顶 1 KiB）。`path` / `n` 往下一律指这里：
+    // 名字形式的 `use` 在收集阶段会调用 `resolve_use_name`，它用的候选缓冲
+    // （`scr + NAMTMP_OFF`）**正是** `fix_rel` 读作"父文件路径"的那块 —— 依赖文件
+    // 的 path 一旦指在 NAMTMP 上，一个 `use numfmt` 就会把后面的 `use "io.lomt"`
+    // 的基准改掉。根文件不会撞（它的 path 是命令行参数），所以这个缺陷只在
+    // **作为依赖被装载**时出现（#679：`host/host.lomt` 打不开 `io.lomt`）。
+    let pcap: u32 = 1024;
+    if n >= pcap {
+        let dm: str = "this file's path is longer than the loader's 1024-byte private copy -- shorten the checkout path";
+        failp(dm, path, n);
+        die(1);
+    }
     let fd: i64 = open_ro(path, n, scr);
     if fd < 0 {
         // 就地报路径: 再晚一点 slot 的读就会把这块内存盖掉。
@@ -1345,26 +3026,83 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         // 只留一行 stderr。那正是这套工具链反复要消灭的东西(见 lomelf 头注与 docs/167:
         // "把静默错编改成报错退出"), 而且参考实现遇到这种输入是抛错退非零的 —— 两边
         // 必须一致。用户能不能看出是导入出的事, 就靠这一下。
-        write_all(2, str_ptr("fujoc-s: 打不开 "), 20);
-        write_all(2, path, n as u64);
-        write_all(2, str_ptr("\n"), 1);
+        //
+        // **路径必须在这里报**: 这句话原先手写了长度 20, 而 "打不开" 那一段只有 19 字节 ——
+        // 多出来的那一字节是字符串常量的 NUL, 用户看到的是 `打不开 \0路径` (issue #8)。
+        // `failp` 把字面量交给 `wstr`、把路径按量好的长度写, 两边都不带尾巴。
+        let dm: str = "cannot open this file";
+        wdiag_file(dfd, scr, path, n, 31, str_ptr(dm), str_len(dm));
+        failp("cannot open ", path, n);
         die(1);
     }
-    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    let sunit: u32 = SLOT - 44224;
+    let raw_n: u64 = read_all(fd as u64, slot, sunit as u64);
     syscall4(3, fd as u64, 0, 0);
+    // **读满了槽 ≠ 文件就这么大**（`#345` 的 (a)：每一个固定容量越界时都要**有话**）。
+    // 槽原先静默截断：一份大于上限的源会**少一截**，用户看到的是一串与被截断位置
+    // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
+    // 等价的写法，但把 `SLOT` **写在比较里**：容量盘点（`tools/loment_caps.py`）认的是
+    // "容量名出现在一条序关系比较里"，`raw_n >= sunit` 里那个名字被别名藏起来了。
+    if raw_n + 44224 as u64 >= SLOT as u64 {
+        let dmsg: str = "this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg) as u64;
+    }
     let nb: u32 = strip_cr(slot, raw_n as u32);
+    // 路径副本: 之后一律指这里 —— 名字形式的候选缓冲 (`scr + NAMTMP_OFF`) 不再能把它改掉。
+    let pcap: u32 = 1024;
+    if n >= pcap {
+        let dm: str = "this file's path is longer than the loader's 1024-byte private copy -- shorten the checkout path";
+        failp(dm, path, n);
+        die(1);
+    }
+    let pbuf: ptr = ptr_add(slot, nb + 43200);
+    let pi: u32 = 0;
+    while pi < n {
+        store8(pbuf, pi, load8(path, pi) as u8);
+        pi = pi + 1;
+    }
+    path = pbuf;
     // 声明说的是"**怎么读**"，不是那份源的一部分 —— **在 `lex` 之前抹掉**（`docs/188` §1）。
     // 与参考实现的 `potato_from.strip_grammar_decl` 同一件事；放在这儿（而不是 token 层）
     // 是为了让 lexer / parser **一行都不动** —— 也就不必为它重生成种子。
-    strip_grammar_decl(slot, nb);
+    // 版次只认根单元（见 `strip_grammar_decl` 里那段）。
+    let isroot: u32 = 0;
+    if depth == 0 {
+        isroot = 1;
+    }
+    strip_grammar_decl(slot, nb, scr, path, n, isroot);
+    // **Tur 2 的纯糖**（`docs/296` §2.1）：先词法一遍判位置，就地等长改写，再正式词法。
+    // 版次是**整程序**属性（根单元写的），依赖也按同一版读 —— `PROF_OFF` 全局一格。
+    if load32(scr, PROF_OFF) != 0 {
+        let _n0: u32 = lex(slot, nb, toks);
+        let _ne: u32 = tur2_sugar(slot, toks, _n0);
+    }
+    // **字符串插值**（`docs/341`）：也是"读法"，也**在 lex 之前**在字节上改
+    // （`f"a{x}b"` 不是语法构造）。版次同样是**整程序**属性：根单元写 2026.3 就都改。
+    if load32(scr, PROF_OFF) == 2 {
+        nb = interp_rewrite(slot, nb, scr, path, n);
+    }
     // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
     let ntf: u32 = lex(slot, nb, toks);
+    // **版次不静默**（`potato_from.DEFAULT_EDITION` 的注）：这份文件没把读法钉在
+    // 生效版次上（没写声明，或写的是旧版次），却声明了新版次的关键字 —— 旧读法把
+    // 它当标识符、新读法把它当语法，同一份源会静默改义。宁可响亮地拒。
+    let effp: u32 = load32(scr, PROF_OFF);
+    if effp >= 1 && load32(scr, FPROF_OFF) != effp {
+        if coll_scan(slot, toks, ntf, effp) != 0 {
+            let dm: str = "this source does not pin its reading to the current edition (no `choose write grammar`, or an older one) and it declares a name that a newer Tur edition treats as syntax (break / continue / defer / print_num / lgc). That would silently change what the source means. Rename it, or pin the old reading with `choose write grammar tur2026.1` (or `tur2026.2`).";
+            wdiag_file(dfd, scr, path, n, 40, str_ptr(dm), str_len(dm));
+            failp(dm, path, n);
+            die(1);
+        }
+    }
     // `addin` 拉进来的单元**只许写 choose 相关代码**（`docs/182` §1.4）。
     if from_addin == 1 {
-        check_chooseset(slot, toks, ntf, path, n);
+        check_chooseset(slot, toks, ntf, path, n, scr);
     }
-    let uses: ptr = ptr_add(scr, USE_OFF);
-    let addins: ptr = ptr_add(scr, ADDIN_OFF);
+    let uses: ptr = ptr_add(slot, nb + 38400);
+    let addins: ptr = ptr_add(slot, nb + 40800);
     let nu: u32 = 0;
     let na: u32 = 0;
     // **归属** (与参考实现 `lomentc.resolve_name` 的 §归属 同一条): 本文件住在商店的包里
@@ -1379,7 +3117,28 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     //   名字形式   `use name`       -> 解析成真实路径, 写在 slot 的 nb 之后
     // (每层各有一个槽, 所以递归不会踩到父层写下的这些路径)
     let rbase: u32 = nb;
+    // **库不许声明命令**（`docs/223` §3.3）：命令是**可执行产物**的身份，而库是给别人
+    // `use` 的代码。与"库不许 `choose`"同一条纪律、同一个落点 —— 只有装载器分得清
+    // "这一层是根还是被 use 进来的"（单元拼完之后检查器看到的是一整块 token）。
+    // 一次算完再进循环：`lex_cmd_find` 扫的是整条 token 流，放在循环里就是 O(n²)。
+    if depth > 0 && from_addin == 0
+            && (lex_cmd_find(slot, toks) / 4294967296) > 0 {
+        let dm: str = "a library must not declare a command (a command is an executable's identity; a library is code other units `use`): ";
+        wdiag_file(dfd, scr, path, n, 24, str_ptr(dm), str_len(dm));
+        failp(dm, path, n);
+        die(1);
+    }
     while load32(toks, i * 20) != 4 {
+        // 记下根/`addin` 单元写没写运行期那一维（docs/324）。依赖写的会被下面抹掉，
+        // 而抹掉之后检查器就看不见它了 —— 但它**是**一个需求，所以要在这里记一笔。
+        if (depth == 0 || from_addin == 1) && tok_is(slot, toks, i, "choose") {
+            let _ws: u32 = load32(toks, (i + 1) * 20 + 4);
+            let _wl: u32 = load32(toks, (i + 1) * 20 + 8);
+            let _bit: u32 = core_word_bit(ptr_add(slot, _ws), _wl);
+            if _bit != 0 {
+                store32(scr, RTDECL_OFF, load32(scr, RTDECL_OFF) | _bit);
+            }
+        }
         // `choose` 声明的是**整个程序**的模式 (docs/143 §3.2), 所以只有**根单元**能写。
         // 这条只能在这里判: 装载器是唯一分得清"这一层是根还是被 use 进来的"的地方 ——
         // 单元拼完之后检查器看到的是一整块 token, 模块边界已经没了 (docs/158 §5 记过)。
@@ -1388,20 +3147,38 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         // `addin` 拉进来的单元**正是**为了写 `choose` 才存在的, 所以这条对它不适用 ——
         // 反过来它有自己的白名单 (`check_chooseset`)。
         if depth > 0 && from_addin == 0 && tok_is(slot, toks, i, "choose") {
-            let mc: str = "fujoc-s: 库不许写 choose (它是整个程序的模式, 只有根单元能定): ";
-            write_all(2, str_ptr(mc), str_len(mc) as u64);
-            write_all(2, path, n as u64);
-            write_all(2, str_ptr("\n"), 1);
-            die(1);
+            // **依赖可以声明它的需求**（`docs/227`，用户 2026-10-09 裁决）。从前这里一律
+            // 硬拒 —— 那让一个要除法的库**两面堵死**：当根编要 `choose runtime`，当依赖
+            // 又不许写（`loment/lib/proc.lomt` 实测就卡在这儿）。
+            //
+            // 但**不能留着**：单元文本是**整段**拷进合并流的（`copy_bytes(out, off, slot,
+            // 0, nb)`），留着它检查器会当成"这一维写了两次" —— 而那是要报的（E022）。
+            // ⇒ 抹成等长空白，与 `choose write grammar` 那一行同一个手法（行号不动）。
+            //
+            // **与参考实现的一处已知不对称**（`docs/227` §5）：参考实现在 `check()` 里还判
+            // "依赖要求 X、根的取值必须是 X"，这里**不判**。想在这里判过一次，**行不通**：
+            // `toks` 是**共享**暂存、每个单元进来就 `lex(slot, nb, toks)` 重写一遍
+            // （`load_file` 头顶那条注释写着"递归会复用 toks"），所以等这一层跑到时，
+            // 根那一层的 token 早没了。要判得给根留一份 token 或把它的文本长度一路传下来 ——
+            // 那是另一轮的事。
+            //
+            // **保证本身不受影响**：依赖的**代码**照样进合并流，于是"依赖里有除法而根写着
+            // `no_runtime`"这一条**自举侧判得住**（合并流上的 E031），而且判得比参考实现
+            // **更宽**（它连深度 > 1 的依赖也看得见）。两边只在"依赖声明了一个它**用不上**的
+            // 核心模式"这一格上不同 —— 那一格不影响产物。
+            blank_tok(slot, toks, i);
+            blank_tok(slot, toks, i + 1);
+            if tok_is(slot, toks, i + 2, ";") {
+                blank_tok(slot, toks, i + 2);
+            }
         }
         // **库不许 `addin`** —— 装载器只走"根 + 根 `addin` 到的单元"那张图, 所以库里的
         // `addin` **不会生效**。写了没生效正是本仓反复要消灭的那种东西, 所以报出来。
         if depth > 0 && from_addin == 0 && tok_is(slot, toks, i, "addin")
                 && load32(toks, (i + 1) * 20) == 0 {
-            let ma: str = "fujoc-s: 库不许 `addin` (只有根单元能拉开关设定): ";
-            write_all(2, str_ptr(ma), str_len(ma) as u64);
-            write_all(2, path, n as u64);
-            write_all(2, str_ptr("\n"), 1);
+            let dm: str = "a library must not use `addin` (only the root unit pulls in switch settings): ";
+            wdiag_file(dfd, scr, path, n, 22, str_ptr(dm), str_len(dm));
+            failp(dm, path, n);
             die(1);
         }
         // `addin <名字>`: 与 `use` 同一条装载路径 —— 差别只有两处: **多一层同目录解析**、
@@ -1409,11 +3186,11 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         if depth == 0 && tok_is(slot, toks, i, "addin")
                 && load32(toks, (i + 1) * 20) == 0 {
             if na >= MAX_ADDIN {
-                let m3: str = "fujoc-s: 单个文件的 addin 超过上限 ";
-                let m4: str = " 条 —— 拆成几个 chooseset, 绝不静默丢\n";
-                write_all(2, str_ptr(m3), str_len(m3) as u64);
+                let dm: str = "more `addin` lines in one file than the limit allows -- split them into several choosesets; they are never dropped silently";
+                wdiag_at(dfd, scr, path, n, load32(toks, i * 20 + 12), 22, str_ptr(dm), str_len(dm));
+                wstr(2, "loment: more than ");
                 wdec(2, scr, MAX_ADDIN);
-                write_all(2, str_ptr(m4), str_len(m4) as u64);
+                wstr(2, " `addin` lines in one file -- split them into several choosesets; they are never dropped silently\n");
                 die(1);
             }
             let ap: u32 = load32(toks, (i + 1) * 20 + 4);
@@ -1423,10 +3200,12 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
             let rl: u32 = resolve_addin_name(slot, ap, al,
                                              ptr_add(slot, rbase + 19200 + na * 64), scr);
             if rl == 0 {
-                let msg2: str = "fujoc-s: `addin` 找不到: ";
-                write_all(2, str_ptr(msg2), str_len(msg2) as u64);
-                write_all(2, ptr_add(slot, ap), al as u64);
-                write_all(2, str_ptr("\n"), 1);
+                let dm: str = "`addin` not found: ";
+                // 名字也要进结构化那一份（`#50`）：只写前缀的话，按 `message` 显示的
+                // 编辑器看到的是"找不到："，没说是哪个。
+                wdiag_file_tail(dfd, scr, path, n, 18, str_ptr(dm), str_len(dm),
+                                ptr_add(slot, ap), al);
+                failp(dm, ptr_add(slot, ap), al);
                 die(1);
             } else {
                 store32(addins, na * 8, rbase + 19200 + na * 64);
@@ -1442,11 +3221,11 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
             // 丢掉的话单元少几块, 而参考实现照收, 两个实现就对同一份源码给出不同产物。
             if (k == 2 && is_lomt(slot, up, ul) == 1) || k == 0 {
                 if nu >= MAX_USE {
-                    let m1: str = "fujoc-s: 单个文件的 use 超过上限 ";
-                    let m2: str = " 条 (路径形式 + 名字形式合起来算) —— 门面拆小, 别把整库塞进一个文件\n";
-                    write_all(2, str_ptr(m1), str_len(m1) as u64);
+                    let dm: str = "more `use` lines in one file than the limit allows (the path form and the name form count together) -- split the facade, do not put a whole library in one file";
+                    wdiag_at(dfd, scr, path, n, load32(toks, i * 20 + 12), 20, str_ptr(dm), str_len(dm));
+                    wstr(2, "loment: more than ");
                     wdec(2, scr, MAX_USE);
-                    write_all(2, str_ptr(m2), str_len(m2) as u64);
+                    wstr(2, " `use` lines in one file (the path form and the name form count together) -- split the facade, do not put a whole library in one file\n");
                     die(1);
                 }
             }
@@ -1455,14 +3234,25 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
                 store32(uses, nu * 8 + 4, ul - 2);
                 nu = nu + 1;
             } else if k == 0 {
+                // ---- **渠道闸（`libl`）：已放开**（`docs/232` §1.1 / §1.3，2026-10-15）
+                //
+                // 这里原先有一段闸：发行版里 `use libl` 打印一条点名 `libl` 的错误再 `die(1)`
+                // （用户 2026-10-12：「LibL 仍然在仓库中，和 LVM 一样发行再锁」）。`#358` 把它
+                // 放开了 —— 放开的条件是**先把承诺写下来**，那就是 `docs/232` §1.3。
+                //
+                // **留这段注释是为了让"闸去哪了"有据可查**：判据那一侧按棘轮规矩**反转**
+                // （`loment_channel_test`：发行版从"拒 `use libl`"改成"收 `use libl`"），
+                // 不是把那条判据删掉。`choose vm` 那条闸在 `checker.lomt` 里**原样留着**。
                 let rl: u32 = resolve_use_name(slot, up, ul, ptr_add(slot, rbase + nu * 64),
                                                scr, ins);
                 if rl == 0 {
                     // 同"打不开": 报出来之后**硬失败**, 不带着缺依赖的单元继续编
-                    let msg: str = "fujoc-s: 名字导入找不到或有歧义: ";
-                    write_all(2, str_ptr(msg), str_len(msg) as u64);
-                    write_all(2, ptr_add(slot, up), ul as u64);
-                    write_all(2, str_ptr("\n"), 1);
+                    let dm: str = "the name import does not resolve, or is ambiguous: ";
+                    // 名字也要进结构化那一份（`#50`）：`--json` 的消费者拿到的
+                    // `message` 得说清是**哪个** `use` 没解析出来。
+                    wdiag_at_tail(dfd, scr, path, n, load32(toks, (i + 1) * 20 + 12), 18,
+                                  str_ptr(dm), str_len(dm), ptr_add(slot, up), ul);
+                    failp(dm, ptr_add(slot, up), ul);
                     die(1);
                 } else {
                     store32(uses, nu * 8, rbase + nu * 64);
@@ -1523,6 +3313,331 @@ fn append_prelude(dst: ptr, off: u64) -> u64 {
     return off + str_len(s) as u64;
 }
 
+// ---------------------------------------------------------------- 编译缓存（`docs/325`）
+
+/// 在 `/proc/self/environ` 里找一个环境变量，值写进 dst（NUL 结尾）；返回长度。
+fn cache_env(scr: ptr, buf: ptr, key: str, dst: ptr, cap: u32) -> u32 {
+    let hp: str = "/proc/self/environ";
+    let fd: i64 = open_ro(str_ptr(hp), str_len(hp), scr);
+    if fd < 0 {
+        return 0;
+    }
+    let n: i64 = syscall4(0, fd as u64, buf as u64, CACHE_BUF as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    let total: u32 = n as u32;
+    let kn: u32 = str_len(key);
+    let i: u32 = 0;
+    while i < total {
+        let st: u32 = i;
+        while i < total && load8(buf, i) != 0 {
+            i = i + 1;
+        }
+        let ln: u32 = i - st;
+        if ln > kn && load8(buf, st + kn) == 61 {   // '='
+            let ok: u32 = 1;
+            let j: u32 = 0;
+            while j < kn {
+                if load8(buf, st + j) != str_byte(key, j) {
+                    ok = 0;
+                }
+                j = j + 1;
+            }
+            if ok == 1 {
+                let vl: u32 = ln - kn - 1;
+                let m: u32 = vl;
+                if m > cap - 1 {
+                    m = cap - 1;
+                }
+                let k: u32 = 0;
+                while k < m {
+                    store8(dst, k, load8(buf, st + kn + 1 + k) as u8);
+                    k = k + 1;
+                }
+                store8(dst, m, 0 as u8);
+                return m;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// FNV-1a 64 位一条车道。缓存键不需要抗碰撞密码学，但需要**足够宽**：两条车道
+/// （不同初值）给 128 位 —— 几千条缓存里撞上的概率可以忽略（`docs/325`）。
+fn cache_fnv(h0: u64, p: ptr, n: u32) -> u64 {
+    let h: u64 = h0;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ (load8(p, i) as u64)) * (1099511628211 as u64);
+        i = i + 1;
+    }
+    return h;
+}
+
+fn cache_lane1() -> u64 {
+    return 14695981039346656037 as u64;
+}
+
+fn cache_lane2() -> u64 {
+    return 1099511628211 as u64;
+}
+
+/// 把一个文件的字节分块喂给两条 FNV 车道，16 字节摘要写进 out。
+fn cache_file_digest(scr: ptr, buf: ptr, out: ptr) -> u32 {
+    let path: str = "/proc/self/exe";
+    let fd: i64 = open_ro(str_ptr(path), str_len(path), scr);
+    if fd < 0 {
+        return 0;
+    }
+    let h1: u64 = cache_lane1();
+    let h2: u64 = cache_lane2();
+    let going: u32 = 1;
+    while going == 1 {
+        let n: i64 = syscall4(0, fd as u64, buf as u64, CACHE_BUF as u64);
+        if n <= 0 {
+            going = 0;
+        } else {
+            h1 = cache_fnv(h1, buf, n as u32);
+            h2 = cache_fnv(h2, buf, n as u32);
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    cache_st64(out, 0, h1);
+    cache_st64(out, 8, h2);
+    return 1;
+}
+
+/// 目录路径复制（NUL 结尾），返回长度。
+fn cache_copy_str(dst: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let m: u32 = n;
+    if m > cap - 1 {
+        m = cap - 1;
+    }
+    let i: u32 = 0;
+    while i < m {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, m, 0 as u8);
+    return m;
+}
+
+fn cache_mkdir(scr: ptr, path: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(scr, i, load8(path, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, n, 0 as u8);
+    // 83 = mkdir；EEXIST 等一律忽略 —— 缓存不可用不该让编译失败。
+    let _r: i64 = syscall4(83, scr as u64, 448 as u64, 0);
+}
+
+/// 定好目录；`LOMENT_CACHE=off` 或建不出目录时返回 0。
+fn cache_prepare(scr: ptr, buf: ptr) -> u32 {
+    let dst: ptr = ptr_add(scr, CACHE_DIR_OFF);
+    let mut_n: u32 = cache_env(scr, buf, "LOMENT_CACHE_DIR", dst, CACHE_DIR_CAP);
+    if mut_n == 0 {
+        // 先试 `$HOME/.cache/loment`（用户私有目录），没有 HOME 才落 `/tmp`。
+        mut_n = cache_env(scr, buf, "HOME", dst, CACHE_DIR_CAP - 32);
+        if mut_n > 0 {
+            let suf: str = "/.cache/loment";
+            let k0: u32 = 0;
+            while k0 < str_len(suf) && mut_n < CACHE_DIR_CAP - 1 {
+                store8(dst, mut_n, str_byte(suf, k0) as u8);
+                mut_n = mut_n + 1;
+                k0 = k0 + 1;
+            }
+            store8(dst, mut_n, 0 as u8);
+        } else {
+            let d: str = cache_default_dir();
+            mut_n = cache_copy_str(dst, CACHE_DIR_CAP, d);
+        }
+    }
+    let offb: ptr = ptr_add(scr, CACHE_TMP_OFF);
+    let offn: u32 = cache_env(scr, buf, "LOMENT_CACHE", offb, 8);
+    if offn == 3 && load8(offb, 0) == 111 && load8(offb, 1) == 102
+            && load8(offb, 2) == 102 {          // "off"
+        return 0;
+    }
+    // 目录太长 ⇒ 不缓存（不截断成另一个目录）。
+    if mut_n + 3 >= CACHE_PATH_CAP - 1 {
+        return 0;
+    }
+    cache_mkdir(scr, dst, mut_n);
+    // <dir>/ir
+    let ip: ptr = ptr_add(scr, CACHE_PATH_OFF);
+    let mut_i: u32 = 0;
+    let k: u32 = 0;
+    while k < mut_n && mut_i < CACHE_PATH_CAP - 1 {
+        store8(ip, mut_i, load8(dst, k) as u8);
+        mut_i = mut_i + 1;
+        k = k + 1;
+    }
+    let sep: str = "/ir";
+    k = 0;
+    while k < 3 && mut_i < CACHE_PATH_CAP - 1 {
+        store8(ip, mut_i, str_byte(sep, k) as u8);
+        mut_i = mut_i + 1;
+        k = k + 1;
+    }
+    store8(ip, mut_i, 0 as u8);
+    cache_mkdir(scr, ip, mut_i);
+    return 1;
+}
+
+/// 键 = 纪元串 + 版次 + 编译器自身摘要 + 单元全文。32 个 hex 字符写进 CACHE_KEY_OFF。
+fn cache_key(scr: ptr, unit: ptr, len: u64, prof: u32, buf: ptr) {
+    let dig: ptr = ptr_add(scr, CACHE_DIG_OFF);
+    let edg: ptr = ptr_add(scr, CACHE_EDG_OFF);
+    let h1: u64 = cache_lane1();
+    let h2: u64 = cache_lane2();
+    let epoc: str = cache_epoch();
+    h1 = cache_fnv(h1, str_ptr(epoc), str_len(epoc));
+    h2 = cache_fnv(h2, str_ptr(epoc), str_len(epoc));
+    let pb: ptr = ptr_add(scr, CACHE_DIG_OFF - 8);
+    store8(pb, 0, (prof % 256) as u8);
+    h1 = cache_fnv(h1, pb, 1);
+    h2 = cache_fnv(h2, pb, 1);
+    if cache_file_digest(scr, buf, edg) == 1 {
+        h1 = cache_fnv(h1, edg, 16);
+        h2 = cache_fnv(h2, edg, 16);
+    }
+    h1 = cache_fnv(h1, unit, len as u32);
+    h2 = cache_fnv(h2, unit, len as u32);
+    cache_st64(dig, 0, h1);
+    cache_st64(dig, 8, h2);
+    let dst: ptr = ptr_add(scr, CACHE_KEY_OFF);
+    let i: u32 = 0;
+    while i < 16 {
+        let b: u32 = load8(dig, i) as u32;
+        store8(dst, i * 2, cache_hexd(b / 16) as u8);
+        store8(dst, i * 2 + 1, cache_hexd(b % 16) as u8);
+        i = i + 1;
+    }
+    store8(dst, 32, 0 as u8);
+}
+
+fn cache_st64(p: ptr, off: u32, v0: u64) {
+    let v: u64 = v0;
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, (v % 256) as u8);
+        v = v / 256;
+        i = i + 1;
+    }
+}
+
+fn cache_hexd(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+/// 拼 `<dir>/ir/<key><ext>`，返回长度。
+fn cache_path(scr: ptr, ext: str, dst: ptr, cap: u32) -> u32 {
+    let d: ptr = ptr_add(scr, CACHE_DIR_OFF);
+    let dn: u32 = cstr_len(d);
+    let kp: ptr = ptr_add(scr, CACHE_KEY_OFF);
+    let en0: u32 = str_len(ext);
+    // 放不下就返回 0（调用方当"这次不缓存"），不截断出另一个路径。
+    if dn + 4 + 32 + en0 >= cap - 1 {
+        return 0;
+    }
+    let mut_p: u32 = 0;
+    let i: u32 = 0;
+    while i < dn && mut_p < cap - 1 {
+        store8(dst, mut_p, load8(d, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    let sep: str = "/ir/";
+    i = 0;
+    while i < 4 && mut_p < cap - 1 {
+        store8(dst, mut_p, str_byte(sep, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    i = 0;
+    while i < 32 && mut_p < cap - 1 {
+        store8(dst, mut_p, load8(kp, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    i = 0;
+    let en: u32 = str_len(ext);
+    while i < en && mut_p < cap - 1 {
+        store8(dst, mut_p, str_byte(ext, i) as u8);
+        mut_p = mut_p + 1;
+        i = i + 1;
+    }
+    store8(dst, mut_p, 0 as u8);
+    return mut_p;
+}
+
+/// 命中：把 IR 流到 stdout，返回 1。未命中：键/路径已备好，返回 2。
+/// 关掉或不可用：返回 0。
+fn cache_try(scr: ptr, buf: ptr, unit: ptr, len: u64, prof: u32) -> u32 {
+    if cache_prepare(scr, buf) == 0 {
+        return 0;
+    }
+    cache_key(scr, unit, len, prof, buf);
+    let p: ptr = ptr_add(scr, CACHE_PATH_OFF);
+    let pn: u32 = cache_path(scr, ".ll", p, CACHE_PATH_CAP);
+    if pn == 0 {
+        return 0;
+    }
+    let fd: i64 = open_ro(p, pn, scr);
+    if fd < 0 {
+        return 2;
+    }
+    let going: u32 = 1;
+    while going == 1 {
+        let n: i64 = syscall4(0, fd as u64, buf as u64, CACHE_BUF as u64);
+        if n <= 0 {
+            going = 0;
+        } else {
+            let _w: u32 = write_checked(1, buf, n as u64, "the IR");
+        }
+    }
+    syscall4(3, fd as u64, 0, 0);
+    return 1;
+}
+
+/// 发射成功后回写：临时名写满再 rename，读到的永远是完整文件。
+fn cache_save(scr: ptr, ir: ptr, m: u32) {
+    let p: ptr = ptr_add(scr, CACHE_PATH_OFF);
+    let pn: u32 = cache_path(scr, ".ll", p, CACHE_PATH_CAP);
+    let t: ptr = ptr_add(scr, CACHE_TMP_OFF);
+    let tn: u32 = cache_path(scr, ".tmp", t, CACHE_TMP_CAP);
+    if pn == 0 || tn == 0 {
+        // 不缓存这一份（见 `cache_path` 的宽度检查）。
+    } else {
+    let i: u32 = 0;
+    let i: u32 = 0;
+    while i < tn {
+        store8(scr, i, load8(t, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, tn, 0 as u8);
+    // 257 = openat；577 = O_WRONLY|O_CREAT|O_TRUNC；420 = 0644
+    let fd: i64 = syscall6(257, (0 as u64) - 100, scr as u64, 577 as u64, 420 as u64, 0);
+    // 不用裸 `return;`（M80 的 dump 助手没有那个结点；这是它登记的第一课，别为一行绕开就
+    // 让整份 driver.lomt 从 AST 对照语料里掉出去）。
+    if fd >= 0 {
+        let _w: u32 = write_checked(fd as u64, ir, m as u64, "the cache");
+        syscall4(3, fd as u64, 0, 0);
+        // 82 = rename
+        let _r: i64 = syscall4(82, t as u64, p as u64, 0);
+    }
+    }
+}
+
 fn _start() -> u32 {
     let unitv: u64 = sys_alloc(UNIT_CAP as u64);
     let irv: u64 = sys_alloc(IR_CAP as u64);
@@ -1531,7 +3646,7 @@ fn _start() -> u32 {
     let argv_buf: u64 = sys_alloc(65536);   // 入口路径单独一块 (不能压在槽区里)
     let sncv: u64 = sys_alloc(16);          // 去重表长度 (一格内存, 递归共享)
     if unitv == 0 || irv == 0 || seenv == 0 || scrv == 0 || argv_buf == 0 || sncv == 0 {
-        return fail("fujoc-s: brk failed\n");
+        return fail("out of memory (brk failed)");
     }
     let unit: ptr = unitv as ptr;
     let ir: ptr = irv as ptr;
@@ -1548,22 +3663,63 @@ fn _start() -> u32 {
     // `--diag-out` 后面跟路径, 这个不跟 —— 对象直接写 stdout (与 IR 同一条出口次序:
     // **一个单元一份产物**)。
     store8(scr, DIAG_OFF, 0 as u8);
+    store32(scr, PROF_OFF, PROF_DEFAULT);   // 缺省 = 最新版次（potato_from.DEFAULT_EDITION）
+    store32(scr, DECLK_OFF, 0);         // 缺省：没写 `choose write grammar`
     let pmode: u32 = 0;
-    let a2: u64 = argv_at(argv_buf as ptr, 65536, scr, 2);
-    if a2 != 0 {
-        let p2: ptr = ptr_add(argv_buf as ptr, (a2 >> 32) as u32);
-        let n2: u32 = (a2 % 4294967296) as u32;
+    // `--no-edition-notice`：**工具**（`lomcomefor` 这类把驱动当子进程、把它的输出
+    // 整段比对的程序）用它关掉编译期那一行版次提示。人敲命令时照旧打（docs/296 §1.2）。
+    let quiet: u32 = 0;
+    // `--lspe-level 0..4`（`#1091`）：上下文敏感度，默认 3（`docs/262` §5.6）。
+    let lvl: u32 = 3;
+    let nocache: u32 = 0;
+    // 参数从 argv[2] 起**逐个**看（`#1091`：`--lspe-level N` 要能和 `--emit-potato`
+    // 同时给）。`argv_at` 越过末尾回 0，所以这就是 argc 的边界。
+    let ai: u32 = 2;
+    let av2: u64 = argv_at(argv_buf as ptr, 65536, scr, ai);
+    while av2 != 0 {
+        let p2: ptr = ptr_add(argv_buf as ptr, (av2 >> 32) as u32);
+        let n2: u32 = (av2 % 4294967296) as u32;
         if streq(p2, n2, "--diag-out") == 1 {
-            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, 3);
+            ai = ai + 1;
+            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, ai);
             if a3 != 0 {
                 let p3: ptr = ptr_add(argv_buf as ptr, (a3 >> 32) as u32);
                 let n3: u32 = (a3 % 4294967296) as u32;
                 copy_bytes(ptr_add(scr, DIAG_OFF), 0, p3, 0, n3);
                 store8(scr, DIAG_OFF + n3, 0 as u8);
             }
+        } else if streq(p2, n2, "--no-edition-notice") == 1 {
+            quiet = 1;
         } else if streq(p2, n2, "--emit-potato") == 1 {
             pmode = 1;
+        } else if streq(p2, n2, "--no-cache") == 1 {
+            nocache = 1;
+        } else if streq(p2, n2, "--print-command") == 1 {
+            // `--print-command` (docs/223): 这个单元注册了哪条命令 —— 构建前端拿它去命名
+            // 产物（`loment-<名字>`）。**不装载**，只词法扫一遍（见 print_command）。
+            pmode = 2;
+        } else if streq(p2, n2, "--lspe-level") == 1 {
+            ai = ai + 1;
+            let a3: u64 = argv_at(argv_buf as ptr, 65536, scr, ai);
+            if a3 != 0 {
+                let p3: ptr = ptr_add(argv_buf as ptr, (a3 >> 32) as u32);
+                let n3: u32 = (a3 % 4294967296) as u32;
+                let v: u32 = 0;
+                let z: u32 = 0;
+                while z < n3 {
+                    let c: u32 = load8(p3, z) as u32;
+                    if c >= 48 && c <= 57 {
+                        v = v * 10 + (c - 48);
+                    }
+                    z = z + 1;
+                }
+                if v <= 4 {
+                    lvl = v;
+                }
+            }
         }
+        ai = ai + 1;
+        av2 = argv_at(argv_buf as ptr, 65536, scr, ai);
     }
     // 工具目录: argv[0] 所在目录 (自带 store 相对它)。**先取它** —— 下一次 argv_at 会把
     // 同一块 argv_buf 重写一遍, 而后面 ap 指进 argv_buf, 顺序反了内容会被抹掉。
@@ -1577,10 +3733,13 @@ fn _start() -> u32 {
     }
     let av: u64 = argv_at(argv_buf as ptr, 65536, scr, 1);
     if av == 0 {
-        return fail("fujoc-s: 用法: fujoc-s <入口.lomt> [--diag-out PATH | --emit-potato]\n");
+        return fail("usage: loment <entry.lomt> [--diag-out PATH | --emit-potato]");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
+    if pmode == 2 {
+        return print_command(ap, an, scr);
+    }
     // 结构化诊断的输出 fd。**现在就开** (建/清空), 不是等出错了再开:
     //   * 上一次跑剩的旧文件不会被这一次误读 (空文件 = "这一次没有诊断");
     //   * 路径写错**立刻**炸出来, 而不是"编译通过所以没写文件"看不出来。
@@ -1590,22 +3749,45 @@ fn _start() -> u32 {
     if dn > 0 {
         let o: i64 = open_wo(ptr_add(scr, DIAG_OFF), dn, scr);
         if o < 0 {
-            return fail("fujoc-s: --diag-out 打不开 (路径或权限)\n");
+            return fail("--diag-out cannot be opened (path or permission)");
         }
         dfd = o;
+    }
+    // 装载器那一层（`load_file` 的递归、`strip_grammar_decl`、`check_chooseset`）也要写
+    // 这一路诊断 —— fd 放进 `scr` 的 `DIAGFD_OFF` 那一格（与 `snc` 同一种传法）。
+    // **0 = 没给**，所以存 fd 加一；`diagfd` 负责还原。
+    store32(scr, DIAGFD_OFF, (dfd + 1) as u32);
+    // **发行版锁**（用户 2026-11-17，`docs/349` §10）：`.lls` 是规范/语义源，
+    // **发行版工具链永不编译它**。锁与 `choose vm` 那把同源（同一个渠道常量），
+    // 但这一次**锁死** —— 不随版本解锁：`.lls` 里的执行规则是判据的尺子。
+    //
+    // ⚠ 渠道常量的**唯一读取点**就是这一行（从 `checker.lomt` 搬来的那一个）：
+    // `loment_channel_test` 钉"dev/release 两个种子只差一处"（`docs/231` §5 判据 F）。
+    let rel: u32 = LOMENT_CHANNEL;
+    if rel == 1 && has_suffix(ap, an, ".lls") == 1 {
+        let dm: str = "the release toolchain never compiles `.lls` sources (specification/semantics files) -- use the dev build (docs/349 section 10)";
+        wdiag_file(dfd, scr, ap, an, 999, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     // 项目根: 入口文件所在目录 (名字形式的 deps/ 层相对它)
     let _p: u32 = dir_of(ap, an, ptr_add(scr, PROJ_OFF), DIR_CAP);
     // 词法缓冲按"单个文件"的大小开 (单元只 lex 一次, 见下)
     let tokv: u64 = sys_alloc(TOKS_CAP as u64);
     if tokv == 0 {
-        return fail("fujoc-s: brk failed\n");
+        let dm: str = "out of memory: cannot allocate the lexer buffer (brk failed)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let toks: ptr = tokv as ptr;
     // 源后缀 (名字形式 `use <名字>` 用它拼候选): **项目自己放的那份优先** (项目根 =
     // 入口文件所在目录), 再是工具链旁边那份; 都没配就用默认 `.lomt`。这时 unit/toks
     // 还空着, 借它们当读配置的暂存 —— load_file 紧接着就会盖掉它们。
     store8(scr, EXT_OFF, 0 as u8);
+    // 根单元所在包的 `pkg.lomp` 要运行期吗（docs/324）？这一步借 unit/toks 当暂存 ——
+    // `load_file` 紧接着就会盖掉它们，与上面读 `loment.conf` 同一个时点。
+    store32(scr, RTDECL_OFF, 0);
+    let _rq: u32 = cfg_pkg_choose(ptr_add(scr, PROJ_OFF),
+                                  cstr_len(ptr_add(scr, PROJ_OFF)), scr, unit, toks);
     let _e0: u32 = cfg_source_ext(ptr_add(scr, PROJ_OFF),
                                   cstr_len(ptr_add(scr, PROJ_OFF)),
                                   ptr_add(scr, EXT_OFF), scr, unit, toks);
@@ -1619,14 +3801,88 @@ fn _start() -> u32 {
     // 真正打不开的路径仍由 `load_file` 报「打不开」, 不进这里。
     let ek: u32 = entry_kind(ap, an, scr);
     if ek == 1 {
-        return fail("fujoc-s: 入口是目录, 不是源文件\n");
+        let dm: str = "the entry is a directory, not a source file";
+        wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks, 0);
     if len == 0 {
         if ek == 2 {
-            return fail("fujoc-s: 入口是空文件 (里面没有源码)\n");
+            let dm: str = "the entry file is empty (there is no source in it)";
+            wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm), str_len(dm));
+            return fail(dm);
         }
-        return fail("fujoc-s: 入口装不进来 (路径对吗?)\n");
+        let dm2: str = "cannot load the entry file (is the path right?)";
+        wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
+        return fail(dm2);
+    }
+    // **包清单的前置条件**（docs/325）：清单 `choose()` 里写了、根与 `addin` 单元
+    // 都没写的那一维，在合并单元末尾补一行 `choose <词>` —— 与参考实现逐维注入
+    // `mod.chooses` 同义。**显式写的优先**：那位已经置位就跳过。
+    // 逐字节写：不写带换行的字符串字面量 —— 两个词法器对多行字面量的解码
+    // 有过一次可测的分歧（`loment_p8_test::test_m80_loment_parser_ast_dump`）。
+    let _fl: u32 = load32(scr, RTDECL_OFF);
+    let _pp: ptr = ptr_add(scr, PKGCH_OFF);
+    let _pn2: u32 = cstr_len(_pp);
+    let _wi: u32 = 0;
+    while _wi < _pn2 {
+        while _wi < _pn2 && load8(_pp, _wi) == 32 {
+            _wi = _wi + 1;
+        }
+        let _ws2: u32 = _wi;
+        while _wi < _pn2 && load8(_pp, _wi) != 32 {
+            _wi = _wi + 1;
+        }
+        let _wl2: u32 = _wi - _ws2;
+        if _wl2 > 0 {
+            let _bit2: u32 = core_word_bit(ptr_add(_pp, _ws2), _wl2);
+            if _bit2 != 0 && (_fl & _bit2) == 0 {
+                store8(unit, len as u32, 10 as u8);
+                let _k: u32 = 0;
+                let _pre: str = "choose ";
+                while _k < str_len(_pre) {
+                    store8(unit, (len as u32) + 1 + _k, str_byte(_pre, _k) as u8);
+                    _k = _k + 1;
+                }
+                let _k2: u32 = 0;
+                while _k2 < _wl2 {
+                    store8(unit, (len as u32) + 1 + str_len(_pre) + _k2,
+                           load8(_pp, _ws2 + _k2) as u8);
+                    _k2 = _k2 + 1;
+                }
+                let _tot: u32 = 2 + str_len(_pre) + _wl2;
+                store8(unit, (len as u32) + _tot - 1, 10 as u8);
+                len = len + (_tot as u64);
+                _fl = _fl | _bit2;
+            }
+        }
+    }
+    store32(scr, RTDECL_OFF, _fl);
+    // **编译期告知版次**（用户 2026-11-04 的要求，`docs/296` §1.1）：每次编译一行，
+    // 把用户写的拼法展开成规范名。短名（`tur2`）跨年之后不再被接受，这一行是用户
+    // 排查"我到底用的哪一版"的第一手信息。工具模式（`--emit-potato`/`--print-command`）
+    // 不打，保持它们的输出面不变。
+    if pmode == 0 && quiet == 0 {
+        let pk: u32 = load32(scr, DECLK_OFF);
+        if pk == 0 {
+            wstr(2, "loment: grammar default -> tur2026.3 (Tur 2026.3)\n");
+        } else if pk == 1 {
+            wstr(2, "loment: grammar loment -> tur2026.3 (Tur 2026.3)\n");
+        } else if pk == 2 {
+            wstr(2, "loment: grammar tur -> tur2026.1 (Tur 1)\n");
+        } else if pk == 3 {
+            wstr(2, "loment: grammar tur1 -> tur2026.1 (Tur 1)\n");
+        } else if pk == 4 {
+            wstr(2, "loment: grammar tur2026.1 -> tur2026.1 (Tur 1)\n");
+        } else if pk == 5 {
+            wstr(2, "loment: grammar tur2 -> tur2026.2 (Tur 2)\n");
+        } else if pk == 6 {
+            wstr(2, "loment: grammar tur2026.2 -> tur2026.2 (Tur 2)\n");
+        } else if pk == 7 {
+            wstr(2, "loment: grammar tur3 -> tur2026.3 (Tur 2026.3)\n");
+        } else {
+            wstr(2, "loment: grammar tur2026.3 -> tur2026.3 (Tur 2026.3)\n");
+        }
     }
     // 单元的词法缓冲: 按**实测密度**估 —— 仓库 184 个文件合计 4.81 字节/token, 最密的
     // 3.02; 取 **10 字节/源码字节**, 一倍余量。原先按 20 字节/源码字节开 (那是"1 字节
@@ -1636,14 +3892,55 @@ fn _start() -> u32 {
     let tcap: u64 = (len + 512) * 10;
     let tok2v: u64 = sys_alloc(tcap);
     if tok2v == 0 {
-        return fail("fujoc-s: 单元太大: 词法缓冲要不到\n");
+        let dm: str = "the unit is too large: cannot allocate the lexer buffer";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let toks2: ptr = tok2v as ptr;
     let ntk: u32 = (tcap / 20) as u32;
     // 预置枚举注入: 先粗判一次 (同一个缓冲; +512 的余量够放下小段 prelude)
     let nt0: u32 = lex_cap(unit, len as u32, toks2, ntk);
     if nt0 > ntk {
-        return fail("fujoc-s: 单元太大: token 数超过缓冲 (密度比 10 字节/token 还密)\n");
+        let dm: str = "the unit is too large: more tokens than the buffer holds (denser than 10 bytes/token)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
+    }
+    // **用户源最后一行的行号**：预置枚举是**追加**在后面的（`append_prelude`），它会把
+    // EOF 的行号推后好几行。诊断不许指到用户文件之外（与 `#1521` 同一类）—— 渲染时按
+    // 这一行夹住。`nt0` 至少为 1（词法必发 eof）。
+    let uline: u32 = 0;
+    if nt0 > 0 {
+        uline = load32(toks2, (nt0 - 1) * 20 + 12);
+    }
+    // **文件必须以 `module` 开头，而且名字要写在同一行**（`#24`）。
+    // 自举这一侧原先**没有这一条**：少了那一行的单元会一路走到 codegen —— 而 codegen
+    // 假设"第一个记号就是 `module`、第二个就是它的名字"，于是**编译器自己段错误**
+    // （用户拿到的是 shell 的 "Segmentation fault"：没有诊断、没有行号、没有退出码）。
+    // 参考实现那句是 "期望 module（文件必须以 module 开头），得到 'fn'"。
+    //
+    // 位置在**词法之后、别的任何一趟之前**：后面每一趟（`has_enum` / `append_prelude`
+    // / `apply_switches` / `check_arena` / `emit_module`）都默认这一格在。
+    // 名字那一格也要判 —— `module` 单独一行时后面每一趟都会把**下一个记号**当名字用
+    // （`module` + 换行 + `fn` 会被当成"模块名是 `fn`"）。
+    // **只有"有内容"的源才要求 `module`** —— 只有注释（或空）的文件与空文件同类：
+    // "没有可编译的源"，`test_m85_entry_load_distinguishes_empty_file_from_directory`
+    // 钉着它必须被**接受**。判据是"lexer 认得出不止一个记号"。
+    if nt0 > 1 {
+        if tok_is(unit, toks2, 0, "module") == false {
+            let dm: str = "the file must start with `module` (the first token has to be `module`) -- without it this source cannot be located";
+            wdiag_at(dfd, scr, ap, an, load32(toks2, 12), 19, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        if load32(toks2, 20) != 0 {
+            let dm: str = "`module` must be followed by a module name (an identifier)";
+            wdiag_at(dfd, scr, ap, an, load32(toks2, 12), 19, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        if load32(toks2, 32) != load32(toks2, 12) {
+            let dm: str = "the module name must be on the same line as `module` (a name after a newline does not count)";
+            wdiag_at(dfd, scr, ap, an, load32(toks2, 12), 19, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
     }
     if has_enum(unit, toks2, "Option") == 0 || has_enum(unit, toks2, "Result") == 0 {
         len = append_prelude(unit, len);
@@ -1651,7 +3948,9 @@ fn _start() -> u32 {
     // 正式词法 + 发射
     let ntl: u32 = lex_cap(unit, len as u32, toks2, ntk);
     if ntl > ntk {
-        return fail("fujoc-s: 单元太大: token 数超过缓冲 (密度比 10 字节/token 还密)\n");
+        let dm: str = "the unit is too large: more tokens than the buffer holds (denser than 10 bytes/token)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     // 开关 (`docs/182` §1): **在 token 流上落定** —— 关着的那段体连 token 都不留,
     // 所以"解析跳过"是字面为真的, 而 `choose` 从此有了一个真消费方（在此之前它什么都不驱动）。
@@ -1659,7 +3958,9 @@ fn _start() -> u32 {
     // 会被算成 i32。500 * 16 + 8 = 8008。
     let swv: u64 = sys_alloc(8008);
     if swv == 0 {
-        return fail("fujoc-s: brk failed (开关表)\n");
+        let dm: str = "out of memory: cannot allocate the switch table (brk failed)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let sw: ptr = swv as ptr;
     let nt: u32 = apply_switches(unit, toks2, ntl, sw);
@@ -1674,29 +3975,37 @@ fn _start() -> u32 {
         cf_used = 1;
         let cfv: u64 = sys_alloc(CF_BYTES as u64);       // 方言表 + 体缓冲 + 语境
         if cfv == 0 {
-            return fail("fujoc-s: brk failed (comefor)\n");
+            let dm: str = "out of memory: cannot allocate the comefor workspace (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
         }
         // 解释器的工作堆**单独要一块**（墙 ①b）：与 codegen 的 49152B 同在一块 64 KiB
         // 上必然相撞，撞了是 `@__loment_abort`（SIGILL，看起来像编译器崩了）。
         let hpv: u64 = sys_alloc(cf_heap_bytes() as u64);
         if hpv == 0 {
-            return fail("fujoc-s: brk failed (comefor heap)\n");
+            let dm: str = "out of memory: cannot allocate the comefor heap (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
         }
         // 展开后的产物表。与源一样大 —— 宏体可以吐得比吃的多，但不会多到要再翻一倍。
         let cfov: u64 = sys_alloc(TOKS_CAP as u64);
         if cfov == 0 {
-            return fail("fujoc-s: brk failed (comefor out)\n");
+            let dm: str = "out of memory: cannot allocate the comefor output buffer (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
         }
         let rsv: u64 = sys_alloc(64);
         if rsv == 0 {
-            return fail("fujoc-s: brk failed (comefor res)\n");
+            let dm: str = "out of memory: cannot allocate the comefor result buffer (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
         }
         let rs: ptr = rsv as ptr;
         let re: u32 = expand_comefor(unit, toks2, nt, cfov as ptr, ntk, cfv as ptr,
                                               hpv as ptr, len as u32, rs);
         if re != 0 {
             // `re` 说哪一类错；`re == 7` 时 `rs[0]` 是**解释器**的错误码（宏体没跑成）。
-            return comefor_fail(re, load32(rs, 0));
+            return comefor_fail(re, load32(rs, 0), scr, dfd, ap, an);
         }
         // 下游一律用展开后的那一份 —— 与 `apply_switches` 换掉 `nt` 是同一个做法。
         nt = load32(rs, 0);
@@ -1707,13 +4016,76 @@ fn _start() -> u32 {
     // 外部代码块（`docs/185` S1）在自举侧**还没落地** —— 参考实现收，这边还不认。
     // 明确拒绝，别让它掉进"未定义符号"那种指不到点子的错里。镜像落地时删掉这一段。
     if has_extblock(unit, toks2, nt) == 1 {
-        return fail("fujoc-s: 外部代码块 (let c { } / c { }) 在自举侧还没实现 — 见 docs/185\n");
+        let dm: str = "external code blocks (`let c { }` / `c { }`) are not implemented in the self-hosted compiler yet -- run `loment skill --print` for what this toolchain takes";
+        wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+        return fail(dm);
+    }
+    // E11 效应站点（`docs/341` A2c）：`check_arena` 里的 `desugar_effects` 会把
+    // `effect` 声明与 `effects` 行从**这块 token 缓冲**里擦掉（`docs/346` A2），而台账
+    // 要数的正是它们。所以计数放在检查**之前**预跑，结果经 `effc` 交给 `potato_emit`。
+    // 只有 `--emit-potato` 会用到；普通编译不付这份扫描。
+    let effv: u64 = 0;
+    let effc: ptr = effv as ptr;
+    if pmode == 1 {
+        let eb: u64 = sys_alloc(eff_scratch_bytes());
+        if eb == 0 {
+            let dm: str = "out of memory: cannot allocate the effect-ledger workspace (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        effc = eb as ptr;
+        let erc: u32 = eff_precount(unit, toks2, nt, effc);
+        if erc == 1 {
+            let dm: str = "--emit-potato: more effect declarations than this section takes (64)";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        if erc == 2 {
+            let dm: str = "--emit-potato: more function declarations than the effect-row table takes (512)";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        if erc == 3 {
+            let dm: str = "--emit-potato: more call sites than the effect-row table takes (16384)";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+    }
+    // `lspe pass "reason" { 体 }`（`docs/262` §5.16 / `#786`）：参考实现在**解析**里把
+    // 头与括号拆平（块体就是当前位置的语句）。自举侧没有 AST，于是在 token 层做同一件事
+    // —— 检查与发射看**拆平后**的流；`--emit-potato` 看**原流**（LSPE 的块表要从头与
+    // 括号来，见 `loment/lspe/lspe.lomt`）。拆平**只删不插**，所以拷一份再压即可。
+    let ctoks: ptr = toks2;
+    let lp: u32 = 0;
+    let ci: u32 = 0;
+    while ci + 1 < nt {
+        if load32(toks2, ci * 20) == 0 && tok_is(unit, toks2, ci, "lspe")
+                && load32(toks2, (ci + 1) * 20) == 0 && tok_is(unit, toks2, ci + 1, "pass") {
+            lp = 1;
+            ci = nt;
+        } else {
+            ci = ci + 1;
+        }
+    }
+    if lp == 1 {
+        let dv: u64 = sys_alloc((nt as u64) * 20 + 64);
+        if dv == 0 {
+            let dm: str = "out of memory: cannot allocate the `lspe pass` buffer (brk failed)";
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+            return fail(dm);
+        }
+        ctoks = dv as ptr;
+        let _nc: u32 = desugar_lspe_pass(unit, toks2, 0, nt, ctoks, 0);
     }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
-    let errsv: u64 = sys_alloc(8192);
+    // 缓冲大小与**写它的那两个模块**同一个数（`switches.err_max()`，`#663`）：
+    // "能写多少"与"分到多大"分开挑，迟早会一边多一边少。
+    let errsv: u64 = sys_alloc(chk_err_bytes() as u64);
     if errsv == 0 {
-        return fail("fujoc-s: brk failed\n");
+        let dm: str = "out of memory: cannot allocate the diagnostic buffer (brk failed)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let errs: ptr = errsv as ptr;
     // 检查器的工作缓冲也从 brk 拿 (一块 >= chk_arena_bytes(), 内部分段见 checker.lomt 的
@@ -1722,63 +4094,183 @@ fn _start() -> u32 {
     // `@__loment_abort` —— 一条非法指令 (SIGILL), 看起来像"编译器崩了"。
     let arenav: u64 = sys_alloc(chk_arena_bytes() as u64);
     if arenav == 0 {
-        return fail("fujoc-s: brk failed\n");
+        let dm: str = "out of memory: cannot allocate the checker arena (brk failed)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let arena: ptr = arenav as ptr;
     // 检查器的符号表按**单元规模**定 (syms 段 / 每条 20 字节)。先数一遍声明关键字 ——
     // 这是个**保守上界** (trait 里只声明不发射的方法也算进去), 超了就报错, 不写穿。
     let nsym: u32 = 0;
     let sk: u32 = 0;
-    while load32(toks2, sk * 20) != 4 {
-        if tok_is(unit, toks2, sk, "fn") || tok_is(unit, toks2, sk, "const")
-                || tok_is(unit, toks2, sk, "struct") || tok_is(unit, toks2, sk, "enum") {
+    while load32(ctoks, sk * 20) != 4 {
+        if tok_is(unit, ctoks, sk, "fn") || tok_is(unit, ctoks, sk, "const")
+                || tok_is(unit, ctoks, sk, "struct") || tok_is(unit, ctoks, sk, "enum") {
             nsym = nsym + 1;
         }
         sk = sk + 1;
     }
     if nsym > (chk_arena_scr() - chk_arena_syms()) / 20 {
-        return fail("fujoc-s: 单元声明数超过 checker 符号表容量 (把门面拆小)\n");
+        let dm: str = "more declarations than the checker's symbol table holds -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
-    let ne: u32 = check_arena(unit, toks2, errs, arena,
+    let tytp: ptr = ptr_add(arena, chk_arena_tyt());
+    let ne: u32 = check_arena(unit, ctoks, errs, arena,
                               ptr_add(arena, chk_arena_scr()),
                               ptr_add(arena, chk_arena_ctab()),
                               ptr_add(arena, chk_arena_nc()),
                               ptr_add(arena, chk_arena_exs()),
                               ptr_add(arena, chk_arena_env()),
-                              ptr_add(arena, chk_arena_tyt()));
+                              tytp, load32(scr, PROF_OFF));
     // 开关的规则接在检查器之后 —— 开关表在**驱动器**手上（做装载与裁减的是它）,
     // 与 "`choose` 第三条（库不许）落在装载器" 同一个理由（docs/176 §7.3）。
-    let nsw: u32 = switch_rules(unit, toks2, sw, errs, ne * 8);
+    let nsw: u32 = switch_rules(unit, ctoks, sw, errs, ne * 8);
     let ne2: u32 = ne + nsw;
     if ne2 != 0 {
-        wstr(2, "fujoc-s: 静态检查未通过\n");
+        wstr(2, "loment: static checks failed\n");
         let e: u32 = 0;
-        while e < ne2 && e < 64 {
+        while e < ne2 {
             let code: u32 = load32(errs, e * 8);
             let tk: u32 = load32(errs, e * 8 + 4);
+            // 开关规则那几条（`e >= ne`）的第二格**不是 token 下标**：压缩把 `choose`
+            // 构造整段删掉了，下标落在压缩后的流上没有意义。`< SW_PACK` 是表项下标
+            // （行号与名字都由它取）；`>= SW_PACK` 是 `SW_PACK + 行号`（嵌套 / 超限，
+            // 没有表项）。其余诊断照旧从 token 取行号。
+            let is_sw: u32 = 0;
+            if e >= ne {
+                is_sw = 1;
+            }
+            // **先分支再读 token**：开关那几条的第二格可能带 `SW_PACK` 高位，拿它去
+            // 索引 `ctoks`（乘 20）会越界读。
+            let line: u32 = 0;
+            let swent: u32 = SW_NONE;
+            if is_sw == 1 {
+                // 2147483648 = `switches.SW_PACK`（写字面量：`常量 == 字面量` 踩过 #224）。
+                if tk >= 2147483648 {
+                    line = tk - 2147483648;
+                } else {
+                    swent = tk;
+                    line = load32(sw, tk * 16 + 12);
+                }
+            } else {
+                line = load32(ctoks, tk * 20 + 12);
+            }
+            // 诊断不许指到**用户文件**之外：预置枚举追加在源尾，EOF 的行号被推后了
+            // （"块没闭合"于是报在 9 行而参考报 5 行）。夹在用户源的 EOF 行上。
+            if uline != 0 && line > uline {
+                line = uline;
+            }
             wstr(2, "  E");
+            // 与 JSONL 那一份同一种形状：< 100 补两位、>= 100 补一位（`docs/338`）。
+            if code < 10 {
+                let _q1: u64 = wstr(2, "00");
+            } else {
+                if code < 1000 {
+                    let _q2: u64 = wstr(2, "0");
+                }
+            }
             wdec(2, scr, code);
             wstr(2, " @");
             wdec(2, scr, tk);
             wstr(2, " line ");
-            wdec(2, scr, load32(toks2, tk * 20 + 12));
+            wdec(2, scr, line);
             wstr(2, ": ");
-            let st: u32 = load32(toks2, tk * 20 + 4);
-            let ln: u32 = load32(toks2, tk * 20 + 8);
+            let st: u32 = 0;
+            let ln: u32 = 0;
+            let ph: str = "";
+            let ph2: str = "";
+            let isrt: u32 = 0;
+            if is_sw == 0 {
+                st = load32(ctoks, tk * 20 + 4);
+                ln = load32(ctoks, tk * 20 + 8);
+                // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
+                // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
+                // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
+                ph = rt_phrase(unit, ctoks, tk);
+                if code == 31 && str_len(ph) > 0 {
+                    isrt = 1;
+                }
+                // `#702`: 解析类的那几条也要说得出**是什么构造**（裸 return / 嵌套上限 /
+                // 裸块），正文不是那一格 token 原文。与 E031 的 `rt_phrase` 同一处分岔。
+                ph2 = err_phrase(unit, ctoks, tk, code);
+            }
             let take: u32 = 24;
             if ln < 24 {
                 take = ln;
             }
-            write_all(2, ptr_add(unit, st), take as u64);
+            if is_sw == 1 {
+                // 表项还在：正文就是那个开关的名字（`unit` 是**未压缩**的源文本，
+                // 名字的起点/长度仍然有效）。没有表项的两种给一句固定说法。
+                if swent != SW_NONE {
+                    write_all(2, ptr_add(unit, load32(sw, swent * 16)),
+                              load32(sw, swent * 16 + 4) as u64);
+                } else {
+                    if line == 0 {
+                        let dm: str = "开关超过 500 条上限（`docs/182` §1.8）";
+                        write_all(2, str_ptr(dm), str_len(dm) as u64);
+                    } else {
+                        let dm: str = "开关声明不能写在任何块内部（`docs/182` §1.10）";
+                        write_all(2, str_ptr(dm), str_len(dm) as u64);
+                    }
+                }
+            } else {
+                if isrt == 1 {
+                    write_all(2, str_ptr(ph), str_len(ph) as u64);
+                } else {
+                    if str_len(ph2) > 0 {
+                        write_all(2, str_ptr(ph2), str_len(ph2) as u64);
+                    } else {
+                        write_all(2, ptr_add(unit, st), take as u64);
+                    }
+                }
+            }
             wstr(2, "\n");
             // 同一条诊断, 结构化那一份 (docs/182 §5)。**同一份数据两个受众**:
             // 上面那份给人看 (stderr), 这份给报错器看 (一行 JSON)。
             if dfd >= 0 {
-                let _j: u64 = wdiag(dfd as u64, scr, ap, an,
-                                    load32(toks2, tk * 20 + 12), code,
-                                    ptr_add(unit, st), take);
+                if is_sw == 1 {
+                    if swent != SW_NONE {
+                        let _j3: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                             ptr_add(unit, load32(sw, swent * 16)),
+                                             load32(sw, swent * 16 + 4));
+                    } else {
+                        if line == 0 {
+                            let dm: str = "开关超过 500 条上限（`docs/182` §1.8）";
+                            let _j4: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                 str_ptr(dm), str_len(dm));
+                        } else {
+                            let dm: str = "开关声明不能写在任何块内部（`docs/182` §1.10）";
+                            let _j5: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                 str_ptr(dm), str_len(dm));
+                        }
+                    }
+                } else {
+                    if isrt == 1 {
+                        let _k2: u64 = wdiag_rt(dfd as u64, scr, ap, an, line, ph,
+                                                load32(tytp, RT_N_SITES));
+                    } else {
+                        if str_len(ph2) > 0 {
+                            let _j2: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                 str_ptr(ph2), str_len(ph2));
+                        } else {
+                            let _j: u64 = wdiag(dfd as u64, scr, ap, an, line, code,
+                                                ptr_add(unit, st), take);
+                        }
+                    }
+                }
             }
             e = e + 1;
+        }
+        // **丢了多少要说**（`#656`）：缓冲是有限的（`ERR_CAP` 条），满了以后每一条都被
+        // 丢掉 —— 从前连"丢了"这件事都没有第二个人知道，而参考实现一条都不丢。
+        let dn: u32 = chk_err_dropped(tytp);
+        if dn > 0 {
+            wstr(2, "loment: ");
+            wdec(2, scr, dn);
+            wstr(2, " more diagnostics were dropped (the buffer holds ");
+            wdec(2, scr, chk_err_cap());
+            wstr(2, "): split the unit, or fix the first ones\n");
         }
         return die(1);
     }
@@ -1792,26 +4284,83 @@ fn _start() -> u32 {
     // 再也看不出"这次展开过没有" —— 而这一层手上正好有那个答案。
     if pmode == 1 {
         if cf_used == 1 {
-            return fail("fujoc-s: --emit-potato: 这个单元用了 comefor/byuse —— `dialects` 那一格还没进自举侧 (docs/189 S1)\n");
+            let dm: str = "`--emit-potato`: this unit uses comefor/byuse, and the `dialects` section has not reached the self-hosted side yet -- run `loment skill --print`";
+            wdiag_file(dfd, scr, ap, an, 23, str_ptr(dm), str_len(dm));
+            return fail(dm);
         }
-        let pn: u32 = potato_emit(unit, toks2, nt, sw, ir);
+        let pn: u32 = potato_emit(unit, toks2, nt, sw, ir, lvl,
+                                  load32(scr, PROF_OFF), effc);
         if pn == 0 {
             return die(1);
         }
-        write_all(1, ir, pn as u64);
+        let _wp: u32 = write_checked(1, ir, pn as u64, "the object");
         return die(0);
+    }
+    // ---- 编译缓存（`docs/325`）：check 已经过了，命中就跳过 codegen。
+    // 键 = 纪元 + 版次 + **编译器自身**摘要 + 合并后的单元全文 —— 任何一项变了就重算。
+    let cache_state: u32 = 0;
+    let cbv: u64 = 0;
+    if nocache == 0 {
+        cbv = sys_alloc(CACHE_BUF as u64);
+        if cbv != 0 {
+            cache_state = cache_try(scr, cbv as ptr, unit, len, load32(scr, PROF_OFF));
+            if cache_state == 1 {
+                return die(0);
+            }
+        }
     }
     // codegen 的状态块也从 brk 拿: 那几张表按**单元规模**定 (函数表 4600 格), 整块
     // 500 KB 上下, 放不进语言自带的 64 KiB bump 堆 (checker 的 arena 早就是这条路)。
     let cgv: u64 = sys_alloc(cg_arena_bytes() as u64);
     if cgv == 0 {
-        return fail("fujoc-s: brk failed (codegen 状态块)\n");
+        let dm: str = "out of memory: cannot allocate the codegen state block (brk failed)";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
+        return fail(dm);
     }
     let cg: ptr = cgv as ptr;
-    let m: u32 = emit_module(unit, toks2, ir, cg);
+    // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
+    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
+                             sw_state_named(unit, sw, "domain_clock_explicit"));
     if m == 0 {
-        return fail("fujoc-s: 单元的函数数超过 codegen 表容量 (拆小门面)\n");
+        // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
+        // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
+        let ec: u32 = emit_error_code(cg);
+        if ec != 0 {
+            let et: u32 = emit_error_tok(cg);
+            // 每号一条消息：这一格原先只认"实参超过 20"（1 号），2 号及以后一律套那句话，
+            // 于是 defer 撞上捕获表上限时用户读到的是"参数太多"（错误的方向）。
+            let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
+            if ec == 3 {
+                em = "a defer takes at most 4 arguments -- bind them to locals first";
+            }
+            if ec == 2 {
+                em = "too many `in SPACE` bindings in one function -- split the function";
+            }
+            if ec == 4 {
+                em = "too many defer statements in one function -- split the function";
+            }
+            if ec == 5 {
+                em = "defer nesting is too deep -- split the function";
+            }
+            if ec == 6 {
+                em = "a `domain` statement cannot be lowered here -- an empty range (`lo > hi`), an unknown member, or a parallel span mismatch (the reference compiler names the exact one)";
+            }
+            if dfd >= 0 {
+                wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
+                      str_ptr(em), str_len(em));
+            }
+            return fail(em);
+        }
+        // **几张表共用这一格，所以几张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN`、
+        // `CG_MAXENUM` 与 `CG_MAXCONST` 都只 `return 0`，从驱动这一端看不出是哪一张撞的
+        // —— 那就别猜，把名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
+        let msg: str = "more functions, constants or enum variants than the codegen tables hold -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
     }
-    write_all(1, ir, m as u64);
+    let _w: u32 = write_checked(1, ir, m as u64, "the IR");
+    if cache_state == 2 {
+        cache_save(scr, ir, m);
+    }
     return die(0);
 }

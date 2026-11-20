@@ -1,4 +1,5 @@
 module allocator
+choose runtime
 
 // M73: 分配器核心 —— 在调用方给的池上做 first-fit 空闲链 (块头 8B: size|free|pad)。
 use bytes

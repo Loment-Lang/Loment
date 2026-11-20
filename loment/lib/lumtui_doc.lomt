@@ -1,4 +1,5 @@
 module lumtui_doc
+choose runtime
 
 // lumtui_doc.lomt — 界面文档: 建、树、序列化成 `.fuc`、校验回读。
 //

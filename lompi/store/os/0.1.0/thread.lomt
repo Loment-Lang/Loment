@@ -1,0 +1,268 @@
+// os/thread.lomt — 一个程序要的多线程手脚: 栈、tid、futex、互斥量、条件变量、join
+//
+// 为什么需要它: `thread_spawn` 进了语言 (M84, `docs/245`) 之后, "起一个线程"是**语法**
+// 了 —— 但周围那一圈还是没有: 栈要自己 mmap、睡/唤醒要自己拼 futex、join 要自己等。
+// 这一层就是那一圈。与 `os/sys` 的分界: 那边是**一个进程**跟系统要东西, 这边是**多个
+// 执行流**之间的事。
+//
+// ---------------------------------------------------------------- 一条硬分界: 这里**不**包 thread_spawn
+//
+// 看起来该有一个 `os_thread_spawn(入口名, ...)` 的包装 —— 写不出来, 而且是语言决定的:
+// `thread_spawn` 的第一个实参是**编译期的名字**, 产物里那是一条写死的 `call @名字`。
+// 一个包装函数里写的名字, 指的是**包装函数自己那个单元里**的函数, 不是调用方的。
+// 所以 `thread_spawn("my_worker", ...)` **必须由用户在自己的单元里直接写**。
+//
+// 这不是缺陷, 是"不动静态调用图"买来的东西 (`docs/208` 那两条门禁的前提)。这一层
+// 因此只提供**周围**那些东西 —— 而它们恰好是"多线程系统"缺的那部分。
+//
+// ---------------------------------------------------------------- join 为什么是自动的
+//
+// `thread_spawn` 的**第四个实参**是完成通知地址: 子线程在入口返回**之后**对它原子加一
+// 并 `futex_wake`。这一段是**编译器发的** —— 入口一 `return` 就 `exit`, 工作线程在返回
+// 之后没有机会跑任何代码。所以 `thread_join` 等的是**产物保证的**那一声, 工作线程不必
+// 记得喊。忘了写通知的库会把这件事变成地雷; 这里没有那个地雷。
+//
+// ---------------------------------------------------------------- 互斥量为什么是"取号"锁
+//
+// 语言只有 `atomic_add` 一个原子操作 (返回**旧值**) —— **没有** CAS、没有 xchg
+// (`lomelf` 的 `atomicrmw` 只认 `add`)。而"加一试试、失败再减回去"那种写法是**错的**:
+// A 拿到锁 (值 1) 之后 B 加一减一, 值回到 0 —— 锁看起来空了, 而 A 还拿着。那个坑很安静,
+// 会表现为"偶发两个线程同时在临界区里"。
+//
+// 取号锁 (ticket lock) 只用"取号"这一个原子操作, 天然公平, 而且是两个普通 u32:
+//   m[0..4] = 下一个号 (next)   m[4..8] = 正在服务的号 (serving)
+// 取号 = `atomic_add(m, 1)` 返回旧值; 等 `serving == 我的号`; 放锁 = `serving += 1` 并唤醒。
+// `serving` 只有**持有者**写, 所以那是一次普通写 (x86 上对齐的 u32 读写不会撕裂),
+// 而唤醒排在写之后。
+//
+// 边界: 号是 u32, 溢出回绕需要 40 亿次取锁 —— 不在这一层的记账面上。
+// 本模块的自检只验**纯逻辑** (记录的读写、栈顶算术); 真的起线程那部分由
+// `tools/loment_thread_test.py` 与 `tools/loment_os_test.py` 判 (理由见 user.lomt 头)。
+//
+// 命名: 公开 thread_*, 内部 thrp_*。
+
+module thread
+
+// ---------------------------------------------------------------- 常量
+
+/// `mmap` 的保护位: 可读可写。
+pub const THR_PROT_RW: u64 = 3;
+/// `mmap` 的旗标: 私有 + 匿名 (不落文件)。
+pub const THR_MAP_PRIV_ANON: u64 = 34;
+/// `mmap` 的 fd: -1。
+pub const THR_NO_FD: u64 = 18446744073709551615;
+/// `mmap` 的返回值落在 `[-4095, -1]` 就是错误 (内核的负 errno)。
+pub const THR_MAP_ERR_LO: i64 = -4095;
+
+/// `futex` 的 op: 睡 (带 FUTEX_PRIVATE_FLAG)。
+pub const THR_FUTEX_WAIT: u64 = 128;
+/// `futex` 的 op: 唤醒 (带 FUTEX_PRIVATE_FLAG)。
+pub const THR_FUTEX_WAKE: u64 = 129;
+
+/// 取号锁记录的两个字段偏移。
+pub const THR_M_NEXT: u32 = 0;
+pub const THR_M_SERVING: u32 = 4;
+/// 一条取号锁记录要几字节。
+pub const THR_MUTEX_BYTES: u32 = 8;
+
+/// 自旋多少轮之后才去睡 (睡是要发系统调用的, 短临界区不值得)。
+const THRP_SPIN: u32 = 64;
+
+const THRP_SYS_MMAP: u64 = 9;
+const THRP_SYS_MUNMAP: u64 = 11;
+const THRP_SYS_GETTID: u64 = 186;
+const THRP_SYS_YIELD: u64 = 24;
+const THRP_SYS_FUTEX: u64 = 202;
+
+// ---------------------------------------------------------------- 记录读写
+
+/// 读一个 u32 (小端)。
+fn thrp_rd32(p: ptr, o: u32) -> u32 {
+    return load8(p, o) | (load8(p, o + 1) << 8) | (load8(p, o + 2) << 16)
+        | (load8(p, o + 3) << 24);
+}
+
+/// 写一个 u32 (小端)。
+fn thrp_wr32(p: ptr, o: u32, v: u32) {
+    store8(p, o, (v & 255) as u8);
+    store8(p, o + 1, ((v >> 8) & 255) as u8);
+    store8(p, o + 2, ((v >> 16) & 255) as u8);
+    store8(p, o + 3, ((v >> 24) & 255) as u8);
+}
+
+/// 栈顶 = 基址 + 字节数。**单独一个函数是为了能纯逻辑地判它** (自检)。
+pub fn thread_stack_top(base: u64, bytes: u32) -> u64 {
+    return base + (bytes as u64);
+}
+
+// ---------------------------------------------------------------- 栈
+
+/// mmap 一块线程栈, 返回**栈顶** (最高地址; 栈往下长)。失败返回 0。
+/// 交给 `thread_spawn` 的第三个实参就是这个返回值。
+pub fn thread_stack(bytes: u32) -> ptr {
+    let r: i64 = syscall7(THRP_SYS_MMAP, 0, bytes as u64, THR_PROT_RW,
+                          THR_MAP_PRIV_ANON, THR_NO_FD, 0);
+    if r < 0 && r >= THR_MAP_ERR_LO {
+        return 0 as ptr;
+    }
+    return thread_stack_top(r as u64, bytes) as ptr;
+}
+
+/// 把 `thread_stack` 拿到的栈还回去。`top` 是它返回的那个栈顶。
+///
+/// **比的是 `as u64` 之后的数, 不是指针本身** —— `ptr == ptr` 在参考实现里发的是
+/// `icmp eq ptr`, 而 `lomelf` 的比较只认 iN 宽度 (issue #205, 已知)。本文件的其它地方
+/// 一条指针比较都没有。
+pub fn thread_stack_free(top: ptr, bytes: u32) -> i64 {
+    let b: u64 = top as u64;
+    if b == 0 {
+        return -1;
+    }
+    return syscall4(THRP_SYS_MUNMAP, b - (bytes as u64), bytes as u64, 0);
+}
+
+// ---------------------------------------------------------------- 身份与让路
+
+/// 当前**线程**的 tid (不是 pid —— 同一个进程里每个线程一个)。
+pub fn thread_self() -> u32 {
+    return syscall4(THRP_SYS_GETTID, 0, 0, 0) as u32;
+}
+
+/// 让出 CPU。
+pub fn thread_yield() -> i64 {
+    return syscall4(THRP_SYS_YIELD, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------- futex (原样)
+
+/// 当 `*(u32*)addr == expect` 时睡, 直到有人唤醒它。**返回 `-EAGAIN` 表示值已经变了**
+/// (那不算失败 —— 调用方该回去重读)。等待是**无超时**的, 所以调用方要保证有人会唤醒。
+pub fn thread_wait(addr: ptr, expect: u32) -> i64 {
+    return syscall7(THRP_SYS_FUTEX, addr as u64, THR_FUTEX_WAIT, expect as u64, 0, 0, 0);
+}
+
+/// 唤醒至多 `n` 个睡在 `addr` 上的等待者。
+pub fn thread_wake(addr: ptr, n: u32) -> i64 {
+    return syscall7(THRP_SYS_FUTEX, addr as u64, THR_FUTEX_WAKE, n as u64, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------- 取号锁
+
+/// 拿锁。`m` 是 `THR_MUTEX_BYTES` 字节的零初始化记录。**一直等到拿到**。
+///
+/// 快路先自旋 `THRP_SPIN` 轮 (短临界区里一个系统调用都不发), 之后就睡在 `serving` 上
+/// —— 值变了才回来看一眼。`thread_wait` 的 `-EAGAIN` 在这里不是错: 它意味着"号已经轮到
+/// 你了"或者"值又变了, 再读一次", 回去读就对了。
+///
+/// 这个循环**没有轮数上限** (issue #695): 以前有一个 `THRP_ROUNDS` 的封顶, 到点之后
+/// 函数**返回 0 —— 和成功同一个值** —— 而锁还在别人手里。互斥静默退化成不互斥, 比死锁
+/// 坏得多。契约是"等到拿到", 那就等到底; 真出了永不释放的锁, 表现是阻塞 (可诊断), 不是
+/// 两个线程同时进临界区 (不可诊断)。
+pub fn thread_lock(m: ptr) -> u32 {
+    let me: u32 = atomic_add(m, 1);              // 取号 (返回旧值 = 我的号)
+    let sp: ptr = ptr_add(m, THR_M_SERVING);
+    let i: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        let cur: u32 = thrp_rd32(sp, 0);
+        if cur == me {
+            go = 0;
+        } else if i < THRP_SPIN {
+            i = i + 1;
+        } else {
+            let _w: i64 = thread_wait(sp, cur);
+            i = i + 1;
+        }
+    }
+    return 0;
+}
+
+/// 放锁: 把号叫到下一个, 然后**把所有等待者都叫醒**。**`serving` 只有持有者写**, 所以这里
+/// 是一次普通写; 唤醒排在写之后 (x86 上这中间没有重排)。
+///
+/// **为什么是"全叫醒"而不是"叫醒一个"** —— 这一条是**实测**出来的 (2026-10-14, 4 个线程
+/// × 5 万次临界区, 挂死 300s): `futex_wake` 叫醒的是**队列里的某一个**等待者, 不是"票号
+/// 轮到的那个人"。被误叫的那个回去重读、发现还没到自己, **又睡了** —— 而它把本该属于
+/// 下一个号的那一次唤醒**吃掉了**。于是每多一次误叫, 就少一次该到的唤醒, 最后某个号
+/// 永远等不到人叫它。4 线程 × 10 次那种小规模根本撞不出来 (档 3 全绿), 一上量就是死锁。
+///
+/// 全叫醒的代价是"惊群": 每次放锁最多叫醒 n-1 个, 它们重读一眼又睡回去。取号锁本来
+/// 就是公平但吞吐一般的结构, 拿这一点代价换"不丢唤醒"是划算的 —— 而丢唤醒是**错**,
+/// 惊群只是慢。
+pub fn thread_unlock(m: ptr) -> u32 {
+    let sp: ptr = ptr_add(m, THR_M_SERVING);
+    thrp_wr32(sp, 0, thrp_rd32(sp, 0) + 1);
+    let _w: i64 = thread_wake(sp, 2147483647);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 条件变量
+
+/// 条件变量就是一个 u32 的**序号** (每次 signal/broadcast 加一)。不需要别的状态 ——
+/// "值变了"这件事本身就是信号, 而等待者在**持着锁的时候**读下它, 所以不会丢唤醒。
+pub fn thread_cv_wait(cv: ptr, m: ptr) -> u32 {
+    let s: u32 = thrp_rd32(cv, 0);
+    let _u: u32 = thread_unlock(m);
+    let _w: i64 = thread_wait(cv, s);
+    let _l: u32 = thread_lock(m);
+    return 0;
+}
+
+/// 叫一个等待者。
+pub fn thread_cv_signal(cv: ptr) -> u32 {
+    let _a: u32 = atomic_add(cv, 1);
+    let _w: i64 = thread_wake(cv, 1);
+    return 0;
+}
+
+/// 叫醒所有等待者 (`n` 给一个足够大的数 —— futex 不认识"全部")。
+pub fn thread_cv_broadcast(cv: ptr) -> u32 {
+    let _a: u32 = atomic_add(cv, 1);
+    let _w: i64 = thread_wake(cv, 2147483647);
+    return 0;
+}
+
+// ---------------------------------------------------------------- join
+
+/// 等 `done` 这一个 u32 变成非 0 (`thread_spawn` 第四个实参指过来的那个地址)。
+/// 返回它等到的值。
+pub fn thread_join(done: ptr) -> u32 {
+    return thread_join_all(done, 1);
+}
+
+/// 等 `done` 至少到 `n` (N 个线程各通知一次)。
+///
+/// **被叫醒的人负责把唤醒传下去**: 产物那段尾声只叫**一个**等待者 (它不知道有几个人在
+/// 等), 所以这里醒来之后再广播一次 —— 否则第二个 join 的人会一直睡着。
+///
+/// 与 `thread_lock` 同一个契约: **没有轮数上限** (issue #695 的同一条)。`done` 在到 `n`
+/// 之前一直在变 (`-EAGAIN` 风暴) 时, 旧的封顶会让人"等够了轮数"就返回一个**小于 n** 的
+/// 值 —— 那等于 join 提前放手。等到就是等到。
+pub fn thread_join_all(done: ptr, n: u32) -> u32 {
+    let go: u32 = 1;
+    while go == 1 {
+        let cur: u32 = thrp_rd32(done, 0);
+        if cur >= n {
+            go = 0;
+        } else {
+            let _w: i64 = thread_wait(done, cur);
+            let _b: i64 = thread_wake(done, 2147483647);   // 把唤醒传给别的等待者
+        }
+    }
+    return thrp_rd32(done, 0);
+}
+
+// ---------------------------------------------------------------- 自检 (纯逻辑)
+
+fn test_thread_mutex_record_is_two_u32s() -> bool {
+    let m: ptr = alloc(THR_MUTEX_BYTES);
+    thrp_wr32(m, THR_M_NEXT, 0);
+    thrp_wr32(m, THR_M_SERVING, 4294967295);
+    return thrp_rd32(m, THR_M_NEXT) == 0 && thrp_rd32(m, THR_M_SERVING) == 4294967295
+        && load8(m, THR_M_NEXT) == 0 && load8(m, THR_M_SERVING) == 255;
+}
+
+fn test_thread_stack_top_is_the_high_end() -> bool {
+    return thread_stack_top(65536, 4096) == 69632
+        && thread_stack_top(0, 0) == 0;
+}

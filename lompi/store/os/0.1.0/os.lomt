@@ -1,0 +1,34 @@
+// os/os.lomt — 包入口 (操作系统面)
+//
+// `use os` 指的是**包内与包同名**的那个模块 (docs/168: 包名与入口文件名必须一致), 所以
+// 这个文件必须叫 `os.lomt` 且 `module os`。它自己不做任何事 —— 作用是把包内全部模块拉进
+// **同一个单元**。
+//
+// ---------------------------------------------------------------- 怎么用
+//
+// **按模块取, 别 `use os`。** 名字形式能直接命中包内模块: `use sys` / `use time` /
+// `use signal` / `use tty` / `use user` / `use thread` 都是一条 use 就够。门面留着是给
+// "我确实全都要"用的, 也是**平名字唯一性**那条判据的语料 (std 门面那条老问题在这里一样成立)。
+//
+// ---------------------------------------------------------------- 与 host 的分界
+//
+// 仓里现在有**四个**随包库, 边界是刻意划的 (别让两处都长一点):
+//
+//   std       可移植层 —— 一个系统调用都不发 (env 解环境块、proc 解 /proc、clock 排时间)
+//   host      **工具链自己的手脚** —— 读整个文件、走目录、stat、日志 (argv/fs/io/dir/stat/log)
+//   os        **一个程序要的手脚** —— mkdir/unlink/rename、uname、时钟、信号、终端、身份、线程
+//   internet  网络那一层 (ip/uri/http/dns/sock/tcp/udp)
+//
+// 重叠最明显的是 `host/fs` 与 `os/sys`: 前者是"读一个文件全部内容"这种**成件事**的接口,
+// 后者是**逐条系统调用**。要前者用 `use fs`, 要后者用 `use sys`。
+//
+// 依赖方向单向: os 不认识 host / internet, 它们也不认识 os —— 这一层是**叶子**。
+
+module os
+
+use "sys.lomt"
+use "time.lomt"
+use "signal.lomt"
+use "tty.lomt"
+use "user.lomt"
+use "thread.lomt"

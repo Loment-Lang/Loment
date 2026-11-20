@@ -1,0 +1,239 @@
+// os/select.lomt — `select` 与 fd_set 的字节级读写
+//
+// 为什么需要它: `select(2)` 是唯一能在**没有 epoll/poll 的地方**同时等"可读/可写/异常"
+// 三组 fd 的接口 (老内核、管道为主的程序、要和别的 POSIX 实现对齐的代码)。它的数据
+// 结构 `fd_set` 是个**位图**: 1024 位 = 128 字节, 第 n 号 fd 在 bit n。位图的读写
+// 没有算术错误可言, 但**偏移写错一位就是等错 fd**, 现象是"程序偶尔卡住", 极难查。
+//
+// 结构 (x86-64 Linux):
+//   fd_set 128 字节 (FD_SETSIZE 1024);
+//   struct timeval: tv_sec i64(0) | tv_usec i64(8) —— 16 字节;
+//   select 返回**就绪 fd 的个数** (三组之和), 0 表示超时, <0 是错误。
+//
+// 边界: 号是 x86-64 Linux 的; 自检只验纯逻辑 (位图与 timeval), 系统调用那一半要有
+// 内核才能验。fd >= 1024 的场合用 poll/epoll —— 这一层刻意不假装能超过它。
+//
+// 命名: 公开 se_*, 内部 seq_。
+
+module select
+
+/// `fd_set` 的字节数 (1024 位)。
+pub const SE_FDSET_BYTES: u32 = 128;
+/// 位图能表示的最大 fd 数。
+pub const SE_MAX_FDS: u32 = 1024;
+/// `timeval` 的字节数。
+pub const SE_TIMEVAL_BYTES: u32 = 16;
+
+const SEQ_SYS_SELECT: u64 = 23;
+
+fn seq_u64(p: ptr, o: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, o + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn seq_st64(p: ptr, o: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, o + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 8;
+}
+
+// ---------------------------------------------------------------- 位图
+
+/// 清空整个 fd_set。
+pub fn se_zero(fds: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < SE_FDSET_BYTES {
+        store8(fds, i, 0 as u8);
+        i = i + 1;
+    }
+    return SE_FDSET_BYTES;
+}
+
+/// 置位 fd。返回 1; fd >= 1024 返回 0 (越界不写)。
+pub fn se_set(fds: ptr, fd: u32) -> u32 {
+    if fd >= SE_MAX_FDS {
+        return 0;
+    }
+    let byte: u32 = fd / 8;
+    let bit: u32 = fd % 8;
+    let cur: u32 = load8(fds, byte) as u32;
+    store8(fds, byte, (cur | (1 << bit)) as u8);
+    return 1;
+}
+
+/// 清位 fd。
+pub fn se_clr(fds: ptr, fd: u32) -> u32 {
+    if fd >= SE_MAX_FDS {
+        return 0;
+    }
+    let byte: u32 = fd / 8;
+    let bit: u32 = fd % 8;
+    let cur: u32 = load8(fds, byte) as u32;
+    store8(fds, byte, (cur & (255 - (1 << bit))) as u8);
+    return 1;
+}
+
+/// fd 在不在位图里。
+pub fn se_isset(fds: ptr, fd: u32) -> u32 {
+    if fd >= SE_MAX_FDS {
+        return 0;
+    }
+    let byte: u32 = fd / 8;
+    let bit: u32 = fd % 8;
+    if (load8(fds, byte) as u32 & (1 << bit)) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 最小的那个置位 fd; 没有返回 -1。select 返回之后用它从 0 开始捞就绪的 fd。
+pub fn se_first(fds: ptr, nbits: u32) -> i64 {
+    let lim: u32 = nbits;
+    if lim > SE_MAX_FDS {
+        lim = SE_MAX_FDS;
+    }
+    let i: u32 = 0;
+    while i < lim {
+        if se_isset(fds, i) == 1 {
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64 - 1;
+}
+
+/// 置位的位数。
+pub fn se_count(fds: ptr, nbits: u32) -> u32 {
+    let lim: u32 = nbits;
+    if lim > SE_MAX_FDS {
+        lim = SE_MAX_FDS;
+    }
+    let i: u32 = 0;
+    let n: u32 = 0;
+    while i < lim {
+        if se_isset(fds, i) == 1 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- timeval
+
+/// 写一个 timeval (16 字节)。
+pub fn se_timeval(tv: ptr, sec: u64, usec: u64) -> u32 {
+    seq_st64(tv, 0, sec);
+    seq_st64(tv, 8, usec);
+    return SE_TIMEVAL_BYTES;
+}
+
+/// 读 timeval 的秒。
+pub fn se_tv_sec(tv: ptr) -> u64 {
+    return seq_u64(tv, 0);
+}
+
+/// 读 timeval 的微秒。
+pub fn se_tv_usec(tv: ptr) -> u64 {
+    return seq_u64(tv, 8);
+}
+
+/// 毫秒 -> (秒, 微秒), 写进两个 u64 槽。纯算术, 便于把"等 250ms"变成 timeval。
+pub fn se_ms_split(ms: u64, sec_out: ptr, usec_out: ptr) -> u32 {
+    let s: u64 = ms / 1000;
+    let r: u64 = ms % 1000;
+    seq_st64(sec_out, 0, s);
+    seq_st64(usec_out, 0, r * 1000);
+    return 1;
+}
+
+// ---------------------------------------------------------------- 系统调用
+
+/// `select(nfds, rfds, wfds, efds, tv)` —— 返回就绪个数, 0 是超时, <0 是错误。
+/// tv 传 0 表示一直等。
+pub fn se_select(nfds: u32, rfds: ptr, wfds: ptr, efds: ptr, tv: ptr) -> i64 {
+    return syscall6(SEQ_SYS_SELECT, nfds as u64, rfds as u64, wfds as u64,
+                    efds as u64, tv as u64);
+}
+
+// `pselect6` 没有包: 它的第六个实参 (sigmask 结构指针) 在 syscall6 的五个槽里放不下,
+// 少传一个就是等在一个错误的掩码上 —— 与其给一个可能错的入口, 不如让调用方直接写。
+
+// ---------------------------------------------------------------- 自检
+
+fn test_select_bits() -> bool {
+    let fds: ptr = alloc(128);
+    se_zero(fds);
+    if se_isset(fds, 0) != 0 {
+        return false;
+    }
+    se_set(fds, 0);
+    se_set(fds, 5);
+    se_set(fds, 1023);
+    if se_isset(fds, 0) != 1 || se_isset(fds, 5) != 1 || se_isset(fds, 1023) != 1 {
+        return false;
+    }
+    if se_isset(fds, 6) != 0 || se_isset(fds, 1022) != 0 {
+        return false;
+    }
+    if se_count(fds, 1024) != 3 {
+        return false;
+    }
+    if se_first(fds, 1024) != 0 {
+        return false;
+    }
+    se_clr(fds, 0);
+    if se_first(fds, 1024) != 5 {
+        return false;
+    }
+    if se_set(fds, 1024) != 0 {
+        return false;
+    }
+    return true;
+}
+
+fn test_select_first_empty() -> bool {
+    let fds: ptr = alloc(128);
+    se_zero(fds);
+    if se_first(fds, 1024) != (0 as i64 - 1) {
+        return false;
+    }
+    if se_count(fds, 1024) != 0 {
+        return false;
+    }
+    se_set(fds, 900);
+    if se_count(fds, 512) != 0 {
+        return false;
+    }
+    if se_first(fds, 512) != (0 as i64 - 1) {
+        return false;
+    }
+    return true;
+}
+
+fn test_select_timeval() -> bool {
+    let tv: ptr = alloc(16);
+    se_timeval(tv, 3, 250000);
+    if se_tv_sec(tv) != 3 || se_tv_usec(tv) != 250000 {
+        return false;
+    }
+    let s: ptr = alloc(8);
+    let u: ptr = alloc(8);
+    se_ms_split(250, s, u);
+    if seq_u64(s, 0) != 0 || seq_u64(u, 0) != 250000 {
+        return false;
+    }
+    se_ms_split(1999, s, u);
+    if seq_u64(s, 0) != 1 || seq_u64(u, 0) != 999000 {
+        return false;
+    }
+    return true;
+}

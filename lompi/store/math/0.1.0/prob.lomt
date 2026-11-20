@@ -1,0 +1,179 @@
+// std/prob.lomt — 常用概率分布与描述统计（double）
+//
+// 为什么要有它: `stats` 只给描述量（均值/方差/分位数），而工程里更常问的是
+// "这个值在正态分布下有多罕见""n 次试验成功 k 次的概率"。这些闭式公式本身很短，
+// 但**erf 的数值近似**与**边界**（k > n、sigma <= 0）写错一次就静默给错概率。
+//
+// 正态 CDF 用 Abramowitz–Stegun 7.1.26（最大误差 1.5e-7）；对"判断异常/阈值"足够，
+// 对"金融定价"不够 —— 后者要正确舍入的 erf，属于另一层。
+//
+// 不做的: 逆 CDF（分位点）、多元分布、假设检验、随机采样（采样走 `rng`/`rand`）。
+//
+// 命名: 公开 pb_*, 内部 pb_*。自检 test_prob_*。
+
+module prob
+
+use f64
+use f64conv
+use mathf
+
+const PB_A1: u64 = 0x3FD04F20C6EC5A7E; //  0.254829592
+const PB_A2: u64 = 0xBFD23531CC3C1469; // -0.284496736
+const PB_A3: u64 = 0x3FF6BE1C55BAE157; //  1.421413741
+const PB_A4: u64 = 0xBFF7401C57014C39; // -1.453152027
+const PB_A5: u64 = 0x3FF0FB844255A12D; //  1.061405429
+const PB_P: u64 = 0x3FD4F740A93D7B8C;  //  0.3275911
+
+/// 误差函数 erf(x)，|误差| < 1.5e-7。
+pub fn pb_erf(x: u64) -> u64 {
+    if f64_eq(x, F64_POS_ZERO) {
+        return F64_POS_ZERO; // 级数在 0 处有 ~1e-9 的残差；数学上它必须精确为 0
+    }
+    let ax: u64 = f64_abs(x);
+    let t: u64 = f64_div(F64_ONE, f64_add(F64_ONE, f64_mul(PB_P, ax)));
+    // y = 1 - (((((a5 t + a4) t + a3) t + a2) t + a1) t) e^{-x^2}
+    let p: u64 = PB_A5;
+    p = f64_add(f64_mul(p, t), PB_A4);
+    p = f64_add(f64_mul(p, t), PB_A3);
+    p = f64_add(f64_mul(p, t), PB_A2);
+    p = f64_add(f64_mul(p, t), PB_A1);
+    p = f64_mul(p, t);
+    let e: u64 = mathf_exp(f64_neg(f64_mul(ax, ax)));
+    let y: u64 = f64_sub(F64_ONE, f64_mul(p, e));
+    if f64_lt(x, F64_POS_ZERO) {
+        return f64_neg(y);
+    }
+    return y;
+}
+
+/// 标准正态 PDF。
+pub fn pb_normal_pdf(x: u64, mu: u64, sigma: u64) -> u64 {
+    if f64_le(sigma, F64_POS_ZERO) {
+        return 0x7FF8000000000000; // NaN
+    }
+    let z: u64 = f64_div(f64_sub(x, mu), sigma);
+    let e: u64 = mathf_exp(f64_neg(f64_mul(F64_HALF, f64_mul(z, z))));
+    return f64_div(e, f64_mul(sigma, 0x40040D931FF62705)); // sigma * sqrt(2*pi)
+}
+
+/// 正态 CDF：0.5 * (1 + erf((x-mu)/(sigma*sqrt2)))。
+pub fn pb_normal_cdf(x: u64, mu: u64, sigma: u64) -> u64 {
+    if f64_le(sigma, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    let z: u64 = f64_div(f64_sub(x, mu), f64_mul(sigma, MF_SQRT2));
+    return f64_mul(F64_HALF, f64_add(F64_ONE, pb_erf(z)));
+}
+
+/// 组合数 C(n,k)（n <= 62，超出会回绕）。
+pub fn pb_binom(n: u32, k: u32) -> u64 {
+    if k > n {
+        return 0;
+    }
+    let kk: u32 = k;
+    if kk > n - k {
+        kk = n - k;
+    }
+    let r: u64 = 1;
+    let i: u32 = 0;
+    while i < kk {
+        r = (r * ((n - i) as u64)) / ((i + 1) as u64);
+        i = i + 1;
+    }
+    return r;
+}
+
+/// 二项分布 P(X=k) = C(n,k) p^k (1-p)^(n-k)。
+pub fn pb_binom_pmf(k: u32, n: u32, p: u64) -> u64 {
+    if k > n {
+        return F64_POS_ZERO;
+    }
+    let c: u64 = f64conv_from_u64(pb_binom(n, k));
+    let pk: u64 = mathf_pow(p, f64conv_from_u64(k as u64));
+    let q: u64 = f64_sub(F64_ONE, p);
+    let qk: u64 = mathf_pow(q, f64conv_from_u64((n - k) as u64));
+    return f64_mul(c, f64_mul(pk, qk));
+}
+
+/// 泊松分布 P(X=k) = lambda^k e^{-lambda} / k!。
+pub fn pb_poisson_pmf(k: u32, lambda: u64) -> u64 {
+    let num: u64 = f64_mul(mathf_pow(lambda, f64conv_from_u64(k as u64)),
+                           mathf_exp(f64_neg(lambda)));
+    let den: u64 = f64conv_from_u64(pb_fact(k));
+    return f64_div(num, den);
+}
+
+fn pb_fact(k: u32) -> u64 {
+    let r: u64 = 1;
+    let i: u32 = 1;
+    while i <= k {
+        r = r * (i as u64);
+        i = i + 1;
+    }
+    return r;
+}
+
+/// 样本均值。
+pub fn pb_mean(x: ptr, n: u32) -> u64 {
+    if n == 0 {
+        return F64_POS_ZERO;
+    }
+    let s: u64 = F64_POS_ZERO;
+    let i: u32 = 0;
+    while i < n {
+        s = f64_add(s, mem_load64(x, i * 8));
+        i = i + 1;
+    }
+    return f64_div(s, f64conv_from_u64(n as u64));
+}
+
+/// 样本方差（除以 n-1；n < 2 返回 0）。
+pub fn pb_var(x: ptr, n: u32) -> u64 {
+    if n < 2 {
+        return F64_POS_ZERO;
+    }
+    let mu: u64 = pb_mean(x, n);
+    let s: u64 = F64_POS_ZERO;
+    let i: u32 = 0;
+    while i < n {
+        let d: u64 = f64_sub(mem_load64(x, i * 8), mu);
+        s = f64_add(s, f64_mul(d, d));
+        i = i + 1;
+    }
+    return f64_div(s, f64conv_from_u64((n - 1) as u64));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_prob_erf() -> bool {
+    // erf(0)=0, erf(1)≈0.8427007929
+    if !f64_eq(pb_erf(F64_POS_ZERO), F64_POS_ZERO) {
+        return false;
+    }
+    let d: u64 = f64_abs(f64_sub(pb_erf(F64_ONE), 0x3FEAF767A741088B));
+    return f64_lt(d, 0x3E7AD7F29ABCAF48); // < 1e-7
+}
+
+fn test_prob_normal_cdf() -> bool {
+    // N(0,1) 在 0 处 = 0.5；在 +inf -> 1（用 10 近似）
+    let half: u64 = pb_normal_cdf(F64_POS_ZERO, F64_POS_ZERO, F64_ONE);
+    let ten: u64 = pb_normal_cdf(f64conv_from_i64(10 as i64), F64_POS_ZERO, F64_ONE);
+    return f64_eq(half, F64_HALF) && f64_gt(ten, 0x3FEFFFFFFFFFFFFF);
+}
+
+fn test_prob_binom() -> bool {
+    // C(5,2)=10
+    if pb_binom(5, 2) != 10 {
+        return false;
+    }
+    // 公平硬币 5 次恰好 2 次正面 = 10/32 = 0.3125
+    let p: u64 = pb_binom_pmf(2, 5, F64_HALF);
+    return f64_eq(p, 0x3FD4000000000000); // 0.3125
+}
+
+fn test_prob_poisson() -> bool {
+    // lambda=1, k=0 -> e^-1 ≈ 0.3678794411714423
+    let p: u64 = pb_poisson_pmf(0, F64_ONE);
+    let d: u64 = f64_abs(f64_sub(p, 0x3FD78B56362CEF38));
+    return f64_lt(d, 0x3D719799812DEA11);
+}

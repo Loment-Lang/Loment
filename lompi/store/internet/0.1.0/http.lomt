@@ -1,0 +1,590 @@
+// internet/http.lomt — HTTP/1.x 报文的**框架** (RFC 9110/9112): 状态行、头、体
+//
+// 为什么需要它: 报文框架里全是"看上去显然、错了不报错"的细节 —— 头名大小写不敏感、
+// 头的值要掐掉两端空白、`Content-Length` 与 `Transfer-Encoding: chunked` 二选一、
+// 行结束是 CRLF 而**有些服务器只发 LF**。而这些字节**不能写字面量**: Loment 的转义集
+// 只有 `\n \t \" \\`, `"\r"` 会静默变成一个字母 `r` (SKILL.md 6.2.13) —— 所以本模块里
+// 每一个 CR 都是 `store8(p, o, 13 as u8)`, 没有例外。
+//
+// 边界 (刻意划的, 不是没做完):
+//   * 纯逻辑: 不发系统调用, 不分配。缓冲区一律调用方给。
+//   * **不做传输**: 连接、超时、重定向在 tcp 模块与调用方那里。
+//   * 不做压缩体解压 (gzip/deflate 在 std/inflate.lomt), 不做分块之外的 `Transfer-Encoding`。
+//   * **HTTP/1.x 文本协议**: 不做 HTTP/2、不做 TLS。
+//   * 本文件不 `use` 任何模块 (理由见 ip.lomt 头)。
+//
+// 命名: 公开 http_*, 内部 httpp_*。自检 test_http_*。
+// 对照物: CPython 的 `http.client` (`responses` 表、`parse_headers`)。
+
+module http
+
+/// 失败 / 缺席。
+pub const HTTP_NO: u32 = 4294967295;
+
+const HTTPP_CR: u32 = 13;
+const HTTPP_LF: u32 = 10;
+
+// ---------------------------------------------------------------- 行与头
+
+fn httpp_put(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn httpp_crlf(out: ptr, o: u32) -> u32 {
+    store8(out, o, HTTPP_CR as u8);
+    store8(out, o + 1, HTTPP_LF as u8);
+    return o + 2;
+}
+
+fn httpp_lower(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+/// 本报文头结束的位置: `CRLF CRLF` 或 `LF LF` 里第一个字节的绝对下标; 没有返回 HTTP_NO。
+/// 两种形式**一起扫、谁先出现谁赢** —— 先在整个缓冲里找 `CRLF CRLF`、找不到才退到 `LF LF`,
+/// 会让一个 LF-only 的响应只要 body 里带 `CRLF CRLF` 就把 body 当成头结束。
+pub fn http_hdr_end(d: ptr, o: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i + 2 <= n {
+        if i + 4 <= n && load8(d, o + i) == HTTPP_CR && load8(d, o + i + 1) == HTTPP_LF
+            && load8(d, o + i + 2) == HTTPP_CR && load8(d, o + i + 3) == HTTPP_LF {
+            return o + i;
+        }
+        if load8(d, o + i) == HTTPP_LF && load8(d, o + i + 1) == HTTPP_LF {
+            return o + i;
+        }
+        i = i + 1;
+    }
+    return HTTP_NO;
+}
+
+/// 报文体从哪儿开始 (跳过头结束那两/四个字节); 头没结束返回 HTTP_NO。
+pub fn http_body_start(d: ptr, o: u32, n: u32) -> u32 {
+    let e: u32 = http_hdr_end(d, o, n);
+    if e == HTTP_NO {
+        return HTTP_NO;
+    }
+    // `e` 是空行的第一个字节 (CRLF 时是 CR, LF 时是 LF) —— 判它本身。拿 `e + 2` 去判
+    // 会让一个 LF 结束的头在 body 首字节恰好是 CR 时多跳两格。
+    if load8(d, e) == HTTPP_CR {
+        return e + 4;
+    }
+    return e + 2;
+}
+
+/// 状态行 "HTTP/1.1 200 OK" -> 状态码写进 out_code; 成功返回 1。
+pub fn http_status_line(d: ptr, o: u32, n: u32, out_code: ptr) -> u32 {
+    if n < 12 {
+        return 0;
+    }
+    if load8(d, o) != 72 || load8(d, o + 1) != 84 || load8(d, o + 2) != 84
+        || load8(d, o + 3) != 80 || load8(d, o + 4) != 47 {
+        return 0;
+    }
+    // RFC 9112 §4: `HTTP-version = HTTP-name "/" DIGIT "." DIGIT`。原来从第 5 字节扫到
+    // 第一个空格、**不看跳过的是什么**，于是 `HTTP/ 200`、`HTTP/x 200`、`HTTP/2 200`
+    // 都被当成正常状态行 (#685)。
+    let maj: u32 = load8(d, o + 5);
+    let dot: u32 = load8(d, o + 6);
+    let min: u32 = load8(d, o + 7);
+    if maj < 48 || maj > 57 || dot != 46 || min < 48 || min > 57 {
+        return 0;
+    }
+    if load8(d, o + 8) != 32 {
+        return 0;
+    }
+    let sp: u32 = 9;
+    if sp + 3 > n {
+        return 0;
+    }
+    let a: u32 = load8(d, o + sp);
+    let b: u32 = load8(d, o + sp + 1);
+    let c: u32 = load8(d, o + sp + 2);
+    if a < 48 || a > 57 || b < 48 || b > 57 || c < 48 || c > 57 {
+        return 0;
+    }
+    if sp + 3 < n {
+        let nx: u32 = load8(d, o + sp + 3);
+        if nx != 32 && nx != HTTPP_CR && nx != HTTPP_LF {
+            return 0;
+        }
+    }
+    let code: u32 = (a - 48) * 100 + (b - 48) * 10 + (c - 48);
+    store8(out_code, 0, code as u8);
+    store8(out_code, 1, (code >> 8) as u8);
+    store8(out_code, 2, (code >> 16) as u8);
+    store8(out_code, 3, (code >> 24) as u8);
+    return 1;
+}
+
+/// 在 [ho, ho+hn) 这段头里找 `name` (大小写不敏感)。找到返回 1, 值的偏移 / 长度
+/// (两端空白已掐掉) 写进 out_off / out_len (各 4 字节)。同名多次出现取**第一个**。
+pub fn http_hdr_find(d: ptr, ho: u32, hn: u32, name: str, out_off: ptr, out_len: ptr) -> u32 {
+    let ln: u32 = str_len(name);
+    let i: u32 = 0;
+    while i < hn {
+        let ls: u32 = i;
+        while i < hn && load8(d, ho + i) != HTTPP_CR && load8(d, ho + i) != HTTPP_LF {
+            i = i + 1;
+        }
+        let le: u32 = i;
+        // 跳过行结束
+        while i < hn && (load8(d, ho + i) == HTTPP_CR || load8(d, ho + i) == HTTPP_LF) {
+            i = i + 1;
+        }
+        let colon: u32 = HTTP_NO;
+        let k: u32 = ls;
+        while k < le {
+            if load8(d, ho + k) == 58 {
+                colon = k;
+                k = le;
+            } else {
+                k = k + 1;
+            }
+        }
+        if colon != HTTP_NO && colon - ls == ln {
+            let match_ok: u32 = 1;
+            let j: u32 = 0;
+            while j < ln {
+                if httpp_lower(load8(d, ho + ls + j)) != httpp_lower(str_byte(name, j)) {
+                    match_ok = 0;
+                }
+                j = j + 1;
+            }
+            if match_ok == 1 {
+                let vs: u32 = colon + 1;
+                while vs < le && (load8(d, ho + vs) == 32 || load8(d, ho + vs) == 9) {
+                    vs = vs + 1;
+                }
+                let ve: u32 = le;
+                while ve > vs && (load8(d, ho + ve - 1) == 32 || load8(d, ho + ve - 1) == 9) {
+                    ve = ve - 1;
+                }
+                // RFC 9110 §5.5: 字段值里的 NUL / CR / LF 必须拒（或换成 SP）。
+                // 原来只记偏移与长度，于是 `X: ab\0\0` 会把 NUL 原样交给调用方 (#686)。
+                let bad: u32 = 0;
+                let x: u32 = vs;
+                while x < ve {
+                    let cv: u32 = load8(d, ho + x);
+                    if cv == 0 || cv == HTTPP_CR || cv == HTTPP_LF {
+                        bad = 1;
+                    }
+                    x = x + 1;
+                }
+                if bad == 1 {
+                    return 0;
+                }
+                let oo: u32 = ho + vs;
+                store8(out_off, 0, oo as u8);
+                store8(out_off, 1, (oo >> 8) as u8);
+                store8(out_off, 2, (oo >> 16) as u8);
+                store8(out_off, 3, (oo >> 24) as u8);
+                let vl: u32 = ve - vs;
+                store8(out_len, 0, vl as u8);
+                store8(out_len, 1, (vl >> 8) as u8);
+                store8(out_len, 2, (vl >> 16) as u8);
+                store8(out_len, 3, (vl >> 24) as u8);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/// 取一个十进制头值 (Content-Length 等); 没有 / 非法返回 HTTP_NO。
+/// 值的偏移 / 长度照 `http_hdr_find` 的约定写进 out_off / out_len(各 4 字节, 必须是两块)。
+pub fn http_hdr_dec(d: ptr, ho: u32, hn: u32, name: str,
+                    out_off: ptr, out_len: ptr) -> u32 {
+    let found: u32 = http_hdr_find(d, ho, hn, name, out_off, out_len);
+    if found == 0 {
+        return HTTP_NO;
+    }
+    let off: u32 = load8(out_off, 0) | (load8(out_off, 1) << 8)
+                 | (load8(out_off, 2) << 16) | (load8(out_off, 3) << 24);
+    let len: u32 = load8(out_len, 0) | (load8(out_len, 1) << 8)
+                 | (load8(out_len, 2) << 16) | (load8(out_len, 3) << 24);
+    if len == 0 {
+        return HTTP_NO;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        let c: u32 = load8(d, off + i);
+        if c < 48 || c > 57 {
+            return HTTP_NO;
+        }
+        // 乘之前先判会不会回绕: 直接 `v = v * 10 + ...` 时一个超 u32 的头值静默回绕
+        // (2^32 读成 0, 99999999999 读成 1215752191) —— 算术静默回绕见 #19。
+        if v > (4294967295 - (c - 48)) / 10 {
+            return HTTP_NO;
+        }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------- 构建请求
+
+/// 一个请求字段里**不许出现**的字节: CR (13)、LF (10)、NUL (0)。
+///
+/// 这三个字节是请求行/头行的骨架 —— 调用方从文件、argv 或 URL 拼出来的 `host` 里
+/// 混进一个 LF, 就多出一整行头（甚至拆出第二个请求）。这是 CRLF 注入 / request
+/// splitting (CWE-113); `http_req_build` 是公共构建器, 校验该在这里做一次 (#790)。
+fn httpp_field_ok(s: str) -> bool {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = str_byte(s, i);
+        if c == 13 || c == 10 || c == 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 拼一条请求到 out (上限 cap), 返回长度; 放不下返回 HTTP_NO。
+/// `method` / `target` / `host` 里有 CR、LF 或 NUL 时也返回 HTTP_NO —— 这些字段会直接
+/// 变成请求行 / 头行, 带换行就是注入 (#790)。拒绝而不是静默删字节: 调用方给的值要么
+/// 原样出现, 要么整条构建失败。
+/// 行结束一律 CRLF (逐字节写 —— 见文件头那条转义限制)。
+/// `keep_alive` 非 0 写 `Connection: keep-alive`, 否则 `Connection: close`。
+pub fn http_req_build(out: ptr, cap: u32, method: str, target: str, host: str,
+                      port: u32, keep_alive: u32) -> u32 {
+    // 先拒输入, 再算容量 —— 被污染的字段一个字节都不该落进 out。
+    if !httpp_field_ok(method) || !httpp_field_ok(target) || !httpp_field_ok(host) {
+        return HTTP_NO;
+    }
+    // 连接行按**最长的那一支**留: keep-alive 是 22 字节、close 是 17。原来固定给 18,
+    // 于是 keep_alive 非 0 时估算少 4 字节, 端口那 6 字节余量一旦被 5 位端口用满
+    // (实际超出 = 端口位数 - 1) 就会写到 cap 之外。改的时候两边**一起改**。
+    let conn: u32 = 17;                       // "Connection: close"
+    if keep_alive != 0 {
+        conn = 22;                            // "Connection: keep-alive"
+    }
+    // 端口那一项按**真实位数**算。原来固定写 6（按 65535 估），于是 `port=1000000`
+    // 起就写到 `cap` 之外 —— 端口是公开的 `u32`，调用方不必先查 65535 (#681)。
+    let ps: u32 = 0;
+    if port != 80 && port != 0 {
+        ps = 1 + httpp_digits(port);
+    }
+    let need: u32 = str_len(method) + 1 + str_len(target) + 1 + 8 + 2
+                  + ps + str_len(host) + 6 + 2
+                  + conn + 2 + 2;
+    if need > cap {
+        return HTTP_NO;
+    }
+    let w: u32 = httpp_put(out, 0, method);
+    w = httpp_put(out, w, " ");
+    w = httpp_put(out, w, target);
+    w = httpp_put(out, w, " HTTP/1.1");
+    w = httpp_crlf(out, w);
+    w = httpp_put(out, w, "Host: ");
+    w = httpp_put(out, w, host);
+    if port != 80 && port != 0 {
+        store8(out, w, 58 as u8);
+        w = w + 1;
+        w = w + httpp_dec(out, w, port);
+    }
+    w = httpp_crlf(out, w);
+    if keep_alive != 0 {
+        w = httpp_put(out, w, "Connection: keep-alive");
+    } else {
+        w = httpp_put(out, w, "Connection: close");
+    }
+    w = httpp_crlf(out, w);
+    w = httpp_crlf(out, w);
+    return w;
+}
+
+/// 十进制位数（`httpp_dec` 会写几个字节）。容量估算必须与它**同一口径**。
+fn httpp_digits(v: u32) -> u32 {
+    let n: u32 = 1;
+    let t: u32 = v;
+    while t >= 10 {
+        t = t / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+fn httpp_dec(out: ptr, o: u32, v: u32) -> u32 {
+    let n: u32 = 1;
+    let t: u32 = v;
+    while t >= 10 {
+        t = t / 10;
+        n = n + 1;
+    }
+    let x: u32 = v;
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + (n - 1 - i), (48 + x % 10) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- 分块体
+
+/// 块长上限。比它大的块在这条解码路上装不进任何缓冲 (`cap` 就是 u32 的缓冲大小),
+/// 直接拒 —— 顺带让 `HTTP_NO`(0xFFFFFFFF) 不再与一个合法块长撞值。
+const HTTPP_MAX_CHUNK: u32 = 2147483647;
+
+fn httpp_hex(d: ptr, o: u32, n: u32) -> u32 {
+    if n == 0 {
+        return HTTP_NO;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(d, o + i);
+        let hv: u32 = 0;
+        if c >= 48 && c <= 57 {
+            hv = c - 48;
+        } else if c >= 97 && c <= 102 {
+            hv = c - 87;
+        } else if c >= 65 && c <= 70 {
+            hv = c - 55;
+        } else if c == 59 {
+            return v;
+        } else {
+            return HTTP_NO;
+        }
+        // 先判再乘, 否则一个超 u32 的块长静默回绕 —— `"100000000"` 会变成 0,
+        // 于是被当成"最后一块", body 被悄悄截断 (算术静默回绕见 #19)。
+        if v > (4294967295 - hv) / 16 {
+            return HTTP_NO;
+        }
+        v = v * 16 + hv;
+        if v > HTTPP_MAX_CHUNK {
+            return HTTP_NO;
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 解 `Transfer-Encoding: chunked` 的体: d[o, o+n) -> out (上限 cap)。
+/// 返回解出的字节数, 出错 / 放不下返回 HTTP_NO。响应里可能带 trailer, 一并跳过。
+pub fn http_chunked_decode(d: ptr, o: u32, n: u32, out: ptr, cap: u32) -> u32 {
+    let r: u32 = 0;
+    let w: u32 = 0;
+    while r < n {
+        let ls: u32 = r;
+        while r < n && load8(d, o + r) != HTTPP_CR && load8(d, o + r) != HTTPP_LF {
+            r = r + 1;
+        }
+        let sz: u32 = httpp_hex(d, o + ls, r - ls);
+        if sz == HTTP_NO {
+            return HTTP_NO;
+        }
+        while r < n && (load8(d, o + r) == HTTPP_CR || load8(d, o + r) == HTTPP_LF) {
+            r = r + 1;
+        }
+        if sz == 0 {
+            return w;
+        }
+        // 减法形式: `w + sz` 自己会回绕 (一个 `2^32 - w` 的块长就让 `w + sz > cap` 为假)。
+        // `w <= cap` 由这条检查维持 —— 初始 0, 每次加的 `sz` 都 <= `cap - w`。
+        if sz > cap - w {
+            return HTTP_NO;
+        }
+        let i: u32 = 0;
+        while i < sz {
+            if r + i >= n {
+                return HTTP_NO;
+            }
+            store8(out, w + i, load8(d, o + r + i) as u8);
+            i = i + 1;
+        }
+        w = w + sz;
+        r = r + sz;
+        // 块尾 CRLF
+        if r < n && load8(d, o + r) == HTTPP_CR {
+            r = r + 1;
+        }
+        if r < n && load8(d, o + r) == HTTPP_LF {
+            r = r + 1;
+        }
+    }
+    return HTTP_NO;
+}
+
+// ---------------------------------------------------------------- 原因短语
+
+/// 状态码的标准原因短语 (IANA 注册表 —— 与 CPython `http.client.responses` 同一份)。
+/// 认不出来返回 HTTP_NO (写 0 字节)。
+///
+/// **这张表照的是 RFC 9110 的现行写法**, 而 RFC 9110 给四个码改过名 ——
+/// 413 `Request Entity Too Large` -> `Content Too Large`、414 `Request-URI Too Long` ->
+/// `URI Too Long`、416 `Requested Range Not Satisfiable` -> `Range Not Satisfiable`、
+/// 422 `Unprocessable Entity` -> `Unprocessable Content`。**旧写法仍在野** (CPython 3.11
+/// 的表就是旧的), 所以判据把那四条单列成"容忍的旧写法"而不是把这条判据放宽。
+/// `418` 不是 RFC 9110 的码 (它来自 RFC 2324), 写法跟 CPython 一致: `I'm a Teapot`。
+pub fn http_reason(code: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = httpp_reason_str(code);
+    let n: u32 = str_len(s);
+    if n == 0 {
+        return HTTP_NO;
+    }
+    if n + 1 > cap {
+        return HTTP_NO;
+    }
+    return httpp_put(out, 0, s);
+}
+
+fn httpp_reason_str(code: u32) -> str {
+    if code == 100 { return "Continue"; }
+    if code == 101 { return "Switching Protocols"; }
+    if code == 102 { return "Processing"; }
+    if code == 103 { return "Early Hints"; }
+    if code == 200 { return "OK"; }
+    if code == 201 { return "Created"; }
+    if code == 202 { return "Accepted"; }
+    if code == 203 { return "Non-Authoritative Information"; }
+    if code == 204 { return "No Content"; }
+    if code == 205 { return "Reset Content"; }
+    if code == 206 { return "Partial Content"; }
+    if code == 207 { return "Multi-Status"; }
+    if code == 208 { return "Already Reported"; }
+    if code == 226 { return "IM Used"; }
+    if code == 300 { return "Multiple Choices"; }
+    if code == 301 { return "Moved Permanently"; }
+    if code == 302 { return "Found"; }
+    if code == 303 { return "See Other"; }
+    if code == 304 { return "Not Modified"; }
+    if code == 305 { return "Use Proxy"; }
+    if code == 307 { return "Temporary Redirect"; }
+    if code == 308 { return "Permanent Redirect"; }
+    if code == 400 { return "Bad Request"; }
+    if code == 401 { return "Unauthorized"; }
+    if code == 402 { return "Payment Required"; }
+    if code == 403 { return "Forbidden"; }
+    if code == 404 { return "Not Found"; }
+    if code == 405 { return "Method Not Allowed"; }
+    if code == 406 { return "Not Acceptable"; }
+    if code == 407 { return "Proxy Authentication Required"; }
+    if code == 408 { return "Request Timeout"; }
+    if code == 409 { return "Conflict"; }
+    if code == 410 { return "Gone"; }
+    if code == 411 { return "Length Required"; }
+    if code == 412 { return "Precondition Failed"; }
+    if code == 413 { return "Content Too Large"; }
+    if code == 414 { return "URI Too Long"; }
+    if code == 415 { return "Unsupported Media Type"; }
+    if code == 416 { return "Range Not Satisfiable"; }
+    if code == 417 { return "Expectation Failed"; }
+    if code == 418 { return "I'm a Teapot"; }
+    if code == 421 { return "Misdirected Request"; }
+    if code == 422 { return "Unprocessable Content"; }
+    if code == 423 { return "Locked"; }
+    if code == 424 { return "Failed Dependency"; }
+    if code == 425 { return "Too Early"; }
+    if code == 426 { return "Upgrade Required"; }
+    if code == 428 { return "Precondition Required"; }
+    if code == 429 { return "Too Many Requests"; }
+    if code == 431 { return "Request Header Fields Too Large"; }
+    if code == 451 { return "Unavailable For Legal Reasons"; }
+    if code == 500 { return "Internal Server Error"; }
+    if code == 501 { return "Not Implemented"; }
+    if code == 502 { return "Bad Gateway"; }
+    if code == 503 { return "Service Unavailable"; }
+    if code == 504 { return "Gateway Timeout"; }
+    if code == 505 { return "HTTP Version Not Supported"; }
+    if code == 506 { return "Variant Also Negotiates"; }
+    if code == 507 { return "Insufficient Storage"; }
+    if code == 508 { return "Loop Detected"; }
+    if code == 510 { return "Not Extended"; }
+    if code == 511 { return "Network Authentication Required"; }
+    return "";
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn httpp_lit(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn test_http_status_line() -> bool {
+    let b: ptr = alloc(64);
+    let c: ptr = alloc(4);
+    let n: u32 = httpp_lit(b, 0, "HTTP/1.1 404 Not Found");
+    let ok: u32 = http_status_line(b, 0, n, c);
+    let code: u32 = load8(c, 0) | (load8(c, 1) << 8) | (load8(c, 2) << 16)
+                  | (load8(c, 3) << 24);
+    return ok == 1 && code == 404;
+}
+
+fn test_http_body_start() -> bool {
+    let b: ptr = alloc(128);
+    let n: u32 = httpp_lit(b, 0, "HTTP/1.1 200 OK");
+    let n2: u32 = httpp_crlf(b, n);
+    let n3: u32 = httpp_lit(b, n2, "X: 1");
+    let n4: u32 = httpp_crlf(b, n3);
+    let n5: u32 = httpp_crlf(b, n4);
+    let n6: u32 = httpp_lit(b, n5, "hello");
+    return http_body_start(b, 0, n6) == n5;
+}
+
+fn test_http_hdr_find_ci() -> bool {
+    let b: ptr = alloc(128);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = httpp_lit(b, 0, "Content-Length:  42  ");
+    let f: u32 = http_hdr_find(b, 0, n, "content-length", oo, ol);
+    let off: u32 = load8(oo, 0) | (load8(oo, 1) << 8);
+    let len: u32 = load8(ol, 0) | (load8(ol, 1) << 8);
+    return f == 1 && len == 2 && load8(b, off) == 52 && load8(b, off + 1) == 50;
+}
+
+fn test_http_req_build() -> bool {
+    let b: ptr = alloc(256);
+    let n: u32 = http_req_build(b, 256, "GET", "/x", "h.example", 8080, 0);
+    let want: ptr = alloc(256);
+    let wn: u32 = httpp_lit(want, 0, "GET /x HTTP/1.1");
+    let w2: u32 = httpp_crlf(want, wn);
+    let w3: u32 = httpp_lit(want, w2, "Host: h.example:8080");
+    let w4: u32 = httpp_crlf(want, w3);
+    let w5: u32 = httpp_lit(want, w4, "Connection: close");
+    let w6: u32 = httpp_crlf(want, w5);
+    let w7: u32 = httpp_crlf(want, w6);
+    return n == w7 && http_body_start(want, 0, w7) == w7;
+}
+
+fn test_http_chunked() -> bool {
+    let b: ptr = alloc(128);
+    let out: ptr = alloc(64);
+    let n: u32 = httpp_lit(b, 0, "5");
+    let n1: u32 = httpp_crlf(b, n);
+    let n2: u32 = httpp_lit(b, n1, "hello");
+    let n3: u32 = httpp_crlf(b, n2);
+    let n4: u32 = httpp_lit(b, n3, "0");
+    let n5: u32 = httpp_crlf(b, n4);
+    let n6: u32 = httpp_crlf(b, n5);
+    let m: u32 = http_chunked_decode(b, 0, n6, out, 64);
+    return m == 5 && load8(out, 0) == 104 && load8(out, 4) == 111;
+}
+
+fn test_http_reason_404() -> bool {
+    let out: ptr = alloc(64);
+    let n: u32 = http_reason(404, out, 64);
+    let want: u32 = httpp_lit(out, n, "!");
+    return n == 9 && load8(out, 0) == 78 && want > n;
+}

@@ -39,6 +39,7 @@
 // argc/argv, 不是返回地址。两条都见 docs/189 §3）。
 
 module lomccheck
+choose runtime
 
 use bytes
 use json

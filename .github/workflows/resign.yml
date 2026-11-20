@@ -1,0 +1,78 @@
+name: resign
+
+# Re-sign a published release's SHA256SUMS with the release key.
+#
+# Why this exists: a release asset can be replaced after publication -- 0.1.5's
+# setup.exe could not install anything (#1132), and the fixed build has a different
+# hash. SHA256SUMS must then follow the new hash, and the detached signature must
+# follow SHA256SUMS; otherwise the signature correctly reports the new manifest as
+# forged. The private key lives only in LOMENT_RELEASE_SIGNING_KEY (it is deliberately
+# write-only), so this cannot be done from a developer machine.
+#
+# Scope, deliberately narrow:
+#   * manual dispatch only;
+#   * one existing release, one file (its SHA256SUMS);
+#   * refuses to sign unless the imported key's fingerprint equals the one the release
+#     itself publishes in FINGERPRINT;
+#   * verifies the signature it just made before uploading anything.
+#
+# It is not a general signing service: the release path for new versions stays in
+# release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag whose SHA256SUMS to re-sign (e.g. v0.1.5)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  resign:
+    runs-on: ubuntu-latest
+    # Same environment as release.yml: the deployment policy on it is the gate that
+    # keeps this on main and on tags, not on arbitrary branches.
+    environment: release
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SIGNING_KEY: ${{ secrets.LOMENT_RELEASE_SIGNING_KEY }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: import the key and check it against the published fingerprint
+        run: |
+          set -eu
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::error::LOMENT_RELEASE_SIGNING_KEY is not set -- refusing to sign"
+            exit 1
+          fi
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --quiet --import
+          fpr=$(gpg --batch --with-colons --list-secret-keys \
+                  | awk -F: '/^fpr:/{print $10; exit}')
+          echo "imported key: $fpr"
+          mkdir -p work
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" \
+            -p FINGERPRINT -p SHA256SUMS -D work
+          want=$(tr -d '[:space:]' < work/FINGERPRINT)
+          if [ "$want" != "$fpr" ]; then
+            echo "::error::imported key $fpr != FINGERPRINT $want published by $TAG"
+            exit 1
+          fi
+          echo "fingerprint matches $TAG"
+
+      - name: sign SHA256SUMS, verify, upload
+        run: |
+          set -eu
+          fpr=$(gpg --batch --with-colons --list-secret-keys \
+                  | awk -F: '/^fpr:/{print $10; exit}')
+          gpg --batch --yes --armor --detach-sign --local-user "$fpr" \
+              -o work/SHA256SUMS.asc work/SHA256SUMS
+          gpg --batch --verify work/SHA256SUMS.asc work/SHA256SUMS
+          echo "signed SHA256SUMS with $fpr"
+          echo "SHA256SUMS digest (paste this into the release body):"
+          sha256sum work/SHA256SUMS
+          gh release upload "$TAG" work/SHA256SUMS.asc --clobber \
+            -R "$GITHUB_REPOSITORY"

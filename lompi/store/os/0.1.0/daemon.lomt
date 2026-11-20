@@ -1,0 +1,171 @@
+// os/daemon.lomt — 把自己变成一个后台守护进程（那五步）
+//
+// 为什么需要它: "写一个服务"和"写一个命令"差的不是业务代码，是**脱离终端**那几步:
+// 父进程要能立刻拿到"起来了"、进程不能持有控制终端、当前目录不能钉在调用者的
+// 目录上（否则那个分区永远卸载不掉）、`umask` 要确定、标准 fd 要处理。这些步骤
+// 少一步不会当场报错，而是**几天后**以"终端登出后服务没了"或"磁盘卸不掉"出现。
+//
+// 为什么是**两次 fork**:
+//   第一次 fork 之后父进程退出 —— 调用者拿回提示符; 子进程调用 `setsid` 成为新
+//   会话的首进程，**同时失去控制终端**。但会话首进程**可以再次获得**一个控制
+//   终端（打开一个 tty 时），所以第二次 fork 让**孙进程**继承工作，它永远不是
+//   会话首进程，也就永远拿不回控制终端。多这一次 fork 买的就是这一条。
+//
+// 边界（刻意不做）:
+//   * **不重定向 stdout/stderr 到日志文件** —— 那是策略（写哪儿、轮转、权限），
+//     由调用方选 `logfile` 或直接 `dup2`；这里只在 `noclose == 0` 时**关掉** 0..2。
+//   * **不写 pid 文件** —— `dm_write_pid` 是独立的一步，调用方决定路径与时机。
+//   * **不等"真正的服务就绪"** —— `dm_signal_ready` 只把 1 个字节写进调用方给的
+//     管道；要"就绪后再返回"的调用方自己保留写端、父进程读端读到字节再退。
+//
+// 号是 x86-64 Linux 的。自检只验纯逻辑（pid 文本的十进制定点）—— 自检不 fork。
+//
+// 命名: 公开 dm_*, 内部 dmq_。
+
+module daemon
+
+/// 守护进程通常的权限掩码（022：组与其他不可写）。
+pub const DM_UMASK: u32 = 18;
+
+const DMQ_SYS_CLOSE: u64 = 3;
+const DMQ_SYS_WRITE: u64 = 1;
+const DMQ_SYS_EXIT: u64 = 60;
+const DMQ_SYS_FORK: u64 = 57;
+const DMQ_SYS_GETPID: u64 = 39;
+const DMQ_SYS_SETSID: u64 = 112;
+const DMQ_SYS_CHDIR: u64 = 80;
+const DMQ_SYS_UMASK: u64 = 95;
+const DMQ_SYS_OPENAT: u64 = 257;
+const DMQ_AT_FDCWD: u64 = 18446744073709551516;
+const DMQ_O_WRONLY_CREAT_TRUNC: u64 = 577;
+const DMQ_MODE: u32 = 420;
+
+/// 一个 u64 写成十进制 ASCII，写进 out；返回字节数（放不下返回 0）。
+/// 不走 sprintf —— 这条链上没有 libc。
+pub fn dm_pid_text(v0: u64, out: ptr, cap: u32) -> u32 {
+    let d: ptr = alloc(24);
+    if v0 == 0 {
+        if cap < 1 {
+            return 0;
+        }
+        store8(out, 0, 48 as u8);
+        return 1;
+    }
+    let v: u64 = v0;
+    let n: u32 = 0;
+    while v > 0 && n < 24 {
+        store8(d, n, (48 + (v % 10)) as u8);
+        v = v / 10;
+        n = n + 1;
+    }
+    if n > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, i, load8(d, n - 1 - i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 标准 fd（0/1/2）全部关掉 —— 之后打开的文件会**占据这些号**，所以调用方要么先
+/// 把日志/空设备 `dup2` 到 0..2，要么确认"没人再写 stdout"。
+pub fn dm_close_std() -> u32 {
+    let fd: u32 = 0;
+    while fd < 3 {
+        let _r: i64 = syscall4(DMQ_SYS_CLOSE, fd as u64, 0, 0);
+        fd = fd + 1;
+    }
+    return 3;
+}
+
+/// 走完守护进程的整套步骤。成功返回 0（**只有孙进程会返回到这里**），失败返回 -1。
+/// `noclose == 0` 时关掉 0..2；调用方想保留 stdio 就传非 0。
+///
+/// **警告**: 父进程与第一次 fork 的子进程都在里面直接 `exit`，所以从调用者的角度
+/// 看，这个函数"回来的那一次"永远是孙进程。不要把它包在"父进程还要接着做别的事"
+/// 的分支里 —— 调用点写完之后就应当 `return`/`exit`。
+pub fn dm_daemonize(noclose: u32) -> i64 {
+    let p1: i64 = syscall4(DMQ_SYS_FORK, 0, 0, 0);
+    if p1 < 0 {
+        return -1;
+    }
+    if p1 > 0 {
+        let _x: i64 = syscall4(DMQ_SYS_EXIT, 0, 0, 0);
+    }
+    let s: i64 = syscall4(DMQ_SYS_SETSID, 0, 0, 0);
+    if s < 0 {
+        return -1;
+    }
+    let p2: i64 = syscall4(DMQ_SYS_FORK, 0, 0, 0);
+    if p2 < 0 {
+        return -1;
+    }
+    if p2 > 0 {
+        let _y: i64 = syscall4(DMQ_SYS_EXIT, 0, 0, 0);
+    }
+    let _u: i64 = syscall4(DMQ_SYS_UMASK, DM_UMASK as u64, 0, 0);
+    let root: ptr = alloc(2);
+    store8(root, 0, 47 as u8);
+    store8(root, 1, 0 as u8);
+    let _d: i64 = syscall4(DMQ_SYS_CHDIR, root as u64, 0, 0);
+    if noclose == 0 {
+        let _c: u32 = dm_close_std();
+    }
+    return 0;
+}
+
+/// 把当前 pid（十进制 + 换行）写进 `path`。成功返回写入的字节数，失败 -1。
+/// `out` 至少 24 字节（号码文本的暂存区）。
+pub fn dm_write_pid(path: ptr, out: ptr) -> i64 {
+    let pid: i64 = syscall4(DMQ_SYS_GETPID, 0, 0, 0);
+    let n: u32 = dm_pid_text(pid as u64, out, 23);
+    if n == 0 {
+        return -1;
+    }
+    store8(out, n, 10 as u8);
+    let fd: i64 = syscall6(DMQ_SYS_OPENAT, DMQ_AT_FDCWD, path as u64,
+                           DMQ_O_WRONLY_CREAT_TRUNC, DMQ_MODE as u64, 0);
+    if fd < 0 {
+        return -1;
+    }
+    let w: i64 = syscall4(DMQ_SYS_WRITE, fd as u64, out as u64, (n + 1) as u64);
+    let _c: i64 = syscall4(DMQ_SYS_CLOSE, fd as u64, 0, 0);
+    return w;
+}
+
+/// 就绪信号: 往调用方给的管道写端写 1 个字节。父进程读到它再退出，
+/// 就不会出现"命令返回了但服务还没开始监听"的竞态。
+pub fn dm_signal_ready(pipe_fd: i64) -> i64 {
+    let b: ptr = alloc(1);
+    store8(b, 0, 1 as u8);
+    return syscall4(DMQ_SYS_WRITE, pipe_fd as u64, b as u64, 1);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_daemon_pid_text_zero() -> bool {
+    let b: ptr = alloc(8);
+    let n: u32 = dm_pid_text(0, b, 8);
+    return n == 1 && load8(b, 0) == 48;
+}
+
+fn test_daemon_pid_text_decimal() -> bool {
+    let b: ptr = alloc(8);
+    let n: u32 = dm_pid_text(1234 as u64, b, 8);
+    return n == 4 && load8(b, 0) == 49 && load8(b, 1) == 50
+        && load8(b, 2) == 51 && load8(b, 3) == 52;
+}
+
+fn test_daemon_pid_text_rejects_small_buffer() -> bool {
+    let b: ptr = alloc(2);
+    return dm_pid_text(1234 as u64, b, 2) == 0;
+}
+
+fn test_daemon_pid_text_high_value() -> bool {
+    // 高位数不能丢 —— 这个函数是手写的定点，最容易错的就是"只取低 32 位"。
+    let b: ptr = alloc(24);
+    let n: u32 = dm_pid_text(4294967296 as u64, b, 24);
+    return n == 10 && load8(b, 0) == 52 && load8(b, 9) == 54;
+}

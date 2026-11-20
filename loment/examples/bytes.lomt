@@ -1,4 +1,5 @@
 module bytes
+choose runtime
 
 // 多字节内存访问助手 (M68/M73 共用): 小端。
 

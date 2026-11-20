@@ -1,0 +1,332 @@
+// internet/unixsock.lomt — AF_UNIX 域套接字：地址、连接、监听、收发、传 fd
+//
+// 为什么需要它: 本机进程之间的通信在 Linux 上几乎都是 AF_UNIX —— systemd、docker、
+// X11、Wayland、D-Bus、pg/redis 的本地 socket 全是它。`sock` / `tcp` 那一层只做
+// AF_INET，整个 store 原先对 `AF_UNIX` 是零覆盖。它的地址结构、长度算法与 socket
+// 路径的清理语义都与 IP 侧不同，照抄 `sockaddr_in` 会把长度算错 —— 而长度错了
+// `bind` 只会返回 EINVAL，不告诉你是哪一步。
+//
+// 两种名字空间 (Linux 特有):
+//   * **路径名**：`sockaddr_un.path` 是一个以 NUL 结尾的路径，`addrlen` 含那个 NUL。
+//     socket 节点是**文件系统里的一个文件**，进程退出不会自动删除 —— 调用方负责
+//     `ux_unlink`，否则下一次 `bind` 拿到 EADDRINUSE。
+//   * **抽象名字空间**：路径第一个字节写成 `@` 时，这里转成"第一个字节是 NUL"的
+//     抽象名（Linux 的约定）。它**不落盘**，进程死了名字自动消失。
+//
+// 为什么 `ux_connect_path` / `ux_listen_path` 自己分配地址缓冲: `sockaddr_un` 最大
+// 110 字节，每次建连一条、不释放 —— 一个进程的本地连接数是有限的，这点代价换调用点
+// 少一个必填参数。需要零分配的调用方走 `ux_addr` + `ux_bind/ux_connect`。
+//
+// 发送一律 `MSG_NOSIGNAL`（16384）: 对端挂断后第二次写会**直接杀掉进程**
+// （SKILL.md 6.2.18，实测退出码 13）。
+//
+// 边界: 不做 `SO_PEERCRED` 同侪身份（号在，未包）、不做 netlink、不做 socketpair
+// （`socketpair(53)` 的四个输出槽要一对 fd，等有需求再加）。自检只验纯逻辑。
+//
+// 命名: 公开 ux_*, 内部 uxq_。自检 test_unixsock_*。
+
+module unixsock
+
+use "sock.lomt"
+
+/// 地址家族。
+pub const UX_AF_UNIX: u64 = 1;
+/// 套接字类型。
+pub const UX_SOCK_STREAM: u64 = 1;
+pub const UX_SOCK_DGRAM: u64 = 2;
+/// `sun_path` 的容量（内核 ABI：110 - 2 字节家族，再留 NUL 之外的最大路径长）。
+pub const UX_MAX_PATH: u32 = 107;
+/// `accept4` 的旗标：回来的 fd 带 CLOEXEC。
+pub const UX_CLOEXEC: u64 = 524288;
+/// `send`/`recv` 的旗标：别为已挂断的对端发 SIGPIPE。
+pub const UX_MSG_NOSIGNAL: u64 = 16384;
+/// `sendmsg`/`recvmsg` 传 fd 时的控制消息参数。
+pub const UX_SOL_SOCKET: u32 = 1;
+pub const UX_SCM_RIGHTS: u32 = 1;
+/// 一个 `sockaddr_un` 缓冲的字节数（内核上限）。
+pub const UX_ADDR_BYTES: u32 = 110;
+/// `ux_send_fd` / `ux_recv_fd` 要的暂存字节数。
+pub const UX_SCRATCH: u32 = 96;
+
+const UXP_SYS_SOCKET: u64 = 41;
+const UXP_SYS_CONNECT: u64 = 42;
+const UXP_SYS_SENDTO: u64 = 44;
+const UXP_SYS_RECVFROM: u64 = 45;
+const UXP_SYS_SENDMSG: u64 = 46;
+const UXP_SYS_RECVMSG: u64 = 47;
+const UXP_SYS_BIND: u64 = 49;
+const UXP_SYS_LISTEN: u64 = 50;
+const UXP_SYS_UNLINK: u64 = 87;
+const UXP_SYS_ACCEPT4: u64 = 288;
+
+/// C 串长度（不含 NUL），最多看 `cap` 字节。
+fn uxq_len(p: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cap && load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 把 `sockaddr_un` 写进 `sa`：家族 u16 小端 = 1，路径从偏移 2 起。
+/// 返回地址长度（字节），路径放不下返回 0。
+/// `path_cstr` 是**调用方拼好的 C 串**；首字节 `@` 表示抽象名字空间。
+pub fn ux_addr(sa: ptr, path_cstr: ptr) -> u32 {
+    let n: u32 = uxq_len(path_cstr, UX_MAX_PATH + 1);
+    if n == 0 {
+        return 0;
+    }
+    store8(sa, 0, (UX_AF_UNIX & 255) as u8);
+    store8(sa, 1, ((UX_AF_UNIX >> 8) & 255) as u8);
+    let i: u32 = 0;
+    if load8(path_cstr, 0) == 64 {
+        // 抽象名字空间：第一个字节是 NUL，名字从 1 起（去掉 `@`）。
+        store8(sa, 2, 0 as u8);
+        let j: u32 = 1;
+        while j < n {
+            store8(sa, 2 + j, load8(path_cstr, j) as u8);
+            j = j + 1;
+        }
+        return 2 + n;
+    }
+    if n > UX_MAX_PATH {
+        return 0;
+    }
+    while i < n {
+        store8(sa, 2 + i, load8(path_cstr, i) as u8);
+        i = i + 1;
+    }
+    store8(sa, 2 + n, 0 as u8);
+    return 2 + n + 1;
+}
+
+/// 建一个流式 AF_UNIX socket。
+pub fn ux_socket_stream() -> i64 {
+    return syscall4(UXP_SYS_SOCKET, UX_AF_UNIX, UX_SOCK_STREAM, 0);
+}
+
+/// 建一个数据报 AF_UNIX socket。
+pub fn ux_socket_dgram() -> i64 {
+    return syscall4(UXP_SYS_SOCKET, UX_AF_UNIX, UX_SOCK_DGRAM, 0);
+}
+
+pub fn ux_bind(fd: i64, sa: ptr, salen: u32) -> i64 {
+    return syscall4(UXP_SYS_BIND, fd as u64, sa as u64, salen as u64);
+}
+
+pub fn ux_listen(fd: i64, backlog: u64) -> i64 {
+    return syscall4(UXP_SYS_LISTEN, fd as u64, backlog, 0);
+}
+
+/// `accept4`：回来的 fd 带 CLOEXEC。
+pub fn ux_accept(fd: i64) -> i64 {
+    return syscall6(UXP_SYS_ACCEPT4, fd as u64, 0, 0, UX_CLOEXEC, 0);
+}
+
+pub fn ux_connect(fd: i64, sa: ptr, salen: u32) -> i64 {
+    return syscall4(UXP_SYS_CONNECT, fd as u64, sa as u64, salen as u64);
+}
+
+/// 一次建好监听 socket：`socket` + `bind` + `listen`。失败返回负数并收掉 fd。
+/// **路径不会自动清** —— 退出前调用 `ux_unlink(path_cstr)`。
+pub fn ux_listen_path(path_cstr: ptr, backlog: u64) -> i64 {
+    let sa: ptr = alloc(UX_ADDR_BYTES);
+    let alen: u32 = ux_addr(sa, path_cstr);
+    if alen == 0 {
+        return 0 as i64 - 22 as i64;
+    }
+    let fd: i64 = ux_socket_stream();
+    if fd < 0 {
+        return fd;
+    }
+    let b: i64 = ux_bind(fd, sa, alen);
+    if b < 0 {
+        sock_close(fd);
+        return b;
+    }
+    let l: i64 = ux_listen(fd, backlog);
+    if l < 0 {
+        sock_close(fd);
+        return l;
+    }
+    return fd;
+}
+
+/// 连到一个本地 socket 路径。`dgram` 为真建数据报 socket，否则流式。
+pub fn ux_connect_path(path_cstr: ptr, dgram: bool) -> i64 {
+    let sa: ptr = alloc(UX_ADDR_BYTES);
+    let alen: u32 = ux_addr(sa, path_cstr);
+    if alen == 0 {
+        return 0 as i64 - 22 as i64;
+    }
+    let fd: i64 = 0 as i64;
+    if dgram {
+        fd = ux_socket_dgram();
+    } else {
+        fd = ux_socket_stream();
+    }
+    if fd < 0 {
+        return fd;
+    }
+    let c: i64 = ux_connect(fd, sa, alen);
+    if c < 0 {
+        sock_close(fd);
+        return c;
+    }
+    return fd;
+}
+
+/// `sendto(..., NULL, 0)`：连接过的 socket 上直接发。
+pub fn ux_send(fd: i64, data: ptr, n: u64, flags: u64) -> i64 {
+    return syscall7(UXP_SYS_SENDTO, fd as u64, data as u64, n, flags, 0, 0);
+}
+
+/// `recvfrom(..., NULL, NULL)`。
+pub fn ux_recv(fd: i64, buf: ptr, cap: u64, flags: u64) -> i64 {
+    return syscall7(UXP_SYS_RECVFROM, fd as u64, buf as u64, cap, flags, 0, 0);
+}
+
+/// 发一条消息并附一个 fd（`SCM_RIGHTS`）。
+/// 暂存布局（`UX_SCRATCH` 字节）: iovec 0..16、cmsghdr 16..36、msghdr 40..96。
+pub fn ux_send_fd(fd: i64, data: ptr, n: u64, pass_fd: i64, scratch: ptr) -> i64 {
+    let sh: u32 = 0;
+    while sh < 8 {
+        store8(scratch, sh, (((data as u64) >> (8 * sh)) & 255) as u8);
+        store8(scratch, 8 + sh, ((n >> (8 * sh)) & 255) as u8);
+        sh = sh + 1;
+    }
+    // cmsghdr: cmsg_len 20、level SOL_SOCKET、type SCM_RIGHTS、data 一个 i32 fd
+    store8(scratch, 16, 20 as u8);
+    let k: u32 = 1;
+    while k < 8 {
+        store8(scratch, 16 + k, 0 as u8);
+        k = k + 1;
+    }
+    store8(scratch, 24, (UX_SOL_SOCKET & 255) as u8);
+    store8(scratch, 25, ((UX_SOL_SOCKET >> 8) & 255) as u8);
+    store8(scratch, 26, 0 as u8);
+    store8(scratch, 27, 0 as u8);
+    store8(scratch, 28, (UX_SCM_RIGHTS & 255) as u8);
+    store8(scratch, 29, ((UX_SCM_RIGHTS >> 8) & 255) as u8);
+    store8(scratch, 30, 0 as u8);
+    store8(scratch, 31, 0 as u8);
+    let pf: u64 = pass_fd as u64;
+    store8(scratch, 32, (pf & 255) as u8);
+    store8(scratch, 33, ((pf >> 8) & 255) as u8);
+    store8(scratch, 34, ((pf >> 16) & 255) as u8);
+    store8(scratch, 35, ((pf >> 24) & 255) as u8);
+    // msghdr at 40: name 40、namelen 48、iov 56、iovlen 64、control 72、controllen 80、flags 88
+    let a: u32 = 0;
+    while a < 16 {
+        store8(scratch, 40 + a, 0 as u8);
+        a = a + 1;
+    }
+    let b: u32 = 0;
+    while b < 8 {
+        store8(scratch, 56 + b, (((scratch as u64) >> (8 * b)) & 255) as u8);
+        store8(scratch, 64 + b, 0 as u8);
+        store8(scratch, 72 + b, ((((scratch as u64) + 16) >> (8 * b)) & 255) as u8);
+        store8(scratch, 80 + b, 0 as u8);
+        b = b + 1;
+    }
+    store8(scratch, 64, 1 as u8);
+    store8(scratch, 80, 20 as u8);
+    return syscall4(UXP_SYS_SENDMSG, fd as u64, (scratch as u64) + 40, 0);
+}
+
+/// 收一条消息；若附了 fd，返回它（挂在 `cmsghdr` 的偏移 16），否则返回 -1。
+pub fn ux_recv_fd(fd: i64, buf: ptr, cap: u64, scratch: ptr) -> i64 {
+    let sh: u32 = 0;
+    while sh < 8 {
+        store8(scratch, sh, (((buf as u64) >> (8 * sh)) & 255) as u8);
+        store8(scratch, 8 + sh, ((cap >> (8 * sh)) & 255) as u8);
+        sh = sh + 1;
+    }
+    let z: u32 = 0;
+    while z < 20 {
+        store8(scratch, 16 + z, 0 as u8);
+        z = z + 1;
+    }
+    let a: u32 = 0;
+    while a < 16 {
+        store8(scratch, 40 + a, 0 as u8);
+        a = a + 1;
+    }
+    let b: u32 = 0;
+    while b < 8 {
+        store8(scratch, 56 + b, (((scratch as u64) >> (8 * b)) & 255) as u8);
+        store8(scratch, 64 + b, 0 as u8);
+        store8(scratch, 72 + b, ((((scratch as u64) + 16) >> (8 * b)) & 255) as u8);
+        store8(scratch, 80 + b, 0 as u8);
+        b = b + 1;
+    }
+    store8(scratch, 64, 1 as u8);
+    store8(scratch, 80, 20 as u8);
+    let rc: i64 = syscall4(UXP_SYS_RECVMSG, fd as u64, (scratch as u64) + 40, 0);
+    if rc < 0 {
+        return rc;
+    }
+    let clen: u64 = 0 as u64;
+    let g: u32 = 0;
+    while g < 8 {
+        clen = clen | ((load8(scratch, 16 + g) as u64) << (8 * g));
+        g = g + 1;
+    }
+    if clen < 20 as u64 {
+        return 0 as i64 - 1;
+    }
+    let got: i64 = load8(scratch, 32) as i64;
+    let h: u32 = 1;
+    while h < 4 {
+        got = got | ((load8(scratch, 32 + h) as i64) << (8 * h));
+        h = h + 1;
+    }
+    return got;
+}
+
+/// 删掉一个 socket 路径（进程退出前清掉自己的监听节点）。
+pub fn ux_unlink(path_cstr: ptr) -> i64 {
+    return syscall4(UXP_SYS_UNLINK, path_cstr as u64, 0, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_unixsock_addr_path() -> bool {
+    let path: ptr = alloc(32);
+    let sa: ptr = alloc(UX_ADDR_BYTES);
+    store8(path, 0, 47 as u8);
+    store8(path, 1, 116 as u8);
+    store8(path, 2, 109 as u8);
+    store8(path, 3, 112 as u8);
+    store8(path, 4, 47 as u8);
+    store8(path, 5, 115 as u8);
+    store8(path, 6, 0 as u8);
+    let n: u32 = ux_addr(sa, path);
+    return n == 9 && load8(sa, 0) == 1 && load8(sa, 1) == 0
+        && load8(sa, 2) == 47 && load8(sa, 8) == 0;
+}
+
+fn test_unixsock_addr_abstract() -> bool {
+    let path: ptr = alloc(32);
+    let sa: ptr = alloc(UX_ADDR_BYTES);
+    store8(path, 0, 64 as u8);
+    store8(path, 1, 97 as u8);
+    store8(path, 2, 98 as u8);
+    store8(path, 3, 99 as u8);
+    store8(path, 4, 0 as u8);
+    let n: u32 = ux_addr(sa, path);
+    return n == 6 && load8(sa, 0) == 1 && load8(sa, 1) == 0
+        && load8(sa, 2) == 0 && load8(sa, 3) == 97 && load8(sa, 5) == 99;
+}
+
+fn test_unixsock_addr_too_long() -> bool {
+    let path: ptr = alloc(160);
+    let sa: ptr = alloc(UX_ADDR_BYTES);
+    let i: u32 = 0;
+    while i < 108 {
+        store8(path, i, 97 as u8);
+        i = i + 1;
+    }
+    store8(path, 108, 0 as u8);
+    return ux_addr(sa, path) == 0;
+}

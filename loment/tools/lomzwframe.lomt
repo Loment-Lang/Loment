@@ -1,0 +1,637 @@
+// loment/tools/lomzwframe.lomt — 零宽那一帧的 Loment 侧（`docs/240` 的孪生）
+//
+// 判据 (tools/loment_zwframe_test.py): 同一份用例文件, 本程序与 `tools/loment_zwframe.py`
+// 的 **stdout / stderr / 退出码逐字节相同**。脚手架照 `loment/tools/lomadmit.lomt`
+// （同一族的工具, 判据也是逐字节比）—— 包括那三条踩过的坑: `sys_alloc` 返回**旧 brk**、
+// argv 里的路径要传**偏移过的指针**、入口要 `die(0)` 而不是 `return 0`。
+//
+// 这一份**不解码那个 32 字节摘要的语义**（陈述与证明各自是什么, 是上面那层的事）——
+// 它只做一件事: **证明这一帧装不下别的东西**。
+
+module lomzwframe
+choose runtime
+
+// ---------------------------------------------------------------- 内存布局（说明用, 缓冲都走 sys_alloc）
+//
+//   256 KiB 用例文件 · 256 KiB 输出 (**不够就翻倍**, 见 `grow_out`) · 8 KiB argv
+//   4 KiB 路径暂存 · 512 B 帧工作区 · 16 B 十进制暂存
+
+const CASES_CAP: u32 = 262144;
+const OUT_CAP: u32 = 262144;
+const ARGV_CAP: u64 = 8192;
+const SCR_CAP: u64 = 4096;
+const FRAME_CAP: u32 = 512;
+const FRAME_LEN: u32 = 72;
+const HASH_LEN: u32 = 32;
+const DIGEST_LEN: u32 = 32;
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    let _e: i64 = syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let o: u64 = 0;
+    while o < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + o, n - o);
+        if w <= 0 {
+            return o;
+        }
+        o = o + (w as u64);
+    }
+    return o;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(2, str_ptr(s), str_len(s) as u64);
+}
+
+fn put_lit(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+/// 十进制, 无前导零 (Python 那侧是 `f"{v}"`)。
+/// **不用 `alloc`**: 那个 bump heap 只有 64 KiB, 每条用例几次 `alloc(16)` 就会在
+/// 几百条时耗尽, 然后 `llvm.trap` (issue #697) —— 这里直接写进输出缓冲。
+fn put_dec(out: ptr, o: u32, v: u64) -> u32 {
+    let nd: u32 = 1;
+    let t: u64 = v;
+    while t >= 10 {
+        t = t / 10;
+        nd = nd + 1;
+    }
+    let i: u32 = 0;
+    let x: u64 = v;
+    while i < nd {
+        let d: u32 = (x % 10) as u32;
+        store8(out, o + (nd - 1 - i), (48 + d) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    return o + nd;
+}
+
+fn is_space(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+// 小端 32/64 位读写 —— 语言没有 `load64`/`store64`, 拆成两个 u32 (同 `lumtui.lomt`)。
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) + (load8(p, off + 1) as u32) * 256
+         + (load8(p, off + 2) as u32) * 65536 + (load8(p, off + 3) as u32) * 16777216;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return off + 4;
+}
+
+fn st64(p: ptr, off: u32, v: u64) -> u32 {
+    let _a: u32 = st32(p, off, (v % 4294967296) as u32);
+    return st32(p, off + 4, (v / 4294967296) as u32);
+}
+
+fn ld64(p: ptr, off: u32) -> u64 {
+    return (ld32(p, off) as u64) + (ld32(p, off + 4) as u64) * 4294967296;
+}
+
+fn hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 97 + 10;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 65 + 10;
+    }
+    return 99;
+}
+
+fn streq(p: ptr, off: u32, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if (load8(p, off + i) as u32) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 十进制: 可选 `+` 前缀, 至少一位 ASCII 数字, 前导零允许, 值域 0..2^63-1。
+/// **与 Python 侧的 `parse_dec` 同一个接受集** (issue #698/#699) —— 成功返回 1 并把值
+/// 写进 `out` (8 字节); 不成返回 0。
+fn dec_span(p: ptr, off: u32, n: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    if n > 0 && load8(p, off) == 43 {
+        i = 1;                                     // 一个可选的 `+`
+    }
+    if i >= n {
+        return 0;
+    }
+    let v: u64 = 0;
+    while i < n {
+        let c: u32 = load8(p, off + i) as u32;
+        if is_digit(c) == 0 {
+            return 0;
+        }
+        if v > 922337203685477580 {
+            return 0;
+        }
+        // **必须显式转**：`v * 10 + (c - 48)` 是 u64 加 u32，参考实现的检查器放行、
+        // 发出来的 IR 却是 `add i64 ..., <i32>`（clang 当场拒）—— 见 issue #289。
+        v = v * 10 + ((c - 48) as u64);
+        if v > 9223372036854775807 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    let _x: u32 = st64(out, 0, v);
+    return 1;
+}
+
+/// 十六进制 `[off, off+n)` 解进 `out`（每两个字符一个字节）。成功返回**字节数**；
+/// **不成**（长度奇数 / 有非十六进制字符）返回 `4294967295`；**超容量**返回
+/// `4294967294` —— 后者与 Python 那侧不一样（那边 `bytes.fromhex` 没有容量概念），
+/// 所以调用处把"超容量"按 **`bad-length`** 报（任何超过容量的长度都 ≠ 72，判据一致）。
+fn hex_decode(p: ptr, off: u32, n: u32, out: ptr, cap: u32) -> u32 {
+    if n % 2 != 0 {
+        return 4294967295;
+    }
+    let nb: u32 = n / 2;
+    if nb > cap {
+        return 4294967294;
+    }
+    let i: u32 = 0;
+    while i < nb {
+        let hi: u32 = hexval(load8(p, off + i * 2) as u32);
+        let lo: u32 = hexval(load8(p, off + i * 2 + 1) as u32);
+        if hi == 99 || lo == 99 {
+            return 4294967295;
+        }
+        store8(out, i, (hi * 16 + lo) as u8);
+        i = i + 1;
+    }
+    return nb;
+}
+
+/// 十六进制**小写**输出（Python 那侧是 `bytes.hex()`）。返回新长度。
+fn hex_encode(out: ptr, o: u32, src: ptr, n: u32) -> u32 {
+    let d: str = "0123456789abcdef";
+    let i: u32 = 0;
+    while i < n {
+        let b: u32 = load8(src, i) as u32;
+        store8(out, o + i * 2, str_byte(d, b / 16) as u8);
+        store8(out, o + i * 2 + 1, str_byte(d, b % 16) as u8);
+        i = i + 1;
+    }
+    return o + n * 2;
+}
+
+fn put_span(out: ptr, o: u32, src: ptr, so: u32, sn: u32) -> u32 {
+    let i: u32 = 0;
+    while i < sn {
+        store8(out, o + i, load8(src, so + i) as u8);
+        i = i + 1;
+    }
+    return o + sn;
+}
+
+// ---------------------------------------------------------------- 文件
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let r: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if r <= 0 {
+            return off;
+        }
+        off = off + (r as u64);
+    }
+    return off;
+}
+
+fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(p, n, scr);
+    if fd < 0 {
+        return 4294967295;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    return got as u32;
+}
+
+/// 输出缓冲不够 `need` 字节就**翻倍** (`sys_alloc` 拿新块、把旧内容拷过去);
+/// 新指针写进 `slot` (8 字节)。返回新容量, 0 = 拿不到内存。
+///
+/// 原先是写穿 256 KiB 缓冲然后 SIGSEGV (issue #696: 1900 行用例, 退出 139、零输出) ——
+/// 输出量随输入行数增长, 所以这里**长**而不是拒: 输入仍受 `CASES_CAP` 约束, 输出没有
+/// 一个拍出来的上限。
+fn grow_out(slot: ptr, out: ptr, olen: u32, cap: u32, need: u32) -> u32 {
+    let ncap: u32 = cap;
+    while ncap < need {
+        ncap = ncap * 2;
+    }
+    let nv: u64 = sys_alloc(ncap as u64);
+    if nv == 0 {
+        return 0;
+    }
+    let np: ptr = nv as ptr;
+    let i: u32 = 0;
+    while i < olen {
+        store8(np, i, load8(out, i) as u8);
+        i = i + 1;
+    }
+    let _x: u32 = st64(slot, 0, nv);
+    return ncap;
+}
+
+/// 把一行切成字段, 起点写进 fo、长度写进 fl, 返回字段数。
+fn split_fields(cases: ptr, fs: u32, fe: u32, fo: ptr, fl: ptr) -> u32 {
+    let k: u32 = 0;
+    let j: u32 = fs;
+    while j < fe {
+        while j < fe && is_space(load8(cases, j) as u32) == 1 {
+            j = j + 1;
+        }
+        if j < fe {
+            let s0: u32 = j;
+            while j < fe && is_space(load8(cases, j) as u32) == 0 {
+                j = j + 1;
+            }
+            if k < 8 {
+                store8(fo, k * 4, (s0 % 256) as u8);
+                store8(fo, k * 4 + 1, ((s0 / 256) % 256) as u8);
+                store8(fo, k * 4 + 2, ((s0 / 65536) % 256) as u8);
+                store8(fo, k * 4 + 3, ((s0 / 16777216) % 256) as u8);
+                let ln: u32 = j - s0;
+                store8(fl, k * 4, (ln % 256) as u8);
+                store8(fl, k * 4 + 1, ((ln / 256) % 256) as u8);
+                store8(fl, k * 4 + 2, ((ln / 65536) % 256) as u8);
+                store8(fl, k * 4 + 3, ((ln / 16777216) % 256) as u8);
+            }
+            k = k + 1;
+        }
+    }
+    return k;
+}
+
+fn fo_at(fo: ptr, k: u32) -> u32 {
+    return (load8(fo, k * 4) as u32) + (load8(fo, k * 4 + 1) as u32) * 256
+         + (load8(fo, k * 4 + 2) as u32) * 65536 + (load8(fo, k * 4 + 3) as u32) * 16777216;
+}
+
+fn fl_at(fl: ptr, k: u32) -> u32 {
+    return (load8(fl, k * 4) as u32) + (load8(fl, k * 4 + 1) as u32) * 256
+         + (load8(fl, k * 4 + 2) as u32) * 65536 + (load8(fl, k * 4 + 3) as u32) * 16777216;
+}
+
+// ---------------------------------------------------------------- 一帧
+
+/// `make`: 帧写进 `fr`, 返回 72；种类/长度不合规返回 0, 并把拒绝码交给调用处打印。
+fn make_frame(fr: ptr, kind: u32, hashp: ptr, digestp: ptr) -> u32 {
+    if kind != 1 && kind != 2 {
+        return 0;
+    }
+    store8(fr, 0, 76 as u8);
+    store8(fr, 1, 90 as u8);
+    store8(fr, 2, 87 as u8);
+    store8(fr, 3, 48 as u8);
+    store8(fr, 4, kind as u8);
+    store8(fr, 5, 0 as u8);
+    store8(fr, 6, 0 as u8);
+    store8(fr, 7, 0 as u8);
+    let i: u32 = 0;
+    while i < HASH_LEN {
+        store8(fr, 8 + i, load8(hashp, i) as u8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < DIGEST_LEN {
+        store8(fr, 8 + HASH_LEN + i, load8(digestp, i) as u8);
+        i = i + 1;
+    }
+    return FRAME_LEN;
+}
+
+/// `parse`: 返回 0 = ok（种类写进 `kout`）, 否则返回拒绝码的代号。
+fn parse_frame(buf: ptr, n: u32, kout: ptr) -> u32 {
+    if n != FRAME_LEN {
+        return 2;
+    }
+    if load8(buf, 0) != 76 || load8(buf, 1) != 90 || load8(buf, 2) != 87 || load8(buf, 3) != 48 {
+        return 3;
+    }
+    let kind: u32 = load8(buf, 4) as u32;
+    if kind != 1 && kind != 2 {
+        return 4;
+    }
+    let i: u32 = 5;
+    while i < 8 {
+        if load8(buf, i) != 0 {
+            return 5;
+        }
+        i = i + 1;
+    }
+    store8(kout, 0, kind as u8);
+    return 0;
+}
+
+fn reject_name(code: u32) -> str {
+    if code == 1 {
+        return "bad-hex";
+    }
+    if code == 2 {
+        return "bad-length";
+    }
+    if code == 3 {
+        return "bad-magic";
+    }
+    if code == 4 {
+        return "bad-kind";
+    }
+    return "reserved-nonzero";
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let cv: u64 = sys_alloc(CASES_CAP as u64);
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let av: u64 = sys_alloc(ARGV_CAP);
+    let scv: u64 = sys_alloc(SCR_CAP);
+    let frv: u64 = sys_alloc(FRAME_CAP as u64);
+    let b1v: u64 = sys_alloc(128);
+    let b2v: u64 = sys_alloc(128);
+    let fov: u64 = sys_alloc(64);
+    let flv: u64 = sys_alloc(64);
+    let kk: u64 = sys_alloc(16);
+    let gv: u64 = sys_alloc(8);
+    if cv == 0 || ov == 0 || av == 0 || scv == 0 || frv == 0 || b1v == 0 || b2v == 0
+            || fov == 0 || flv == 0 || kk == 0 || gv == 0 {
+        return die(2);
+    }
+    let cases: ptr = cv as ptr;
+    let out: ptr = ov as ptr;
+    let argv: ptr = av as ptr;
+    let scr: ptr = scv as ptr;
+    let fr: ptr = frv as ptr;
+    let b1: ptr = b1v as ptr;
+    let b2: ptr = b2v as ptr;
+    let fo: ptr = fov as ptr;
+    let fl: ptr = flv as ptr;
+    let kout: ptr = kk as ptr;
+    let gslot: ptr = gv as ptr;
+    let outcap: u32 = OUT_CAP;
+
+    // ---- argv[1]
+    let afd: i64 = open_ro(str_ptr("/proc/self/cmdline"), str_len("/proc/self/cmdline"), scr);
+    if afd < 0 {
+        return die(2);
+    }
+    let an: u64 = read_all(afd as u64, argv, ARGV_CAP);
+    let _c0: i64 = syscall4(3, afd as u64, 0, 0);
+    let total: u32 = an as u32;
+    let seg: u32 = 0;
+    let p1o: u32 = 0;
+    let p1n: u32 = 0;
+    let ai: u32 = 0;
+    let astart: u32 = 0;
+    while ai < total {
+        if load8(argv, ai) == 0 {
+            if seg == 1 {
+                p1o = astart;
+                p1n = ai - astart;
+                seg = 2;
+            } else if seg == 0 {
+                seg = 1;
+            }
+            astart = ai + 1;
+        }
+        ai = ai + 1;
+    }
+    if p1n == 0 {
+        let _u: u64 = say("usage: loment_zwframe.py <cases-file>\n");
+        return die(2);
+    }
+
+    let clen: u64 = slurp(ptr_add(argv, p1o), p1n, cases, CASES_CAP, scr) as u64;
+    if clen == 4294967295 {
+        let o0: u32 = put_lit(out, 0, "loment_zwframe: cannot open ");
+        let o1: u32 = put_span(out, o0, argv, p1o, p1n);
+        store8(out, o1, 10 as u8);
+        let _w: u64 = write_all(2, out, (o1 + 1) as u64);
+        return die(2);
+    }
+    let n: u32 = clen as u32;
+
+    let olen: u32 = 0;
+    let lineno: u32 = 0;
+    let li: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        if li >= n {
+            go = 0;
+        } else {
+            let le: u32 = li;
+            while le < n && load8(cases, le) != 10 {
+                le = le + 1;
+            }
+            lineno = lineno + 1;
+            let fstart: u32 = li;
+            let fend: u32 = le;
+            while fstart < fend && is_space(load8(cases, fstart) as u32) == 1 {
+                fstart = fstart + 1;
+            }
+            while fend > fstart && is_space(load8(cases, fend - 1) as u32) == 1 {
+                fend = fend - 1;
+            }
+            if fend > fstart {
+                // 一行的输出上界: **行本身的字节数** (报错要回显 token) + 固定开销。
+                let need: u32 = olen + (fend - fstart) + 256;
+                if need > outcap {
+                    let nc: u32 = grow_out(gslot, out, olen, outcap, need);
+                    if nc == 0 {
+                        return die(2);
+                    }
+                    outcap = nc;
+                    out = ld64(gslot, 0) as ptr;
+                }
+                let k: u32 = split_fields(cases, fstart, fend, fo, fl);
+                let action: u32 = 0;              // 1 = make, 2 = parse, 0 = 不认识
+                if k >= 1 && streq(cases, fo_at(fo, 0), fl_at(fl, 0), "make") == 1 {
+                    action = 1;
+                }
+                if k >= 1 && streq(cases, fo_at(fo, 0), fl_at(fl, 0), "parse") == 1 {
+                    action = 2;
+                }
+                if action == 0 {
+                    let b: u32 = put_lit(out, 0, "line ");
+                    b = put_dec(out, b, lineno as u64);
+                    b = put_lit(out, b, ": unknown action ");
+                    b = put_span(out, b, cases, fo_at(fo, 0), fl_at(fl, 0));
+                    store8(out, b, 10 as u8);
+                    let _w: u64 = write_all(2, out, (b + 1) as u64);
+                    return die(1);
+                }
+                if action == 1 {
+                    if k != 4 {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": make needs <kind> <hash32hex> <digest32hex>");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    // **顺序与 Python 侧逐条对齐**: 先解数字 (`bad-kind`), 再解十六进制
+                    // (`bad-hex`), 然后才是种类范围 (`bad-kind`) 与长度 (`bad-length`) ——
+                    // Python 那边 `make_frame` 在 `bytes.fromhex` **之后**才看种类。
+                    let kok: u32 = dec_span(cases, fo_at(fo, 1), fl_at(fl, 1), kout);
+                    let kindv: u64 = ld64(kout, 0);
+                    if kok == 0 {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-kind");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    let hn: u32 = hex_decode(cases, fo_at(fo, 2), fl_at(fl, 2), b1, 128);
+                    let dn: u32 = hex_decode(cases, fo_at(fo, 3), fl_at(fl, 3), b2, 128);
+                    if hn == 4294967295 || dn == 4294967295 {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-hex");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    if kindv != 1 && kindv != 2 {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-kind");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    if hn == 4294967294 || dn == 4294967294 {
+                        // 超容量 ⇒ 长度必然 ≠ 32 ⇒ 与 Python 那侧的 `bad-length` 同一条
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-length");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    let kind: u32 = kindv as u32;
+                    if hn != HASH_LEN || dn != DIGEST_LEN {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": bad-length");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    let _fl2: u32 = make_frame(fr, kind, b1, b2);
+                    olen = put_lit(out, olen, "ok kind=");
+                    olen = put_dec(out, olen, kind as u64);
+                    olen = put_lit(out, olen, " len=72 frame=");
+                    olen = hex_encode(out, olen, fr, FRAME_LEN);
+                    store8(out, olen, 10 as u8);
+                    olen = olen + 1;
+                } else {
+                    if k != 2 {
+                        let b: u32 = put_lit(out, 0, "line ");
+                        b = put_dec(out, b, lineno as u64);
+                        b = put_lit(out, b, ": parse needs <hex>");
+                        store8(out, b, 10 as u8);
+                        let _w: u64 = write_all(2, out, (b + 1) as u64);
+                        return die(1);
+                    }
+                    let bn: u32 = hex_decode(cases, fo_at(fo, 1), fl_at(fl, 1), fr, FRAME_CAP);
+                    if bn == 4294967294 {
+                        // 超容量 ⇒ 长度必然 ≠ 72 ⇒ 与 Python 那侧的 `bad-length` 同一条
+                        olen = put_lit(out, olen, "reject why=bad-length");
+                        store8(out, olen, 10 as u8);
+                        bn = 0;
+                        olen = olen + 1;
+                    }
+                    if bn == 0 {
+                        // 已经在上面报过（超容量），这一轮不重复报
+                    } else if bn == 4294967295 {
+                        olen = put_lit(out, olen, "reject why=bad-hex");
+                        store8(out, olen, 10 as u8);
+                        olen = olen + 1;
+                    } else {
+                        let code: u32 = parse_frame(fr, bn, kout);
+                        if code == 0 {
+                            olen = put_lit(out, olen, "ok kind=");
+                            olen = put_dec(out, olen, (load8(kout, 0) as u32) as u64);
+                            olen = put_lit(out, olen, " len=");
+                            olen = put_dec(out, olen, bn as u64);
+                            store8(out, olen, 10 as u8);
+                            olen = olen + 1;
+                        } else {
+                            olen = put_lit(out, olen, "reject why=");
+                            olen = put_lit(out, olen, reject_name(code));
+                            store8(out, olen, 10 as u8);
+                            olen = olen + 1;
+                        }
+                    }
+                }
+                li = le + 1;
+            } else {
+                li = le + 1;
+            }
+        }
+    }
+    let _w2: u64 = write_all(1, out, olen as u64);
+    // 入口不能靠 `return 0` 退出（返回就跳到垃圾地址）—— 照 `lomsyscalls.lomt` 用 `die(0)`。
+    return die(0);
+}

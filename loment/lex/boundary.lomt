@@ -14,7 +14,7 @@
 //
 //   extern fn declared   2      (write / read)
 //   extern call sites    3      (write 2 处, read 1 处)
-//   syscalls             3      (syscall4 两处, syscall6 一处)
+//   syscalls             4      (syscall4 两处, syscall6 一处, syscall7 一处)
 //   raw ptr transforms   4      (ptr_add 1, ptr_sub 1, str_ptr 2)
 //
 // **不该被数到的**, 每条都是有意写进来的:
@@ -44,9 +44,10 @@ fn demo(p: ptr) -> u32 {
     let f: u32 = syscall4(60, 0, 0, 0);
     /* 块注释也从计数里整段跳过 */
     let g: u32 = syscall6(0, 0, 0, 0, 0, 0);
+    let l: u32 = syscall7(0, 0, 0, 0, 0, 0, 0);
     let h: ptr = ptr_add(p, 8);
     let i: ptr = ptr_sub(p, 8);
     let j: ptr = str_ptr(s);
     let k: ptr = str_ptr(s);
-    return a + b + c + d + e + f + g;
+    return a + b + c + d + e + f + g + l;
 }

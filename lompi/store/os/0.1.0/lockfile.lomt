@@ -1,0 +1,211 @@
+// os/lockfile.lomt — 跨进程互斥: 一把 flock 锁文件
+//
+// 为什么需要它: "同一个任务只许跑一份"在现实里到处都是 —— 定时任务、日志轮转、
+// 单实例守护进程。做法不是"查一下 pid 文件在不在"（检查与动作之间有窗口），
+// 而是让内核替你**原子地**占住一把锁：`flock` 对一个打开的 fd 上锁，进程死了
+// 内核自动释放，所以没有"锁文件残留"这种需要人清理的状态。
+//
+// 三个刻意的边界:
+//   * **建议锁, 不是强制锁** —— `flock` 只挡住同样用 `flock` 的进程；别的程序照写
+//     不误。它解决的是协作进程之间的互斥，不是文件保护。
+//   * **锁记在打开的文件描述上**，不记在路径上 —— 同一个进程用两个 fd 打开同一个
+//     文件，第二次 `flock(LOCK_EX)` 会卡在自己身上。所以 `lk_acquire` 一个进程
+//     只该调一次。
+//   * `lk_stale` 用 `kill(pid, 0)` 判活：`ESRCH` 才是真死了，`EPERM` 说明活着但
+//     不是你的进程。这一层拿不到 errno，于是把**失败一律当"可能还活着"** ——
+//     宁可多等，不误判成可抢占。
+//
+// 命名: 公开 lk_*, 内部 lkq_。自检 test_lockfile_*。
+
+module lockfile
+
+/// 共享锁：多个持有者可以并存（读者）。
+pub const LK_SH: u32 = 1;
+/// 排他锁：同一时刻只有一个持有者（写着）。
+pub const LK_EX: u32 = 2;
+/// 不阻塞：锁被占时立刻失败，而不是等。
+pub const LK_NB: u32 = 4;
+/// 解锁。
+pub const LK_UN: u32 = 8;
+
+const LKQ_SYS_READ: u64 = 0;
+const LKQ_SYS_CLOSE: u64 = 3;
+const LKQ_SYS_KILL: u64 = 62;
+const LKQ_SYS_FLOCK: u64 = 73;
+const LKQ_SYS_OPENAT: u64 = 257;
+const LKQ_AT_FDCWD: u64 = 18446744073709551516;
+const LKQ_O_RDWR_CREAT: u64 = 66;
+const LKQ_O_RDONLY: u64 = 0;
+const LKQ_MODE: u32 = 420;
+
+/// `flock(fd, op)` —— op 是 LK_SH / LK_EX / LK_UN 的按位或，可再加 LK_NB。
+/// 成功返回 0，失败返回负数。
+pub fn lk_lock(fd: i64, op: u32) -> i64 {
+    return syscall4(LKQ_SYS_FLOCK, fd as u64, op as u64, 0);
+}
+
+/// `openat(AT_FDCWD, path, flags, mode)` —— 打开（或新建）锁文件本身。
+pub fn lk_open(path: ptr, flags: u64, mode: u32) -> i64 {
+    return syscall6(LKQ_SYS_OPENAT, LKQ_AT_FDCWD, path as u64, flags, mode as u64, 0);
+}
+
+/// 打开 + 加锁一步到位。成功返回 fd（>= 0），失败返回 -1。
+/// `exclusive != 0` 要排他锁，否则共享锁；`nonblock != 0` 不许等。
+/// 失败时**关掉自己刚打开的那个 fd** —— 不留半个描述符给调用方。
+pub fn lk_acquire(path: ptr, exclusive: u32, nonblock: u32) -> i64 {
+    let fd: i64 = lk_open(path, LKQ_O_RDWR_CREAT, LKQ_MODE);
+    if fd < 0 {
+        return -1;
+    }
+    let op: u32 = LK_EX;
+    if exclusive == 0 {
+        op = LK_SH;
+    }
+    if nonblock != 0 {
+        op = op | LK_NB;
+    }
+    let r: i64 = lk_lock(fd, op);
+    if r < 0 {
+        let _c: i64 = syscall4(LKQ_SYS_CLOSE, fd as u64, 0, 0);
+        return -1;
+    }
+    return fd;
+}
+
+/// 解锁并关闭。返回关闭的结果（解锁失败时先报解锁那个数）。
+pub fn lk_release(fd: i64) -> i64 {
+    let a: i64 = lk_lock(fd, LK_UN);
+    let b: i64 = syscall4(LKQ_SYS_CLOSE, fd as u64, 0, 0);
+    if a < 0 {
+        return a;
+    }
+    return b;
+}
+
+/// 把缓冲区开头的 ASCII 十进制数解析成 u64。遇到第一个非数字就停（换行/空白都算停）;
+/// 开头就没有数字返回 0。溢出**不回绕**：乘之前先比上限。
+pub fn lk_parse_u64(p: ptr, n: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    let started: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c >= 48 && c <= 57 {
+            if v > 1844674407370955161 as u64 {
+                return v;
+            }
+            v = v * 10 + ((c - 48) as u64);
+            started = 1;
+        } else {
+            if started == 1 {
+                return v;
+            }
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 读锁文件里的 pid（文件内容就是十进制文本）。成功返回 pid，0 表示读不到。
+pub fn lk_pid_file(path: ptr, out: ptr, cap: u32) -> u64 {
+    let fd: i64 = lk_open(path, LKQ_O_RDONLY, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let n: i64 = syscall4(LKQ_SYS_READ, fd as u64, out as u64, cap as u64);
+    let _c: i64 = syscall4(LKQ_SYS_CLOSE, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    return lk_parse_u64(out, n as u32);
+}
+
+/// pid 还活着吗：`kill(pid, 0)`。活着返回 1 并把 0 写进 out；否则返回 0、写 1。
+/// `EPERM`（活着但不是你的进程）在这一层与 `ESRCH` 分不开 —— 见文件头的边界。
+pub fn lk_stale(pid: u64, out: ptr) -> u32 {
+    let r: i64 = syscall4(LKQ_SYS_KILL, pid, 0, 0);
+    if r == 0 {
+        store8(out, 0, 0 as u8);
+        return 1;
+    }
+    store8(out, 0, 1 as u8);
+    return 0;
+}
+
+/// 锁的操作名（日志与诊断用）。`"SH|NB"` / `"EX"` / `"UN"`，未知位写 `"?"`。
+pub fn lk_op_text(op: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    if (op & LK_EX) != 0 {
+        pos = lkq_put(out, cap, pos, "EX");
+    } else {
+        if (op & LK_SH) != 0 {
+            pos = lkq_put(out, cap, pos, "SH");
+        }
+    }
+    if (op & LK_UN) != 0 {
+        if pos > 0 {
+            pos = lkq_put(out, cap, pos, "|");
+        }
+        pos = lkq_put(out, cap, pos, "UN");
+    }
+    if (op & LK_NB) != 0 {
+        if pos > 0 {
+            pos = lkq_put(out, cap, pos, "|");
+        }
+        pos = lkq_put(out, cap, pos, "NB");
+    }
+    if pos == 0 {
+        pos = lkq_put(out, cap, pos, "?");
+    }
+    return pos;
+}
+
+fn lkq_put(out: ptr, cap: u32, pos0: u32, s: str) -> u32 {
+    let pos: u32 = pos0;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if pos < cap {
+            store8(out, pos, str_byte(s, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_lockfile_parse_u64() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 49 as u8);
+    store8(b, 1, 50 as u8);
+    store8(b, 2, 51 as u8);
+    store8(b, 3, 10 as u8);
+    return lk_parse_u64(b, 4) == 123;
+}
+
+fn test_lockfile_parse_u64_stops_at_text() -> bool {
+    // "  42\n" —— 前导空白被跳过，第一个非数字收尾。
+    let b: ptr = alloc(8);
+    store8(b, 0, 32 as u8);
+    store8(b, 1, 32 as u8);
+    store8(b, 2, 52 as u8);
+    store8(b, 3, 50 as u8);
+    store8(b, 4, 10 as u8);
+    return lk_parse_u64(b, 5) == 42;
+}
+
+fn test_lockfile_parse_u64_no_digits() -> bool {
+    let b: ptr = alloc(4);
+    store8(b, 0, 120 as u8);
+    store8(b, 1, 10 as u8);
+    return lk_parse_u64(b, 2) == 0;
+}
+
+fn test_lockfile_op_text() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = lk_op_text(LK_EX | LK_NB, b, 16);
+    return n == 5 && load8(b, 0) == 69 && load8(b, 1) == 88
+        && load8(b, 2) == 124 && load8(b, 3) == 78 && load8(b, 4) == 66;
+}

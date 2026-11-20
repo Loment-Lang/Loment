@@ -60,8 +60,9 @@
     "fjru_v1": "FJRU v1 rule bytecode 778B, sdk/rulebook/fjru.bin — load semantics identical across implementations; verified by loader diff in v1.1"
   },
   "gates": {
-    "dom_admit_qual_feed": "core primitives 0x8313/0x8314 carry a trust-adaptive authority gate (FujoOS: qual_test flag -> -12; LinuxFUAI: gate semantics for deployment)",
-    "tau_invariant": "cfg7>cfg8, cfg7>=35, cfg8<=45 (W46 policy envelope, both implementations)"
+    "dom_admit_qual_feed": "core primitives 0x8313/0x8314 carry a trust-adaptive authority gate (FujoOS: qual_test flag -> -12; LinuxFUAI: same gate semantics — the judgement is specified by width_invariant below, docs/239)",
+    "tau_invariant": "cfg7>cfg8, cfg7>=35, cfg8<=45 (W46 policy envelope, both implementations)",
+    "width_invariant": "dom_admit = f(self_hash, peer_hash, qual_seq) -> width: earned from the duty ledger (per-peer rolling 64 hits), capped by what the artifact asks (its Potato net_ladder, docs/237); WIDEN_CONFIRM needs 3 consecutive seqs, shrink immediate; seq is a sequence number NOT a clock, so no time-based policy exists (docs/238, docs/239)"
   },
   "deployment_params": {
     "tau_high_default": {

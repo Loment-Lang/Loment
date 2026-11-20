@@ -8,7 +8,7 @@
 #     只是**由这里发**，不是在那边写的。
 #   * **发布是整体覆盖**（force-push 成 `main`）：**别在那边直接提交**，一定被下次发布盖掉。
 #     那边的 `README.md` 与 `.gitattributes` 也是本工具直出的（见 §cmd_push），不是手写的。
-#   * 名字与可见性：`FujoJTOP/loment` 与 `FujoJTOP/lompi`，**两个都公开**
+#   * 名字与可见性：`Loment-Lang/loment` 与 `Loment-Lang/lompi`，**两个都公开**
 #     （Loment 是用户 2026-09-16 定的；lompi 是 2026-09-17 定的 —— 见各自 spec 里的注解）。
 #     可见性写进 spec 而不是手敲 `gh repo edit`，因为手敲的只生效一次，换台机器就丢。
 #
@@ -39,7 +39,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-ORG = "FujoJTOP"
+ORG = "Loment-Lang"
 
 #: L0 契约的**对照物** —— 契约对面那一侧的源码，判据拿它们做逐字段对账。
 #:
@@ -107,8 +107,17 @@ REPOS: dict[str, dict] = {
             "loment/", "lom/", "lompi/", "editors/",
             "docs/manual/",
             ".claude/skills/loment/", ".claude/skills/lompi/",
+            # The LomentSkill suite (2026-11-04): topic skills as their own directories,
+            # so the mirror carries the same set Claude Code discovers.
+            ".claude/skills/loment-syntax/", ".claude/skills/loment-tur/",
+            ".claude/skills/loment-traps/", ".claude/skills/loment-safety/",
+            ".claude/skills/loment-runtime/", ".claude/skills/loment-ffi/",
+            ".claude/skills/loment-toolchain/",
             # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
             "tools/lom*",
+            # lmgr 的判据（`docs/303`）。源已搬进 `loment/tools/lmgr.lomt`，由上面
+            # 那条 `loment/` 与发布账本的 `loment/tools/*.lomt` 覆盖。
+            "tools/lmgr*",
             # 文档：**一条 `docs/*.md` 收全**。
             #
             # 原文是按名字分段收（`docs/14*-loment-*.md` + 一串 explicit 补漏），那是在
@@ -128,7 +137,8 @@ REPOS: dict[str, dict] = {
             # `cmd_push`），前提是它已经跟着筛出来；不在清单里的话追加的是空文件，
             # `*.lomt text eol=lf` 那条规矩照样丢。2026-09-17 第一次修漏写这一条，
             # 远端那份仍只有工具自己那段，是查"克隆出来还是 CRLF"才发现的。
-            "CLAUDE.md", "AGENTS.md", ".gitignore", ".gitattributes", "LICENSE",
+            "CLAUDE.md", "AGENTS.md", ".gitignore", ".gitattributes",
+            "LICENSE-MIT", "LICENSE-APACHE",
             # 新读者走的第二份文档 (**英文**), 与 README 分工: README 说"这是什么",
             # 它只管"怎么跑起来"。README 顶部指向它。不在 `loment_release.GLOBS` 里,
             # 所以不进发布清单 —— 它只服务于仓库读者, 不进包。
@@ -149,6 +159,17 @@ REPOS: dict[str, dict] = {
             "tools/potato_from.py", "tools/potato_llm_arm.py", "tools/potato_measure.py",
             "tools/potato_test.py", "tools/vscode_ext.py", "tools/vscode_ext_test.py",
             "tools/fuai_contract_check.py",
+            # LSPE 子系统自己的判据（`docs/262`；`loment/lspe/` 拆包那一笔带进来的）。
+            # 名字既不以 `lom` 开头、也不在 potato 一族 —— **门禁闭包**那条判据在
+            # CI 上点了名（2026-10-20）。开发口少了它，发布树里就没有这条判据。
+            "tools/lspe_test.py",
+            # `pass_ratio` 棘轮的度量与基线导出（`docs/262` §5.16 / #1065）——
+            # `lspe_test` import 它，闭包判据会点名。
+            "tools/lspe_ratchet.py",
+            # E8 的反证探针登记表（`docs/262` §5.4 / `#766`）—— `lspe_test` import 它。
+            "tools/lspe_probes.py",
+            # AI slop 的机械代理判据（`docs/319`）。
+            "tools/loment_slop.py", "tools/loment_slop_test.py",
             # 花括号族的共享前端核（`docs/188` §7.1）。同样不以 `lom` 开头。
             "tools/trans_core.py",
             # C -> Loment 的翻译器（`docs/186` Stage A）。名字**不以 `lom` 开头**，
@@ -174,6 +195,19 @@ REPOS: dict[str, dict] = {
             # 自举快速对照探针（定位工具，非检查项 —— 与 `loment_ir_diff.py` 同一分工）。
             # 改语言面时要先用它把差异钉到一行，再决定惊不惊动 p8；开发口该带它。
             "tools/loment_probe.py",
+            # LVM 的 T0（`docs/243`）。**名字不以 `lom` 开头**（是 `lvm`），所以上面那个
+            # `tools/lom*` 收不到 —— 正是闭包判据点名的那一类（2026-10-13 CI 上真红了一次：
+            # 参考解释器与两条判据把 `lvm`/`lvm_test` 拉进了门禁闭包，而它们不在清单里）。
+            "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py",
+            "tools/lvm_profile_test.py",
+            "tools/lvm_t2.py", "tools/lvm_t2_test.py",
+            "tools/lvm_compact.py", "tools/lvm_compact_test.py",
+            "tools/lvm_cache.py", "tools/lvm_cache_test.py",
+            "tools/lvm_fusion_test.py", "tools/lvm_mirror_t2_test.py",
+            "tools/lvm_t3.py", "tools/lvm_t3_test.py",
+            "tools/lvm_stability_test.py",
+            "tools/lvm_a0_test.py",
+            "tools/lvm_perf_test.py",
             # **L0 契约的对照物**（见文件顶部 `COUNTERPARTS` 的说明）。整目录收不得：
             # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。
             # 这 8 条是判据真正读的那些，一条一条点名。
@@ -187,9 +221,10 @@ REPOS: dict[str, dict] = {
         #: 下次建库/换机器就丢了; 写进 spec 则每次 `--push` 都会对齐 (值一样时是无操作)。
         #: 用户 2026-09-16 定: **Loment 公开**, 且**不打 tag** (tag 要等真发布)。
         "visibility": "public",
-        "description": "Loment — a systems programming language with a Rust-subset syntax "
-                       "and capability domains; compiles to native binaries with no runtime",
-        "homepage": "https://fujojtop.github.io/loment-site/",
+        "description": "Loment — a systems programming language with a Rust-flavored syntax "
+                       "and capability domains; artifacts are sealed (no runtime, no libc) by "
+                       "default, hosted on request",
+        "homepage": "https://loment-lang.github.io/loment-site/",
         "topics": ["programming-language", "compiler", "rust", "self-hosted",
                    "systems-programming", "capability-security", "no-std"],
         #: 写进仓库根的 `.gitattributes`（与 README 同一种做法：发布工具直出，不靠手敲）。
@@ -220,20 +255,24 @@ loment/build/** linguist-generated
 # Loment
 
 Loment is a **systems programming language**: it compiles to native x86-64 executables —
-Linux ELF and Windows PE, or a freestanding object for bare metal — with no runtime and no
-libc, and the toolchain is itself written in Loment. Its own syntax is Rust-flavored, and the
-same program can be written in six more: C, C++, Java, C#, Go or Python.
+Linux ELF and Windows PE, or a freestanding object for bare metal. What goes into one is the
+program's decision, and the build records it: `choose sealed`, the default, is an artifact
+with no runtime, no libc and no undefined symbols, and `choose hosted` is one that may link
+against real libc and shared libraries. The toolchain is itself written in Loment. Its own
+syntax is Rust-flavored, and the same program can be written in six more: C, C++, Java, C#, Go
+or Python.
 
 **[Quick start](QUICKSTART.md)** ·
-[Project site](https://fujojtop.github.io/loment-site/) ·
+[Project site](https://loment-lang.github.io/loment-site/) ·
 [Manual](docs/manual/index.md) ·
 [Language guide](.claude/skills/loment/SKILL.md) ·
 [Examples](loment/examples/) ·
-[Issues](https://github.com/FujoJTOP/loment/issues)
+[Issues](https://github.com/Loment-Lang/loment/issues)
 
 ## Status
 
-`0.1.4`; prebuilt toolchains are not published yet. The toolchain is **self-hosted**: it
+`0.1.4.5 QuickFix` **ships as a package** — a Linux `tar.gz`, a Windows `zip` and a Windows installer.
+The toolchain is **self-hosted**: it
 compiles and runs with no Python and no libc at run time. **Not yet finished**: the
 *development-side* self-hosting is incomplete (`docs/189`) — the reference implementation
 (`tools/lomentc.py` and friends) and the Python test suites are still in the repository, and
@@ -259,15 +298,17 @@ $ loment run hello.lomt
 hello from Loment
 ```
 
-`_start` is the entry point, because there is no runtime to call one for you, and output goes
-through the `write` system call, because there is no `printf`. [QUICKSTART.md](QUICKSTART.md)
-takes it from here — sources, toolchain, and the first four rows below.
+`_start` is the entry point, because a sealed artifact has no runtime to call one for you, and
+output goes through the `write` system call, because there is no `printf`. A `hosted` artifact
+is a C-runtime program instead, with `fn main() -> u32` as its entry point.
+[QUICKSTART.md](QUICKSTART.md) takes it from here — sources, toolchain, and the first four rows
+below.
 
 ## What it does that others do not
 
 | | |
 |---|---|
-| **Calls libraries written in other languages** | Ten of them, end to end: C, C++, Rust and Zig by static linking behind the C ABI, then Go, Python, Java, JavaScript, Perl and Lua over a process bridge. [docs/173](docs/173-loment-ffi.md) is the honest ledger — dynamic libraries and embedding a runtime are not started. |
+| **Calls libraries written in other languages** | Ten of them, two mechanisms: C, C++, Rust and Zig behind the C ABI, then Go, Python, Java, JavaScript, Perl and Lua over a process bridge. `--link` takes an object that is **self-contained** (relocations are applied, objects may reference each other); one that carries **undefined symbols** (`printf`/`malloc`) is **refused by default**. `choose hosted` — the dimension that reaches real libraries, exercised by criteria that link libstdc++ and libz and embed CPython — is **not available in a release build**: that path is unfinished, so the release toolchain refuses `choose hosted` and keeps the door shut ([docs/222](docs/222-lompi-020-foreign-libs.md) sec 4.5, [docs/219](docs/219-world-ports.md) sec 8c). What is **not** there either is the **library system** — lompi still installs `.lomt` sources only, so a real C library is not yet an installable dependency. [docs/173](docs/173-loment-ffi.md) is the ledger. |
 | **Can be written in six other syntaxes** | C, C++, Java, C#, Go, Python. Only the spelling changes; the semantics are always Loment's. Declaring it in the file (`choose write grammar`) is not wired into the compiler yet — the translators in `tools/` are the path. [docs/188](docs/188-grammar-declaration.md) |
 | **Everything is customizable** | The source suffix, the command surface (`loment-<name>` on `PATH`; official commands always win), the libraries (a directory whose identity is a content hash), and the toolchain itself. No registry — the extension points are files on disk. |
 | **Reports errors out of a separate program** | The compiler emits structured diagnostics; `lomenterr` adds the title, the location and how to fix it, so the compiler carries no message table of its own. [docs/182](docs/182-lomenterr-and-choose-switches.md) |
@@ -277,13 +318,13 @@ takes it from here — sources, toolchain, and the first four rows below.
 
 | | |
 |---|---|
-| `.claude/skills/loment/SKILL.md` | The language guide: syntax, built-ins, error codes, and the deviations from Rust. Self-contained, shipped in the package (`loment skill --print`), and the fastest way in. |
+| `.claude/skills/loment/SKILL.md` | The entry to the **LomentSkill suite**: syntax, built-ins, error codes, the whole-language tour, and the map to `loment-tur`, `loment-syntax`, `loment-traps`, `loment-safety`, `loment-runtime`, `loment-ffi` and `loment-toolchain`. Self-contained as a suite, shipped in the package (`loment skill --print` prints the entry), and the fastest way in. |
 | `loment/examples/tour.lomt` | The whole language in one file, with commentary (`loment example tour`). |
 | `docs/manual/` | The generated manual: specifications, plus a page per example. |
 | `docs/143-l1-loment-v0.md` · `docs/146` · `docs/158` | The specification, capability semantics, and what is frozen. |
 | `docs/173` · `docs/188` | The two capabilities in the table above. |
 | `docs/` | Design and measurement records, numbered by document. Most are written in Chinese. |
-| [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager. |
+| [Loment-Lang/lompi](https://github.com/Loment-Lang/lompi) | The package manager. |
 
 ## Repository layout
 
@@ -300,13 +341,14 @@ takes it from here — sources, toolchain, and the first four rows below.
 
 ## Getting help and contributing
 
-Ask in an [issue](https://github.com/FujoJTOP/loment/issues) — questions are as welcome as
+Ask in an [issue](https://github.com/Loment-Lang/loment/issues) — questions are as welcome as
 bug reports. Loment is developed in this repository, and the working conventions are in
 `AGENTS.md`.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+**MIT OR Apache-2.0**, at your option. See [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
 """,
     },
     "lompi": {
@@ -317,46 +359,66 @@ MIT. See [LICENSE](LICENSE).
         "floor": 30,
         # **公开** (用户 2026-09-17 定)。原先 2026-09-16 是私有的, 理由是"用户只说了开源
         # Loment 本体"; 但 Loment 开发树离不开 `lompi/` (`loment_dist.py:67` 拿它构建随包
-        # 发行的 lompi 工具), 而 `FujoJTOP/loment` 是开发口且公开 —— 两边可见性必须一致,
+        # 发行的 lompi 工具), 而 `Loment-Lang/loment` 是开发口且公开 —— 两边可见性必须一致,
         # 否则要么公开库缺件、要么开发口得转私有。用户选了"lompi 也开源"。
         "visibility": "public",
-        "description": "lompi — Loment 的包管理器（库是一个目录，身份是内容哈希）",
-        "homepage": "https://fujojtop.github.io/FujoOSwebsite/loment/lompi/",
+        # 简介与正文一律英文（2026-10-12 用户定）：这两个库都是 public，读者不一定是
+        # 中文使用者；仓里其它对外文字（README / 发布说明 / issue）也已经是英文。
+        "description": "lompi — the package manager for Loment libraries "
+                       "(a library is a directory, its identity is a content hash)",
+        "homepage": "https://loment-lang.github.io/loment-site/",
         "topics": ["package-manager", "loment"],
         "readme": """# lompi
 
-**Loment 库的包管理器** —— 库是一个目录，身份是**内容哈希**，依赖就是源码里的 `use`。
-用 **Loment 自己写**的，由 Loment 工具链编出来。
+**The package manager for Loment libraries.** A library is a *directory*, its identity is a
+**content hash**, and its dependencies are the `use` lines in the source. lompi is written
+**in Loment** and built by the Loment toolchain.
 
-**它是独立命令，不是 Loment 的子命令**：`loment help` 里没有它，直接敲 `lompi`。
+**It is a standalone command, not a `loment` subcommand**: `loment help` does not list it; you
+run `lompi` directly.
 
-## 建它
+## Building it
 
-需要先有 Loment 工具链（<https://github.com/FujoJTOP/loment>），然后**在本目录里**：
+You need the Loment toolchain first (<https://github.com/Loment-Lang/loment>; 0.1.5 or newer
+ships the `internet` library lompi uses), then **from this directory**:
 
 ```
 loment build lompi.lomt -o lompi
 ```
 
-（必须在**本目录**下调用：本工具链按 **CWD** 解析 `use "lpi_cli.lomt"` 这种相对导入。）
+(Path imports such as `use "lpi_cli.lomt"` resolve relative to the importing file; the
+`internet` package (`use tcp` / `use http` / `use uri` / `use ip`) comes from the toolchain's
+bundled store.)
 
 ```
 lompi version
-lompi index   <store>
-lompi show    <store> <name[@version]>
-lompi tree    <store> <name[@version]>
-lompi resolve <store> <name[@version]>          # 打锁（按哈希钉住）
-lompi check   <dir>                             # 校验一个库目录
+lompi list  [<store>]                     # what is in the store (index is a synonym)
+lompi show  [<store>] <name[@version]>
+lompi tree  [<store>] <name[@version]>
+lompi resolve [<store>] <name[@version]>  # write a lock, pinned by content hash
+lompi check <dir>                         # validate a library directory
+lompi fetch --registry <url>              # download a registry over http
 ```
 
-自检驱动 `lpi_test.lomt`：每个模块一个 `selftest_<模块>()`，汇总后**退出码即结论**。
+`<store>` is optional — omit it and the **global store** is used (the `store:` line that
+`lompi config` prints), the same way `pip` never asks you where site-packages lives.
 
-## 这个仓库是什么
+`fetch` does the download itself when the registry is `http://` with an IPv4 literal: it reads
+the index, GETs each file, and **verifies the sha256 the index states**. It will not do
+`https://` (there is no TLS in the toolchain) or a hostname (no resolver) — for those it prints
+the `git clone` to run and names the piece that is missing.
 
-**它是 FujoOS 单仓的发布口，不是开发地。** 开发在主仓里做，这里切出来发布
-（主仓的 `tools/loment_publish.py`）。**别在这里直接提交** —— 下次发布会把它盖掉。
+The self-test driver is `lpi_test.lomt`: one `selftest_<module>()` per module, summarised with
+the **exit code as the verdict**.
 
-指南：`.claude/skills/lompi/SKILL.md`
+## What this repository is
+
+**It is the publish outlet of the Loment repository, not a development tree.** Development
+happens in <https://github.com/Loment-Lang/loment>, under `lompi/`; this repository is regenerated
+from it by that repository's `tools/loment_publish.py`. **Do not commit here** — the next
+publish overwrites it.
+
+The guide is `.claude/skills/lompi/SKILL.md`.
 """,
     },
 }

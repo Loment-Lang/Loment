@@ -1,0 +1,206 @@
+// system/netlink.lomt — netlink 的协议号、消息头与路由类消息名
+//
+// 为什么系统工具需要它: 路由、链路、邻居表、审计，在内核里都挂在 netlink 上。
+// 它的线上格式是**二进制头 + 4 字节对齐的负载**，而头里的五个字段没有一个能
+// "肉眼看出来": `len` 是多长、`type` 是 RTM_*、`flags` 决定是请求还是 dump、
+// `seq` 要自己配对、`pid` 通常是 0（内核）。调试一次 dump 的常规起点就是把这
+// 16 个字节解出来 —— 这一层就是那一步，外加协议号与消息名。
+//
+// 覆盖:
+//   * 协议号（`NETLINK_*`）与请求标志（`NLM_F_*`）;
+//   * `nlmsghdr` 的打包与逐字段解码（u32/u16/u32/u32，16 字节）;
+//   * `nl_align4` —— 负载按 4 字节对齐，长度不对齐是 dump 循环里最常见的越界;
+//   * `sockaddr_nl` 的打包/解码（12 字节，`groups` 是组播掩码）;
+//   * RTM_* 类型名。
+//
+// 不做: 真正的 socket/bind/send/recv（调用方自己发）、属性的 TLV 解析
+// （`rtattr` 的嵌套结构因消息而异）、audit/generic 协议各自的负载。
+//
+// 命名: 公开 nl_*, 内部 nlq_*。自检 test_netlink_*。
+
+module netlink
+
+pub const NL_ROUTE: u32 = 0;
+pub const NL_USERSOCK: u32 = 2;
+pub const NL_SOCK_DIAG: u32 = 4;
+pub const NL_AUDIT: u32 = 9;
+pub const NL_NFLOG: u32 = 12;
+pub const NL_KOBJECT_UEVENT: u32 = 15;
+pub const NL_GENERIC: u32 = 16;
+
+pub const NL_F_REQUEST: u32 = 1;
+pub const NL_F_MULTI: u32 = 2;
+pub const NL_F_ACK: u32 = 4;
+pub const NL_F_ECHO: u32 = 8;
+pub const NL_F_DUMP_INTR: u32 = 16;
+pub const NL_F_DUMP_FILTERED: u32 = 32;
+pub const NL_F_ROOT: u32 = 256;
+pub const NL_F_MATCH: u32 = 512;
+/// `ROOT | MATCH` —— 一次 dump 的全部标志。
+pub const NL_F_DUMP: u32 = 768;
+
+pub const NL_HDR_BYTES: u32 = 16;
+pub const NL_ADDR_BYTES: u32 = 12;
+
+fn nlq_st16(buf: ptr, off: u32, v: u32) -> u32 {
+    store8(buf, off, (v & (255 as u32)) as u8);
+    store8(buf, off + 1, ((v >> (8 as u32)) & (255 as u32)) as u8);
+    return off + 2;
+}
+
+fn nlq_st32(buf: ptr, off: u32, v: u32) -> u32 {
+    let o: u32 = off;
+    let b: u32 = 0;
+    while b < 4 {
+        store8(buf, o, ((v >> ((8 * b) as u32)) & (255 as u32)) as u8);
+        o = o + 1;
+        b = b + 1;
+    }
+    return o;
+}
+
+fn nlq_ld16(buf: ptr, off: u32) -> u32 {
+    return (load8(buf, off) as u32) | ((load8(buf, off + 1) as u32) << (8 as u32));
+}
+
+fn nlq_ld32(buf: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(buf, off + b) as u32) << ((8 * b) as u32));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 写一个 `nlmsghdr`（16 字节，小端）: `len u32 | type u16 | flags u16 | seq u32 | pid u32`。
+/// 返回写出的字节数（恒为 16）。
+pub fn nl_hdr_pack(buf: ptr, len: u32, typ: u32, flags: u32, seq: u32, pid: u32) -> u32 {
+    let o: u32 = nlq_st32(buf, 0, len);
+    o = nlq_st16(buf, o, typ & (65535 as u32));
+    o = nlq_st16(buf, o, flags & (65535 as u32));
+    o = nlq_st32(buf, o, seq);
+    o = nlq_st32(buf, o, pid);
+    return o;
+}
+
+/// 头里的总长度（含头）。
+pub fn nl_len(buf: ptr) -> u32 {
+    return nlq_ld32(buf, 0);
+}
+
+/// 消息类型（RTM_* 等）。
+pub fn nl_type(buf: ptr) -> u32 {
+    return nlq_ld16(buf, 4);
+}
+
+/// 请求/响应标志（`NLM_F_*` 的位或）。
+pub fn nl_flags(buf: ptr) -> u32 {
+    return nlq_ld16(buf, 6);
+}
+
+/// 序号 —— 多路复用应答靠它配对。
+pub fn nl_seq(buf: ptr) -> u32 {
+    return nlq_ld32(buf, 8);
+}
+
+/// 发送方 pid（内核发的通常是 0）。
+pub fn nl_pid(buf: ptr) -> u32 {
+    return nlq_ld32(buf, 12);
+}
+
+/// 负载对齐: 向上取到 4 的倍数。已对齐的原样返回。
+pub fn nl_align4(n: u32) -> u32 {
+    return ((n + 3) / 4) * 4;
+}
+
+/// RTM_* 类型名。未知返回 `"RTM_UNKNOWN"`。
+pub fn nl_type_name(typ: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "RTM_UNKNOWN";
+    if typ == 16 { s = "RTM_NEWLINK"; }
+    else if typ == 17 { s = "RTM_DELLINK"; }
+    else if typ == 18 { s = "RTM_GETLINK"; }
+    else if typ == 20 { s = "RTM_NEWADDR"; }
+    else if typ == 21 { s = "RTM_DELADDR"; }
+    else if typ == 22 { s = "RTM_GETADDR"; }
+    else if typ == 24 { s = "RTM_NEWROUTE"; }
+    else if typ == 25 { s = "RTM_DELROUTE"; }
+    else if typ == 26 { s = "RTM_GETROUTE"; }
+    else if typ == 28 { s = "RTM_NEWNEIGH"; }
+    else if typ == 29 { s = "RTM_DELNEIGH"; }
+    else if typ == 30 { s = "RTM_GETNEIGH"; }
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 写一个 `sockaddr_nl`（12 字节）: `family u16=0 | pad u16=0 | pid u32 | groups u32`。
+/// `groups` 每一位对应一个 `RTNLGRP_*` 组播组。
+pub fn nl_sockaddr_pack(buf: ptr, pid: u32, groups: u32) -> u32 {
+    let o: u32 = nlq_st16(buf, 0, 0);
+    o = nlq_st16(buf, o, 0);
+    o = nlq_st32(buf, o, pid);
+    o = nlq_st32(buf, o, groups);
+    return o;
+}
+
+/// `sockaddr_nl` 里的 pid。
+pub fn nl_sockaddr_pid(buf: ptr) -> u32 {
+    return nlq_ld32(buf, 4);
+}
+
+/// `sockaddr_nl` 里的组播掩码。
+pub fn nl_sockaddr_groups(buf: ptr) -> u32 {
+    return nlq_ld32(buf, 8);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_netlink_hdr_roundtrip() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = nl_hdr_pack(b, 11223344, 16, 5, 7, 42);
+    if n != 16 {
+        return false;
+    }
+    if nl_len(b) != 11223344 || nl_type(b) != 16 || nl_flags(b) != 5 {
+        return false;
+    }
+    return nl_seq(b) == 7 && nl_pid(b) == 42;
+}
+
+fn test_netlink_hdr_little_endian() -> bool {
+    let b: ptr = alloc(32);
+    nl_hdr_pack(b, 1, 2, 3, 4, 5);
+    return load8(b, 0) == 1 && load8(b, 2) == 0 && load8(b, 3) == 0 && load8(b, 15) == 0;
+}
+
+fn test_netlink_align4() -> bool {
+    return nl_align4(0) == 0 && nl_align4(1) == 4 && nl_align4(4) == 4 && nl_align4(5) == 8;
+}
+
+fn test_netlink_type_name_and_addr() -> bool {
+    let b: ptr = alloc(32);
+    let w: str = "RTM_GETROUTE";
+    let n: u32 = nl_type_name(26, b, 32);
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(b, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    let a: ptr = alloc(16);
+    if nl_sockaddr_pack(a, 77, 1) != 12 {
+        return false;
+    }
+    return load8(a, 0) == 0 && nl_sockaddr_pid(a) == 77 && nl_sockaddr_groups(a) == 1;
+}

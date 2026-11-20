@@ -1,0 +1,8 @@
+module liba
+
+use helper
+use ownmod
+
+pub fn a() -> u32 {
+    return h() + o();
+}

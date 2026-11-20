@@ -1,0 +1,5 @@
+module ex
+
+fn main() {
+    print("hello, lomentlings\n");
+}

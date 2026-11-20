@@ -1,0 +1,356 @@
+// os/paths.lomt — 路径的纯文本运算: 取尾、取目录、取扩展名、拼接、归一化
+//
+// 为什么需要它: 路径操作是**文本**操作，不该为它发一个系统调用，更不该拼错。
+// 真实世界里的坑都在边界上：`/a/b/` 的尾名是 `b`（不是空）、根目录的目录部分是
+// `/`、`a.b/c` 的扩展名是**没有**（点在最后一个 `/` 之前就不算）、`a/../../b`
+// 归一化成 `../b`（`..` 在开头**不能**被吃掉 —— 那会把路径从"相对"变成"别的相对"）。
+//
+// 覆盖: 尾名、目录部分、扩展名、拼接（不多不少一个 `/`）、文本归一化（折叠 `//`、
+// 吃掉 `.`、按栈消 `..`）、是否绝对、深度。
+//
+// 不做的: 不碰文件系统 —— 不解析符号链接、不判断存在、不把相对路径变成绝对路径
+// （那需要 `getcwd`，是 `sys` 的事）。也不处理 Windows 的 `\` 与盘符：这一层是
+// POSIX 路径文本。
+//
+// 边界: `..` 只按文本消，`a/../b` 与 `b` 在这里是同一个结果，但如果 `a` 是符号
+// 链接，内核看到的并不是同一个文件 —— 归一化只用于显示与比较，不用于"打开前先算"。
+//
+// 命名: 公开 pa_*, 内部 paq_*。自检 test_paths_*。
+
+module paths
+
+const PAQ_SLASH: u32 = 47;
+const PAQ_DOT: u32 = 46;
+
+fn paq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 4 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 4;
+}
+
+fn paq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        v = v | ((load8(p, off + i) as u32) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 把 str 写进缓冲区（不加 NUL），返回长度。缓冲区不够就截断，返回值仍是全长。
+fn paq_copy(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn paq_put(out: ptr, cap: u32, pos: u32, b: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, b as u8);
+    }
+    return pos + 1;
+}
+
+/// 去掉尾部的 `/` 之后的长度（`/` 本身保留一个）。
+fn paq_trim(p: ptr, n: u32) -> u32 {
+    let e: u32 = n;
+    while e > 1 {
+        if load8(p, e - 1) as u32 == PAQ_SLASH {
+            e = e - 1;
+        } else {
+            return e;
+        }
+    }
+    return e;
+}
+
+/// 尾名。起点与长度写进两个 4 字节槽（off_ptr / len_ptr）；返回长度。
+pub fn pa_base(p: ptr, n: u32, off_ptr: ptr, len_ptr: ptr) -> u32 {
+    let e: u32 = paq_trim(p, n);
+    let i: u32 = e;
+    let off: u32 = 0;
+    while i > 0 {
+        if load8(p, i - 1) as u32 == PAQ_SLASH {
+            off = i;
+            i = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+    paq_st32(off_ptr, 0, off);
+    paq_st32(len_ptr, 0, e - off);
+    return e - off;
+}
+
+/// 目录部分。起点与长度写进两个 4 字节槽；返回长度。
+/// `/a/b` -> `/a`；`/a` -> `/`；`a` -> 空（表示当前目录）。
+pub fn pa_dir(p: ptr, n: u32, off_ptr: ptr, len_ptr: ptr) -> u32 {
+    let e: u32 = paq_trim(p, n);
+    let i: u32 = e;
+    let cut: u32 = 0;
+    let got: u32 = 0;
+    while i > 0 {
+        if load8(p, i - 1) as u32 == PAQ_SLASH {
+            cut = i - 1;
+            got = 1;
+            i = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+    if got == 0 {
+        paq_st32(off_ptr, 0, 0);
+        paq_st32(len_ptr, 0, 0);
+        return 0;
+    }
+    if cut == 0 {
+        paq_st32(off_ptr, 0, 0);
+        paq_st32(len_ptr, 0, 1);
+        return 1;
+    }
+    paq_st32(off_ptr, 0, 0);
+    paq_st32(len_ptr, 0, cut);
+    return cut;
+}
+
+/// 扩展名（不含点）。起点写进 off_ptr；没有返回 0。
+/// 点在最后一个 `/` 之前不算扩展名；点本身是尾名第一个字符也不算（`.rc` 没有扩展名）。
+pub fn pa_ext(p: ptr, n: u32, off_ptr: ptr) -> u32 {
+    let e: u32 = paq_trim(p, n);
+    let i: u32 = e;
+    let off: u32 = 0;
+    let got: u32 = 0;
+    let base: u32 = 0;
+    while i > 0 {
+        if load8(p, i - 1) as u32 == PAQ_SLASH {
+            base = i;
+            i = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+    i = e;
+    while i > base + 1 {
+        if load8(p, i - 1) as u32 == PAQ_DOT {
+            off = i;
+            got = 1;
+            i = base;
+        } else {
+            i = i - 1;
+        }
+    }
+    if got == 0 {
+        paq_st32(off_ptr, 0, e);
+        return 0;
+    }
+    paq_st32(off_ptr, 0, off);
+    return e - off;
+}
+
+/// 拼接 a 与 b，中间正好一个 `/`（a 已以 `/` 结尾就不再补；b 以 `/` 开头就先跳过）。
+/// 返回完整长度（可能大于 cap）。
+pub fn pa_join(a: ptr, an: u32, b: ptr, bn: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    let skip: u32 = 0;
+    while i < an {
+        pos = paq_put(out, cap, pos, load8(a, i));
+        i = i + 1;
+    }
+    if an > 0 && bn > 0 {
+        if load8(b, 0) as u32 == PAQ_SLASH {
+            skip = 1;
+        } else if load8(a, an - 1) as u32 != PAQ_SLASH {
+            pos = paq_put(out, cap, pos, 47);
+        }
+    }
+    i = skip;
+    while i < bn {
+        pos = paq_put(out, cap, pos, load8(b, i));
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 是否绝对路径。
+pub fn pa_is_absolute(p: ptr, n: u32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    return load8(p, 0) as u32 == PAQ_SLASH;
+}
+
+/// 组件深度：数非空、非 `.` 的组件，`..` 抵消一层（最低 0）。
+pub fn pa_depth(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    let d: u32 = 0;
+    let start: u32 = 0;
+    let len: u32 = 0;
+    let is_dot: u32 = 0;
+    let is_dotdot: u32 = 0;
+    while i <= n {
+        if i == n || load8(p, i) as u32 == PAQ_SLASH {
+            len = i - start;
+            is_dot = 0;
+            is_dotdot = 0;
+            if len == 1 && load8(p, start) as u32 == PAQ_DOT {
+                is_dot = 1;
+            }
+            if len == 2 && load8(p, start) as u32 == PAQ_DOT
+                && load8(p, start + 1) as u32 == PAQ_DOT {
+                is_dotdot = 1;
+            }
+            if is_dotdot == 1 {
+                if d > 0 {
+                    d = d - 1;
+                }
+            } else if is_dot == 0 && len > 0 {
+                d = d + 1;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return d;
+}
+
+/// 文本归一化：折叠 `//`、去掉 `.`、按栈消 `..`（开头的 `..` 保留 —— 相对路径
+/// 不能把"上一级"吃掉）。返回完整长度（可能大于 cap）。
+pub fn pa_normalize(p: ptr, n: u32, out: ptr, cap: u32) -> u32 {
+    let abs: u32 = 0;
+    let stack: ptr = alloc(4096);
+    let depth: u32 = 0;
+    let i: u32 = 0;
+    let start: u32 = 0;
+    let len: u32 = 0;
+    let is_dot: u32 = 0;
+    let is_dotdot: u32 = 0;
+    let pos: u32 = 0;
+    let k: u32 = 0;
+    let s: u32 = 0;
+    let l: u32 = 0;
+    if n > 0 && load8(p, 0) as u32 == PAQ_SLASH {
+        abs = 1;
+    }
+    while i <= n {
+        if i == n || load8(p, i) as u32 == PAQ_SLASH {
+            len = i - start;
+            is_dot = 0;
+            is_dotdot = 0;
+            if len == 1 && load8(p, start) as u32 == PAQ_DOT {
+                is_dot = 1;
+            }
+            if len == 2 && load8(p, start) as u32 == PAQ_DOT
+                && load8(p, start + 1) as u32 == PAQ_DOT {
+                is_dotdot = 1;
+            }
+            if is_dot == 0 && len > 0 {
+                if is_dotdot == 1 {
+                    if depth > 0 {
+                        l = paq_ld32(stack, (depth - 1) * 8 + 4);
+                        s = paq_ld32(stack, (depth - 1) * 8);
+                        if l == 2 && load8(p, s) as u32 == PAQ_DOT
+                            && load8(p, s + 1) as u32 == PAQ_DOT {
+                            paq_st32(stack, depth * 8, start);
+                            paq_st32(stack, depth * 8 + 4, 2);
+                            depth = depth + 1;
+                        } else {
+                            depth = depth - 1;
+                        }
+                    } else if abs == 0 {
+                        paq_st32(stack, depth * 8, start);
+                        paq_st32(stack, depth * 8 + 4, 2);
+                        depth = depth + 1;
+                    }
+                } else {
+                    paq_st32(stack, depth * 8, start);
+                    paq_st32(stack, depth * 8 + 4, len);
+                    depth = depth + 1;
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if abs == 1 {
+        pos = paq_put(out, cap, pos, 47);
+    } else if depth == 0 {
+        pos = paq_put(out, cap, pos, 46);
+        return pos;
+    }
+    k = 0;
+    while k < depth {
+        if k > 0 {
+            pos = paq_put(out, cap, pos, 47);
+        }
+        s = paq_ld32(stack, k * 8);
+        l = paq_ld32(stack, k * 8 + 4);
+        i = 0;
+        while i < l {
+            pos = paq_put(out, cap, pos, load8(p, s + i));
+            i = i + 1;
+        }
+        k = k + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_paths_base_dir() -> bool {
+    let b: ptr = alloc(16);
+    let o: ptr = alloc(4);
+    let l: ptr = alloc(4);
+    paq_copy(b, 16, "/a/b/");
+    let nb: u32 = pa_base(b, 5, o, l);
+    let nd: u32 = pa_dir(b, 5, o, l);
+    return nb == 1 && nd == 2;
+}
+
+fn test_paths_ext_ignores_dot_dir() -> bool {
+    let b: ptr = alloc(16);
+    let o: ptr = alloc(4);
+    paq_copy(b, 16, "a.b/c");
+    let n1: u32 = pa_ext(b, 5, o);
+    paq_copy(b, 16, ".rc");
+    let n2: u32 = pa_ext(b, 3, o);
+    paq_copy(b, 16, "x.tar.gz");
+    let n3: u32 = pa_ext(b, 8, o);
+    return n1 == 0 && n2 == 0 && n3 == 2;
+}
+
+fn test_paths_join_one_slash() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    let o: ptr = alloc(32);
+    paq_copy(a, 16, "/a/");
+    paq_copy(b, 16, "/b");
+    let n: u32 = pa_join(a, 3, b, 2, o, 32);
+    return n == 4 && load8(o, 0) == 47 && load8(o, 1) == 97
+        && load8(o, 2) == 47 && load8(o, 3) == 98;
+}
+
+fn test_paths_normalize() -> bool {
+    let b: ptr = alloc(32);
+    let o: ptr = alloc(32);
+    paq_copy(b, 32, "/a//b/./c/../d");
+    let n1: u32 = pa_normalize(b, 14, o, 32);
+    let ok1: bool = n1 == 6 && load8(o, 0) == 47 && load8(o, 1) == 97
+        && load8(o, 2) == 47 && load8(o, 3) == 98 && load8(o, 4) == 47
+        && load8(o, 5) == 100;
+    paq_copy(b, 32, "a/../../b");
+    let n2: u32 = pa_normalize(b, 9, o, 32);
+    let ok2: bool = n2 == 4 && load8(o, 0) == 46 && load8(o, 1) == 46
+        && load8(o, 2) == 47 && load8(o, 3) == 98;
+    return ok1 && ok2;
+}

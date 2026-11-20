@@ -396,6 +396,13 @@ int f(byte b) { return b; }        // C# 里完全正常（隐式提升 byte -> 
 宽度跟踪（C# 的小整数算术本来就会提升到 `int`）留到下一版；这条边界写进了
 `tools/cstrans.py` 的文件头，也写进了六语言的语言卡（`loment_diag.LANG_CARDS["csharp"]`）。
 
+> **2026-10-09 更正（`#123` / `#125` / `#133`）**：C / C++ 那两门**已经**跟宽度了 ——
+> `Dialect.usual_arith` 打开时按 C 的**寻常算术转换**插 `as`（`docs/186` §5.1），
+> 因为不插的那一半是**静默**的：`int a = -1; unsigned b = 0; a > b` 在 C 里为真、
+> 在这边为假，而两边都退 0。**这条边界今天只对 Java / C# / Go 成立**（它们的转换
+> 规则各不相同，按 C 的插会写出那几门本不接受程序 —— 所以那边照旧，响亮的失败）。
+> 本章后面几处"不做整数宽度跟踪"的话，都按这一条读。
+
 ### 一条**比数字更硬**的判据：同一个程序、两种拼法、翻出**同一份** Loment
 
 `loment/cstrans/Sample.cs` 与 `loment/jtrans/Sample.java` 是**同一个程序**的两种拼法
@@ -669,6 +676,11 @@ genesis 汇编 -> rc=139 (段错误)        clang 汇编 -> rc=0, 产物 3172 B 
 
 ## 7.3 `grammar rust` 是**基础语法的另一种拼法**（2026-09-22）
 
+> **⚠ 已被 2026-11-03 的裁定取代**（见 `docs/295`）：原生语法正式命名为 **Tur**，
+> `NATIVE_GRAMMARS` 变成 `("loment", "tur")`；**`rust` 退回成一门表层语法**
+> （与 C / Java / Go 同级，走 `from_rust` 抽接口）。于是"`grammar rust` 是严格 Rust
+> 子集"由**读法本身**保证，Tur 后续的修改漏不过去。下面这一节保留为历史记录。
+
 用户 2026-09-22 的裁定，一句话：
 
 > **rust 语法是 Loment 基础语法，不需要翻译**
@@ -730,13 +742,44 @@ genesis 汇编 -> rc=139 (段错误)        clang 汇编 -> rc=0, 产物 3172 B 
 **三方里有两方相等不能说明什么**；改成语料里不留溢出（`mid <= n / mid`）之后三方一致。
 这一条与"每门配一个独立推出来的期望值"是同一件事的两面。
 
+### 7.3.5 `mut` 映射掉：`grammar rust` 里必须写得出一句重赋值（`#77`）
+
+`grammar rust` 是**原生读法**，而 Rust 与本语言在"本地变量怎么声明"上没有交集：
+
+| | 重赋值一个本地变量 | 重赋值一个形参 |
+|---|---|---|
+| Rust | `let mut v: T = e;` | `fn f(mut a: T)` |
+| 本语言 | `let v: T = e;`（本地变量本来就可变） | `fn f(a: T)` |
+
+两种拼法互不相容：写 `let mut` 在 `mut` 上解析不过（`期望 :，得到 'v'`），去掉 `mut`
+又被 `rustc` 拒（`cannot assign twice to immutable variable`）。后果不是一条小限制 ——
+**每一个有状态循环都写不出来**（累加器只能改成递归辅助函数）。
+
+**决定（`#77` 的两个选项里选 1：前端映射掉）**：前门对 `grammar rust` 做一次
+**等长**的表层改写 —— `let mut x: T = e` → `let x: T = e`、`fn f(mut a: T)` →
+`fn f(a: T)`。这是**拼法**上的事，不是语义：在本语言里那些本地变量本来就可变，
+与另外五门翻译器做的事同类（它们把源语言的声明搬过来，这一门只是把标记抹掉）。
+
+**只动这两种位置**。`mut` 在本语言里还有别的意思 —— `mut [T]`（可变切片类型）与
+`&mut`（可变借用）—— 一刀切会把那两处一起抹掉，直接改坏程序。判据用**词法器的
+token** 而不是正则（字符串/注释里的 `mut` 不算 token）：
+`loment_grammar_test::test_declared_rust_maps_mut_away_but_keeps_mut_slices`。
+改写是等长的（换空格、保留换行），所以行号/列号/偏移都不动。
+
 ## 8. 未定 / 待复核
 
 - **`choose write grammar` 的编译器那一半落了**（§7.2，`loment_grammar_test` 14/14）——
   连同 `.lomt` 不嗅探那条（兜底已从"猜"改成"拒绝"，§2 那一句的落地）。
 - **自举侧那一半**：`grammar loment` 这一格**落了**（§7.2，`loment_p8_test` M87）——
   按字节抹，lexer/parser 一行未动。仍开着的是**别的写法**（阻塞在 `docs/189` §4.1 的
-  翻译器孪生上）与**直接读源的编辑器入口**（`lomfmt` / `lomdoc` / LSP）。
+  翻译器孪生上）。
+- **直接读源的入口**（`docs/182` §1.9 那张清单）—— 2026-10-12 的状态：
+  * `lomfmt` / `lomdoc` / `loment check`：**认出非原生写法就拒**
+    （`potato_from.refuse_foreign_grammar`，两份实现同一条）；
+  * **VS Code 扩展**：读那一行，按它给文档换语言 id 上色（`docs/235`）；
+  * **两个 LSP（`tools/loment_lsp.py` / `loment/tools/lsp.lomt`）：仍按原生 Loment 解析** ——
+    一份声明了外门写法的源接上语言服务会拿到**假诊断**。扩展因此**不把外门那几种接给
+    语言服务**（只给高亮）。这是**开着**的那一格，另记 issue。
 - **⚠ 驱动单元的 `.ll` 离 lomelf 的 2 MiB 输入上限只剩 1377 B**（§7.2 末、`docs/192`）。
   这一轮是被它绊倒的：越界**不报错**，而是**静默截断**成一个启动就崩的二进制。
   两条判据钉着了：预算一条（`loment_genesis_test::test_seed_fits_lomelf_input_buffer`，

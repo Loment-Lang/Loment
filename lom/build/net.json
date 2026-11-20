@@ -1,0 +1,275 @@
+{
+  "lom": "v0",
+  "module": "net",
+  "meta": {
+    "schema": "fujo-net-spec/v1",
+    "title": "network surface contract: Linux syscall number -> surface",
+    "version": "2026-10-12.1",
+    "authority": "docs/224 §3（面进 Potato）+ docs/227（收口账）：本文件是那张表的单源，两边实现由它校验",
+    "layers": {
+      "surface": "号 → 面的划分。**面名由用的人定** —— file/mem/net/proc 只是本仓库自己的划法，other 是兜底",
+      "runtime": "PE 运行时**真的派发**哪些号。今天它与 surface **同宽**（见 gates.why_equal）：表外的号在 PE 上回 -ENOSYS，不是「另一个面」",
+      "not_dispatched": "Linux 有、本仓运行时**故意不派发**的号。它们**不进 Syscall**：计数词汇与派发面保持同宽，否则产物会数出一个跑不了的站点（docs/227 §5）。**2026-10-12 起这一族是空的** —— 联网面补完了（docs/234），留着枚举是为了让“点名不做”继续可数"
+    },
+    "gates": {
+      "why_equal": "`surfaces` 是**不读源码可判**的数（docs/224），而它的价值在「数与行为对得上」。若 `Syscall` 比派发面宽，产物就会说出「3 个 net 站点」而其中一个是 PE 答不了的号 —— 那正是 docs/217 要堵的缺口。所以两边今天取**相等**，而不是包含",
+      "two_ways": "多一个号、少一个号、面不同，三种都算差异（`loment_net_test`）；方向反了也一样",
+      "fallback": "表外号在 PE 上回 `-ENOSYS`（-38），不是 `-1`（EPERM）—— 见 lomelf.PE_ENOSYS 与 docs/227 §2"
+    }
+  },
+  "consts": [],
+  "params": [],
+  "enums": [
+    {
+      "name": "Surface",
+      "base": "u8",
+      "variants": [
+        {
+          "name": "other",
+          "value": 0,
+          "meta": {
+            "title": "兜底：本表没点名的号，或首参不是整数字面量的站点"
+          }
+        },
+        {
+          "name": "file",
+          "value": 1,
+          "meta": {
+            "title": "文件与目录"
+          }
+        },
+        {
+          "name": "mem",
+          "value": 2,
+          "meta": {
+            "title": "内存（brk）"
+          }
+        },
+        {
+          "name": "net",
+          "value": 3,
+          "meta": {
+            "title": "联网：socket 那一族 + poll"
+          }
+        },
+        {
+          "name": "proc",
+          "value": 4,
+          "meta": {
+            "title": "进程（exit）"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Syscall",
+      "base": "u32",
+      "variants": [
+        {
+          "name": "read",
+          "value": 0,
+          "meta": {
+            "surface": "file"
+          }
+        },
+        {
+          "name": "write",
+          "value": 1,
+          "meta": {
+            "surface": "file"
+          }
+        },
+        {
+          "name": "close",
+          "value": 3,
+          "meta": {
+            "surface": "file"
+          }
+        },
+        {
+          "name": "poll",
+          "value": 7,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "brk",
+          "value": 12,
+          "meta": {
+            "surface": "mem"
+          }
+        },
+        {
+          "name": "select",
+          "value": 23,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "socket",
+          "value": 41,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "connect",
+          "value": 42,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "accept",
+          "value": 43,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "sendto",
+          "value": 44,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "recvfrom",
+          "value": 45,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "shutdown",
+          "value": 48,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "bind",
+          "value": 49,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "listen",
+          "value": 50,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "getsockname",
+          "value": 51,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "getpeername",
+          "value": 52,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "setsockopt",
+          "value": 54,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "getsockopt",
+          "value": 55,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "exit",
+          "value": 60,
+          "meta": {
+            "surface": "proc"
+          }
+        },
+        {
+          "name": "getdents64",
+          "value": 217,
+          "meta": {
+            "surface": "file"
+          }
+        },
+        {
+          "name": "openat",
+          "value": 257,
+          "meta": {
+            "surface": "file"
+          }
+        },
+        {
+          "name": "newfstatat",
+          "value": 262,
+          "meta": {
+            "surface": "file"
+          }
+        },
+        {
+          "name": "accept4",
+          "value": 288,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "sendmsg",
+          "value": 46,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "recvmsg",
+          "value": 47,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "socketpair",
+          "value": 53,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "epoll_wait",
+          "value": 232,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "epoll_ctl",
+          "value": 233,
+          "meta": {
+            "surface": "net"
+          }
+        },
+        {
+          "name": "epoll_create1",
+          "value": 291,
+          "meta": {
+            "surface": "net"
+          }
+        }
+      ]
+    }
+  ],
+  "records": []
+}

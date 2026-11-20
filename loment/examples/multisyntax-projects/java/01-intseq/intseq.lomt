@@ -1,4 +1,5 @@
 choose write grammar java
+choose runtime
 
 /*
  * intseq.lomt —— 用 **Java 语法**写的 Loment 模块（docs/188 的 `choose write grammar`）。

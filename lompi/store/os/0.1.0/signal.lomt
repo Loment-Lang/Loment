@@ -1,0 +1,120 @@
+// os/signal.lomt — 信号: 忽略 / 恢复默认 / 发给自己
+//
+// 为什么需要它 (**这一条是实测过的代价**): Loment 的运行时**不忽略 SIGPIPE**。对端挂断
+// 之后再写一个 socket, 第一次返回 -104 (可恢复), **第二次直接把进程杀掉** (退出码 13,
+// 什么都不打印)。SKILL.md §6.2.18 记着这件事, 而修法只有两条: 用 `MSG_NOSIGNAL`
+// (那是 `internet/tcp` 的选择), 或者**在这里把 SIGPIPE 忽略掉**。这条模块给的就是后一条。
+//
+// 只做三件事 —— **忽略**、**恢复默认**、**发一个**。这是刻意划的:
+//   * **不装自己的处理函数**。x86-64 上 `rt_sigaction` 装 C 函数指针要 `SA_RESTORER`
+//     指向一段正确的还原桩, 少一个字节就是"信号回来时跳到垃圾上"; 而本语言今天
+//     **没有函数指针** (`docs/232` §3.3 同一条限制)。只放 `SIG_IGN`/`SIG_DFL` 这两个
+//     特殊值, 就既用得上又不会骗人。
+//   * `SIGKILL` / `SIGSTOP` **不能**被忽略或改 —— 内核直接拒, 这里照样把它报成失败。
+//
+// 结构体 (x86-64 Linux, 32 字节): `handler u64 | flags u64 | restorer u64 | mask u64`。
+// `SIG_DFL` = 0, `SIG_IGN` = 1。`rt_sigaction` 的第四个参数是**信号掩码的字节数**, 恒 8。
+//
+// 边界: 号是 x86-64 Linux 的。自检只验纯逻辑 (结构体拼装) —— 理由见 user.lomt 头。
+//
+// 命名: 公开 signal_*, 内部 sigp_。
+
+module signal
+
+pub const SIGNAL_HUP: u32 = 1;
+pub const SIGNAL_INT: u32 = 2;
+pub const SIGNAL_QUIT: u32 = 3;
+pub const SIGNAL_KILL: u32 = 9;
+pub const SIGNAL_USR1: u32 = 10;
+pub const SIGNAL_SEGV: u32 = 11;
+pub const SIGNAL_USR2: u32 = 12;
+/// 对端挂断 —— 不忽略它会**杀进程** (见文件头)。
+pub const SIGNAL_PIPE: u32 = 13;
+pub const SIGNAL_ALRM: u32 = 14;
+pub const SIGNAL_TERM: u32 = 15;
+pub const SIGNAL_CHLD: u32 = 17;
+pub const SIGNAL_CONT: u32 = 18;
+pub const SIGNAL_STOP: u32 = 19;
+pub const SIGNAL_TSTP: u32 = 20;
+
+/// 恢复默认动作。
+pub const SIGNAL_DFL: u64 = 0;
+/// 忽略。
+pub const SIGNAL_IGN: u64 = 1;
+
+/// 一个 `sigaction` 的字节数。
+pub const SIGNAL_SA_BYTES: u32 = 32;
+
+const SIGP_SYS_RT_SIGACTION: u64 = 13;
+const SIGP_SYS_KILL: u64 = 62;
+const SIGP_SYS_GETPID: u64 = 39;
+
+/// 往 sa 里摆一个 sigaction。handler 取 SIGNAL_DFL / SIGNAL_IGN。
+pub fn signal_set(sa: ptr, handler: u64, flags: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(sa, b, ((handler >> (8 * b)) & 255) as u8);
+        store8(sa, 8 + b, ((flags >> (8 * b)) & 255) as u8);
+        store8(sa, 16 + b, 0 as u8);
+        store8(sa, 24 + b, 0 as u8);
+        b = b + 1;
+    }
+    return SIGNAL_SA_BYTES;
+}
+
+/// 把 sig 的动作设成 sa 里写的那个。成功返回 0; 内核拒绝 (如 SIGKILL) 返回负数。
+///
+/// **必须用 `syscall6`**: `rt_sigaction` 有**第四个**实参 —— 信号掩码的字节数, 恒 8。
+/// 少给一个内核直接返 -EINVAL (实测: 用 `syscall4` 时忽略 SIGPIPE 静默失败, 而后面的
+/// "发给自己还活着"就成了假绿)。
+pub fn signal_action(sig: u32, sa: ptr) -> i64 {
+    return syscall6(SIGP_SYS_RT_SIGACTION, sig as u64, sa as u64, 0, 8, 0);
+}
+
+/// 忽略 sig。
+pub fn signal_ignore(sig: u32, sa: ptr) -> i64 {
+    signal_set(sa, SIGNAL_IGN, 0);
+    return signal_action(sig, sa);
+}
+
+/// 把 sig 恢复成默认动作。
+pub fn signal_default(sig: u32, sa: ptr) -> i64 {
+    signal_set(sa, SIGNAL_DFL, 0);
+    return signal_action(sig, sa);
+}
+
+/// 忽略 SIGPIPE —— 一行版 (网络代码的常见前置)。
+pub fn signal_ignore_pipe(sa: ptr) -> i64 {
+    return signal_ignore(SIGNAL_PIPE, sa);
+}
+
+/// 给 pid 发信号。`kill(pid, 0)` 是"这个进程还在不在"。
+pub fn signal_kill(pid: u64, sig: u32) -> i64 {
+    return syscall4(SIGP_SYS_KILL, pid, sig as u64, 0);
+}
+
+/// 给自己发一个信号。
+pub fn signal_self(sig: u32) -> i64 {
+    let me: i64 = syscall4(SIGP_SYS_GETPID, 0, 0, 0);
+    return syscall4(SIGP_SYS_KILL, me as u64, sig as u64, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_signal_set_ignore() -> bool {
+    let sa: ptr = alloc(32);
+    let n: u32 = signal_set(sa, SIGNAL_IGN, 0);
+    return n == 32 && load8(sa, 0) == 1 && load8(sa, 1) == 0 && load8(sa, 31) == 0;
+}
+
+fn test_signal_set_dfl_clears_all() -> bool {
+    let sa: ptr = alloc(32);
+    store8(sa, 0, 255 as u8);
+    signal_set(sa, SIGNAL_DFL, 0);
+    return load8(sa, 0) == 0 && load8(sa, 8) == 0 && load8(sa, 16) == 0
+        && load8(sa, 24) == 0;
+}
+
+fn test_signal_constants() -> bool {
+    return SIGNAL_INT == 2 && SIGNAL_PIPE == 13 && SIGNAL_TERM == 15 && SIGNAL_STOP == 19;
+}

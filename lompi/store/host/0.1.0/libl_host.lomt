@@ -1,0 +1,230 @@
+// host/libl_host.lomt — LibL 的**宿主面**（世界那一半）
+//
+// **为什么在 host 而不是 std**：LibL 的四张脸住在 `std`，而那个包的题注写着"**一个 syscall
+// 都不发**"、依赖方向是 `host -> std` 单向 —— 裸机 / 无宿主的消费者只依赖 std。
+// `fopen` / `exit` 这一类**必须发 syscall**，塞进 std 就把那条不变式破了。
+// 所以按用户 2026-10-15 的裁决，**另开一张宿主面**：
+//
+//     use libl        —— 可移植那半（string / ctype / stdlib / stdio）
+//     use libl_host   —— 这一张（文件、进程）
+//
+// "一个 libc 头对一个模块"的规矩在这里**故意让路**：这一张跨 `<stdio.h>` 的**文件那一半**
+// 与 `<stdlib.h>` 的进程那一半 —— 它们的共同前提是"**有宿主**"，而不是"落在哪个头里"。
+//
+// **不做缓冲**（这是与 libc 的第一处行为差异，如实记）：libc 的 `FILE*` 有缓冲，`fwrite`
+// 先攒着、`fflush`/`fclose` 才落盘；这里**每次直接 write**。于是 `fflush` 是空操作，而
+// **与裸 `write` 交错的次序**与 libc 不同（libc 的 stdout 是行缓冲、重定向到文件才变全缓冲）。
+// 判据比的是**文件内容**，那件事两边一样。
+//
+// **`stdin` / `stdout` / `stderr` 不做**：libc 里它们是三个**常量对象**，而本语言没有模块级
+// 可变全局 ⇒ 给不出那个形状（做成函数的话，每次返回一块新的，`fclose` 一关就把 fd 0/1/2
+// 关掉了）。要流就用 `puts` / `putchar` / `getchar`（它们直接对 fd 1/0），或者 `fopen` 自己开。
+//
+// **只认 `"r"` 与 `"w"` 两种模式**（`"a"` / `"r+"` / `"w+"` / `"b"` 没做）—— 见 `fopen`。
+//
+// 命名：平名字空间，公开一律 libc 名，内部一律 `lf_*`。
+//
+// ⚠ **本文件避开 `ptr_add` / `ptr_sub`**（`io.lomt` 尾注那条）：它们在 **Rust 路径**
+// （`loment.py test` 走的降级）会变成没有 `unsafe` 的裸指针运算，rustc 直接拒。
+// 需要偏移时用 `(p as u64) + n` 再转回来。
+
+module libl_host
+
+use io
+use mem
+use string
+
+/// `FILE` 在内存里的样子。**布局是这张脸的私有约定** —— 调用方拿到的是不透明指针，
+/// 只有本文件的 `lf_*` 读它。
+///   +0  `i64` fd
+///   +8  `i32` eof（1 = 读到过文件尾）
+///   +12 `i32` err（留给以后；今天恒 0）
+const LF_SZ: u32 = 16;
+
+fn lf_new(fd: i64) -> ptr {
+    let p: ptr = alloc(LF_SZ);
+    mem_store64(p, 0, fd as u64);
+    mem_store32(p, 8, 0);
+    mem_store32(p, 12, 0);
+    return p;
+}
+
+fn lf_fd(f: ptr) -> i64 {
+    return mem_load64(f, 0) as i64;
+}
+
+// ---------------------------------------------------------------- 文件
+
+/// `fopen` —— **只认 `"r"` 与 `"w"`**：第一个字符是 `'w'` 就当写、否则当读。
+///
+/// `"a"`（追加）、`"r+"` / `"w+"`（读写）、`"b"`（二进制）**没做** —— 它们要的组合
+/// 今天没有对应的 syscall 封装（`host/io` 只有 `io_open_ro` / `io_open_wo`）。
+/// **不做就说不做**：传 `"a"` 会按 `"r"` 处理，而不是悄悄按读打开一个不存在的文件 ——
+/// 后者返回 NULL，调用方看得见。
+///
+/// 失败返回 NULL（libc 同）。路径要 **NUL 结尾**（那是 `open(2)` 的要求）。
+pub fn fopen(path: ptr, mode: ptr) -> ptr {
+    let m: u32 = load8(mode, 0);
+    let fd: i64 = 0;
+    if m == 119 {
+        fd = io_open_wo(path);
+    } else {
+        fd = io_open_ro(path);
+    }
+    if fd < (0 as i64) {
+        return 0 as ptr;
+    }
+    return lf_new(fd);
+}
+
+/// `fclose` —— 关掉底下的 fd 并归还 `FILE` 那块内存。**总返回 0**（关不上也不报，
+/// 与 `fflush` 是空操作同一个原因：没有缓冲，没有"最后一步会失败"）。
+pub fn fclose(f: ptr) -> i32 {
+    if (f as u64) == (0 as u64) {
+        return 0 as i32 - 1;
+    }
+    let _c: i64 = io_close(lf_fd(f));
+    let _fr: u32 = free(f);
+    return 0 as i32;
+}
+
+/// `fread` —— 返回**读到的项数**（不是字节数），与 libc 同：读不满一项就不算那一项。
+///
+/// 没读满就把这块标成"到过文件尾"（`feof` 的语义），下一次 `fseek` 会清掉它。
+pub fn fread(buf: ptr, sz: u32, n: u32, f: ptr) -> u32 {
+    let want: u32 = sz * n;
+    if want == 0 {
+        return 0;
+    }
+    let got: u64 = io_read_all(lf_fd(f), buf, want as u64);
+    if got < (want as u64) {
+        mem_store32(f, 8, 1);
+    }
+    return (got / (sz as u64)) as u32;
+}
+
+/// `fwrite` —— 返回**写入的项数**。
+pub fn fwrite(buf: ptr, sz: u32, n: u32, f: ptr) -> u32 {
+    let want: u32 = sz * n;
+    if want == 0 {
+        return 0;
+    }
+    let _w: u64 = io_write_bytes(lf_fd(f), buf, want);
+    return n;
+}
+
+/// `fseek` —— `whence`：0 文件头 / 1 当前位置 / 2 文件尾。成功返回 0，失败 -1。
+pub fn fseek(f: ptr, off: i64, whence: u32) -> i32 {
+    let r: i64 = io_seek(lf_fd(f), off, whence);
+    if r < (0 as i64) {
+        return 0 as i32 - 1;
+    }
+    // 定位过就不是文件尾了 —— 与 libc 同（`fseek` 清 EOF 标志）。
+    mem_store32(f, 8, 0);
+    return 0 as i32;
+}
+
+/// `ftell` —— 当前位置；失败 -1。
+pub fn ftell(f: ptr) -> i64 {
+    return io_seek(lf_fd(f), 0 as i64, 1);
+}
+
+/// `fflush` —— **空操作**，恒返回 0（这张脸不缓冲，写完就已经在 fd 上了，见文件头）。
+pub fn fflush(f: ptr) -> i32 {
+    let _u: u64 = f as u64;
+    return 0 as i32;
+}
+
+/// `feof` —— 上一次读有没有碰到文件尾。**不是"下一个字节是不是 EOF"**（libc 也是这个语义：
+/// 只有读过一次之后才为真）。
+pub fn feof(f: ptr) -> i32 {
+    return mem_load32(f, 8) as i32;
+}
+
+/// `fgets` —— 最多读 `n-1` 个字节，遇到换行就停（**换行留在缓冲里**，libc 同），末尾补 NUL。
+/// 一个字节都没读到就返回 NULL（EOF）。
+pub fn fgets(buf: ptr, n: u32, f: ptr) -> ptr {
+    if n == 0 {
+        return 0 as ptr;
+    }
+    let one: ptr = alloc(1);
+    let fd: i64 = lf_fd(f);
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        if i + 1 >= n {
+            go = false;
+        } else {
+            let got: u64 = io_read_all(fd, one, 1);
+            if got == 0 {
+                go = false;
+            } else {
+                let c: u32 = load8(one, 0);
+                store8(buf, i, c as u8);
+                i = i + 1;
+                if c == 10 {
+                    go = false;
+                }
+            }
+        }
+    }
+    let _fr: u32 = free(one);
+    if i == 0 {
+        return 0 as ptr;
+    }
+    store8(buf, i, 0 as u8);
+    return buf;
+}
+
+/// `fputs` —— 写下 `s` 直到 NUL（**字符串要 NUL 结尾**，libc 同）。恒返回 0。
+pub fn fputs(s: ptr, f: ptr) -> i32 {
+    let n: u32 = strlen(s);
+    let _w: u64 = io_write_bytes(lf_fd(f), s, n);
+    return 0 as i32;
+}
+
+// ---------------------------------------------------------------- fd 0/1/2 上的几个
+
+/// `puts` —— 写到 **fd 1** 并补一个换行（libc 的 `puts` 也补换行）。
+pub fn puts(s: ptr) -> i32 {
+    let n: u32 = strlen(s);
+    let _w: u64 = io_write_bytes(1 as i64, s, n);
+    let _nl: u64 = io_write_bytes(1 as i64, str_ptr("\n"), 1);
+    return 0 as i32;
+}
+
+/// `putchar` —— 一个字节到 **fd 1**。返回那个字节（libc 同）。
+pub fn putchar(c: u32) -> i32 {
+    let one: ptr = alloc(1);
+    store8(one, 0, c as u8);
+    let _w: u64 = io_write_bytes(1 as i64, one, 1);
+    let _fr: u32 = free(one);
+    return c as i32;
+}
+
+/// `getchar` —— 一个字节从 **fd 0**。**文件尾返回 -1**（libc 同）。
+pub fn getchar() -> i32 {
+    let one: ptr = alloc(1);
+    store8(one, 0, 0 as u8);
+    let got: u64 = io_read_all(0 as i64, one, 1);
+    // 先读、再放：`free` 之后就不该再碰这块（LMS 的 E029 正是这条）。
+    let c: u32 = load8(one, 0);
+    let _fr: u32 = free(one);
+    if got == 0 {
+        return 0 as i32 - 1;
+    }
+    return c as i32;
+}
+
+// ---------------------------------------------------------------- 进程
+
+/// `exit` —— 不返回（`io_exit` 底下就是 `exit_group`，会结束**所有**线程）。
+pub fn exit(code: u32) {
+    let _e: u32 = io_exit(code as u64);
+}
+
+/// `abort` —— 与 libc 的差异**如实写**：libc 发 `SIGABRT`（由信号处理器可接、退出码 134），
+/// 这里走 `panic` 的 `llvm.trap` —— 那是 **SIGILL**，接不住。
+pub fn abort() {
+    let _p: u32 = panic(1);
+}

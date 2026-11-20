@@ -1,8 +1,16 @@
 {
-  "potato": "v2",
+  "potato": "v13",
   "unit": "lexer",
   "language": "loment",
+  "grammar": "loment",
   "mode": "std",
+  "gc": "gc_manual",
+  "runtime": "runtime",
+  "port": "sealed",
+  "vm": "no_vm",
+  "switches": [],
+  "dialects": [],
+  "bodies": [],
   "imports": [
     "bytes"
   ],
@@ -33,6 +41,94 @@
       "params": [
         {
           "name": "c",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "lx_same",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "o1",
+          "type": "u32"
+        },
+        {
+          "name": "o2",
+          "type": "u32"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "lx_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "ln",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "lx_word_len",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "lx_ext_starts",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "depth",
+          "type": "u32"
+        },
+        {
+          "name": "dl",
+          "type": "[u32; 16]"
+        },
+        {
+          "name": "dn",
           "type": "u32"
         }
       ],
@@ -125,10 +221,114 @@
         }
       ],
       "ret": "u32"
+    },
+    {
+      "name": "lex_tok_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "lex_reg_close",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "lex_reg_one_fn",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "lex_cmd_find",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u64"
+    },
+    {
+      "name": "lex_cmd_label",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "toks",
+          "type": "ptr"
+        },
+        {
+          "name": "dst",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u64"
     }
   ],
   "layouts": [],
-  "consts": [],
+  "consts": [
+    {
+      "name": "MAX_LANG",
+      "type": "u32",
+      "value": 16
+    }
+  ],
   "enums": [],
   "types": [],
   "traits": [],
@@ -152,5 +352,22 @@
   ],
   "instances": [],
   "guards": 0,
+  "boundary": {
+    "extern_declared": 0,
+    "extern_calls": 0,
+    "syscalls": 0,
+    "ptr_transforms": 1,
+    "total_sites": 1
+  },
+  "gc_ladder": {
+    "l0": 0,
+    "l1": 0,
+    "l2": 0,
+    "l3": 0,
+    "total_sites": 0
+  },
+  "surfaces": {
+    "total_sites": 0
+  },
   "excluded": []
 }

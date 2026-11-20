@@ -1,0 +1,42 @@
+module ex
+
+choose runtime
+
+use num
+
+fn print_dec(v: u32) {
+    let b: ptr = alloc(16);
+    let n: u32 = num_to_dec(b, v);
+    syscall4(1, 1, b as u64, n as u64);
+}
+
+fn print_nl() {
+    syscall4(1, 1, str_ptr("
+") as u64, str_len("
+") as u64);
+}
+
+fn half(x: u32) -> Result<u32, u32> {
+    if x % 2 == 0 {
+        return Result::Ok(x / 2);
+    }
+    return Result::Err(1);
+}
+
+fn quarter(x: u32) -> Result<u32, u32> {
+    let h: u32 = half(x)?;
+    return Result::Ok(h / 2);
+}
+
+fn show(r: Result<u32, u32>) -> u32 {
+    match r {
+        Result::Ok(v) => { return v; }
+        Result::Err(e) => { return 900 + e; }
+    }
+}
+
+fn _start() {
+    print_dec(show(quarter(8)));
+    print_nl();
+    syscall4(60, 0, 0, 0);
+}

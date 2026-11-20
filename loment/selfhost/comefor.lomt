@@ -20,6 +20,7 @@
 // 2. **合成文本追加在源缓冲末尾**（见 `ct_syn` 那条注释）—— 自举侧 token 的"文本"就是
 //    `(off, len)` 指进 `unit`，所以合成的词也得**落在 `unit` 里**才读得到。
 module comefor
+choose runtime
 
 use bytes
 use lexer

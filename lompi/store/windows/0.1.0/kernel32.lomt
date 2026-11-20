@@ -1,0 +1,234 @@
+// windows/kernel32.lomt — Win32 的文件与句柄面（Kernel32）
+//
+// 为什么标准库要有它: Loment 能直接产出 PE，但 Windows 上的文件、进程、控制台不在
+// Loment 自己的 syscall 面里（PE 垫片只有 8 个调用）。想在 Windows 上干活的程序，
+// 只能直接声明 Kernel32 的导出符号。
+//
+// **边界（今天必须说清）**: PE 目标还没有 FFI —— `--link` 对 `--target pe` 是拒的
+// （#1262）。所以这一包是**声明面**：签名、常数、缓冲布局都是对的，编成 IR 也过；
+// 真链成 PE 要等 #1262 落地。判据只能核"编得过 + 布局对"，不能核"跑得起来"。
+//
+// 约定:
+//   * 句柄一律 u64；`INVALID_HANDLE_VALUE` 是 u64 最大值。
+//   * 字符串参数是 `ptr`，指向调用方拼好的 NUL 结尾缓冲（本语言的字面量不带 NUL），
+//     `k32_cstr` 就是那个拼装器。
+//   * BOOL 返回值非零为真；失败时用 `k32_last_error()` 取 GetLastError。
+//   * 读/写字节数的输出参数是一个 4 字节缓冲（`k32_read`/`k32_write` 内部处理）。
+//
+// 命名: 公开 k32_*, 内部 k3_*。自检 test_kernel32_*。
+
+module kernel32
+
+choose runtime
+choose hosted
+
+/// u64 最大值的句柄 —— `INVALID_HANDLE_VALUE`。
+pub const K32_INVALID: u64 = 18446744073709551615;
+/// 打开已有文件读取。
+pub const K32_GENERIC_READ: u32 = 2147483648;
+/// 打开文件写入。
+pub const K32_GENERIC_WRITE: u32 = 1073741824;
+/// 允许别的进程同时读/写/删（FILE_SHARE_READ|WRITE|DELETE）。
+pub const K32_SHARE_ALL: u32 = 7;
+/// 截断并创建。
+pub const K32_CREATE_ALWAYS: u32 = 2;
+/// 必须已存在。
+pub const K32_OPEN_EXISTING: u32 = 3;
+/// 存在就打开、不存在就建。
+pub const K32_OPEN_ALWAYS: u32 = 4;
+/// 普通文件属性。
+pub const K32_ATTR_NORMAL: u32 = 128;
+/// 移动文件时允许覆盖目标。
+pub const K32_MOVE_REPLACE: u32 = 1;
+/// 文件指针：从开头 / 当前 / 末尾。
+pub const K32_SEEK_SET: u32 = 0;
+pub const K32_SEEK_CUR: u32 = 1;
+pub const K32_SEEK_END: u32 = 2;
+
+extern fn GetLastError() -> u32;
+extern fn CloseHandle(h: u64) -> u32;
+extern fn CreateFileA(name: ptr, access: u32, share: u32, sa: ptr,
+                      disp: u32, flags: u32, tmpl: u64) -> u64;
+extern fn ReadFile(h: u64, buf: ptr, n: u32, got: ptr, ov: ptr) -> u32;
+extern fn WriteFile(h: u64, buf: ptr, n: u32, put: ptr, ov: ptr) -> u32;
+extern fn FlushFileBuffers(h: u64) -> u32;
+extern fn GetFileSizeEx(h: u64, size: ptr) -> u32;
+extern fn SetFilePointerEx(h: u64, dist: i64, newpos: ptr, method: u32) -> u32;
+extern fn CreateDirectoryA(path: ptr, sa: ptr) -> u32;
+extern fn DeleteFileA(path: ptr) -> u32;
+extern fn MoveFileExA(from: ptr, to: ptr, flags: u32) -> u32;
+
+fn k3_u64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 字符串 -> NUL 结尾缓冲。返回写入的字节数（含 NUL，若 cap 容得下）。
+pub fn k32_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    if n < cap {
+        store8(out, n, 0 as u8);
+        return n + 1;
+    }
+    return n;
+}
+
+/// BOOL 结果是否成功（非零）。
+pub fn k32_ok(rc: u32) -> bool {
+    return rc != 0;
+}
+
+/// 句柄是不是 INVALID_HANDLE_VALUE。
+pub fn k32_invalid(h: u64) -> bool {
+    return h == K32_INVALID;
+}
+
+/// 上一次失败的 GetLastError。
+pub fn k32_last_error() -> u32 {
+    return GetLastError();
+}
+
+/// 打开已有文件读取。失败返回 K32_INVALID。
+pub fn k32_open_read(path: ptr) -> u64 {
+    return CreateFileA(path, K32_GENERIC_READ, K32_SHARE_ALL, 0 as ptr,
+                       K32_OPEN_EXISTING, K32_ATTR_NORMAL, 0 as u64);
+}
+
+/// 截断并创建、打开写入。失败返回 K32_INVALID。
+pub fn k32_open_write(path: ptr) -> u64 {
+    return CreateFileA(path, K32_GENERIC_WRITE, K32_SHARE_ALL, 0 as ptr,
+                       K32_CREATE_ALWAYS, K32_ATTR_NORMAL, 0 as u64);
+}
+
+/// 读一段。返回此次读到的字节数；失败返回 -1（i64 表示）。
+pub fn k32_read(h: u64, buf: ptr, n: u32) -> i64 {
+    let got: ptr = alloc(4);
+    store8(got, 0, 0 as u8);
+    store8(got, 1, 0 as u8);
+    store8(got, 2, 0 as u8);
+    store8(got, 3, 0 as u8);
+    let rc: u32 = ReadFile(h, buf, n, got, 0 as ptr);
+    if rc == 0 {
+        return 0 as i64 - 1 as i64;
+    }
+    return (load8(got, 0) as i64) | ((load8(got, 1) as i64) << 8)
+        | ((load8(got, 2) as i64) << 16) | ((load8(got, 3) as i64) << 24);
+}
+
+/// 写一段。返回此次写出的字节数；失败返回 -1。
+pub fn k32_write(h: u64, buf: ptr, n: u32) -> i64 {
+    let put: ptr = alloc(4);
+    store8(put, 0, 0 as u8);
+    store8(put, 1, 0 as u8);
+    store8(put, 2, 0 as u8);
+    store8(put, 3, 0 as u8);
+    let rc: u32 = WriteFile(h, buf, n, put, 0 as ptr);
+    if rc == 0 {
+        return 0 as i64 - 1 as i64;
+    }
+    return (load8(put, 0) as i64) | ((load8(put, 1) as i64) << 8)
+        | ((load8(put, 2) as i64) << 16) | ((load8(put, 3) as i64) << 24);
+}
+
+/// 把缓冲刷到盘上。
+pub fn k32_flush(h: u64) -> bool {
+    return k32_ok(FlushFileBuffers(h));
+}
+
+/// 文件大小（字节）。失败返回 0 并且 `k32_last_error()` 有值。
+pub fn k32_size(h: u64) -> u64 {
+    let sz: ptr = alloc(8);
+    let i: u32 = 0;
+    while i < 8 {
+        store8(sz, i, 0 as u8);
+        i = i + 1;
+    }
+    let rc: u32 = GetFileSizeEx(h, sz);
+    if rc == 0 {
+        return 0 as u64;
+    }
+    return k3_u64(sz, 0);
+}
+
+/// 移动文件指针。成功返回 true。`newpos` 可为 0（不要新位置）。
+pub fn k32_seek(h: u64, off: i64, method: u32, newpos: ptr) -> bool {
+    return k32_ok(SetFilePointerEx(h, off, newpos, method));
+}
+
+/// 关句柄。成功返回 true。
+pub fn k32_close(h: u64) -> bool {
+    return k32_ok(CloseHandle(h));
+}
+
+/// 建目录（不递归）。成功返回 true。
+pub fn k32_mkdir(path: ptr) -> bool {
+    return k32_ok(CreateDirectoryA(path, 0 as ptr));
+}
+
+/// 删文件。成功返回 true。
+pub fn k32_unlink(path: ptr) -> bool {
+    return k32_ok(DeleteFileA(path));
+}
+
+/// 改名/移动。成功返回 true。
+pub fn k32_rename(from: ptr, to: ptr) -> bool {
+    return k32_ok(MoveFileExA(from, to, 0 as u32));
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_kernel32_bool_and_handle() -> bool {
+    if k32_ok(0) {
+        return false;
+    }
+    if !k32_ok(1) {
+        return false;
+    }
+    if !k32_invalid(K32_INVALID) {
+        return false;
+    }
+    if k32_invalid(0 as u64) {
+        return false;
+    }
+    return true;
+}
+
+fn test_kernel32_cstr() -> bool {
+    let b: ptr = alloc(8);
+    let n: u32 = k32_cstr("abc", b, 8);
+    if n != 4 {
+        return false;
+    }
+    if load8(b, 0) != 97 || load8(b, 1) != 98 || load8(b, 2) != 99 {
+        return false;
+    }
+    if load8(b, 3) != 0 {
+        return false;
+    }
+    return true;
+}
+
+fn test_kernel32_constants() -> bool {
+    if K32_CREATE_ALWAYS != 2 || K32_OPEN_EXISTING != 3 {
+        return false;
+    }
+    if K32_ATTR_NORMAL != 128 {
+        return false;
+    }
+    if K32_GENERIC_READ != 2147483648 {
+        return false;
+    }
+    return true;
+}

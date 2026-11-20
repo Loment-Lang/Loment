@@ -1,0 +1,130 @@
+// std/toposort.lomt — 有向图的拓扑序与环检测（CSR 表示）
+//
+// 为什么不是 `graph` 的扩展: `graph.lomt` 给的是**邻接矩阵/边表**那套基础表示；
+// 而"构建顺序"这件事在工程里出现得极多（依赖、任务、make 目标），并且需要
+// **O(V+E)** 的实现。`graph` 不背这个责任，单独一份更清楚。
+//
+// 表示（CSR，全部 u32）:
+//   `off[0..n]`  第 v 个顶点的边在 `adj` 里的区间是 `[off[v], off[v+1])`
+//   `adj[0..m]`  边的终点
+// 这是压缩得最紧、缓存最友好的图表示；`lompi` 的依赖图就是这个形状。
+//
+// 算法: Kahn（入度为 0 的队列）。返回的顺序是**一个**合法拓扑序；同一层内的相对顺序
+// 取决于顶点编号，不承诺词典序最小。
+//
+// 命名: 公开 tp_*, 内部 tp_*。自检 test_toposort_*。
+
+module toposort
+
+use mem
+
+pub const TP_ERR: u32 = 4294967295;
+
+/// 工作区字节数：n 个入度 + n 个队列槽。
+pub fn tp_ws_bytes(n: u32) -> u32 {
+    return n * 8;
+}
+
+/// 拓扑序写进 `out`（至少 n 个 u32），返回长度；有环返回 TP_ERR。
+/// `ws` 至少 `tp_ws_bytes(n)`。
+pub fn tp_topo(off: ptr, adj: ptr, n: u32, out: ptr, ws: ptr) -> u32 {
+    let indeg: ptr = ws;
+    let q: ptr = ptr_add(ws, n * 4);
+    let i: u32 = 0;
+    while i < n {
+        mem_store32(indeg, i * 4, 0);
+        i = i + 1;
+    }
+    // 统计入度
+    i = 0;
+    while i < n {
+        let e: u32 = mem_load32(off, i * 4);
+        let end: u32 = mem_load32(off, (i + 1) * 4);
+        while e < end {
+            let w: u32 = mem_load32(adj, e * 4);
+            if w < n {
+                mem_store32(indeg, w * 4, mem_load32(indeg, w * 4) + 1);
+            }
+            e = e + 1;
+        }
+        i = i + 1;
+    }
+    let head: u32 = 0;
+    let tail: u32 = 0;
+    i = 0;
+    while i < n {
+        if mem_load32(indeg, i * 4) == 0 {
+            mem_store32(q, tail * 4, i);
+            tail = tail + 1;
+        }
+        i = i + 1;
+    }
+    let count: u32 = 0;
+    while head < tail {
+        let v: u32 = mem_load32(q, head * 4);
+        head = head + 1;
+        mem_store32(out, count * 4, v);
+        count = count + 1;
+        let e: u32 = mem_load32(off, v * 4);
+        let end: u32 = mem_load32(off, (v + 1) * 4);
+        while e < end {
+            let w: u32 = mem_load32(adj, e * 4);
+            if w < n {
+                let d: u32 = mem_load32(indeg, w * 4) - 1;
+                mem_store32(indeg, w * 4, d);
+                if d == 0 {
+                    mem_store32(q, tail * 4, w);
+                    tail = tail + 1;
+                }
+            }
+            e = e + 1;
+        }
+    }
+    if count != n {
+        return TP_ERR;
+    }
+    return count;
+}
+
+/// 有环返回 true。`out` 至少 n 个 u32（拓扑序的临时输出，内容不保证）。
+pub fn tp_has_cycle(off: ptr, adj: ptr, n: u32, out: ptr, ws: ptr) -> bool {
+    return tp_topo(off, adj, n, out, ws) == TP_ERR;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_toposort_dag() -> bool {
+    // 0->1, 0->2, 1->3, 2->3
+    let off: ptr = alloc(20);
+    let adj: ptr = alloc(16);
+    let out: ptr = alloc(16);
+    let ws: ptr = alloc(tp_ws_bytes(4));
+    mem_store32(off, 0, 0);
+    mem_store32(off, 4, 2);
+    mem_store32(off, 8, 3);
+    mem_store32(off, 12, 4);
+    mem_store32(off, 16, 4);
+    mem_store32(adj, 0, 1);
+    mem_store32(adj, 4, 2);
+    mem_store32(adj, 8, 3);
+    mem_store32(adj, 12, 3);
+    if tp_topo(off, adj, 4, out, ws) != 4 {
+        return false;
+    }
+    // 0 必须第一，3 必须最后
+    return mem_load32(out, 0) == 0 && mem_load32(out, 12) == 3;
+}
+
+fn test_toposort_cycle() -> bool {
+    // 0->1, 1->0
+    let off: ptr = alloc(12);
+    let adj: ptr = alloc(8);
+    let out: ptr = alloc(8);
+    let ws: ptr = alloc(tp_ws_bytes(2));
+    mem_store32(off, 0, 0);
+    mem_store32(off, 4, 1);
+    mem_store32(off, 8, 2);
+    mem_store32(adj, 0, 1);
+    mem_store32(adj, 4, 0);
+    return tp_topo(off, adj, 2, out, ws) == TP_ERR && tp_has_cycle(off, adj, 2, out, ws);
+}

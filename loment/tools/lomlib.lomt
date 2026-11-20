@@ -25,6 +25,7 @@
 //      本仓库其它工具一直用 `ptr_add`, 所以从没暴露过。
 
 module lomlib
+choose runtime
 
 use bytes
 use sha256

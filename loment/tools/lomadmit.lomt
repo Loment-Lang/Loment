@@ -1,0 +1,653 @@
+// loment/tools/lomadmit.lomt — Loment 版准入判定 (docs/238 的孪生侧)
+//
+// 判据 (tools/loment_admit_test.py): 同一份用例文件, 本程序与 `tools/loment_admit.py`
+// 的 **stdout / stderr / 退出码逐字节相同**。形状照 `loment/tools/lomsyscalls.lomt`
+// (那一对的判据也是逐字节比) —— 包括"入口写成 `fn _start()` 不是 `main`": 写成 `main`
+// 时 lld 把入口留成 0, 一跑就段错误、一个字都不输出 (docs/189 §3)。
+//
+// **两边各写一份判定**, 不是"一边调另一边": `docs/218` §2 第 4 条要的正是"两个实现
+// 逐字节相同" —— 孪生纪律第一次用在**授权**上, 而不只用在代码生成上。
+//
+// 与 Python 版的对应 (逐句抄, 连报错行都一样):
+//   * 用例恰好 **7 个字段**, 多一个少一个都是错 (那条"输入是闭集"就是"没有时钟");
+//   * 空行跳过; 字段间是任意空白 (空格 / TAB / CR);
+//   * `asked` / `granted_prev` 只认 w0..w3; `seq` / `hits` / `held` 是非负十进制;
+//   * `self` / `peer` 是**原样回显**的字节 (十六进制串) —— 不校验、不改大小写;
+//   * 报错走 stderr 且**只报第一条**, 退出码 1; 用法/读文件错退出码 2。
+//
+// **形参上限 10** (`FujoJTOP/loment#265`: 11 个以上自举编译器无声 SIGILL) —— 所以解析出来的
+// 一条用例是**摆进一块缓冲**再传指针, 不是一串形参。
+
+module lomadmit
+choose runtime
+
+// ---------------------------------------------------------------- 内存布局
+//
+// 这些只是**布局说明**（照 `lomsyscalls.lomt` 那份注解的写法）：真正的缓冲一律从
+// `sys_alloc` 拿 —— 第一版把 `M_*` 当地址直接用了，那些数是**偏移不是地址**，一跑就崩。
+//
+//   256 KiB  用例文件全文        · 256 KiB  记录正文（**不够就翻倍**, 见 `grow_out`）
+//   64 B     一条用例的解析结果（3 个 u64 + 6 个 u32）· 64 B 字段起点 · 64 B 字段长度
+//   8 KiB    /proc/self/cmdline · 4 KiB 路径 NUL 暂存
+
+const CASES_CAP: u32 = 262144;
+const OUT_CAP: u32 = 262144;
+const ARGV_CAP: u64 = 8192;
+const SCR_CAP: u64 = 4096;
+
+//: `c` 那块 64 B **按字节偏移**摆: 三个数 `seq/hits/held` 是 u64 (Python 那边是无界
+//: 整数, 两侧取同一个 0..2^63-1 的值域, issue #698), 其余四格是 u32。
+const C_SEQ: u32 = 0;     // u64
+const C_HITS: u32 = 8;    // u64
+const C_HELD: u32 = 16;   // u64
+const C_ASKED: u32 = 24;
+const C_PREV: u32 = 28;
+const C_SOFF: u32 = 32;
+const C_SLEN: u32 = 36;
+const C_POFF: u32 = 40;
+const C_PLEN: u32 = 44;
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    let _e: i64 = syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let o: u64 = 0;
+    while o < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + o, n - o);
+        if w <= 0 {
+            return o;
+        }
+        o = o + (w as u64);
+    }
+    return o;
+}
+
+fn say(s: str) -> u64 {
+    return write_all(2, str_ptr(s), str_len(s) as u64);
+}
+
+// ---------------------------------------------------------------- 小工具
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let a: u32 = load8(p, off) as u32;
+    let b: u32 = load8(p, off + 1) as u32;
+    let c: u32 = load8(p, off + 2) as u32;
+    let d: u32 = load8(p, off + 3) as u32;
+    return a + b * 256 + c * 65536 + d * 16777216;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return off + 4;
+}
+
+/// 64 位小端读写 —— 语言没有 `load64`/`store64`, 拆成两个 u32 (同 `lumtui.lomt`)。
+fn st64(p: ptr, off: u32, v: u64) -> u32 {
+    let _a: u32 = st32(p, off, (v % 4294967296) as u32);
+    return st32(p, off + 4, (v / 4294967296) as u32);
+}
+
+fn ld64(p: ptr, off: u32) -> u64 {
+    return (ld32(p, off) as u64) + (ld32(p, off + 4) as u64) * 4294967296;
+}
+
+/// 十进制, 无前导零 (Python 那侧是 `f"{v}"`)。
+/// **不用 `alloc`**: 那个 bump heap 只有 64 KiB, 每条用例 5 次 `alloc(16)` 在 ~700 条时
+/// 耗尽, 然后 `llvm.trap` (SIGILL, issue #697) —— 这里直接写进输出缓冲。
+fn put_dec(out: ptr, o: u32, v: u64) -> u32 {
+    let nd: u32 = 1;
+    let t: u64 = v;
+    while t >= 10 {
+        t = t / 10;
+        nd = nd + 1;
+    }
+    let i: u32 = 0;
+    let x: u64 = v;
+    while i < nd {
+        let d: u32 = (x % 10) as u32;
+        store8(out, o + (nd - 1 - i), (48 + d) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    return o + nd;
+}
+
+fn put_lit(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+/// 把 `src[so..so+sn)` 原样搬到 `out[o..]`。
+fn put_span(out: ptr, o: u32, src: ptr, so: u32, sn: u32) -> u32 {
+    let i: u32 = 0;
+    while i < sn {
+        store8(out, o + i, load8(src, so + i) as u8);
+        i = i + 1;
+    }
+    return o + sn;
+}
+
+fn is_space(c: u32) -> u32 {
+    if c == 32 || c == 9 || c == 13 || c == 10 {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return 1;
+    }
+    return 0;
+}
+
+fn streq(p: ptr, off: u32, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if (load8(p, off + i) as u32) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `[off, off+n)` 的十进制值: 可选 `+` 前缀, 至少一位 ASCII 数字, 前导零允许,
+/// 值域 0..2^63-1。**与 Python 侧的 `parse_count` 同一个接受集** (issue #698) ——
+/// 成功返回 1 并把值写进 `out` (8 字节); 不成返回 0。
+fn dec_span(p: ptr, off: u32, n: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    if n > 0 && load8(p, off) == 43 {
+        i = 1;                                     // 一个可选的 `+`
+    }
+    if i >= n {
+        return 0;
+    }
+    let v: u64 = 0;
+    while i < n {
+        let c: u32 = load8(p, off + i) as u32;
+        if is_digit(c) == 0 {
+            return 0;
+        }
+        if v > 922337203685477580 {
+            return 0;
+        }
+        v = v * 10 + ((c - 48) as u64);
+        if v > 9223372036854775807 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    let _x: u32 = st64(out, 0, v);
+    return 1;
+}
+
+// ---------------------------------------------------------------- 判定
+
+/// 台账命中数 → 挣到的档 (0..3)。**阈值是策略**, 与 Python 版那三个常量对齐。
+fn earned_rung(hits: u64) -> u32 {
+    if hits >= 32 {
+        return 3;
+    }
+    if hits >= 8 {
+        return 2;
+    }
+    if hits >= 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 档名 `[off, off+n)` → 代号; 不认识的档名返回 `99`。
+fn rung_code(p: ptr, off: u32, n: u32) -> u32 {
+    if streq(p, off, n, "w0") == 1 {
+        return 0;
+    }
+    if streq(p, off, n, "w1") == 1 {
+        return 1;
+    }
+    if streq(p, off, n, "w2") == 1 {
+        return 2;
+    }
+    if streq(p, off, n, "w3") == 1 {
+        return 3;
+    }
+    return 99;
+}
+
+fn rung_name(code: u32) -> str {
+    if code == 0 {
+        return "w0";
+    }
+    if code == 1 {
+        return "w1";
+    }
+    if code == 2 {
+        return "w2";
+    }
+    return "w3";
+}
+
+/// 三刻度: 档 → (并发连接数, 字节, 存活)。**与 Python 版的 `WIDTH` 同表。**
+fn width_conns(code: u32) -> u32 {
+    if code == 0 {
+        return 0;
+    }
+    if code == 1 {
+        return 1;
+    }
+    if code == 2 {
+        return 64;
+    }
+    return 4096;
+}
+
+fn width_bytes(code: u32) -> u32 {
+    if code == 0 {
+        return 72;                                 // 一个帧长（`docs/240`，`lomzwframe.lomt` 的 FRAME_LEN）
+    }
+    if code == 1 {
+        return 65536;
+    }
+    if code == 2 {
+        return 1048576;
+    }
+    return 1073741824;
+}
+
+fn width_life(code: u32) -> u32 {
+    if code == 0 {
+        return 1;
+    }
+    if code == 1 {
+        return 4096;
+    }
+    if code == 2 {
+        return 65536;
+    }
+    return 1048576;
+}
+
+// ---------------------------------------------------------------- 文件
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let r: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if r <= 0 {
+            return off;
+        }
+        off = off + (r as u64);
+    }
+    return off;
+}
+
+/// 读整个文件。返回字节数, 或两个哨兵:
+///   4294967295 = 打不开；
+///   4294967294 = **比 `cap` 大** —— 容量错, 不许静默截断（`#872`）。
+///
+/// 原先 `read_all` 读满 `cap` 就收工, 调用方把前缀当成整份输入: 文件一大, 最后一行被
+/// 拦腰截断, 报出来的是"这一行字段数不对" —— 指错了地方。多读一个字节就能把
+/// "刚好 cap 字节"（合法）与"超过 cap"分开。
+fn slurp(p: ptr, n: u32, buf: ptr, cap: u32, scr: ptr) -> u32 {
+    let fd: i64 = open_ro(p, n, scr);
+    if fd < 0 {
+        return 4294967295;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap as u64);
+    let more: i64 = 0;
+    if got == cap as u64 {
+        more = syscall4(0, fd as u64, buf as u64, 1);
+    }
+    let _c: i64 = syscall4(3, fd as u64, 0, 0);
+    if more > 0 {
+        return 4294967294;
+    }
+    return got as u32;
+}
+
+/// 输出缓冲不够 `need` 字节就**翻倍** (`sys_alloc` 拿新块、把旧内容拷过去);
+/// 新指针写进 `slot` (8 字节)。返回新容量, 0 = 拿不到内存。
+///
+/// 记录会回显 `self`/`peer` 两段原文, 所以一行的输出上界是**行本身 + 固定开销**;
+/// 输出总量没有拍出来的上限 —— 只有输入受 `CASES_CAP` 约束。
+fn grow_out(slot: ptr, out: ptr, olen: u32, cap: u32, need: u32) -> u32 {
+    let ncap: u32 = cap;
+    while ncap < need {
+        // **翻倍也会走到头**（`#872`）：`ncap * 2` 在 u32 上会回绕成 0, 于是这个循环
+        // 永远出不去。到 1 GiB 就停, 由调用方报容量错 —— 那里比这里多一条消息。
+        if ncap > 1073741824 {
+            return 0;
+        }
+        ncap = ncap * 2;
+    }
+    let nv: u64 = sys_alloc(ncap as u64);
+    if nv == 0 {
+        return 0;
+    }
+    let np: ptr = nv as ptr;
+    let i: u32 = 0;
+    while i < olen {
+        store8(np, i, load8(out, i) as u8);
+        i = i + 1;
+    }
+    let _x: u32 = st64(slot, 0, nv);
+    return ncap;
+}
+
+// ---------------------------------------------------------------- 一条记录
+
+/// 一条记录: `out[o..]`。`c` 是摆好的那九格 (`C_*`), `cases` 是它们指向的文本。
+/// **逐句对应 Python 的 `admit`** —— 两边算的是同一件事, 只是这份要说清每一格从哪来。
+fn admit_one(out: ptr, o: u32, cases: ptr, c: ptr) -> u32 {
+    let hits: u64 = ld64(c, C_HITS);
+    let asked: u32 = ld32(c, C_ASKED);
+    let prev: u32 = ld32(c, C_PREV);
+    let held: u64 = ld64(c, C_HELD);
+    let earned: u32 = earned_rung(hits);
+    let want: u32 = earned;
+    if asked < earned {
+        want = asked;                      // 产物自己要求的上限封顶
+    }
+    let granted: u32 = 0;
+    let held2: u64 = 0;
+    let why: u32 = 0;                      // 0=zero 1=hold 2=widen-pending 3=widen-confirmed 4=shrink-immediate
+    if want == prev {
+        granted = want;
+        held2 = held + 1;
+        why = 1;
+    } else if want > prev {
+        held2 = held + 1;
+        if held2 >= 3 {
+            granted = want;
+            why = 3;
+        } else {
+            granted = prev;
+            why = 2;
+        }
+    } else {
+        granted = want;
+        held2 = 0;
+        why = 4;
+    }
+    if hits == 0 && granted == 0 {
+        why = 0;
+    }
+    o = put_lit(out, o, "seq=");
+    o = put_dec(out, o, ld64(c, C_SEQ));
+    o = put_lit(out, o, " self=");
+    o = put_span(out, o, cases, ld32(c, C_SOFF), ld32(c, C_SLEN));
+    o = put_lit(out, o, " peer=");
+    o = put_span(out, o, cases, ld32(c, C_POFF), ld32(c, C_PLEN));
+    o = put_lit(out, o, " asked=");
+    o = put_lit(out, o, rung_name(asked));
+    o = put_lit(out, o, " earned=");
+    o = put_lit(out, o, rung_name(earned));
+    o = put_lit(out, o, " granted=");
+    o = put_lit(out, o, rung_name(granted));
+    o = put_lit(out, o, " conns=");
+    o = put_dec(out, o, width_conns(granted) as u64);
+    o = put_lit(out, o, " bytes=");
+    o = put_dec(out, o, width_bytes(granted) as u64);
+    o = put_lit(out, o, " life=");
+    o = put_dec(out, o, width_life(granted) as u64);
+    o = put_lit(out, o, " held=");
+    o = put_dec(out, o, held2);
+    o = put_lit(out, o, " why=");
+    if why == 0 {
+        o = put_lit(out, o, "zero");
+    } else if why == 1 {
+        o = put_lit(out, o, "hold");
+    } else if why == 2 {
+        o = put_lit(out, o, "widen-pending");
+    } else if why == 3 {
+        o = put_lit(out, o, "widen-confirmed");
+    } else {
+        o = put_lit(out, o, "shrink-immediate");
+    }
+    store8(out, o, 10 as u8);
+    return o + 1;
+}
+
+/// 报错行 `line <n>: ...` 写进 `out`, 返回长度。**与 Python 版逐字相同。**
+fn bad_line(out: ptr, n: u32, kind: u32, got: u32) -> u32 {
+    let o: u32 = put_lit(out, 0, "line ");
+    o = put_dec(out, o, n as u64);
+    if kind == 0 {
+        o = put_lit(out, o, ": expected 7 fields, got ");
+        o = put_dec(out, o, got as u64);
+    } else if kind == 1 {
+        o = put_lit(out, o, ": seq/hits/held must be non-negative integers below 2^63");
+    } else {
+        o = put_lit(out, o, ": asked/granted must be one of w0..w3");
+    }
+    store8(out, o, 10 as u8);
+    return o + 1;
+}
+
+/// 把一行切成字段, 结果写进 `M_FO` / `M_FL`, 返回字段数。
+fn split_fields(cases: ptr, fs: u32, fe: u32, fo: ptr, fl: ptr) -> u32 {
+    let k: u32 = 0;
+    let j: u32 = fs;
+    while j < fe {
+        while j < fe && is_space(load8(cases, j) as u32) == 1 {
+            j = j + 1;
+        }
+        if j < fe {
+            let s0: u32 = j;
+            while j < fe && is_space(load8(cases, j) as u32) == 0 {
+                j = j + 1;
+            }
+            if k < 7 {
+                st32(fo, k * 4, s0);
+                st32(fl, k * 4, j - s0);
+            }
+            k = k + 1;
+        }
+    }
+    return k;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let cv: u64 = sys_alloc(CASES_CAP as u64);
+    let ov: u64 = sys_alloc(OUT_CAP as u64);
+    let av: u64 = sys_alloc(ARGV_CAP);
+    let scv: u64 = sys_alloc(SCR_CAP);
+    let cav: u64 = sys_alloc(64);
+    let fov: u64 = sys_alloc(64);
+    let flv: u64 = sys_alloc(64);
+    let gv: u64 = sys_alloc(8);
+    if cv == 0 || ov == 0 || av == 0 || scv == 0 || cav == 0 || fov == 0 || flv == 0
+            || gv == 0 {
+        return die(2);
+    }
+    let cases: ptr = cv as ptr;
+    let out: ptr = ov as ptr;
+    let argv: ptr = av as ptr;
+    let scr: ptr = scv as ptr;
+    let c: ptr = cav as ptr;
+    let fo: ptr = fov as ptr;
+    let fl: ptr = flv as ptr;
+    let gslot: ptr = gv as ptr;
+    let outcap: u32 = OUT_CAP;
+
+    // ---- argv[1]（路径）：/proc/self/cmdline 里第 2 个 NUL 分隔段
+    let afd: i64 = open_ro(str_ptr("/proc/self/cmdline"), str_len("/proc/self/cmdline"), scr);
+    if afd < 0 {
+        return die(2);
+    }
+    let an: u64 = 0;
+    let stop0: u32 = 0;
+    while stop0 == 0 {
+        let r: i64 = syscall4(0, afd as u64, (argv as u64) + an, ARGV_CAP - an);
+        if r <= 0 {
+            stop0 = 1;
+        } else {
+            an = an + (r as u64);
+            if an >= ARGV_CAP {
+                stop0 = 1;
+            }
+        }
+    }
+    let _c0: i64 = syscall4(3, afd as u64, 0, 0);
+    let total: u32 = an as u32;
+    let seg: u32 = 0;
+    let p1o: u32 = 0;
+    let p1n: u32 = 0;
+    let ai: u32 = 0;
+    let astart: u32 = 0;
+    while ai < total {
+        if load8(argv, ai) == 0 {
+            if seg == 1 {
+                p1o = astart;
+                p1n = ai - astart;
+                seg = 2;
+            } else if seg == 0 {
+                seg = 1;
+            }
+            astart = ai + 1;
+        }
+        ai = ai + 1;
+    }
+    if p1n == 0 {
+        let _u: u64 = say("usage: loment_admit.py <cases-file>\n");
+        return die(2);
+    }
+
+    // ---- 用例文件
+    let clen: u64 = slurp(ptr_add(argv, p1o), p1n, cases, CASES_CAP, scr) as u64;
+    if clen == 4294967295 {
+        let o0: u32 = put_lit(out, 0, "loment_admit: cannot open ");
+        let o1: u32 = put_span(out, o0, argv, p1o, p1n);
+        store8(out, o1, 10 as u8);
+        let _w: u64 = write_all(2, out, (o1 + 1) as u64);
+        return die(2);
+    }
+    if clen == 4294967294 {
+        // **容量错要报容量**（`#872`）：静默截断会让最后一行变成"字段数不对" —— 用户
+        // 拿着一条假诊断去改一份没写错的行。
+        let o0: u32 = put_lit(out, 0, "loment_admit: cases file is too large: more than ");
+        let o1: u32 = put_dec(out, o0, CASES_CAP as u64);
+        let o2: u32 = put_lit(out, o1, " bytes -- split it into smaller files\n");
+        let _w: u64 = write_all(2, out, o2 as u64);
+        return die(2);
+    }
+    let n: u32 = clen as u32;
+    let olen: u32 = 0;
+    let lineno: u32 = 0;
+    let li: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        if li >= n {
+            go = 0;
+        } else {
+            let le: u32 = li;
+            while le < n && load8(cases, le) != 10 {
+                le = le + 1;
+            }
+            lineno = lineno + 1;
+            let fstart: u32 = li;
+            let fend: u32 = le;
+            while fstart < fend && is_space(load8(cases, fstart) as u32) == 1 {
+                fstart = fstart + 1;
+            }
+            while fend > fstart && is_space(load8(cases, fend - 1) as u32) == 1 {
+                fend = fend - 1;
+            }
+            if fend > fstart {
+                // 一条记录的输出上界: 回显的两段原文 <= 行本身, 固定开销 ~150 B。
+                let need: u32 = olen + (fend - fstart) + 256;
+                // `need` 回绕 = 已经写不下了。报容量错, 别拿一个变小的数去比 `outcap`。
+                if need < olen {
+                    let o0: u32 = put_lit(out, 0, "loment_admit: output is too large: the record buffer cannot grow");
+                    store8(out, o0, 10 as u8);
+                    let _w: u64 = write_all(2, out, (o0 + 1) as u64);
+                    return die(2);
+                }
+                if need > outcap {
+                    let nc: u32 = grow_out(gslot, out, olen, outcap, need);
+                    if nc == 0 {
+                        let o0: u32 = put_lit(out, 0, "loment_admit: output is too large: the record buffer cannot grow");
+                        store8(out, o0, 10 as u8);
+                        let _w: u64 = write_all(2, out, (o0 + 1) as u64);
+                        return die(2);
+                    }
+                    outcap = nc;
+                    out = ld64(gslot, 0) as ptr;
+                }
+                let k: u32 = split_fields(cases, fstart, fend, fo, fl);
+                if k != 7 {
+                    let b: u32 = bad_line(out, lineno, 0, k);
+                    let _w: u64 = write_all(2, out, b as u64);
+                    return die(1);
+                }
+                let ok1: u32 = dec_span(cases, ld32(fo, 0), ld32(fl, 0), ptr_add(c, C_SEQ));
+                let ok2: u32 = dec_span(cases, ld32(fo, 12), ld32(fl, 12), ptr_add(c, C_HITS));
+                let ok3: u32 = dec_span(cases, ld32(fo, 24), ld32(fl, 24), ptr_add(c, C_HELD));
+                if ok1 == 0 || ok2 == 0 || ok3 == 0 {
+                    let b: u32 = bad_line(out, lineno, 1, 0);
+                    let _w: u64 = write_all(2, out, b as u64);
+                    return die(1);
+                }
+                let asked: u32 = rung_code(cases, ld32(fo, 16), ld32(fl, 16));
+                let prev: u32 = rung_code(cases, ld32(fo, 20), ld32(fl, 20));
+                if asked == 99 || prev == 99 {
+                    let b: u32 = bad_line(out, lineno, 2, 0);
+                    let _w: u64 = write_all(2, out, b as u64);
+                    return die(1);
+                }
+                st32(c, C_ASKED, asked);
+                st32(c, C_PREV, prev);
+                st32(c, C_SOFF, ld32(fo, 4));
+                st32(c, C_SLEN, ld32(fl, 4));
+                st32(c, C_POFF, ld32(fo, 8));
+                st32(c, C_PLEN, ld32(fl, 8));
+                olen = admit_one(out, olen, cases, c);
+                li = le + 1;
+            } else {
+                li = le + 1;
+            }
+        }
+    }
+    let _w2: u64 = write_all(1, out, olen as u64);
+    // **入口函数不能靠 `return 0` 退出**：`_start` 是 lld 定的入口，它返回就是跳到栈上
+    // 那个垃圾地址（实测：16 条记录都打对了，收尾段错误）。照 `lomsyscalls.lomt` 用 `die(0)`。
+    return die(0);
+}

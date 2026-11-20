@@ -46,6 +46,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf                                                        # noqa: E402
 import lomentc                                                       # noqa: E402
 import lomt_from                                                     # noqa: E402
@@ -236,14 +237,36 @@ def _rustc() -> str | None:
 
 
 def _rust_has_target() -> bool:
-    r = subprocess.run(["rustc", "--print", "target-list"], capture_output=True,
+    """**这份工具链装没装**这个目标的 `core` —— 不是"rustc 认不认识这个名字"。
+
+    原先是 `rustc --print target-list`, 而那个名单对**所有**内置目标都为真: 它回答的是
+    "名字在不在内置表里", 与有没有这个目标的 `core` 无关。本机没装 rustc 时这一族判据
+    一律 SKIP, 所以错在哪看不出来; `#371` 让它们在 runner 上**原生跑**之后现形 ——
+    容器里 apt 装的 rustc **认识** `x86_64-unknown-none`, 却没装它的 core, 于是判据红在
+    "工具链不全"上 (`error[E0463]: can't find crate for core … may not be installed`),
+    而那不是被测行为。
+    """
+    rustc = _rustc()
+    if not rustc:
+        return False
+    r = subprocess.run([rustc, "--print", "sysroot"], capture_output=True,
                        text=True, shell=False)
-    return "x86_64-unknown-none" in r.stdout
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
+    d = Path(r.stdout.strip()) / "lib" / "rustlib" / "x86_64-unknown-none" / "lib"
+    return d.is_dir() and any(d.glob("libcore*.rlib"))
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
 
 
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:                                               # noqa: BLE001
         return False
@@ -251,6 +274,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -468,11 +493,13 @@ def _run_with(td: Path, iface: Path, objs: list[Path], exit_want: int, fname: st
     deps = lomentc.resolve_deps(mod, ROOT, main.parent, entry=main)
     errs = lomentc.check(mod, deps=deps)
     assert not errs, errs
+    # `allow_ports=True`：外源语法编出来的那些 `.o` 是**真的外源对象**，链接器默认会因为
+    # "可能带端口"而拒（`docs/222` §4 的门）；这条要测的是"七门语法跑同一条管线"。
     blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps),
-                               [lomelf.load_foreign(p) for p in objs])
+                               [lomelf.load_foreign(p) for p in objs], allow_ports=True)
     exe = td / "ms.elf"
     exe.write_bytes(blob)
-    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
                         f"cp {_wsl_path(exe)} /tmp/ms_{exe.stat().st_size}.elf && "
                         f"chmod +x /tmp/ms_{exe.stat().st_size}.elf && "
                         f"/tmp/ms_{exe.stat().st_size}.elf"],
@@ -577,7 +604,210 @@ def test_diag_does_not_tell_you_to_fix_valid_foreign_source():
                       encoding="utf-8", newline="\n")
         assert loment_diag.foreign_note(lp, ["5:1: 期望 ;，得到 '}'"]) is None
         assert loment_diag.foreign_note(td / "m.c", []) is None
-    print("      五种语法都给出对得上的提示; Loment 的 typo 不给")
+
+        # **顺序与码**（`#29`）：`loment diag` 曾经先印 `E0999 [未分类]` 与一屏
+        # Loment 的修法，最后才说"这个文件不是 Loment"。现在语言那段是起点，
+        # 解析器看到的东西只作参考；而"翻不出来"也不再是 E0999（请报告），是 E023
+        # （这一版的前端还不收那个构造 —— 与其它编译器限制同一条修法）。
+        py = td / "nohdr.py"
+        py.write_text("def _start():\n    return\n", encoding="utf-8", newline="\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            loment_diag.main([str(py)])
+        out = buf.getvalue()
+        first = [ln for ln in out.splitlines() if ln.strip()][0]
+        assert "不是 Loment" in first, f"第一行不是语言提示: {out[:200]!r}"
+        assert "E0999" not in out, f"翻不出来的源还在报 E0999「请报告」: {out[:300]!r}"
+        assert "E023" in out, f"翻不出来的源该是 E023（编译器限制）: {out[:300]!r}"
+        assert out.index("不是 Loment") < out.index("E023"), (
+            f"语言提示排到了 Loment 诊断后面: {out[:300]!r}")
+    print("      五种语法都给出对得上的提示; Loment 的 typo 不给；外源提示在 E023 之前")
+
+
+@test
+def test_diag_does_not_call_a_native_declaration_foreign():
+    """**声明里写的"原生"语法不是"外源"** —— `tur` 是 `NATIVE_GRAMMARS` 里那个。
+
+    `choose write grammar tur` 的文件**就是** Loment（只是拼法，`docs/188` §2、
+    2026-11-03 的裁定），前门当原生读。而这一处原先对 `lang in LANGS` 一律给外源卡 ——
+    `tur` 也在 `LANGS` 里，于是它说"**这个文件不是 Loment 语法**、别照上面那条改"，
+    而上面那条（**补 `module`**）**恰恰是对的**：一条该听的话被一句"别听"撤销。
+
+    **但只排"声明"那一路**：一份**真 Rust 源码**叫 `.rs`、没写声明 —— 那时按**后缀**
+    认，而那句提示**是对的**（那份内容确实不是 Loment）。靠 `resolve_lang` 给的
+    `why`（`文件头声明 …` / `后缀 …`）分。
+
+    **`rust` 已退回表层语法**（2026-11-03）：声明 rust 的文件**该**拿外源提示。
+    """
+    import loment_diag                                                # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        d = td / "r.lomt"                      # 声明是 tur、正文是 Loment
+        d.write_text("choose write grammar tur\n\nfn f() -> i32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        assert loment_diag.foreign_note(d, ["2:1: 期望 module，得到 'fn'"]) is None, \
+            "对一份 `choose write grammar tur` 的 Loment 说了'不是 Loment'"
+        # 反面：声明为 rust 的**不再**是原生 —— 它该拿外源提示。
+        r0 = td / "r0.lomt"
+        r0.write_text("choose write grammar rust\n\nfn f() -> i32 {\n    return 1;\n}\n",
+                      encoding="utf-8", newline="\n")
+        note0 = loment_diag.foreign_note(r0, ["2:1: 期望 module，得到 'fn'"])
+        assert note0 and "不是 Loment" in note0, (
+            "`grammar rust` 已退回表层语法，诊断却仍把它当原生")
+        # 反面一：真 Rust 源码（`.rs`、没声明）**照旧**要点名
+        r = td / "real.rs"
+        r.write_text("#[no_mangle]\npub fn f() {}\n", encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(r, ["1:1: 期望 module，得到 '#'"])
+        assert note and "不是 Loment" in note and "rust" in note.lower(), note
+        # 反面二：声明为**外源**的照旧要点名
+        c = td / "x.lomt"
+        c.write_text("choose write grammar c\nint f() { return ~1; }\n",
+                     encoding="utf-8", newline="\n")
+        note = loment_diag.foreign_note(c, ["2:22: 非法字符 '~'"])
+        assert note and "不是 Loment" in note, note
+    print("      声明为原生的不给'外源'提示；真 Rust 源码与声明为外源的照旧点名")
+
+
+@test
+def test_dbg_refuses_foreign_grammar():
+    """`loment dbg` 对别的写法要**拒** —— 它给的 `文件:行` 两头都不对。
+
+    `dbg` 过前门，拿到的是**译文**的模块：DWARF 行表里写的是**译文**的行号，
+    而 `mod.src` 是 `None`（`lomentc.load`：翻译出来的单元**不声称**源文件是那一份）。
+    于是输出指向一个**不存在的地方**——实测一份 **9 行**的 C 写法文件报 `…\\t.lomt:10`，
+    而且路径丢了一截、分隔符混用。**退 0**，看着像成功。
+
+    只钉"拒"，不钉输出格式：`dbg` 那条路要 clang 才能走完，而这一条在**用不着 clang**
+    的那一步就该拦住（判据因此在本机与 CI 上都能跑）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "d.lomt"
+        p.write_text("choose write grammar c\n\nunsigned int f(unsigned int x) {\n"
+                     "    return x + 1;\n}\n", encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "dbg", str(p), "--fn", "f"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        out = r.stdout + r.stderr
+        assert r.returncode != 0, f"没拒（rc=0）:\n{out[:200]}"
+        assert "只处理**原生**写法" in out, f"没给出说得通的拒绝理由:\n{out[:200]}"
+        # 那份"文件:行"走的是 **stdout** —— 拒绝之后它必须是空的
+        # （不能拿整段出来查 `.lomt:`：拒绝消息自己就带上路径了）。
+        assert r.stdout.strip() == "", f"还吐了个 文件:行:\n{r.stdout[:200]}"
+    print("      `loment dbg` 认出非原生写法就拒，不给不存在之处的 文件:行")
+
+
+@test
+def test_the_cross_unit_gate_does_not_depend_on_call_position():
+    """"本单元没有的函数"这条闸，**不许**因为调用恰好写在语句位就绕过去。
+
+    `trans_core.raw()` 对 `ast.Call` 原先**不查** `self.fns`（`ty_of` 才查）——
+    于是同一个 `acquire(16);`：写在**值位**被拒、写在**语句位**照发。
+    判决取决于"恰好写在哪个位置"不是设计，是**漏**：那道闸的用意是"跨单元调用要
+    显式声明"，与写法位置无关。（`docs/198` §3 报过这一条，说根在共用核、
+    不只 Python 那一门。）
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        msgs = []
+        for i, body in enumerate(("int f() { acquire(16); return 7; }\n",
+                                  "int f() { return acquire(16); }\n")):
+            p = td / f"t{i}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable as e:
+                msgs.append(str(e))
+            else:
+                raise AssertionError(f"第 {i} 种（{'语句位' if i == 0 else '值位'}）没拒")
+        for m in msgs:
+            assert "acquire" in m and "本单元没有的函数" in m, m
+        # 反面：调**已在本单元**的函数照旧（语句位也不许被误拒）
+        p = td / "ok.lomt"
+        p.write_text("choose write grammar c\nint g(int x) { return x; }\n"
+                     "int f() { g(1); return 7; }\n", encoding="utf-8", newline="\n")
+        assert "g(1);" in potato_from.front_door(p).source
+    print("      语句位与值位给同一个判决；调本单元的函数照旧")
+
+
+@test
+def test_forward_declaration_is_merged_and_a_real_duplicate_is_not():
+    """**前向声明并进它的定义**；**真重复照旧报**。
+
+    C 里 `int g(int);` 后面跟 `int g(int x) { … }` 是**最常规**的写法 —— 互相递归的
+    两个函数**只能**这么写。对象里于是一个名字有两条记录（一条有正文、一条没有），
+    而下游报"**函数 g 重复**"：一个**假的重复**，用户只写了一份定义。
+    （`docs/186` §4 承诺"报得出是哪个函数"，而这里报的是一个不存在的冲突。）
+
+    四种形状各钉一面：声明+定义 → 并成一条；两条声明 → 并成一条（下游说"只有声明
+    没有定义"，那是对的）；**两条都有正文 → 不并**（真重复，一并就把一份写重复了的
+    源悄悄收下了 —— 那比报错坏）；互相递归 → 现在**翻得过**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        def fns_of(i: int, body: str) -> list[str]:
+            p = td / f"t{i}.lomt"          # **路径要不同** —— front_door 按路径备忘
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            return [x.split("(")[0].replace("pub fn ", "")
+                    for x in potato_from.front_door(p).source.splitlines()
+                    if x.startswith("pub fn")]
+        assert fns_of(0, "int g(int x);\nint g(int x) { return x; }\n"
+                         "int main() { return g(7); }\n") == ["g", "main"]
+        assert fns_of(1, "int odd(int n);\n"
+                         "int even(int n) { if (n == 0) { return 1; } return odd(n - 1); }\n"
+                         "int odd(int n) { if (n == 0) { return 0; } return even(n - 1); }\n"
+                         "int main() { return even(4); }\n") == ["odd", "even", "main"]
+        for i, body in ((2, "int g(int x) { return x; }\nint g(int x) { return x; }\n"
+                            "int main() { return g(1); }\n"),
+                        (3, "int g(int x);\nint g(int x);\nint main() { return 7; }\n")):
+            p = td / f"t{i}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable:
+                pass
+            else:
+                raise AssertionError(f"第 {i} 种该拒（真重复 / 只有声明）却过了")
+    print("      前向声明并进定义、互相递归翻得过；真重复与只有声明照旧拒")
+
+
+@test
+def test_an_unmappable_return_type_names_the_declaration_not_the_call_site():
+    """返回类型映不上时，报的必须是**那条声明**，不是几行之外的**调用点**。
+
+    `float f() { … }` 在转写那一步就没进对象（"返回类型 'float' 无映射"）。原先用户
+    看到的是下游那句"**调用了本单元没有的函数 `f`**"—— 指到 `main` 里那个调用点，
+    而真正该改的是**三行之上**那条声明。
+
+    **这一条是第二批（`#74` 那一笔）修好的**：前门原先把 `potato_from` 的
+    `Report.skipped` 整个丢掉（`doc, _rep = LANGS[lang](…)`），于是转写期丢的东西
+    在编译器这条路上一个字都不说、只剩下游那句假消息。这里把它**钉住** ——
+    没有判据的话，那句话改回去也没人知道。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "f.lomt"
+        p.write_text("choose write grammar c\nfloat f() { return 7; }\n"
+                     "int main() { return f(); }\n", encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except lomt_from.NotRepresentable as e:
+            msg = str(e)
+            assert "float" in msg and "无映射" in msg, f"没说清是返回类型的问题:\n{msg}"
+            assert "'f'" in msg or "`f`" in msg, f"没点名那条声明:\n{msg}"
+            assert "调用了本单元没有的函数" not in msg, \
+                f"又只报调用点了（真因在那条声明上）:\n{msg}"
+        else:
+            raise AssertionError("`float` 返回类型映不上，却没拒")
+    print("      返回类型映不上时报的是那条声明（点名 + 真因），不是调用点")
+
+
+
+
+
+
+
+
 
 
 #: 照 2026-09-17 一个子 agent **真写出来的那份 C** 蒸馏的 (无 `#include`、无 libc),
@@ -704,7 +934,7 @@ def test_c_source_named_lomt_end_to_end():
 
         want = (720 + 21 + 13) % 256            # 6! + gcd(1071,462) + popcount(0xbeef)
         main = td / "main.lomt"
-        main.write_text(f'module msc\n\nuse "{unit.as_posix()}"\n\n'
+        main.write_text(f'module msc\nchoose runtime\n\nuse "{unit.as_posix()}"\n\n'
                         "fn _start() {\n"
                         "    let a: u32 = c_fact(6 as i32) as u32;\n"
                         "    let b: u32 = c_gcd(1071 as u32, 462 as u32);\n"
@@ -719,7 +949,7 @@ def test_c_source_named_lomt_end_to_end():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "ms.elf"
         exe.write_bytes(blob)
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc",
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc",
                              f"cp {_wsl_path(exe)} /tmp/ms_cinlomt.elf && "
                              f"chmod +x /tmp/ms_cinlomt.elf && /tmp/ms_cinlomt.elf"],
                             capture_output=True, text=True, timeout=120, shell=False)
@@ -740,7 +970,7 @@ def test_c_source_named_lomt_end_to_end():
                             "-o", str(binp), str(cside)],
                            capture_output=True, text=True, shell=False)
         assert r.returncode == 0, r.stderr[-300:]
-        rc2 = subprocess.run(["wsl", "-e", "bash", "-lc",
+        rc2 = subprocess.run([*_WSLCMD, "bash", "-lc",
                               f"chmod +x {_wsl_path(binp)} && {_wsl_path(binp)}; echo -n $?"],
                              capture_output=True, text=True, timeout=120, shell=False)
         assert int(rc2.stdout.strip()) == want, f"clang 那边 {rc2.stdout} != {want}"
@@ -834,6 +1064,257 @@ def test_declaration_forms_that_used_to_vanish():
         assert doc["grammar"] == "java" and doc["language"] == "loment", doc["grammar"]
         assert not [x for x in rep.skipped if "void" in x["why"]], rep.skipped
     print("      Python 注解/负号/移位、Rust `pub const`、Java `void` 都进得来")
+
+
+@test
+def test_functions_are_found_wherever_they_start():
+    """**同一行上的第二个函数**也是一条声明，不能因为"不在行首"就看不见（C / C++）。
+
+    `_C_FN` 原先锚 `^[ \\t]*`（配 `re.M`），于是 `int f(){ … } int g(){ … }` 里 `g`
+    **整个消失** —— 而且不是"被跳过"：对象里没有它、`skipped` 里也没有它，下游只会说
+    "调用了本单元没有的函数 `g`"（一个**指向别处**的错）。这与 `_C_FIELD` 是同一处毛病
+    （`struct P { int a; int b; };` 一行写完只抽得到第一个字段），那一处已经改过。
+
+    **为什么不能只把锚去掉**：那个锚本来挡的是"函数**体**里与定义同形的写法" ——
+    `Foo bar(1);` 在 C++ 里就是**变量声明**，与 `Foo bar(...) {...}` 只差一个 `{`。
+    所以 `_from_c` 里按"已认下的函数体范围"再挡一道（`claimed`）。这一条两面都钉。
+    """
+    # ① 两个函数同一行：都要在
+    doc, rep = potato_from.from_c("int f(int a){return a+1;} int g(int a){return a+2;}\n",
+                                  "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f", "g"], doc["functions"]
+    assert not rep.skipped, rep.skipped
+    # ② 顶层语句 + 函数同一行（`int g = 7; int main(void){…}`）
+    doc, _ = potato_from.from_c("int g = 7; int main(void){ return 5; }\n", "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["main"], doc["functions"]
+    # ③ 三个同一行
+    doc, _ = potato_from.from_c(
+        "int a1(){return 1;} int a2(){return 2;} int a3(){return 3;}\n", "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["a1", "a2", "a3"], doc["functions"]
+    # ④ **反面**：体里那些与定义同形的写法不是函数。
+    #    - 裸的调用（`g(1)`）本来就不该匹配；
+    #    - C++ 的 `Foo bar(1);` **会**匹配那条正则，靠 `claimed` 挡下来。
+    doc, _ = potato_from.from_c("int f(){ return g(1); }\nint g(int x){ return x; }\n",
+                                "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f", "g"], doc["functions"]
+    doc, _ = potato_from.from_cpp("int f(){ Foo bar(1); return 0; }\n", "t.cpp", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["f"], doc["functions"]
+    # ⑤ 被跳过的定义，**体内**同样要被认下来（不然它的体会被当成一串函数）
+    doc, rep = potato_from.from_c("float f(){ int x = 1; return 0; }\nint g(){ return 1; }\n",
+                                  "t.c", "strict")
+    assert [f["name"] for f in doc["functions"]] == ["g"], doc["functions"]
+    assert [x["name"] for x in rep.skipped] == ["f"], rep.skipped
+    print("      同行多函数都找得到；体内与定义同形的写法（含 C++ 的 `Foo bar(1);`）不被误认")
+
+
+@test
+def test_unrecognised_toplevel_content_is_reported():
+    """顶层"谁也不认识"的东西要**报出来**，不能让它悄悄蒸发。
+
+    `_from_c` 只有三条正则（`_C_STRUCT` / `_C_ENUM` / `_C_FN`）扫顶层，**扫不到的既不进
+    产物、也不进 `skipped`** —— 单元于是带着**半份内容**被发出去，而 `check` 判 `[OK]`。
+    `docs/186` §4 把"全局变量 / 聚合类型 / 预处理指令"逐条列进**点名拒绝**那一栏。
+
+    两面都钉：七种认不出的形状**必须报**；而认识的形状（含 `struct` / `enum` 后面那个
+    分号、以及注释里的 `#`）**不许**被误报 —— 残渣检测最容易错的就是"顺手报多了"。
+    """
+    for label, head in {
+        "typedef": "typedef int myint;\n",
+        "global":  "int g = 7;\n",
+        "union":   "union U { int a; long b; };\n",
+        "include": "#include <stdio.h>\n",
+        "define":  "#define N 5\n",
+        "extern":  "extern int g;\n",
+        "knr":     "int f(a, b) int a; int b; { return a + b; }\n",
+    }.items():
+        doc, rep = potato_from.from_c(head + "int main() { return 5; }\n", "t.c", "strict")
+        got = [x for x in rep.skipped if "没有对应的规则" in x["why"]]
+        assert got, f"{label}: 没报出来（skipped={rep.skipped}）"
+        assert [f["name"] for f in doc["functions"]] == ["main"], (label, doc["functions"])
+    # 反面：认识的形状不许被当成残渣（`struct` / `enum` 尾随的分号也算它们的）
+    doc, rep = potato_from.from_c(
+        "struct P { int a; };\nenum E { A, B };\nint main() { return 5; }\n", "t.c", "strict")
+    assert not [x for x in rep.skipped if "没有对应的规则" in x["why"]], rep.skipped
+    assert [t["name"] for t in doc["types"]] == ["P"], doc["types"]
+    # 注释里的 `#` 不算（注释先被等长抹掉）
+    _, rep = potato_from.from_c("/* #define X 5 */\nint main() { return 5; }\n", "t.c", "strict")
+    assert not rep.skipped, rep.skipped
+    print("      顶层认不出的七种形状都报得出来；struct/enum 与注释里的 # 不误报")
+
+
+@test
+def test_class_languages_report_unrecognised_toplevel_content():
+    """**Java / C# 那一族也要报"谁也不认识"的顶层内容**（`#121` / `#75`）。
+
+    同一个口子在 C 那边（批次 1）就补上了（上面那条判据），而 `_from_class_lang`
+    当时**漏了** —— 于是：
+
+      * `use "x.lomt"` / `use bytes`（**Loment 语法**，这一族没有对应构造）静默蒸发；
+      * 类里一条谁也不认识的成员（方法头写坏成 `static int bad( { … }`、嵌套类、
+        静态初始化块、带注解的方法）**静默消失**。
+
+    两种都是"整份单元少一块内容，而 `check` 判 OK"。**两面都钉**：认不出的必须报；
+    认识的（一个正常的类 + 枚举、以及类里的常量/字段/方法）**不许**被误报 ——
+    残渣检测最容易错的就是"顺手报多了"。
+    """
+    NL = chr(10)
+    java_good = ("class K {" + NL + "    static final int N0 = 5;" + NL
+                 + "    int a;" + NL + "    static int f() { return 1; }" + NL + "}" + NL
+                 + "enum E { A, B }" + NL)
+    cs_good = ("class K {" + NL + "    const int N0 = 5;" + NL
+               + "    int a;" + NL + "    static int f() { return 1; }" + NL + "}" + NL
+               + "enum E { A, B }" + NL)
+    for lang, fn, good in (("java", potato_from.from_java, java_good),
+                           ("csharp", potato_from.from_csharp, cs_good)):
+        # ① `use` 行：既不进产物、也不该无声无息
+        doc, rep = fn('use "d_packdef.lomt"' + NL + "use bytes" + NL + NL + good, "t.x", "strict")
+        left = [x for x in rep.skipped if "没有对应的规则" in x["why"]]
+        assert len(left) == 2, f"{lang}: 两条 use 没报出来: {rep.skipped}"
+        assert [f["name"] for f in doc["functions"]] == ["f"], (lang, doc["functions"])
+        # ② 写坏的成员：原来整条消失（连 `[skip]` 都没有）
+        broken = ("class K {" + NL + "    static int good() { return 7; }" + NL
+                  + "    static int bad( { return 1; }" + NL + "}" + NL)
+        doc2, rep2 = fn(broken, "t.x", "strict")
+        lost = [x for x in rep2.skipped if "不是常量 / 字段 / 方法" in x["why"]]
+        assert lost, f"{lang}: 认不出的成员没报出来: {rep2.skipped}"
+        assert [f["name"] for f in doc2["functions"]] == ["good"], (lang, doc2["functions"])
+        # ③ 反面：正常的类 + 枚举、类里的常量/字段/方法都不许被当成残渣
+        # **壳行也不算**（`namespace` / `using` / 两层壳的花括号）—— 它们是**结构**，
+        # `class` / `enum` 那两条正则已经把类体认下来了。不排掉的话，一份平常的 C# 文件
+        # （`loment/cstrans/*.cs` 三份语料都是这个形状）会因为这些行被**整份拒掉**。
+        _, rep3 = fn(good, "t.x", "strict")
+        assert not [x for x in rep3.skipped if "没有对应的规则" in x["why"]], (lang, rep3.skipped)
+        assert not [x for x in rep3.skipped if "不是常量 / 字段 / 方法" in x["why"]], (lang, rep3.skipped)
+        shelled = ("using System;" + NL + NL + "namespace D" + NL + "{" + NL
+                   + "    public class T" + NL + "    {" + NL
+                   + "        public static int f(int a) { return a; }" + NL
+                   + "    }" + NL + "}" + NL)
+        _, rep4 = fn(shelled, "t.x", "strict")
+        left4 = [x for x in rep4.skipped if "没有对应的规则" in x["why"]]
+        assert not left4, f"{lang}: shell rows were reported as leftovers: {left4}"
+    print("      Java / C#：use 与写坏的成员都报得出来；正常的类与枚举不误报")
+
+
+@test
+def test_front_door_refuses_when_the_transcribe_step_drops_something():
+    """**转写那一步丢的东西也要到用户面前**（既有 #74 的实质）。
+
+    `potato_from` 的 `Report.skipped` 与 `lomt_from.emit_lomt` 的 `skipped` 是两处：
+    前者是"**根本没进对象**"（顶层 `typedef` / 全局量 / `union` / 预处理指令 / K&R 函数），
+    后者是"进了对象但发不出来"。`front_door` 一直只看后者，把前者整个丢掉
+    （`doc, _rep = LANGS[lang](…)`）—— 于是这些东西**在编译器这条路上一个字都不说**，
+    而 `lomt_from.py` 那条 CLI 会打 `[skip]`。**两副面孔，而编译器那副是瞎的。**
+
+    这条同时钉住那个"假 skip"：Java / C# 的**类壳**（没有字段的类）原先无条件报一条
+    `无可用字段` —— 那不是丢东西，它只是方法的命名空间。不清掉它，"有 skip 就拒"
+    会把**每一份** Java / C# 语料都拒掉（实测：7 门语料里 6 份带这条假 skip）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for label, body in [("typedef", "typedef int myint;\nint main() { return 5; }\n"),
+                            ("include", "#include <stdio.h>\nint main() { return 5; }\n"),
+                            ("knr", "int f(a, b) int a; int b; { return a + b; }\n"),
+                            ("use", "use bytes\nint f() { return 1; }\n")]:
+            p = td / f"{label}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable:
+                pass
+            else:
+                raise AssertionError(f"{label}: 转写期丢了东西，前门却放过了")
+        # 反面一：干净的单元照过
+        good = td / "ok.lomt"
+        good.write_text("choose write grammar c\nint main() { return 5; }\n",
+                        encoding="utf-8", newline="\n")
+        assert potato_from.front_door(good).source
+        # 反面二：Java / C# 的**类壳**（无字段）不算丢
+        for name, src in (
+            ("java", "public class Sample {\n    public static int f() {\n        return 1;\n    }\n}\n"),
+            ("csharp", "class Sample {\n    static int F() {\n        return 1;\n    }\n}\n"),
+        ):
+            doc, rep = potato_from.LANGS[name](src, f"Sample.{name}", "strict")
+            assert not rep.skipped, f"{name}: 类壳被当成丢东西了 {rep.skipped}"
+    print("      转写期丢的东西前门会拒；类壳（无字段）不受影响")
+
+
+@test
+def test_bad_literals_and_identifiers_are_refused_at_the_users_line():
+    """词法上"读不了"的东西要**当着用户那一行**说，而不是甩 Python 内部异常。
+
+    两处都在共用词法表里，六门一起受影响：
+
+    * **前导零的整数字面量**（C 的八进制，`010` == 8）。`primary` 用的是
+      `int(t[1], 0)` —— 那是**按 Python 的读法**认进制，它**拒绝前导零**，与 C **正好相反**。
+      原先漏出裸 `ValueError`：整屏回溯、没有行号、退出码 1（与"子集外"同码不同因），
+      而三条防线（`emit_lomt` / `front_door` / `lomentc.load_unit`）**一条都拦不住**。
+    * **标识符里的 `\\w` 是 Unicode 的**。`_变量` 这种名字前端收下、产物却过不了本语言的
+      词法（那边是 ASCII），报出来还带着**生成单元**的行号。现在收紧成 `[A-Za-z0-9_]`。
+
+    两边都钉：**拒得到**（且行号是用户的），而 `0x1F` / 十进制 / ASCII 标识符**照旧**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for label, body in [("octal", "int main() { return 010; }\n"),
+                            ("cjk", "int main() { int _变量 = 46; return _变量; }\n")]:
+            p = td / f"{label}.lomt"
+            p.write_text("choose write grammar c\n" + body, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except lomt_from.NotRepresentable as e:
+                assert "第 2 行" in str(e), f"{label}: 行号不是用户那一行 —— {str(e)[:120]}"
+            except ValueError as e:
+                raise AssertionError(f"{label}: 漏出裸 Python 异常 {e}")
+            else:
+                raise AssertionError(f"{label}: 读不了，却没拒")
+        for okk in ("int main() { return 0x1F; }\n", "int main() { return 8; }\n",
+                    "int main() { int _v1 = 46; return _v1; }\n"):
+            p = td / "ok.lomt"
+            p.write_text("choose write grammar c\n" + okk, encoding="utf-8", newline="\n")
+            assert potato_from.front_door(p).source
+    print("      八进制与 Unicode 标识符在**用户那一行**被拒；hex/十进制/ASCII 照旧")
+
+
+@test
+def test_entry_layer_refuses_foreign_grammar_instead_of_mangling_it():
+    """**"读 L1 源的入口"认出别的写法就拒**（`docs/182` §1.9 那条消费者轴）。
+
+    `lomfmt` / `lomdoc` 是**独立入口**：它们不走前门，直接拿词法器读原文。而一份
+    `.lomt` 里可以装六种写法的任何一种。对 C 那门后果很重：
+
+        choose write grammar c unsigned int f(unsigned int x) {     ← 声明与函数头揉成一行
+
+    **声明那一行整个是"怎么读"**：前门按它定读法、再把它抹成等长空白 ⇒ 那一行上的
+    函数跟着一起消失，单元变成空的。`lomfmt --write` 是**原地写回**，用户那份源就这么
+    被改坏了（实测：改之前跑一次，前门译文里那个函数**没了**）。
+
+    `lomdoc` 那边更绕：它**过前门**拿到的是**译文**的模块（函数带的是**译文行号**），
+    却拿**原文**去按那些行号索引 —— 短文件 `IndexError` 甩栈；长文件不越界，于是
+    **不崩、给出张冠李戴的文档**（`fn alpha` 拿到 `beta` 的注释），退 0。
+
+    两面都钉：非原生写法**必须拒**（`fmt` 还**不许动文件**），原生与 `tur` **照旧**。
+    """
+    import lomdoc                                                     # noqa: PLC0415
+    import lomfmt                                                     # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "w.lomt"
+        p.write_bytes(("choose write grammar c\n\nunsigned int f(unsigned int x) {\n"
+                       "    return x + 1;\n}\n").encode("utf-8"))
+        before = p.read_bytes()
+        assert lomfmt.main(["--write", str(p)]) == 2, "fmt 对 C 写法没拒"
+        assert p.read_bytes() == before, "fmt --write 把用户那份源改了"
+        assert lomfmt.main([str(p)]) == 2, "fmt（stdout 模式）没拒"
+        assert lomdoc.main([str(p)]) == 1, "doc 对 C 写法没拒"
+        # 原生与 `tur`（`NATIVE_GRAMMARS` 里那两个）照旧
+        for tag, src in (("native.lomt", "module m\n\nfn f() -> i32 {\n    return 1;\n}\n"),
+                         ("tur.lomt", "choose write grammar tur\n\nmodule m\n\n"
+                                      "fn f() -> i32 {\n    return 1;\n}\n")):
+            q = td / tag
+            q.write_text(src, encoding="utf-8", newline="\n")
+            assert "fn f" in lomfmt.format_source(q.read_text(encoding="utf-8")), tag
+    print("      fmt/doc 认出非原生写法就拒（fmt 不动文件）；原生与 tur 照旧")
+
 
 
 @test
@@ -1025,23 +1506,7 @@ def test_body_line_does_not_leak_into_the_emitted_unit():
 
 
 def main(argv: list[str] | None = None) -> int:
-    only = argv[0] if argv else None
-    failed = []
-    for name, fn in TESTS:
-        if only and only not in name:
-            continue
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except AssertionError as e:                                  # noqa: PERF203
-            failed.append(name)
-            print(f"  FAIL  {name}: {e}")
-        except Exception as e:                                       # noqa: BLE001
-            failed.append(name)
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    n = len([1 for x, _ in TESTS if not only or only in x])
-    print(f"\nloment_multisyntax_test: {n - len(failed)}/{n} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_multisyntax_test", only=(argv[0] if argv else None))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Loment (natural surface grammar)",
+  "scopeName": "source.loment.natural",
+  "comment": "一份 Loment 源，文件头写了 `choose write grammar natural`（`nl` / `lument` 也收）—— 正文是自然语言写法（docs/197）。这一门**没有宿主语法可借**：全世界没有哪份 TextMate 语法认识它，所以这里只认真那条声明。正文不着色是如实的 —— 与其编一套自造的着色，不如让它保持原样。",
+  "patterns": [
+    { "include": "source.loment#grammar-decl" }
+  ]
+}

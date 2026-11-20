@@ -1,0 +1,17 @@
+// `for i in lo..hi` + `continue`（LLS §11.6 / §11.7）：上界不含；跳过 3 ⇒ 1+2+4 = 7。
+choose write grammar tur2026.2
+
+module forr
+choose runtime
+
+fn main() {
+    let s: u32 = 0;
+    for i in 1..5 {
+        if i == 3 {
+            continue;
+        }
+        s = s + i;
+    }
+    print_num(s as i64);
+    print("\n");
+}

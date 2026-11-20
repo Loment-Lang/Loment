@@ -1,0 +1,284 @@
+// world/dateparse.lomt — ISO 8601 日期/时间的解析与格式化
+//
+// 为什么现实世界需要它: 日志、文件名、API 参数里全是 `2026-11-08` 与
+// `2026-11-08T10:30:00Z`。手写 `atoi` 会把 `2026-13-45` 收下，把 `2026-1-8`
+// 悄悄读成别的东西。这里做的是**严格**解析：位数、分隔符、范围都查。
+//
+// 接受:
+//   * 日期 `YYYY-MM-DD` / `YYYY/MM/DD` / `YYYYMMDD`；
+//   * 时间 `HH:MM` 或 `HH:MM:SS`；
+//   * 日期时间 `YYYY-MM-DD[T ]HH:MM[:SS][Z]`（无时区换算，按 UTC 解释）。
+//
+// 命名: 公开 dp_*, 内部 dq_*。自检 test_dateparse_*。
+
+module dateparse
+
+use mem
+use "calendar.lomt"
+
+fn dq_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn dq_num(p: ptr, st: u32, n: u32, ok: ptr) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, st + i);
+        if !dq_digit(c) {
+            mem_store32(ok, 0, 0);
+            return 0;
+        }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    return v;
+}
+
+/// 解析日期 -> 1970-01-01 起的天数。失败写 ok=0、返回 0。
+pub fn dp_parse_date(s: str, ok_out: ptr) -> i64 {
+    return dp_parse_date_span(str_ptr(s), str_len(s), ok_out);
+}
+
+fn dp_parse_date_span(p: ptr, n: u32, ok_out: ptr) -> i64 {
+    mem_store32(ok_out, 0, 0);
+    let y: u32 = 0;
+    let mo: u32 = 0;
+    let d: u32 = 0;
+    if n == 8 {
+        mem_store32(ok_out, 0, 1);
+        y = dq_num(p, 0, 4, ok_out);
+        mo = dq_num(p, 4, 2, ok_out);
+        d = dq_num(p, 6, 2, ok_out);
+    } else if n == 10 && (load8(p, 4) == 45 || load8(p, 4) == 47)
+        && load8(p, 4) == load8(p, 7) {
+        mem_store32(ok_out, 0, 1);
+        y = dq_num(p, 0, 4, ok_out);
+        mo = dq_num(p, 5, 2, ok_out);
+        d = dq_num(p, 8, 2, ok_out);
+    } else {
+        return 0 as i64;
+    }
+    if mem_load32(ok_out, 0) == 0 {
+        return 0 as i64;
+    }
+    if mo < 1 || mo > 12 || d < 1 {
+        return 0 as i64;
+    }
+    let limit: u32 = cd_days_in_month(y as i64, mo as i64);
+    if d > limit {
+        return 0 as i64;
+    }
+    mem_store32(ok_out, 0, 1);
+    return cd_days_from_civil(y as i64, mo as i64, d as i64);
+}
+
+/// 解析时间 -> 秒。失败写 ok=0。
+pub fn dp_parse_time(s: str, ok_out: ptr) -> u32 {
+    mem_store32(ok_out, 0, 0);
+    let n: u32 = str_len(s);
+    let p: ptr = str_ptr(s);
+    if n != 5 && n != 8 {
+        return 0;
+    }
+    if load8(p, 2) != 58 {
+        return 0;
+    }
+    mem_store32(ok_out, 0, 1);
+    let hh: u32 = dq_num(p, 0, 2, ok_out);
+    let mi: u32 = dq_num(p, 3, 2, ok_out);
+    let ss: u32 = 0;
+    if n == 8 {
+        if load8(p, 5) != 58 {
+            mem_store32(ok_out, 0, 0);
+            return 0;
+        }
+        ss = dq_num(p, 6, 2, ok_out);
+    }
+    if mem_load32(ok_out, 0) == 0 {
+        return 0;
+    }
+    if hh > 23 || mi > 59 || ss > 60 {
+        mem_store32(ok_out, 0, 0);
+        return 0;
+    }
+    mem_store32(ok_out, 0, 1);
+    return hh * 3600 + mi * 60 + ss;
+}
+
+/// 解析 `YYYY-MM-DD[T ]HH:MM[:SS][Z]` -> epoch 秒。ok=0 表示失败。
+pub fn dp_parse_iso(s: str, ok_out: ptr) -> i64 {
+    mem_store32(ok_out, 0, 0);
+    let n: u32 = str_len(s);
+    if n < 16 {
+        return 0 as i64;
+    }
+    let p: ptr = str_ptr(s);
+    if load8(p, 10) != 84 && load8(p, 10) != 32 {
+        return 0 as i64;
+    }
+    let date_ok: ptr = alloc(4);
+    let days: i64 = dp_parse_date_span(p, 10, date_ok);
+    if mem_load32(date_ok, 0) == 0 {
+        return 0 as i64;
+    }
+    let tn: u32 = n - 11;
+    if tn > 0 && load8(p, n - 1) == 90 {
+        tn = tn - 1;
+    }
+    if tn != 5 && tn != 8 {
+        return 0 as i64;
+    }
+    let tbuf: ptr = alloc(16);
+    let i: u32 = 0;
+    while i < tn {
+        store8(tbuf, i, load8(p, 11 + i) as u8);
+        i = i + 1;
+    }
+    store8(tbuf, tn, 0 as u8);
+    let tok: ptr = alloc(4);
+    let secs: u32 = dp_parse_time_span(tbuf, tn, tok);
+    if mem_load32(tok, 0) == 0 {
+        return 0 as i64;
+    }
+    mem_store32(ok_out, 0, 1);
+    return days * (86400 as i64) + (secs as i64);
+}
+
+fn dp_parse_time_span(p: ptr, n: u32, ok_out: ptr) -> u32 {
+    mem_store32(ok_out, 0, 0);
+    if n != 5 && n != 8 {
+        return 0;
+    }
+    if load8(p, 2) != 58 {
+        return 0;
+    }
+    mem_store32(ok_out, 0, 1);
+    let hh: u32 = dq_num(p, 0, 2, ok_out);
+    let mi: u32 = dq_num(p, 3, 2, ok_out);
+    let ss: u32 = 0;
+    if n == 8 {
+        if load8(p, 5) != 58 {
+            mem_store32(ok_out, 0, 0);
+            return 0;
+        }
+        ss = dq_num(p, 6, 2, ok_out);
+    }
+    if mem_load32(ok_out, 0) == 0 {
+        return 0;
+    }
+    if hh > 23 || mi > 59 || ss > 60 {
+        mem_store32(ok_out, 0, 0);
+        return 0;
+    }
+    mem_store32(ok_out, 0, 1);
+    return hh * 3600 + mi * 60 + ss;
+}
+
+fn dq_two(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let p: u32 = pos;
+    if p < cap {
+        store8(out, p, (48 + v / 10) as u8);
+    }
+    p = p + 1;
+    if p < cap {
+        store8(out, p, (48 + v % 10) as u8);
+    }
+    return p + 1;
+}
+
+/// epoch 秒 -> `YYYY-MM-DDTHH:MM:SSZ`。返回完整长度。
+pub fn dp_format_iso(epoch: i64, out: ptr, cap: u32) -> u32 {
+    let c: ptr = alloc(24);
+    let days: i64 = epoch / (86400 as i64);
+    let secs: i64 = epoch % (86400 as i64);
+    let s: i64 = secs;
+    let d: i64 = days;
+    if s < (0 as i64) {
+        s = s + (86400 as i64);
+        d = days - (1 as i64);
+    }
+    cd_civil_from_days(d, c);
+    let pos: u32 = 0;
+    let y: u32 = mem_load32(c, 0);
+    let mo: u32 = mem_load32(c, 4);
+    let dd: u32 = mem_load32(c, 8);
+    let hh: u32 = (s / (3600 as i64)) as u32;
+    let mi: u32 = ((s % (3600 as i64)) / (60 as i64)) as u32;
+    let ss: u32 = (s % (60 as i64)) as u32;
+    pos = dp_year(out, cap, pos, y);
+    pos = dq_put(out, cap, pos, 45);
+    pos = dq_two(out, cap, pos, mo);
+    pos = dq_put(out, cap, pos, 45);
+    pos = dq_two(out, cap, pos, dd);
+    pos = dq_put(out, cap, pos, 84);
+    pos = dq_two(out, cap, pos, hh);
+    pos = dq_put(out, cap, pos, 58);
+    pos = dq_two(out, cap, pos, mi);
+    pos = dq_put(out, cap, pos, 58);
+    pos = dq_two(out, cap, pos, ss);
+    pos = dq_put(out, cap, pos, 90);
+    return pos;
+}
+
+fn dq_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+fn dp_year(out: ptr, cap: u32, pos: u32, y: u32) -> u32 {
+    let p: u32 = pos;
+    let d1: u32 = (y / 1000) % 10;
+    let d2: u32 = (y / 100) % 10;
+    let d3: u32 = (y / 10) % 10;
+    let d4: u32 = y % 10;
+    if p < cap { store8(out, p, (48 + d1) as u8); }
+    p = p + 1;
+    if p < cap { store8(out, p, (48 + d2) as u8); }
+    p = p + 1;
+    if p < cap { store8(out, p, (48 + d3) as u8); }
+    p = p + 1;
+    if p < cap { store8(out, p, (48 + d4) as u8); }
+    return p + 1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_dateparse_date() -> bool {
+    let ok: ptr = alloc(4);
+    let d: i64 = dp_parse_date("2024-02-29", ok);
+    if mem_load32(ok, 0) != 1 {
+        return false;
+    }
+    let back: ptr = alloc(12);
+    cd_civil_from_days(d, back);
+    if mem_load32(back, 0) != 2024 || mem_load32(back, 4) != 2 || mem_load32(back, 8) != 29 {
+        return false;
+    }
+    let _x: i64 = dp_parse_date("2023-02-29", ok);
+    return mem_load32(ok, 0) == 0;
+}
+
+fn test_dateparse_iso() -> bool {
+    let ok: ptr = alloc(4);
+    let e: i64 = dp_parse_iso("1970-01-01T00:00:00Z", ok);
+    if mem_load32(ok, 0) != 1 || e != (0 as i64) {
+        return false;
+    }
+    let o: ptr = alloc(32);
+    let n: u32 = dp_format_iso(e, o, 32);
+    let want: str = "1970-01-01T00:00:00Z";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

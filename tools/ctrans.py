@@ -88,7 +88,17 @@ C = Dialect(
     coerce_int_to_bool=True,
     coerce_bool_to_int=True,
     int_default="i32",
+    # **C 的寻常算术转换**（`#123` / `#125` / `#133`）：`int`/`unsigned`/`long` 混算
+    # 或互相赋值时，C 把窄的那侧提升到宽/无符号那侧。不插转换的话本语言按**自己的**
+    # 规则算，结果是**静默错**（`int a = -1; unsigned b = 0; a > b` C 答真、这边答假）。
+    # 这一门**能表达**那个提升（`as`），所以转。见 `Dialect.usual_arith`。
+    usual_arith=True,
     safe_suffix="_c",
+    # C 里 `true` / `false` **不是字面量**：那是 `<stdbool.h>` 的宏，而这一门不收
+    # `#include` —— `int true = 5;` 是合法的普通变量。见 `Dialect.bool_literals`。
+    bool_literals=False,
+    # 函数内的 `static` 是**静态存储期**，丢掉会改程序的数 —— 见 `Dialect.local_storage`。
+    local_storage=frozenset({"static"}),
 )
 
 

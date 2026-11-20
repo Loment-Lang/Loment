@@ -1,8 +1,16 @@
 {
-  "potato": "v2",
+  "potato": "v13",
   "unit": "native_mut",
   "language": "loment",
+  "grammar": "loment",
   "mode": "std",
+  "gc": "gc_manual",
+  "runtime": "no_runtime",
+  "port": "sealed",
+  "vm": "no_vm",
+  "switches": [],
+  "dialects": [],
+  "bodies": [],
   "imports": [],
   "capabilities": [],
   "functions": [
@@ -66,5 +74,22 @@
   ],
   "instances": [],
   "guards": 0,
+  "boundary": {
+    "extern_declared": 0,
+    "extern_calls": 0,
+    "syscalls": 0,
+    "ptr_transforms": 0,
+    "total_sites": 0
+  },
+  "gc_ladder": {
+    "l0": 0,
+    "l1": 0,
+    "l2": 0,
+    "l3": 0,
+    "total_sites": 0
+  },
+  "surfaces": {
+    "total_sites": 0
+  },
   "excluded": []
 }

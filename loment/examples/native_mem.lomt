@@ -1,8 +1,17 @@
 // loment/examples/native_mem.lomt — M15/M18/M19 验证集 (docs/145)
 //
 // 堆分配接口 (bump) + 回绕语义 + 除零 trap + panic。
+//
+// **这里原先还有一句 `free(p)`（2026-10-15 拿掉，issue #165）**：这个文件是
+// `lomentc_test` 里 M15/M18/M21 几条判据共用的夹具，而它们都要**发 Rust 侧**的产物
+// （`lomentc.emit_rust`）—— Rust 后端的运行期只有一个 bump 分配器，兑现不了 `free`，
+// 于是那句源在那边**静默降级成空操作**：同一份源原生侧真回收、Rust 侧静默泄漏。
+// 现在 Rust 侧改为**点名拒**，这个夹具就发不出去了。`free` 不在这份文件的自述目的里
+// （M15 堆分配 / M18 回绕 / M19 panic），所以把它拿掉，而不是把三条判据改成期待报错。
+// 原生侧 `free` 的**真回收**另有判据：`loment_elf_test` 的 `test_free_really_reclaims`。
 
 module native_mem
+choose runtime
 
 fn heap_roundtrip() -> u32 {
     let p: ptr = alloc(16);
@@ -14,7 +23,6 @@ fn heap_roundtrip() -> u32 {
         s = s + load8(p, i);
         i = i + 1;
     }
-    free(p);
     return s;
 }
 

@@ -1,0 +1,975 @@
+// loment/tools/lompicheck.lomt — `loment lompicheck` 的引擎 (docs/222)
+//
+// 它**只读本地两棵树**, 逐文件比内容:
+//
+//   A  开发口 <仓库根>/lompi/                    <->  发布口 <缓存>/            (摊平到根)
+//   B  开发口 <仓库根>/.claude/skills/lompi/     <->  发布口 <缓存>/.claude/skills/lompi/
+//
+// 发布口根上的 `README.md` 是 `loment_publish` **自己写**的, 两边都没有对应物, 一律不看。
+// 这两对 (以及那条 README 例外) 就是 `loment_publish.REPOS["lompi"]` 的 `paths` + `renames`;
+// 那边的判据 (`tools/lompicheck_test.py`) 会核这几条字面量与发布清单仍然一致 —— 引擎这边
+// 引不了 Python 的清单, 所以用一条**判据**当那份"不能漂"的保证。
+//
+// **联网那一半不在这里**: 卡住它的不是 socket —— 派发面里 socket 那一族两个平台都在
+// (docs/234) —— 而是发布口在 GitHub 上, 走 HTTPS, 而工具链里没有 TLS。所以本程序不联网,
+// 也起不了 `git`。要更新那份缓存 clone 时它把该跑的 `git` 命令**打出来**让你跑
+// (够不着的时候 `lompi fetch` 也是这一招, docs/236), 缓存路径默认从 `argv[0]` 推
+// (`<家目录>/.lompi/cache/lompi`)。
+//
+//   loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
+//
+// 退出码: 0 = 一致 / 1 = 不一致 / 2 = 用法错或读不了
+//
+// **为什么不用 `use`**: 这一层要自包含。工具链的 `use` 有几条实测限制 (一个单元只能一条
+// name-form、路径 form 按 CWD 解析、链深上限 8), 而这里要的东西很少 —— 照抄 lompi
+// `lpi_sys` / `lpi_dir` 那套**已在 PE 上跑通**的原语, 比引一门依赖便宜也稳。
+//
+// 命名: 平名字空间, 公开一律 `lpc_*` (与 lompi 那两个模块同一约定)。
+
+module lompicheck
+choose runtime
+
+// ---------------------------------------------------------------- 常量
+//
+// `const` 的初值不许是算式 (SKILL 6.1.8: `const B: u32 = A + 1;` 过得了检查、
+// 在 build 里以一条后端内部消息挂掉), 所以下面凡是"算出来的"都写成**字面量**,
+// 算式留在注释里。
+
+const SYS_READ: u64 = 0;
+const SYS_WRITE: u64 = 1;
+const SYS_CLOSE: u64 = 3;
+const SYS_BRK: u64 = 12;
+const SYS_EXIT: u64 = 60;
+const SYS_GETDENTS64: u64 = 217;
+const SYS_OPENAT: u64 = 257;
+const SYS_NEWFSTATAT: u64 = 262;
+
+const AT_FDCWD: u64 = 18446744073709551516;
+const O_RDONLY: u64 = 0;
+const O_DIRECTORY: u64 = 65536;
+
+const FD_OUT: i64 = 1;
+const FD_ERR: i64 = 2;
+
+/// 目录项收不下、队列满、池子满 —— 一律是 SYS_ERR 那个形状的哨兵。
+const LPC_ERR: u32 = 4294967295;
+
+/// dirent 里的偏移: d_reclen@16(2) d_type@18(1) d_name@19
+const NAME_OFF: u32 = 19;
+const MIN_RECLEN: u32 = 20;
+
+/// d_type: 4 = 目录, 8 = 普通文件 (linux_dirent64 的 DT_*)
+const TYPE_DIR: u32 = 4;
+const TYPE_REG: u32 = 8;
+
+/// stat 的 st_mode@24; S_IFMT = 61440, 目录 = 16384, 普通文件 = 32768
+const ST_MODE_OFF: u32 = 24;
+const IFMT: u32 = 61440;
+const IFDIR: u32 = 16384;
+const IFREG: u32 = 32768;
+
+// ---------------------------------------------------------------- 工作区布局
+//
+// 全部塞在**一块** brk 出来的内存里, 于是整套代码只需要递一个 `ws` 指针。
+// 布局 (字节偏移 = 字面量, 算式在注释里):
+//
+//   状态 10 个 u32 (占 64)   0                 ..   64
+//   队列串池 64 KiB         64                 ..  65600     (65536)
+//   队列项 2048 条 x 24     65600              .. 114752     (49152)
+//   目录批缓冲 8 KiB       114752              .. 122944     (8192)
+//   一个目录的名字池 16 KiB 122944             .. 139328     (16384)
+//   一个目录的条目 512 x 12 139328             .. 145472     (6144)
+//   路径刮擦 4 x 1024      145472              .. 149568     (4096)
+//   比对块 2 x 8 KiB       149568              .. 165952     (16384)
+//   stat 缓冲 256          165952              .. 166208
+const W_ST: u32 = 0;
+const W_QP: u32 = 64;
+const W_QE: u32 = 65600;
+const W_DBUF: u32 = 114752;
+const W_NAMES: u32 = 122944;
+const W_ENTS: u32 = 139328;
+const W_PATH: u32 = 145472;
+const W_FB: u32 = 149568;
+const W_SBUF: u32 = 165952;
+const W_TOTAL: u32 = 166208;
+
+const Q_STRIDE: u32 = 24;
+const QUEUE_CAP: u32 = 2048;
+const QNAMES_CAP: u32 = 65536;
+const ENT_STRIDE: u32 = 12;
+const ENTS_CAP: u32 = 512;
+const NAMES_CAP: u32 = 16384;
+const PATH_CAP: u32 = 1024;
+const DIRBUF_CAP: u64 = 8192;
+const CHUNK: u64 = 8192;
+
+/// 状态块里的偏移 (整块 64 字节, 见布局)。
+const ST_SAME: u32 = 0;
+const ST_DIFF: u32 = 4;
+const ST_MISS: u32 = 8;
+const ST_EXTRA: u32 = 12;
+/// 队列条数与队列串池已用字节 —— **别和 W_QP 撞上**: 池子从 64 起, 状态只占 0..63。
+const ST_QN: u32 = 16;
+const ST_QP: u32 = 20;
+const ST_ZERO: u32 = 64;
+
+/// 每类差异最多**打**这么多条, 其余折成一行计数 —— 上百条差异时输出要还能读。
+/// 计数不受它影响。
+const SHOW_MAX: u32 = 20;
+
+// ---------------------------------------------------------------- 输出
+
+fn lpc_w(fd: i64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let r: i64 = syscall4(SYS_WRITE, fd as u64, (p as u64) + off, n - off);
+        if r <= 0 {
+            return off;
+        }
+        off = off + (r as u64);
+    }
+    return off;
+}
+
+fn lpc_ws(fd: i64, s: str) -> u64 {
+    return lpc_w(fd, str_ptr(s), str_len(s) as u64);
+}
+
+/// 打印一段**没有 NUL 的**字节 (路径在池子里就是这个形状)。
+fn lpc_wb(fd: i64, p: ptr, n: u32) -> u64 {
+    return lpc_w(fd, p, n as u64);
+}
+
+fn lpc_wdec(fd: i64, v: u32) {
+    let buf: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(buf, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(buf, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(buf, i) as u8;
+        let hi: u8 = load8(buf, n - 1 - i) as u8;
+        store8(buf, i, hi);
+        store8(buf, n - 1 - i, lo);
+        i = i + 1;
+    }
+    lpc_w(fd, buf, n as u64);
+}
+
+// ---------------------------------------------------------------- 内存
+
+/// brk 分配 (内建 alloc 只有 64 KiB 静态堆, 装不下这个工作区)。
+///
+/// **判空的写法是 `(p as u64) == 0`, 不是 `p == (0 as ptr)`** —— 参考实现的 codegen
+/// 会为两个 `ptr` 比相等发出 `icmp == ptr` (非法 IR, docs/189 §47), 于是这条判据里
+/// 用参考实现编引擎的那条路直接挂。`loment/selfhost/potato.lomt` 里也是照这条绕的。
+pub fn lpc_alloc(n: u64) -> ptr {
+    let cur: i64 = syscall4(SYS_BRK, 0, 0, 0);
+    if cur <= 0 {
+        return 0 as ptr;
+    }
+    let want: u64 = (((cur as u64) + n + 15) / 16) * 16;
+    let got: i64 = syscall4(SYS_BRK, want, 0, 0);
+    if got < 0 {
+        return 0 as ptr;
+    }
+    return cur as ptr;
+}
+
+fn lpc_zero(dst: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+fn lpc_copy(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+}
+
+/// 小端 u32 读写 (池子里的记录靠它们)。
+fn lpc_l32(p: ptr, off: u32) -> u32 {
+    return load8(p, off) + load8(p, off + 1) * 256 + load8(p, off + 2) * 65536
+        + load8(p, off + 3) * 16777216;
+}
+
+fn lpc_s32(p: ptr, off: u32, v: u32) {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, (v / 16777216) as u8);
+}
+
+fn lpc_bump(ws: ptr, off: u32) {
+    lpc_s32(ws, off, lpc_l32(ws, off) + 1);
+}
+
+// ---------------------------------------------------------------- 路径拼接
+
+/// a + "/" + b, 补 NUL, 返回长度。a 为空时不加分隔符。
+fn lpc_join(dst: ptr, a: ptr, an: u32, b: ptr, bn: u32) -> u32 {
+    lpc_copy(dst, 0, a, 0, an);
+    let o: u32 = an;
+    if an > 0 {
+        store8(dst, o, 47 as u8);
+        o = o + 1;
+    }
+    lpc_copy(dst, o, b, 0, bn);
+    store8(dst, o + bn, 0 as u8);
+    return o + bn;
+}
+
+fn lpc_join_lit(dst: ptr, a: ptr, an: u32, lit: str) -> u32 {
+    return lpc_join(dst, a, an, str_ptr(lit), str_len(lit));
+}
+
+/// 一段字节是否等于字面量。
+fn lpc_eq_lit(p: ptr, n: u32, lit: str) -> bool {
+    if n != str_len(lit) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(lit, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 目录
+
+fn lpc_reclen(buf: ptr, off: u32) -> u32 {
+    return load8(buf, off + 16) + load8(buf, off + 17) * 256;
+}
+
+fn lpc_dtype(buf: ptr, off: u32) -> u32 {
+    return load8(buf, off + 18);
+}
+
+/// 名字长度。**按 reclen 封顶** —— 记录坏了的时候不封顶就是一路读出缓冲区。
+fn lpc_namelen(buf: ptr, off: u32) -> u32 {
+    let lim: u32 = off + lpc_reclen(buf, off);
+    let l: u32 = 0;
+    let i: u32 = off + NAME_OFF;
+    while i < lim && load8(buf, i) != 0 {
+        l = l + 1;
+        i = i + 1;
+    }
+    return l;
+}
+
+fn lpc_nameptr(buf: ptr, off: u32) -> ptr {
+    return ptr_add(buf, off + NAME_OFF);
+}
+
+/// 下一条记录的偏移; 返回 off 表示到头了 (坏记录也当到头, 不猜)。
+fn lpc_next(buf: ptr, off: u32, n: u32) -> u32 {
+    let r: u32 = lpc_reclen(buf, off);
+    if r < MIN_RECLEN {
+        return off;
+    }
+    let nx: u32 = off + r;
+    if nx > n {
+        return off;
+    }
+    return nx;
+}
+
+fn lpc_isdot(buf: ptr, off: u32) -> bool {
+    let l: u32 = lpc_namelen(buf, off);
+    if l == 1 && load8(buf, off + NAME_OFF) == 46 {
+        return true;
+    }
+    if l == 2 && load8(buf, off + NAME_OFF) == 46 && load8(buf, off + NAME_OFF + 1) == 46 {
+        return true;
+    }
+    return false;
+}
+
+/// 把 path 下的条目收进池子: ents 每条 ENT_STRIDE 字节 (名字偏移/长度/类型),
+/// 名字字节进 names。返回条数; 打不开返回 LPC_ERR。
+///
+/// **"读一批 → 走完 → 再读一批"**: PE 垫片每读一次只给一条记录 (Linux 一次给一批),
+/// 写成"读一次就是全部"会在 PE 上静默丢条目 —— 这正是不许静默的地方。
+/// 收满 ENTS_CAP 也返回 LPC_ERR: 宁可说"读不下"也不给一份少了几条的清单。
+fn lpc_list(path: ptr, dbuf: ptr, names: ptr, ents: ptr) -> u32 {
+    let fd: i64 = syscall4(SYS_OPENAT, AT_FDCWD, path as u64, O_DIRECTORY);
+    if fd < 0 {
+        return LPC_ERR;
+    }
+    let cnt: u32 = 0;
+    let noff: u32 = 0;
+    let n: u32 = 0;
+    let off: u32 = 0;
+    let more: u32 = 1;
+    let bad: u32 = 0;
+    while more == 1 {
+        if off >= n {
+            let r: i64 = syscall4(SYS_GETDENTS64, fd as u64, dbuf as u64, DIRBUF_CAP);
+            if r <= 0 {
+                more = 0;
+            } else {
+                n = r as u32;
+                off = 0;
+            }
+        }
+        if more == 1 && off < n {
+            if !lpc_isdot(dbuf, off) {
+                let ln: u32 = lpc_namelen(dbuf, off);
+                if cnt >= ENTS_CAP || noff + ln > NAMES_CAP {
+                    bad = 1;
+                    more = 0;
+                } else {
+                    let eo: u32 = cnt * ENT_STRIDE;
+                    lpc_s32(ents, eo, noff);
+                    lpc_s32(ents, eo + 4, ln);
+                    lpc_s32(ents, eo + 8, lpc_dtype(dbuf, off));
+                    lpc_copy(names, noff, lpc_nameptr(dbuf, off), 0, ln);
+                    noff = noff + ln;
+                    cnt = cnt + 1;
+                }
+            }
+            if more == 1 {
+                let nx: u32 = lpc_next(dbuf, off, n);
+                if nx == off {
+                    more = 0;
+                } else {
+                    off = nx;
+                }
+            }
+        }
+    }
+    syscall4(SYS_CLOSE, fd as u64, 0, 0);
+    if bad == 1 {
+        return LPC_ERR;
+    }
+    return cnt;
+}
+
+// ---------------------------------------------------------------- 文件
+
+/// stat 的 st_mode; 0 = 不存在 (0 不是合法 mode)。
+fn lpc_mode(path: ptr, sb: ptr) -> u32 {
+    let r: i64 = syscall4(SYS_NEWFSTATAT, AT_FDCWD, path as u64, sb as u64);
+    if r < 0 {
+        return 0;
+    }
+    return lpc_l32(sb, ST_MODE_OFF);
+}
+
+fn lpc_is_dir(path: ptr, sb: ptr) -> bool {
+    return (lpc_mode(path, sb) & IFMT) == IFDIR;
+}
+
+fn lpc_is_file(path: ptr, sb: ptr) -> bool {
+    return (lpc_mode(path, sb) & IFMT) == IFREG;
+}
+
+/// 读到 buf 满或 EOF。**不问大小** —— PE 垫片的 st_size 是垃圾 (lpi_dir 那条实测)。
+fn lpc_read_all(fd: i64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let r: i64 = syscall4(SYS_READ, fd as u64, (buf as u64) + off, cap - off);
+        if r <= 0 {
+            return off;
+        }
+        off = off + (r as u64);
+    }
+    return off;
+}
+
+/// 两个文件内容是否一样。0 = 一样 / 1 = 不一样 / 2 = b 打不开 (发布口缺这个文件)。
+///
+/// 分块比, 所以多大的文件都只吃 2 x CHUNK 内存; 长度不同直接判不同, 不会因为
+/// "前面一样"就放过一个被截断的文件。
+fn lpc_same_file(a: ptr, b: ptr, ba: ptr, bb: ptr) -> u32 {
+    let fa: i64 = syscall4(SYS_OPENAT, AT_FDCWD, a as u64, O_RDONLY);
+    if fa < 0 {
+        return 1;
+    }
+    let fb: i64 = syscall4(SYS_OPENAT, AT_FDCWD, b as u64, O_RDONLY);
+    if fb < 0 {
+        syscall4(SYS_CLOSE, fa as u64, 0, 0);
+        return 2;
+    }
+    let verdict: u32 = 0;
+    let done: u32 = 0;
+    while done == 0 {
+        let na: u64 = lpc_read_all(fa, ba, CHUNK);
+        let nb: u64 = lpc_read_all(fb, bb, CHUNK);
+        if na != nb {
+            verdict = 1;
+            done = 1;
+        } else {
+            let i: u64 = 0;
+            while i < na && verdict == 0 {
+                if load8(ba, i as u32) != load8(bb, i as u32) {
+                    verdict = 1;
+                }
+                i = i + 1;
+            }
+            if na < CHUNK {
+                done = 1;
+            }
+        }
+    }
+    syscall4(SYS_CLOSE, fa as u64, 0, 0);
+    syscall4(SYS_CLOSE, fb as u64, 0, 0);
+    return verdict;
+}
+
+// ---------------------------------------------------------------- 报告
+
+/// 记一类差异并按上限打出来。label 自带尾随空格 (对齐用)。
+fn lpc_report(ws: ptr, label: str, coff: u32, rel: ptr, reln: u32) {
+    let c: u32 = lpc_l32(ws, coff);
+    lpc_s32(ws, coff, c + 1);
+    if c < SHOW_MAX {
+        lpc_ws(FD_OUT, "  ");
+        lpc_ws(FD_OUT, label);
+        lpc_wb(FD_OUT, rel, reln);
+        lpc_ws(FD_OUT, "\n");
+    }
+}
+
+/// 打过上限之后补一行计数 —— 差别上百条时"还有多少"比多打几条重要。
+fn lpc_more(ws: ptr, label: str, coff: u32) {
+    let c: u32 = lpc_l32(ws, coff);
+    if c > SHOW_MAX {
+        lpc_ws(FD_OUT, "  ... and ");
+        lpc_wdec(FD_OUT, c - SHOW_MAX);
+        lpc_ws(FD_OUT, " more ");
+        lpc_ws(FD_OUT, label);
+        lpc_ws(FD_OUT, "\n");
+    }
+}
+
+// ---------------------------------------------------------------- 队列
+
+/// 把 (sdir, ddir, rel) 收进队列。满了返回 false —— **不静默丢**。
+fn lpc_push(ws: ptr, sp: ptr, sn: u32, dp: ptr, dn: u32, rp: ptr, rn: u32) -> bool {
+    let qn: u32 = lpc_l32(ws, W_ST + ST_QN);
+    if qn >= QUEUE_CAP {
+        return false;
+    }
+    let pool: ptr = ptr_add(ws, W_QP);
+    let po: u32 = lpc_l32(ws, W_ST + ST_QP);
+    if po + sn + dn + rn + 3 > QNAMES_CAP {
+        return false;
+    }
+    let eo: u32 = W_QE + qn * Q_STRIDE;
+    lpc_s32(ws, eo + 0, po);
+    lpc_s32(ws, eo + 4, sn);
+    lpc_s32(ws, eo + 8, po + sn + 1);
+    lpc_s32(ws, eo + 12, dn);
+    lpc_s32(ws, eo + 16, po + sn + dn + 2);
+    lpc_s32(ws, eo + 20, rn);
+    lpc_copy(pool, po, sp, 0, sn + 1);
+    lpc_copy(pool, po + sn + 1, dp, 0, dn + 1);
+    lpc_copy(pool, po + sn + dn + 2, rp, 0, rn + 1);
+    lpc_s32(ws, W_ST + ST_QP, po + sn + dn + rn + 3);
+    lpc_s32(ws, W_ST + ST_QN, qn + 1);
+    return true;
+}
+
+// ---------------------------------------------------------------- 走一个目录对
+//
+// 两侧都列一遍:
+//   源侧每个条目  -> 在发布口找对应的那个 (缺 / 内容不同 / 一样)
+//   发布口每个条目 -> 源侧有没有它 (没有就是"多出来的")
+// 于是"缺"和"多"两个方向都盖住, 而且不需要把两边的清单都留在内存里对照。
+
+fn lpc_process(ws: ptr, eo: u32) -> u32 {
+    let pool: ptr = ptr_add(ws, W_QP);
+    let e_s: u32 = lpc_l32(ws, eo + 0);
+    let e_sn: u32 = lpc_l32(ws, eo + 4);
+    let e_d: u32 = lpc_l32(ws, eo + 8);
+    let e_dn: u32 = lpc_l32(ws, eo + 12);
+    let e_r: u32 = lpc_l32(ws, eo + 16);
+    let e_rn: u32 = lpc_l32(ws, eo + 20);
+    let sdir: ptr = ptr_add(pool, e_s);
+    let ddir: ptr = ptr_add(pool, e_d);
+    let reld: ptr = ptr_add(pool, e_r);
+
+    let dbuf: ptr = ptr_add(ws, W_DBUF);
+    let names: ptr = ptr_add(ws, W_NAMES);
+    let ents: ptr = ptr_add(ws, W_ENTS);
+    let sbuf: ptr = ptr_add(ws, W_SBUF);
+    let fba: ptr = ptr_add(ws, W_FB);
+    let fbb: ptr = ptr_add(ws, W_FB + 8192);
+
+    // ---- 源侧
+    let n: u32 = lpc_list(sdir, dbuf, names, ents);
+    if n == LPC_ERR {
+        lpc_ws(FD_ERR, "lompicheck: cannot read directory ");
+        lpc_wb(FD_ERR, sdir, e_sn);
+        lpc_ws(FD_ERR, "\n");
+        return 1;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let xe: u32 = i * ENT_STRIDE;
+        let noff: u32 = lpc_l32(ents, xe);
+        let nl: u32 = lpc_l32(ents, xe + 4);
+        let ty: u32 = lpc_l32(ents, xe + 8);
+        let namep: ptr = ptr_add(names, noff);
+        let sp: ptr = ptr_add(ws, W_PATH);
+        let dp: ptr = ptr_add(ws, W_PATH + PATH_CAP);
+        let rp: ptr = ptr_add(ws, W_PATH + PATH_CAP * 2);
+        let sn: u32 = lpc_join(sp, sdir, e_sn, namep, nl);
+        let dn: u32 = lpc_join(dp, ddir, e_dn, namep, nl);
+        let rn: u32 = lpc_join(rp, reld, e_rn, namep, nl);
+        if ty == TYPE_DIR {
+            if !lpc_push(ws, sp, sn, dp, dn, rp, rn) {
+                lpc_ws(FD_ERR, "lompicheck: out of queue space at ");
+                lpc_wb(FD_ERR, rp, rn);
+                lpc_ws(FD_ERR, "\n");
+                return 1;
+            }
+        } else {
+            if ty == TYPE_REG {
+                // 发布口根上的 README.md 是发布工具自己写的 (两边都没有对应物)。
+                if !(e_rn == 0 && lpc_eq_lit(namep, nl, "README.md")) {
+                    let res: u32 = lpc_same_file(sp, dp, fba, fbb);
+                    if res == 0 {
+                        lpc_bump(ws, ST_SAME);
+                    } else {
+                        if res == 2 {
+                            lpc_report(ws, "missing  ", ST_MISS, rp, rn);
+                        } else {
+                            lpc_report(ws, "differs  ", ST_DIFF, rp, rn);
+                        }
+                    }
+                }
+            } else {
+                lpc_report(ws, "odd-type ", ST_DIFF, rp, rn);
+            }
+        }
+        i = i + 1;
+    }
+
+    // ---- 发布口侧 (只看"多出来的")
+    let m: u32 = lpc_list(ddir, dbuf, names, ents);
+    if m == LPC_ERR {
+        if e_rn == 0 {
+            lpc_ws(FD_ERR, "lompicheck: cannot read the outlet directory ");
+            lpc_wb(FD_ERR, ddir, e_dn);
+            lpc_ws(FD_ERR, "\n");
+            return 1;
+        }
+        // 发布口少了这一层目录不算错: 源侧那一遍已经把底下每个文件报成 missing 了。
+        return 0;
+    }
+    let j: u32 = 0;
+    while j < m {
+        let ye: u32 = j * ENT_STRIDE;
+        let noff2: u32 = lpc_l32(ents, ye);
+        let nl2: u32 = lpc_l32(ents, ye + 4);
+        let ty2: u32 = lpc_l32(ents, ye + 8);
+        let namep2: ptr = ptr_add(names, noff2);
+        let sp2: ptr = ptr_add(ws, W_PATH);
+        let rp2: ptr = ptr_add(ws, W_PATH + PATH_CAP);
+        let sn2: u32 = lpc_join(sp2, sdir, e_sn, namep2, nl2);
+        let rn2: u32 = lpc_join(rp2, reld, e_rn, namep2, nl2);
+        // 根上的三个例外: README.md 由发布工具写; .git 是那份 clone 自己的;
+        // .claude 属于**另一对** (B 那棵树整棵落在这儿), 不是这一对多出来的。
+        let gen: bool = e_rn == 0 && (lpc_eq_lit(namep2, nl2, "README.md")
+            || lpc_eq_lit(namep2, nl2, ".git")
+            || lpc_eq_lit(namep2, nl2, ".claude"));
+        if !gen {
+            if ty2 == TYPE_DIR {
+                if !lpc_is_dir(sp2, sbuf) {
+                    lpc_report(ws, "extra-dir ", ST_EXTRA, rp2, rn2);
+                }
+            } else {
+                if !lpc_is_file(sp2, sbuf) {
+                    lpc_report(ws, "extra    ", ST_EXTRA, rp2, rn2);
+                }
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 主流程
+
+fn lpc_run(r1: ptr, r1n: u32, r2: ptr, r2n: u32, stale: bool) -> u32 {
+    let ws: ptr = lpc_alloc(W_TOTAL as u64);
+    if (ws as u64) == 0 {
+        lpc_ws(FD_ERR, "lompicheck: cannot allocate the workspace\n");
+        return 2;
+    }
+    lpc_zero(ws, ST_ZERO);          // 只清状态块: 池子里的东西都是写过的
+
+    // 四条路径: 源 A <根>/lompi, 源 B <根>/.claude/skills/lompi, 发布口根, 发布口 B。
+    let sr: ptr = lpc_alloc(1024);
+    let sy: ptr = lpc_alloc(1024);
+    let od: ptr = lpc_alloc(1024);
+    let ob: ptr = lpc_alloc(1024);
+    if (sr as u64) == 0 || (sy as u64) == 0 || (od as u64) == 0 || (ob as u64) == 0 {
+        lpc_ws(FD_ERR, "lompicheck: cannot allocate the path buffers\n");
+        return 2;
+    }
+    let sn: u32 = lpc_join_lit(sr, r1, r1n, "/lompi");
+    let syn: u32 = lpc_join_lit(sy, r1, r1n, "/.claude/skills/lompi");
+    lpc_copy(od, 0, r2, 0, r2n);
+    store8(od, r2n, 0 as u8);
+    let odn: u32 = r2n;
+    let obn: u32 = lpc_join_lit(ob, r2, r2n, "/.claude/skills/lompi");
+
+    lpc_ws(FD_OUT, "lompicheck: the lompi publish outlet against the loment source\n");
+    lpc_ws(FD_OUT, "  source  ");
+    lpc_wb(FD_OUT, r1, r1n);
+    lpc_ws(FD_OUT, "\n  outlet  ");
+    lpc_wb(FD_OUT, r2, r2n);
+    lpc_ws(FD_OUT, "\n");
+    if stale {
+        lpc_ws(FD_OUT, "  note: `git` could not refresh the cached outlet; this may be an old copy\n");
+    }
+
+    let empty: ptr = lpc_alloc(4);
+    store8(empty, 0, 0 as u8);
+    if !lpc_push(ws, sr, sn, od, odn, empty, 0) {
+        lpc_ws(FD_ERR, "lompicheck: cannot seed the queue\n");
+        return 2;
+    }
+    if !lpc_push(ws, sy, syn, ob, obn, str_ptr(".claude/skills/lompi"), 20) {
+        lpc_ws(FD_ERR, "lompicheck: cannot seed the queue\n");
+        return 2;
+    }
+
+    // 条件里**每次都重读**队列条数: 走一个目录会往里加子目录, 只读一次就只走根那一层。
+    let i: u32 = 0;
+    while i < lpc_l32(ws, W_ST + ST_QN) {
+        let rc: u32 = lpc_process(ws, W_QE + i * Q_STRIDE);
+        if rc != 0 {
+            return 2;
+        }
+        i = i + 1;
+    }
+
+    let same: u32 = lpc_l32(ws, W_ST + ST_SAME);
+    let diff: u32 = lpc_l32(ws, W_ST + ST_DIFF);
+    let miss: u32 = lpc_l32(ws, W_ST + ST_MISS);
+    let extra: u32 = lpc_l32(ws, W_ST + ST_EXTRA);
+    if diff == 0 && miss == 0 && extra == 0 {
+        lpc_ws(FD_OUT, "[OK] the outlet is in step with the source (");
+        lpc_wdec(FD_OUT, same);
+        lpc_ws(FD_OUT, " file(s) identical)\n");
+        return 0;
+    }
+
+    lpc_more(ws, "differing", ST_DIFF);
+    lpc_more(ws, "missing", ST_MISS);
+    lpc_more(ws, "extra", ST_EXTRA);
+    lpc_ws(FD_OUT, "[BAD] the outlet is NOT in step with the source\n  ");
+    lpc_wdec(FD_OUT, diff);
+    lpc_ws(FD_OUT, " differ, ");
+    lpc_wdec(FD_OUT, miss);
+    lpc_ws(FD_OUT, " missing, ");
+    lpc_wdec(FD_OUT, extra);
+    lpc_ws(FD_OUT, " extra, ");
+    lpc_wdec(FD_OUT, same);
+    lpc_ws(FD_OUT, " identical\n");
+    lpc_ws(FD_OUT, "  The outlet is written whole by `tools/loment_publish.py --push lompi`\n");
+    lpc_ws(FD_OUT, "  from a loment checkout -- nobody edits it, and nothing in your tree\n");
+    lpc_ws(FD_OUT, "  can fix it. Please open an issue so the maintainers notice:\n");
+    lpc_ws(FD_OUT, "      https://github.com/Loment-Lang/lompi/issues/new\n");
+    return 1;
+}
+
+// ---------------------------------------------------------------- 入口
+
+// ---------------------------------------------------------------- 命令入口 (docs/223)
+
+/// 这条单元注册的命令名（`docs/223` 形态 A）：编出来的产物因此叫 `loment-lompicheck`
+/// —— 放上 `PATH` 就有一条 `loment lompicheck`。
+///
+/// 名字在**语法**里（块那种写法），不再是从函数体里**扫**出来的一个字符串 ——
+/// 这一层原先写的是 `pub fn loment_command() -> str { return "lompicheck"; }`，
+/// 名字与实现分在两处；`docs/223` §2 的块把它合成一处。
+register lompicheck {
+
+    /// 命令体（`docs/223` §3.2）。**不自己写 `_start`** —— 工具链生成的入口读
+    /// `/proc/self/cmdline`、数出字段数，把那一整块与个数交到这里。
+    ///
+    ///     loment lompicheck [--source DIR] [--outlet DIR] [--refresh]
+    ///
+    /// `--source` 默认**当前目录**（在 loment 检出里跑就是它）；`--outlet` 默认从 `argv[0]`
+    /// 推出来 —— 与 `lompi` 推它的全局根**同一条规矩**：程序在哪个家目录下，缓存就在那儿。
+    ///
+    /// **拉取那一半不在这个程序里**：PE 运行时没有 socket（`docs/222` §1），Loment 起不了
+    /// `git`。所以需要更新缓存时它**把该跑的命令打出来**让你跑 —— `lompi fetch` 对同一个
+    /// 局面用的就是这一招。
+    pub fn command_main(argv: ptr, argc: u32) -> u32 {
+        let m: u32 = lpc_cmdline_len(argv, argc);
+        let srcb: ptr = lpc_alloc(PATH_CAP as u64);
+        let outb: ptr = lpc_alloc(PATH_CAP as u64);
+        if (srcb as u64) == 0 || (outb as u64) == 0 {
+            lpc_ws(FD_ERR, "lompicheck: out of memory\n");
+            return 2;
+        }
+        lpc_put_lit(srcb, ".");
+        let a0: u64 = lpc_arg_at(argv, m, 0);
+        lpc_outlet_of(argv, lpc_arg_off(a0), lpc_arg_len(a0), outb);
+        let want_refresh: u32 = 0;
+        let i: u32 = 1;
+        while i < argc {
+            let a: u64 = lpc_arg_at(argv, m, i);
+            let ap: ptr = ptr_add(argv, lpc_arg_off(a));
+            let an: u32 = lpc_arg_len(a);
+            if (lpc_eq_lit(ap, an, "--source") || lpc_eq_lit(ap, an, "--outlet")) && i + 1 < argc {
+                let b: u64 = lpc_arg_at(argv, m, i + 1);
+                // **不用 `if` 表达式** —— 语言里 `if` 是语句（与 `match` 的臂体是块同一条），
+                // 参考实现直接报 `期望 ;，得到 …`。
+                let dst: ptr = srcb;
+                if !lpc_eq_lit(ap, an, "--source") {
+                    dst = outb;
+                }
+                let bl: u32 = lpc_arg_len(b);
+                lpc_copy(dst, 0, ptr_add(argv, lpc_arg_off(b)), 0, bl);
+                store8(dst, bl, 0 as u8);
+                i = i + 1;
+            } else if lpc_eq_lit(ap, an, "--refresh") {
+                want_refresh = 1;
+            } else if lpc_eq_lit(ap, an, "-h") || lpc_eq_lit(ap, an, "--help") {
+                lpc_usage();
+                return 0;
+            } else {
+                lpc_ws(FD_ERR, "lompicheck: unknown option ");
+                lpc_wb(FD_ERR, ap, an);
+                lpc_ws(FD_ERR, "\n");
+                lpc_usage();
+                return 2;
+            }
+            i = i + 1;
+        }
+        let srcn: u32 = lpc_strlen(srcb);
+        let outn: u32 = lpc_strlen(outb);
+        if outn == 0 {
+            lpc_ws(FD_ERR, "lompicheck: cannot tell where the outlet clone is -- pass --outlet DIR\n");
+            lpc_ws(FD_ERR, "  (the default is derived from this program's own path, the way lompi derives its root; that failed here)\n");
+            return 2;
+        }
+        if want_refresh == 1 {
+            lpc_print_refresh(outb, outn);
+            return 0;
+        }
+        // lpc_run 的最后一个参数是「这份缓存可能是旧的」那句提示 —— 缓存什么时候刷新
+        // 由 `--refresh` 打印出来的那条命令决定，这个程序自己判断不了，所以恒 false。
+        return lpc_run(srcb, srcn, outb, outn, false);
+    }
+}
+
+/// 命令行的字节长度。**命令体拿到的是 (整块 cmdline, 字段数)，没有长度**
+/// （入口签名是固定的，`docs/223` §3.2），所以自己数到第 `argc` 个 NUL。
+fn lpc_cmdline_len(buf: ptr, argc: u32) -> u32 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    while f < argc {
+        if load8(buf, i) == 0 {
+            f = f + 1;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn lpc_strlen(p: ptr) -> u32 {
+    let n: u32 = 0;
+    while load8(p, n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn lpc_put_lit(dst: ptr, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+/// 发布口那个库的地址。**与 `loment_publish.REPOS["lompi"]["repo"]` 同源** ——
+/// `tools/lompicheck_test.py` 有一条判据把这两处钉在一起（写死在源码里是没办法：
+/// 这个程序引不了 Python 的发布清单，而且 Loment **没有字符串常量**，只能写成函数）。
+fn lpc_outlet_url() -> str {
+    return "https://github.com/Loment-Lang/lompi";
+}
+
+/// 写一行帮助。**纯 ASCII 英文**：与 `loment` / `lompi` 两个 CLI 同一条规矩
+/// （PE 把字节直接写进控制台，936 代码页下中文是乱码，SKILL §6.1.12）。
+fn lpc_usage() {
+    lpc_ws(FD_OUT, "usage: loment lompicheck [--source DIR] [--outlet DIR] [--refresh]\n");
+    lpc_ws(FD_OUT, "  --source DIR   the loment checkout to compare (default: current directory)\n");
+    lpc_ws(FD_OUT, "  --outlet DIR   the clone of the publish outlet (default: from argv[0])\n");
+    lpc_ws(FD_OUT, "  --refresh      print the git command that updates the outlet clone\n");
+}
+
+/// **拉取那一半**（`docs/222` §1）：本程序联不了网，所以把该跑的 git 命令打出来。
+/// 外面的单引号是刻意选的 —— Loment 的转义集里没有 `\'`，用双引号就得写成 `\\"`，
+/// 而这条路径上每多一层转义就多一次能和自举侧分叉的机会。
+fn lpc_print_refresh(outlet: ptr, on: u32) {
+    lpc_ws(FD_OUT, "# the outlet clone: ");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "\n");
+    lpc_ws(FD_OUT, "# this program cannot fetch (the PE runtime has no socket) -- run one of:\n");
+    lpc_ws(FD_OUT, "git clone --depth 1 -c core.autocrlf=false -c core.eol=lf ");
+    lpc_ws(FD_OUT, lpc_outlet_url());
+    lpc_ws(FD_OUT, " '");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "'\n");
+    lpc_ws(FD_OUT, "# or, if it is already there:\n");
+    lpc_ws(FD_OUT, "git -C '");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "' fetch --depth 1 origin main && git -C '");
+    lpc_wb(FD_OUT, outlet, on);
+    lpc_ws(FD_OUT, "' reset --hard FETCH_HEAD\n");
+}
+
+/// 从 `argv[0]` 推出发布口缓存的位置：**与 `lompi` 推它的全局根同一条规矩** ——
+/// 程序放在哪个家目录下，缓存就在那儿。认得 `\Users\<名>\`、`/home/<名>/`、`/Users/<名>/`。
+///
+/// **为什么不用环境变量**：PE 运行时没有 `getenv`，`/proc/self/environ` 也读不到
+/// （`lompi` 的 SKILL 专门记过这条）。`argv[0]` 是唯一定位得了的东西。
+/// 推不出来就把 `dst` 留成空串 —— 调用方据此让你用 `--outlet` 指明。
+fn lpc_outlet_of(argv: ptr, a0off: u32, a0len: u32, dst: ptr) -> u32 {
+    let home: u32 = lpc_home_len(argv, a0off, a0len);
+    if home == 0 {
+        store8(dst, 0, 0 as u8);
+        return 0;
+    }
+    lpc_copy(dst, 0, ptr_add(argv, a0off), 0, home);
+    store8(dst, home, 0 as u8);
+    // `lpc_join_lit` 自己会补一个分隔符 —— 这里再写一个就成了 `hooya//.lompi/...`
+    // （实测就是这样，路径难看还不一定打不开）。
+    return lpc_join_lit(dst, dst, home, ".lompi/cache/lompi");
+}
+
+/// `argv[0]` 里家目录那一段的长度（到**下一个路径分隔符之前**为止），0 = 认不出来。
+/// 92 = `\`、47 = `/`（两个分隔符都认，Windows 与 POSIX 同一份代码）。
+fn lpc_home_len(b: ptr, off: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let mk: u32 = lpc_marker_len(b, off + i, n - i);
+        if mk > 0 {
+            let j: u32 = i + mk;
+            while j < n && load8(b, off + j) != 92 && load8(b, off + j) != 47 {
+                j = j + 1;
+            }
+            if j < n {
+                return j;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 三个"家目录"标记之一在 `p[off..]` 处的话返回它的长度，否则 0。
+fn lpc_marker_len(p: ptr, off: u32, rem: u32) -> u32 {
+    // `\\Users\\`（`#33`）：原先写的是 `"\Users\\"`，靠"未知转义取原字符"的兜底在跑 ——
+    // 它的值其实是 `Users\`，**少了开头那个反斜杠**，所以这个标记从来没匹配对过。
+    let a: u32 = lpc_prefix_lit(p, off, rem, "\\Users\\");
+    if a > 0 {
+        return a;
+    }
+    let b: u32 = lpc_prefix_lit(p, off, rem, "/home/");
+    if b > 0 {
+        return b;
+    }
+    return lpc_prefix_lit(p, off, rem, "/Users/");
+}
+
+/// `p[off..off+len(lit)]` 与字面量逐字节相同的话返回它的长度，否则 0。
+fn lpc_prefix_lit(p: ptr, off: u32, rem: u32, lit: str) -> u32 {
+    let ln: u32 = str_len(lit);
+    if rem < ln {
+        return 0;
+    }
+    let q: u32 = 0;
+    while q < ln {
+        if load8(p, off + q) != str_byte(lit, q) {
+            return 0;
+        }
+        q = q + 1;
+    }
+    return ln;
+}
+
+// ---- argv: /proc/self/cmdline 是一串 NUL 结尾的字段 (PE 运行时也会合成它)
+
+fn lpc_arg_count(buf: ptr, m: u32) -> u32 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if s < m {
+        f = f + 1;
+    }
+    return f;
+}
+
+/// 第 n 个字段: (起点 << 32) | 长度。0 = 没有。
+fn lpc_arg_at(buf: ptr, m: u32, n: u32) -> u64 {
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == n {
+                hit = (s as u64) * 4294967296 + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    if f == n && s < m {
+        hit = (s as u64) * 4294967296 + ((m - s) as u64);
+    }
+    return hit;
+}
+
+fn lpc_arg_off(av: u64) -> u32 {
+    return (av >> 32) as u32;
+}
+
+fn lpc_arg_len(av: u64) -> u32 {
+    return (av % 4294967296) as u32;
+}
+
+fn lpc_arg_eq(buf: ptr, av: u64, lit: str) -> bool {
+    if av == 0 {
+        return false;
+    }
+    return lpc_eq_lit(ptr_add(buf, lpc_arg_off(av)), lpc_arg_len(av), lit);
+}

@@ -1,0 +1,735 @@
+// internet/tls.lomt — TLS 1.3 的客户端内核：记录层 + 握手数据结构
+//
+// 为什么标准库要有它: store 里已经有 AEAD（`std/aead`）、X25519（`std/x25519`）、
+// Ed25519（`std/ed25519`）、HKDF（`std/kdf`）与 DER（`std/asn1`），但**没有一件东西
+// 把它们按 TLS 1.3 的规矩拼起来** —— 记录层怎么封、握手头怎么排、HKDF-Expand-Label
+// 的 HkdfLabel 长什么样、CertificateVerify 到底签哪串字节。这一层就是那些规矩。
+//
+// 范围（刻意划窄，写死在这里）:
+//   * 套件只有 **TLS_CHACHA20_POLY1305_SHA256（0x1303）**；
+//   * 密钥交换只有 **x25519**；
+//   * 证书只有 **Ed25519 叶子证书**（RSA / ECDSA 证书没有做）；
+//   * 不做 session ticket、0-RTT、HelloRetryRequest、post-handshake auth；
+//   * **不声称与真实服务器互通**：这里是记录/握手的算术与解析，靠自检与
+//     `loment_crypto_test` 的向量判据验证，不靠打真连接。
+//
+// 一条容易写错的规矩: 记录层的 nonce 不是 IV 本身 —— 它是 `iv XOR 序号`，
+// 序号按**大端**铺在末尾 8 字节。写错这里，第一条记录能过、第二条起全部解不开。
+//
+// 命名: 公开 tls_*, 内部 tq_*。自检 test_tls_*。
+
+module tls
+
+use aead
+use ed25519
+use kdf
+use sha256
+use asn1
+
+pub const TLS_REC_CCS: u32 = 20;
+pub const TLS_REC_ALERT: u32 = 21;
+pub const TLS_REC_HANDSHAKE: u32 = 22;
+pub const TLS_REC_APPDATA: u32 = 23;
+pub const TLS_HS_CLIENT_HELLO: u32 = 1;
+pub const TLS_HS_SERVER_HELLO: u32 = 2;
+pub const TLS_HS_ENCRYPTED_EXTENSIONS: u32 = 8;
+pub const TLS_HS_CERTIFICATE: u32 = 11;
+pub const TLS_HS_CERT_VERIFY: u32 = 15;
+pub const TLS_HS_FINISHED: u32 = 20;
+/// TLS_CHACHA20_POLY1305_SHA256。
+pub const TLS_SUITE: u32 = 4867;
+pub const TLS_REC_HDR: u32 = 5;
+/// x25519 的 named group 号。
+pub const TLS_GROUP_X25519: u32 = 29;
+
+// ---------------------------------------------------------------- 小工具
+
+fn tq_at(b: ptr, off: u32) -> ptr {
+    return ((b as u64) + (off as u64)) as ptr;
+}
+
+fn tq_copy(dst: ptr, doff: u32, src: ptr, soff: u32, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, doff + i, load8(src, soff + i) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn tq_u8(b: ptr, off: u32, v: u32) -> u32 {
+    store8(b, off, (v & 255) as u8);
+    return off + 1;
+}
+
+fn tq_u16(b: ptr, off: u32, v: u32) -> u32 {
+    store8(b, off, ((v >> 8) & 255) as u8);
+    store8(b, off + 1, (v & 255) as u8);
+    return off + 2;
+}
+
+fn tq_u24(b: ptr, off: u32, v: u32) -> u32 {
+    store8(b, off, ((v >> 16) & 255) as u8);
+    store8(b, off + 1, ((v >> 8) & 255) as u8);
+    store8(b, off + 2, (v & 255) as u8);
+    return off + 3;
+}
+
+fn tq_r8(b: ptr, off: u32) -> u32 {
+    return load8(b, off) as u32;
+}
+
+fn tq_r16(b: ptr, off: u32) -> u32 {
+    return (load8(b, off) as u32) * 256 + (load8(b, off + 1) as u32);
+}
+
+fn tq_r24(b: ptr, off: u32) -> u32 {
+    return (load8(b, off) as u32) * 65536 + (load8(b, off + 1) as u32) * 256
+        + (load8(b, off + 2) as u32);
+}
+
+fn tq_str(b: ptr, off: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(b, off + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return off + n;
+}
+
+// ---------------------------------------------------------------- 记录层
+
+/// 每记录 nonce = iv XOR seq（seq 大端铺在末尾 8 字节）。
+fn tq_nonce(nonce: ptr, iv: ptr, seq: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 12 {
+        store8(nonce, i, load8(iv, i) as u8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 8 {
+        let sh: u32 = (7 - i) * 8;
+        let sb: u32 = ((seq >> sh) & 255) as u32;
+        store8(nonce, 4 + i, (load8(nonce, 4 + i) ^ sb) as u8);
+        i = i + 1;
+    }
+    return 12;
+}
+
+/// 封一条记录：5 字节头 + 密文 + 16 字节 tag。返回总字节数。
+pub fn tls_rec_seal(key: ptr, iv: ptr, seq: u64, typ: u32, pt: ptr, n: u32,
+                    out: ptr, sc: ptr) -> u32 {
+    let nonce: ptr = alloc(12);
+    tq_nonce(nonce, iv, seq);
+    store8(out, 0, (typ & 255) as u8);
+    store8(out, 1, 3 as u8);
+    store8(out, 2, 3 as u8);
+    let inner: u32 = n + 16;
+    store8(out, 3, ((inner >> 8) & 255) as u8);
+    store8(out, 4, (inner & 255) as u8);
+    let aead_sc: ptr = alloc(aead_scratch(n));
+    let ct: ptr = tq_at(out, 5);
+    let tag: ptr = tq_at(out, 5 + n);
+    let _r: u32 = aead_seal(key, nonce, out, 5, pt, n, ct, tag, aead_sc);
+    return 5 + n + 16;
+}
+
+/// 开一条记录（rec 是完整记录）。返回明文长度；-1 标签不符；-2 头不对。
+pub fn tls_rec_open(key: ptr, iv: ptr, seq: u64, rec: ptr, n: u32,
+                    out: ptr, sc: ptr) -> i64 {
+    if n < 21 {
+        return 0 as i64 - 2;
+    }
+    let typ: u32 = tq_r8(rec, 0);
+    if typ < 20 || typ > 23 {
+        return 0 as i64 - 2;
+    }
+    if tq_r8(rec, 1) != 3 || tq_r8(rec, 2) != 3 {
+        return 0 as i64 - 2;
+    }
+    let inner: u32 = tq_r16(rec, 3);
+    if inner + 5 != n || inner < 16 {
+        return 0 as i64 - 2;
+    }
+    let ptlen: u32 = inner - 16;
+    let nonce: ptr = alloc(12);
+    tq_nonce(nonce, iv, seq);
+    let aead_sc: ptr = alloc(aead_scratch(ptlen));
+    let ct: ptr = tq_at(rec, 5);
+    let tag: ptr = tq_at(rec, 5 + ptlen);
+    let bad: u32 = aead_open(key, nonce, rec, 5, ct, ptlen, tag, out, aead_sc);
+    if bad != 0 {
+        return 0 as i64 - 1;
+    }
+    return ptlen as i64;
+}
+
+// ---------------------------------------------------------------- HKDF-Expand-Label
+
+/// `tls_expand_label` 的 sc 需要这么多字节：前 544 是 HMAC-SHA256 的临时区，
+/// 后面是 HKDF-Expand 自己的临时区（kdf_hkdf_scratch(256)）。
+pub fn tls_label_scratch() -> u32 {
+    return 544 + (64 + 32 + 256 + 1);
+}
+
+/// TLS 1.3 的 HKDF-Expand-Label。
+/// HkdfLabel = u16(outn) || u8(len("tls13 "+label)) || "tls13 "+label || u8(cn) || context。
+pub fn tls_expand_label(secret: ptr, label: str, context: ptr, cn: u32, out: ptr,
+                        outn: u32, sc: ptr) -> u32 {
+    let info: ptr = alloc(512);
+    let off: u32 = 0;
+    off = tq_u16(info, off, outn);
+    let ln: u32 = str_len(label) + 6;
+    off = tq_u8(info, off, ln);
+    off = tq_str(info, off, "tls13 ");
+    off = tq_str(info, off, label);
+    off = tq_u8(info, off, cn);
+    let _c: u32 = tq_copy(info, off, context, 0, cn);
+    let info_len: u32 = off + cn;
+    let hmac_sc: ptr = sc;
+    let sbuf: ptr = tq_at(sc, 544);
+    kdf_hkdf_expand(secret, info, 0, info_len, out, outn, hmac_sc, sbuf);
+    return outn;
+}
+
+/// 派生一个 32 字节的 secret（traffic secret / finished key 都用这条）。
+pub fn tls_derive_secret(secret: ptr, label: str, transcript_hash: ptr,
+                         out: ptr, sc: ptr) -> u32 {
+    return tls_expand_label(secret, label, transcript_hash, 32, out, 32, sc);
+}
+
+// ---------------------------------------------------------------- 握手头
+
+/// 4 字节握手头（type + u24 长度）+ body。装不下返回 0。
+pub fn tls_hs_msg(buf: ptr, cap: u32, typ: u32, body: ptr, bn: u32) -> u32 {
+    if bn + 4 > cap {
+        return 0;
+    }
+    store8(buf, 0, (typ & 255) as u8);
+    store8(buf, 1, ((bn >> 16) & 255) as u8);
+    store8(buf, 2, ((bn >> 8) & 255) as u8);
+    store8(buf, 3, (bn & 255) as u8);
+    let _c: u32 = tq_copy(buf, 4, body, 0, bn);
+    return bn + 4;
+}
+
+pub fn tls_hs_type(buf: ptr) -> u32 {
+    return tq_r8(buf, 0);
+}
+
+pub fn tls_hs_len(buf: ptr) -> u32 {
+    return tq_r24(buf, 1);
+}
+
+pub fn tls_hs_body(buf: ptr) -> ptr {
+    return tq_at(buf, 4);
+}
+
+// ---------------------------------------------------------------- ClientHello
+
+fn tq_ext(buf: ptr, off: u32, typ: u32, body_len: u32) -> u32 {
+    let p: u32 = tq_u16(buf, off, typ);
+    let q: u32 = tq_u16(buf, p, body_len);
+    return q;
+}
+
+/// 建一个 ClientHello（含 4 字节握手头）。返回总长度；装不下返回负数。
+pub fn tls_client_hello(out: ptr, cap: u32, host: ptr, hostn: u32, pubkey: ptr,
+                        random: ptr, sc: ptr) -> i64 {
+    if hostn > 255 {
+        return 0 as i64 - 2;
+    }
+    let body: ptr = alloc(1024);
+    let off: u32 = 0;
+    off = tq_u16(body, off, 771);            // legacy_version 0x0303
+    let _r: u32 = tq_copy(body, off, random, 0, 32);
+    off = off + 32;
+    off = tq_u8(body, off, 0);               // 空 session id
+    off = tq_u16(body, off, 2);              // 套件列表长度
+    off = tq_u16(body, off, TLS_SUITE);
+    off = tq_u8(body, off, 1);               // 压缩方法
+    off = tq_u8(body, off, 0);
+    let ext_len_at: u32 = off;
+    off = tq_u16(body, off, 0);              // 扩展总长占位
+    let ext_start: u32 = off;
+
+    // server_name (0)
+    off = tq_ext(body, off, 0, hostn + 5);
+    off = tq_u16(body, off, hostn + 3);
+    off = tq_u8(body, off, 0);
+    off = tq_u16(body, off, hostn);
+    let _h: u32 = tq_copy(body, off, host, 0, hostn);
+    off = off + hostn;
+
+    // supported_versions (43)
+    off = tq_ext(body, off, 43, 3);
+    off = tq_u8(body, off, 2);
+    off = tq_u16(body, off, 772);            // 0x0304
+
+    // key_share (51): 一个 x25519 共享
+    off = tq_ext(body, off, 51, 38);
+    off = tq_u16(body, off, 36);
+    off = tq_u16(body, off, TLS_GROUP_X25519);
+    off = tq_u16(body, off, 32);
+    let _k: u32 = tq_copy(body, off, pubkey, 0, 32);
+    off = off + 32;
+
+    // signature_algorithms (13): 只有 ed25519 (0x0807)
+    off = tq_ext(body, off, 13, 4);
+    off = tq_u16(body, off, 2);
+    off = tq_u16(body, off, 2055);
+
+    // ALPN (16): h2 + http/1.1 —— 名单 12 字节，扩展体 2 + 12 = 14。
+    off = tq_ext(body, off, 16, 14);
+    off = tq_u16(body, off, 12);
+    off = tq_u8(body, off, 2);
+    off = tq_str(body, off, "h2");
+    off = tq_u8(body, off, 8);
+    off = tq_str(body, off, "http/1.1");
+
+    let ext_total: u32 = off - ext_start;
+    store8(body, ext_len_at, ((ext_total >> 8) & 255) as u8);
+    store8(body, ext_len_at + 1, (ext_total & 255) as u8);
+    if off + 4 > cap {
+        return 0 as i64 - 1;
+    }
+    let total: u32 = tls_hs_msg(out, cap, TLS_HS_CLIENT_HELLO, body, off);
+    if total == 0 {
+        return 0 as i64 - 1;
+    }
+    return total as i64;
+}
+
+/// 解 ServerHello（含握手头）。写出 random 与服务器 x25519 公钥；0 = 成功。
+pub fn tls_parse_server_hello(msg: ptr, n: u32, out_random: ptr, out_key: ptr) -> i64 {
+    if n < 4 + 2 + 32 + 1 + 2 + 1 + 2 {
+        return 0 as i64 - 2;
+    }
+    if tls_hs_type(msg) != TLS_HS_SERVER_HELLO {
+        return 0 as i64 - 3;
+    }
+    let bn: u32 = tls_hs_len(msg);
+    if bn + 4 > n {
+        return 0 as i64 - 2;
+    }
+    let b: ptr = tls_hs_body(msg);
+    if tq_r16(b, 0) != 771 {
+        return 0 as i64 - 4;
+    }
+    let _r: u32 = tq_copy(out_random, 0, b, 2, 32);
+    let sid_len: u32 = tq_r8(b, 34);
+    let off: u32 = 35 + sid_len;
+    if off + 2 + 1 + 2 > bn {
+        return 0 as i64 - 2;
+    }
+    if tq_r16(b, off) != TLS_SUITE {
+        return 0 as i64 - 5;
+    }
+    let ext_len_at: u32 = off + 3;
+    let ext_end: u32 = ext_len_at + 2 + tq_r16(b, ext_len_at);
+    let p: u32 = ext_len_at + 2;
+    let found: u32 = 0;
+    let q: u32 = p;
+    while q + 4 <= ext_end && q + 4 <= bn {
+        let et: u32 = tq_r16(b, q);
+        let el: u32 = tq_r16(b, q + 2);
+        if et == 51 && el >= 36 && found == 0 {
+            let g: u32 = tq_r16(b, q + 4);
+            let kl: u32 = tq_r16(b, q + 6);
+            if g == TLS_GROUP_X25519 && kl == 32 && q + 40 <= bn {
+                let _k: u32 = tq_copy(out_key, 0, b, q + 8, 32);
+                found = 1;
+            }
+        }
+        q = q + 4 + el;
+    }
+    if found == 0 {
+        return 0 as i64 - 6;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 握手记录
+
+pub fn tls_transcript_scratch() -> u32 {
+    return SHA256_CTX;
+}
+
+pub fn tls_transcript_init(st: ptr) {
+    sha256_init(st);
+}
+
+pub fn tls_transcript_add(st: ptr, d: ptr, n: u32) {
+    sha256_update(st, d, 0, n);
+}
+
+pub fn tls_transcript_hash(st: ptr, out: ptr) {
+    sha256_final(st, out);
+}
+
+// ---------------------------------------------------------------- 证书
+
+/// 从 X.509 证书 DER 里取 Ed25519 公钥。0 = 成功。
+/// 做法：在 tbsCertificate 的子元素里找“长度为 42、内容以 Ed25519 SPKI 前缀开头”的
+/// SEQUENCE —— 按结构下标找对版本号/可选字段太脆，按形状认更稳。
+pub fn tls_cert_ed25519_spki(cert_der: ptr, n: u32, out: ptr) -> i64 {
+    let cert: u32 = 0;
+    let t: u32 = der_tag_at(cert_der, 0, n, cert);
+    if t != 48 {
+        return 0 as i64 - 1;
+    }
+    let tbs: u32 = der_seq_at(cert_der, 0, n, cert, 0);
+    if tbs == DER_NO || tbs == DER_ERR {
+        return 0 as i64 - 2;
+    }
+    let v: u32 = der_seq_first(cert_der, 0, n, tbs);
+    let pfx_ptr: ptr = tls_spki_prefix();
+    let hit: u32 = 0;
+    let cur: u32 = v;
+    while cur != DER_NO && cur != DER_ERR && hit == 0 {
+        let tag: u32 = der_tag_at(cert_der, 0, n, cur);
+        let vl: u32 = der_value_len(cert_der, 0, n, cur);
+        if tag == 48 && vl == 42 {
+            let vo: u32 = der_value_at(cert_der, 0, n, cur);
+            let m: u32 = 0;
+            let ok: u32 = 1;
+            // 前缀那 12 字节里有元素头（30 2a），所以从元素起点比；公钥在值里的第 10 字节。
+            while m < 12 {
+                let want: u32 = tq_r8(cert_der, cur + m);
+                let pfx: u32 = tq_r8(pfx_ptr, m);
+                if want != pfx {
+                    ok = 0;
+                }
+                m = m + 1;
+            }
+            if ok == 1 {
+                let _k: u32 = tq_copy(out, 0, cert_der, vo + 10, 32);
+                hit = 1;
+            }
+        }
+        cur = der_seq_next(cert_der, 0, n, tbs, cur);
+    }
+    if hit == 0 {
+        return 0 as i64 - 3;
+    }
+    return 0;
+}
+
+/// `302a300506032b6570032100` —— X.509 里 Ed25519 SubjectPublicKeyInfo 的头 12 字节，
+/// 后面紧跟 32 字节公钥。
+fn tls_spki_prefix() -> ptr {
+    let b: ptr = alloc(12);
+    store8(b, 0, 48 as u8);
+    store8(b, 1, 42 as u8);
+    store8(b, 2, 48 as u8);
+    store8(b, 3, 5 as u8);
+    store8(b, 4, 6 as u8);
+    store8(b, 5, 3 as u8);
+    store8(b, 6, 43 as u8);
+    store8(b, 7, 101 as u8);
+    store8(b, 8, 112 as u8);
+    store8(b, 9, 3 as u8);
+    store8(b, 10, 33 as u8);
+    store8(b, 11, 0 as u8);
+    return b;
+}
+
+/// 校验 CertificateVerify：签名覆盖 64 个空格 + 上下文串 + 0x00 + 握手哈希。
+/// 0 = 有效；1 = 无效；负数 = 参数问题。
+pub fn tls_cert_verify_ed25519(pubkey: ptr, transcript_hash: ptr, sig: ptr,
+                               sn: u32, sc: ptr) -> i64 {
+    if sn != 64 {
+        return 0 as i64 - 2;
+    }
+    let ctx: str = "TLS 1.3, server CertificateVerify";
+    let cl: u32 = str_len(ctx);
+    let msg: ptr = alloc(160);
+    let i: u32 = 0;
+    while i < 64 {
+        store8(msg, i, 32 as u8);
+        i = i + 1;
+    }
+    let off: u32 = tq_str(msg, 64, ctx);
+    let p: u32 = tq_u8(msg, off, 0);
+    let _h: u32 = tq_copy(msg, p, transcript_hash, 0, 32);
+    let total: u32 = p + 32;
+    let ed_sc: ptr = alloc(ed_scratch());
+    let r: u32 = ed_verify(pubkey, msg, total, sig, ed_sc);
+    if r != 0 {
+        return 1 as i64;
+    }
+    return 0 as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tls_record_round_trip() -> bool {
+    let key: ptr = alloc(32);
+    let iv: ptr = alloc(12);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(key, i, 0 as u8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 12 {
+        store8(iv, i, 0 as u8);
+        i = i + 1;
+    }
+    let pt: ptr = alloc(5);
+    i = 0;
+    while i < 5 {
+        store8(pt, i, (65 + i) as u8);
+        i = i + 1;
+    }
+    let rec: ptr = alloc(64);
+    let sc: ptr = alloc(aead_scratch(64));
+    let n: u32 = tls_rec_seal(key, iv, 5, TLS_REC_APPDATA, pt, 5, rec, sc);
+    if n != 26 {
+        return false;
+    }
+    let out: ptr = alloc(16);
+    let r: i64 = tls_rec_open(key, iv, 5, rec, n, out, sc);
+    if r != 5 as i64 {
+        return false;
+    }
+    let k: u32 = 0;
+    let ok: u32 = 1;
+    while k < 5 {
+        if load8(out, k) != load8(pt, k) {
+            ok = 0;
+        }
+        k = k + 1;
+    }
+    if ok != 1 {
+        return false;
+    }
+    // 篡改 tag → -1
+    store8(rec, n - 1, (load8(rec, n - 1) ^ 1) as u8);
+    let bad: i64 = tls_rec_open(key, iv, 5, rec, n, out, sc);
+    if bad != 0 as i64 - 1 {
+        return false;
+    }
+    // 头不完整 → -2
+    return tls_rec_open(key, iv, 5, rec, 3, out, sc) == 0 as i64 - 2;
+}
+
+fn test_tls_hs_framing() -> bool {
+    let body: ptr = alloc(5);
+    store8(body, 0, 7 as u8);
+    store8(body, 1, 8 as u8);
+    store8(body, 2, 9 as u8);
+    store8(body, 3, 10 as u8);
+    store8(body, 4, 11 as u8);
+    let buf: ptr = alloc(32);
+    let n: u32 = tls_hs_msg(buf, 32, TLS_HS_CERTIFICATE, body, 5);
+    if n != 9 {
+        return false;
+    }
+    if tls_hs_type(buf) != TLS_HS_CERTIFICATE || tls_hs_len(buf) != 5 {
+        return false;
+    }
+    let b: ptr = tls_hs_body(buf);
+    return load8(b, 0) == 7 && load8(b, 4) == 11;
+}
+
+fn test_tls_expand_label() -> bool {
+    let secret: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(secret, i, 1 as u8);
+        i = i + 1;
+    }
+    let out: ptr = alloc(32);
+    let sc: ptr = alloc(tls_label_scratch());
+    let _n: u32 = tls_expand_label(secret, "test", secret, 0, out, 32, sc);
+    // 期望值由一份独立的 Python HKDF-SHA256 算出（HkdfLabel 结构按 RFC 8446 拼）。
+    let want: ptr = alloc(32);
+    store8(want, 0, 194 as u8);
+    store8(want, 1, 155 as u8);
+    store8(want, 2, 49 as u8);
+    store8(want, 3, 99 as u8);
+    store8(want, 4, 54 as u8);
+    store8(want, 5, 156 as u8);
+    store8(want, 6, 108 as u8);
+    store8(want, 7, 56 as u8);
+    store8(want, 8, 101 as u8);
+    store8(want, 9, 251 as u8);
+    store8(want, 10, 41 as u8);
+    store8(want, 11, 18 as u8);
+    store8(want, 12, 17 as u8);
+    store8(want, 13, 183 as u8);
+    store8(want, 14, 136 as u8);
+    store8(want, 15, 174 as u8);
+    store8(want, 16, 5 as u8);
+    store8(want, 17, 183 as u8);
+    store8(want, 18, 43 as u8);
+    store8(want, 19, 232 as u8);
+    store8(want, 20, 37 as u8);
+    store8(want, 21, 103 as u8);
+    store8(want, 22, 247 as u8);
+    store8(want, 23, 135 as u8);
+    store8(want, 24, 131 as u8);
+    store8(want, 25, 218 as u8);
+    store8(want, 26, 28 as u8);
+    store8(want, 27, 131 as u8);
+    store8(want, 28, 0 as u8);
+    store8(want, 29, 16 as u8);
+    store8(want, 30, 202 as u8);
+    store8(want, 31, 242 as u8);
+    let k: u32 = 0;
+    while k < 32 {
+        if load8(out, k) != load8(want, k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn test_tls_client_hello_shape() -> bool {
+    let host: ptr = alloc(11);
+    let hn: u32 = tq_str(host, 0, "example.com");
+    let key: ptr = alloc(32);
+    let rnd: ptr = alloc(32);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(key, i, 171 as u8);
+        store8(rnd, i, i as u8);
+        i = i + 1;
+    }
+    let out: ptr = alloc(512);
+    let n: i64 = tls_client_hello(out, 512, host, hn, key, rnd, out);
+    if n <= 0 as i64 {
+        return false;
+    }
+    if tls_hs_type(out) != TLS_HS_CLIENT_HELLO {
+        return false;
+    }
+    if tls_hs_len(out) + 4 != n as u32 {
+        return false;
+    }
+    let b: ptr = tls_hs_body(out);
+    if tq_r16(b, 0) != 771 || load8(b, 2) != 0 {
+        return false;
+    }
+    // 找到 key_share 里的 group 29 与 0xAB 开头的公钥。
+    let total: u32 = n as u32;
+    let i2: u32 = 0;
+    let found: u32 = 0;
+    while i2 + 4 <= total && found == 0 {
+        if load8(out, i2) == 0 && load8(out, i2 + 1) == 29
+            && load8(out, i2 + 2) == 0 && load8(out, i2 + 3) == 32 {
+            found = 1;
+        }
+        i2 = i2 + 1;
+    }
+    return found == 1;
+}
+
+fn tq_build_server_hello(buf: ptr) -> u32 {
+    let b: ptr = alloc(128);
+    let off: u32 = 0;
+    off = tq_u16(b, off, 771);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(b, off + i, 17 as u8);
+        i = i + 1;
+    }
+    off = off + 32;
+    off = tq_u8(b, off, 0);          // session id
+    off = tq_u16(b, off, TLS_SUITE);
+    off = tq_u8(b, off, 0);          // compression
+    let el_at: u32 = off;
+    off = tq_u16(b, off, 0);
+    let es: u32 = off;
+    off = tq_ext(b, off, 51, 36);
+    off = tq_u16(b, off, TLS_GROUP_X25519);
+    off = tq_u16(b, off, 32);
+    i = 0;
+    while i < 32 {
+        store8(b, off + i, 34 as u8);
+        i = i + 1;
+    }
+    off = off + 32;
+    let et: u32 = off - es;
+    store8(b, el_at, ((et >> 8) & 255) as u8);
+    store8(b, el_at + 1, (et & 255) as u8);
+    return tls_hs_msg(buf, 256, TLS_HS_SERVER_HELLO, b, off);
+}
+
+fn test_tls_parse_server_hello() -> bool {
+    let msg: ptr = alloc(256);
+    let n: u32 = tq_build_server_hello(msg);
+    let rnd: ptr = alloc(32);
+    let key: ptr = alloc(32);
+    let r: i64 = tls_parse_server_hello(msg, n, rnd, key);
+    if r != 0 as i64 {
+        return false;
+    }
+    return load8(rnd, 0) == 17 && load8(key, 0) == 34 && load8(key, 31) == 34;
+}
+
+fn test_tls_cert_spki() -> bool {
+    // SPKI: 30 2a 30 05 06 03 2b 65 70 03 21 00 + 32 字节密钥
+    let spki: ptr = alloc(44);
+    let m: u32 = 0;
+    while m < 12 {
+        store8(spki, m, load8(tls_spki_prefix(), m) as u8);
+        m = m + 1;
+    }
+    m = 0;
+    while m < 32 {
+        store8(spki, 12 + m, (100 + m) as u8);
+        m = m + 1;
+    }
+    // tbs: INTEGER 1 | SEQ(空) | SEQ(空) | SPKI
+    let tbs: ptr = alloc(128);
+    store8(tbs, 0, 2 as u8);
+    store8(tbs, 1, 1 as u8);
+    store8(tbs, 2, 1 as u8);
+    store8(tbs, 3, 48 as u8);
+    store8(tbs, 4, 0 as u8);
+    store8(tbs, 5, 48 as u8);
+    store8(tbs, 6, 0 as u8);
+    let _c: u32 = tq_copy(tbs, 7, spki, 0, 44);
+    let tbs_len: u32 = 7 + 44;
+    let cert: ptr = alloc(160);
+    store8(cert, 0, 48 as u8);
+    store8(cert, 1, (tbs_len + 2) as u8);
+    store8(cert, 2, 48 as u8);
+    store8(cert, 3, tbs_len as u8);
+    let _d: u32 = tq_copy(cert, 4, tbs, 0, tbs_len);
+    let out: ptr = alloc(32);
+    let r: i64 = tls_cert_ed25519_spki(cert, tbs_len + 4, out);
+    if r != 0 as i64 {
+        return false;
+    }
+    return load8(out, 0) == 100 && load8(out, 31) == 131;
+}
+
+fn test_tls_cert_verify_shape() -> bool {
+    // 用一把**真公钥**（由种子导出）配全零签名 —— 必须拒绝。
+    // 不用全零公钥：`y = 0` 是低阶点，全零“签名”在那种退化密钥下确实能过
+    // （Ed25519 的已知边角），拿它当反例会测出实现没毛病、测试有毛病。
+    let seed: ptr = alloc(32);
+    let pk: ptr = alloc(32);
+    let th: ptr = alloc(32);
+    let sig: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(seed, i, 1 as u8);
+        store8(th, i, 0 as u8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 64 {
+        store8(sig, i, 0 as u8);
+        i = i + 1;
+    }
+    let sc: ptr = alloc(ed_scratch());
+    let _p: u32 = ed_public(seed, pk, sc);
+    let r: i64 = tls_cert_verify_ed25519(pk, th, sig, 64, sc);
+    return r == 1 as i64;
+}

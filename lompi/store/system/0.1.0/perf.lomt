@@ -1,0 +1,272 @@
+// system/perf.lomt — perf_event_open: 属性块布局与常见事件
+//
+// 为什么系统工具需要它: `perf_event_open` 的全部输入是一块 **128 字节**的
+// `struct perf_event_attr`，而这块结构体**从 3.x 起一路在长**：新字段追加在后面，
+// 内核靠 `size` 字段判断调用方认识多少。自己拼这块内存时最常见的两个错是
+//   * 字段偏移手抄错一格（比如把 `sample_period` 当 `sample_type`）—— 静默，采到的
+//     是另一个量；
+//   * `size` 写成 `sizeof` 的旧值，新字段被内核忽略 —— 也只表现为"某个开关不生效"。
+//
+// 覆盖: x86-64 Linux 的属性块前 128 字节（`type` / `size` / `config` /
+// `sample_period` / `sample_type` / `read_format` / `flags` / `wakeup_events` /
+// `config1` / `config2` / `branch_sample_type`）、硬件与软件事件的 `config` 取值、
+// `read_format` 位、以及 `perf_event_open` / `read` 两个系统调用。
+//
+// 不做: 采样环形缓冲（`mmap` 那块 aux 区）的解析、`PERF_RECORD_*` 记录的排版、
+// group 的层级语义。这一层只把"要采什么"写成内核认得的字节。
+//
+// 命名: 公开 pf_*, 内部 pfq_*。自检 test_perf_*。
+
+module perf
+
+/// 属性块的字节数（本模块覆盖的那一代 `size`）。
+pub const PF_ATTR_BYTES: u32 = 128;
+
+pub const PF_TYPE_HARDWARE: u32 = 0;
+pub const PF_TYPE_SOFTWARE: u32 = 1;
+pub const PF_TYPE_TRACEPOINT: u32 = 2;
+pub const PF_TYPE_HW_CACHE: u32 = 3;
+pub const PF_TYPE_RAW: u32 = 4;
+pub const PF_TYPE_BREAKPOINT: u32 = 5;
+
+pub const PF_SW_CPU_CLOCK: u64 = 0;
+pub const PF_SW_TASK_CLOCK: u64 = 1;
+pub const PF_SW_PAGE_FAULTS: u64 = 2;
+pub const PF_SW_CONTEXT_SWITCHES: u64 = 3;
+pub const PF_SW_CPU_MIGRATIONS: u64 = 4;
+pub const PF_SW_PAGE_FAULTS_MIN: u64 = 6;
+pub const PF_SW_PAGE_FAULTS_MAJ: u64 = 7;
+pub const PF_SW_ALIGNMENT_FAULTS: u64 = 8;
+pub const PF_SW_EMULATION_FAULTS: u64 = 9;
+
+pub const PF_HW_CPU_CYCLES: u64 = 0;
+pub const PF_HW_INSTRUCTIONS: u64 = 1;
+pub const PF_HW_CACHE_REFERENCES: u64 = 2;
+pub const PF_HW_CACHE_MISSES: u64 = 3;
+pub const PF_HW_BRANCH_INSTRUCTIONS: u64 = 4;
+pub const PF_HW_BRANCH_MISSES: u64 = 5;
+pub const PF_HW_BUS_CYCLES: u64 = 6;
+
+pub const PF_FMT_TOTAL_TIME_ENABLED: u64 = 1;
+pub const PF_FMT_TOTAL_TIME_RUNNING: u64 = 2;
+pub const PF_FMT_ID: u64 = 4;
+pub const PF_FMT_GROUP: u64 = 8;
+pub const PF_FMT_LOST: u64 = 16;
+
+/// `flags` 位（从低到高）。
+pub const PF_FLAG_DISABLED: u64 = 1;
+pub const PF_FLAG_INHERIT: u64 = 2;
+pub const PF_FLAG_PINNED: u64 = 4;
+pub const PF_FLAG_EXCLUSIVE: u64 = 8;
+pub const PF_FLAG_EXCLUDE_USER: u64 = 16;
+pub const PF_FLAG_EXCLUDE_KERNEL: u64 = 32;
+pub const PF_FLAG_EXCLUDE_HV: u64 = 64;
+pub const PF_FLAG_EXCLUDE_IDLE: u64 = 128;
+pub const PF_FLAG_MMAP: u64 = 256;
+pub const PF_FLAG_COMM: u64 = 512;
+pub const PF_FLAG_FREQ: u64 = 1024;
+
+fn pfq_zero(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn pfq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 4;
+}
+
+fn pfq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn pfq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn pfq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn pfq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 清零整块并写上 `size` —— 每个属性块都从这一步开始。
+pub fn pf_attr_begin(buf: ptr) -> u32 {
+    let _z: u32 = pfq_zero(buf, PF_ATTR_BYTES);
+    let _s: u32 = pfq_st32(buf, 4, PF_ATTR_BYTES);
+    return PF_ATTR_BYTES;
+}
+
+pub fn pf_attr_type(buf: ptr, t: u32) -> u32 {
+    return pfq_st32(buf, 0, t);
+}
+
+pub fn pf_attr_size(buf: ptr, size: u32) -> u32 {
+    return pfq_st32(buf, 4, size);
+}
+
+pub fn pf_attr_config(buf: ptr, cfg: u64) -> u32 {
+    return pfq_st64(buf, 8, cfg);
+}
+
+pub fn pf_attr_sample_period(buf: ptr, v: u64) -> u32 {
+    return pfq_st64(buf, 16, v);
+}
+
+pub fn pf_attr_sample_type(buf: ptr, v: u64) -> u32 {
+    return pfq_st64(buf, 24, v);
+}
+
+pub fn pf_attr_read_format(buf: ptr, fmt: u64) -> u32 {
+    return pfq_st64(buf, 32, fmt);
+}
+
+pub fn pf_attr_flags(buf: ptr, bits: u64) -> u32 {
+    return pfq_st64(buf, 40, bits);
+}
+
+pub fn pf_attr_wakeup_events(buf: ptr, n: u32) -> u32 {
+    return pfq_st32(buf, 48, n);
+}
+
+pub fn pf_attr_config1(buf: ptr, v: u64) -> u32 {
+    return pfq_st64(buf, 56, v);
+}
+
+pub fn pf_attr_config2(buf: ptr, v: u64) -> u32 {
+    return pfq_st64(buf, 64, v);
+}
+
+pub fn pf_attr_get_type(buf: ptr) -> u32 {
+    return pfq_ld32(buf, 0);
+}
+
+pub fn pf_attr_get_size(buf: ptr) -> u32 {
+    return pfq_ld32(buf, 4);
+}
+
+pub fn pf_attr_get_config(buf: ptr) -> u64 {
+    return pfq_ld64(buf, 8);
+}
+
+pub fn pf_attr_get_flags(buf: ptr) -> u64 {
+    return pfq_ld64(buf, 40);
+}
+
+/// `perf_event_open(attr, pid, cpu, group_fd, flags)`。
+pub fn pf_event_open(attr: ptr, pid: u32, cpu: u32, group_fd: i64, flags: u64) -> i64 {
+    return syscall6(298, attr as u64, pid as u64, cpu as u64, group_fd as u64, flags);
+}
+
+/// 从计数器 fd 读一个 u64（`read(2)`，不是 `read(3)`）。失败返回 0。
+pub fn pf_read_count(fd: u64) -> u64 {
+    let b: ptr = alloc(8);
+    let r: i64 = syscall4(0, fd, b as u64, 8);
+    if r < 0 {
+        return 0;
+    }
+    return pfq_ld64(b, 0);
+}
+
+pub fn pf_sw_name(cfg: u64, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if cfg == PF_SW_CPU_CLOCK { s = "cpu-clock"; }
+    else if cfg == PF_SW_TASK_CLOCK { s = "task-clock"; }
+    else if cfg == PF_SW_PAGE_FAULTS { s = "page-faults"; }
+    else if cfg == PF_SW_CONTEXT_SWITCHES { s = "context-switches"; }
+    else if cfg == PF_SW_CPU_MIGRATIONS { s = "cpu-migrations"; }
+    else if cfg == PF_SW_PAGE_FAULTS_MIN { s = "minor-faults"; }
+    else if cfg == PF_SW_PAGE_FAULTS_MAJ { s = "major-faults"; }
+    else if cfg == PF_SW_ALIGNMENT_FAULTS { s = "alignment-faults"; }
+    else if cfg == PF_SW_EMULATION_FAULTS { s = "emulation-faults"; }
+    return pfq_put(out, cap, 0, s);
+}
+
+pub fn pf_hw_name(cfg: u64, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if cfg == PF_HW_CPU_CYCLES { s = "cpu-cycles"; }
+    else if cfg == PF_HW_INSTRUCTIONS { s = "instructions"; }
+    else if cfg == PF_HW_CACHE_REFERENCES { s = "cache-references"; }
+    else if cfg == PF_HW_CACHE_MISSES { s = "cache-misses"; }
+    else if cfg == PF_HW_BRANCH_INSTRUCTIONS { s = "branch-instructions"; }
+    else if cfg == PF_HW_BRANCH_MISSES { s = "branch-misses"; }
+    else if cfg == PF_HW_BUS_CYCLES { s = "bus-cycles"; }
+    return pfq_put(out, cap, 0, s);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_perf_attr_offsets() -> bool {
+    let a: ptr = alloc(PF_ATTR_BYTES);
+    let _b: u32 = pf_attr_begin(a);
+    let _t: u32 = pf_attr_type(a, PF_TYPE_SOFTWARE);
+    let _c: u32 = pf_attr_config(a, PF_SW_CPU_CLOCK);
+    let _p: u32 = pf_attr_sample_period(a, 1000);
+    let _r: u32 = pf_attr_read_format(a, 3);
+    let _f: u32 = pf_attr_flags(a, 6);
+    return pf_attr_get_type(a) == PF_TYPE_SOFTWARE
+        && pf_attr_get_size(a) == PF_ATTR_BYTES
+        && pf_attr_get_config(a) == 0
+        && pf_attr_get_flags(a) == 6
+        && pfq_ld64(a, 16) == 1000 as u64
+        && pfq_ld64(a, 32) == 3 as u64
+        && load8(a, 12) == 0;
+}
+
+fn test_perf_attr_begin_zeroes() -> bool {
+    let a: ptr = alloc(PF_ATTR_BYTES);
+    store8(a, 100, 255 as u8);
+    store8(a, 8, 255 as u8);
+    let _b: u32 = pf_attr_begin(a);
+    return load8(a, 100) == 0 && load8(a, 8) == 0 && pf_attr_get_size(a) == 128;
+}
+
+fn test_perf_flags_bits() -> bool {
+    return PF_FLAG_DISABLED == 1 as u64 && PF_FLAG_INHERIT == 2 as u64
+        && PF_FLAG_FREQ == 1024 as u64
+        && PF_FMT_GROUP == 8 as u64 && PF_FMT_LOST == 16 as u64;
+}
+
+fn test_perf_name() -> bool {
+    let o: ptr = alloc(24);
+    let n: u32 = pf_sw_name(PF_SW_CONTEXT_SWITCHES, o, 24);
+    let want: str = "context-switches";
+    return n == str_len(want) && load8(o, 0) == 99 && load8(o, 7) == 115;
+}

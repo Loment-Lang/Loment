@@ -1,0 +1,150 @@
+// windows/wtime.lomt — 时钟与睡眠：tick、高精度计数器、FILETIME、Sleep
+//
+// 为什么标准库要有它: Windows 上"量耗时"要用 `QueryPerformanceCounter`（tick 是
+// 以 `QueryPerformanceFrequency` 为分母的计数），"墙上时间"是 `FILETIME`（自
+// 1601-01-01 起的 100ns 计数，两个 u32 低高拼接）。这两套都不是 Unix 的
+// timespec，抄错一个常数就得到差 369 年的日期。
+//
+// **边界**: 与 `kernel32` 同一条 —— PE 还没有 FFI（#1262）。这里给声明面、单位
+// 换算与 FILETIME 拼接；`wt_unix_seconds` 只做算术，不做时区。
+//
+// 约定:
+//   * FILETIME 是 8 字节：低 u32 在偏移 0、高 u32 在偏移 4；`wt_filetime_u64`
+//     合并成 100ns 计数。
+//   * `Sleep(0)` 是"让出时间片"，不是"睡 0 毫秒"——语义由系统决定。
+//
+// 命名: 公开 wt_*, 内部 wtq_*。自检 test_wtime_*。
+
+module wtime
+
+choose runtime
+choose hosted
+
+/// 1601-01-01 到 1970-01-01 之间的 100ns 个数。
+pub const WT_EPOCH_100NS: u64 = 116444736000000000;
+/// 一秒的 100ns 个数。
+pub const WT_SEC_100NS: u64 = 10000000;
+/// 一毫秒的 100ns 个数。
+pub const WT_MS_100NS: u64 = 10000;
+
+extern fn GetTickCount64() -> u64;
+extern fn QueryPerformanceCounter(out: ptr) -> u32;
+extern fn QueryPerformanceFrequency(out: ptr) -> u32;
+extern fn Sleep(ms: u32);
+extern fn GetSystemTimePreciseAsFileTime(out: ptr) -> u64;
+
+fn wtq_ld32(p: ptr, off: u32) -> u32 {
+    return (load8(p, off) as u32) | ((load8(p, off + 1) as u32) << 8)
+        | ((load8(p, off + 2) as u32) << 16) | ((load8(p, off + 3) as u32) << 24);
+}
+
+fn wtq_st64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+/// 自开机起的毫秒数。
+pub fn wt_tick_ms() -> u64 {
+    return GetTickCount64();
+}
+
+/// 读高精度计数器。成功返回 true。
+pub fn wt_qpc(out: ptr) -> bool {
+    return QueryPerformanceCounter(out) != 0;
+}
+
+/// 读高精度计数器频率（每秒计数）。成功返回 true。
+pub fn wt_qpf(out: ptr) -> bool {
+    return QueryPerformanceFrequency(out) != 0;
+}
+
+/// 从 FILETIME 的两半拼出 100ns 计数。
+pub fn wt_filetime_u64(ft: ptr) -> u64 {
+    let lo: u64 = wtq_ld32(ft, 0) as u64;
+    let hi: u64 = wtq_ld32(ft, 4) as u64;
+    return (hi << 32) | lo;
+}
+
+/// 现在（系统时间）的 100ns 计数，写进调用方的 8 字节缓冲。
+pub fn wt_now_filetime(ft: ptr) -> u64 {
+    GetSystemTimePreciseAsFileTime(ft);
+    return wt_filetime_u64(ft);
+}
+
+/// FILETIME -> Unix 秒（可能为负，所以返回 i64）。
+pub fn wt_unix_seconds(ft100ns: u64) -> i64 {
+    if ft100ns < WT_EPOCH_100NS {
+        return 0 as i64 - ((WT_EPOCH_100NS - ft100ns) / WT_SEC_100NS) as i64;
+    }
+    return ((ft100ns - WT_EPOCH_100NS) / WT_SEC_100NS) as i64;
+}
+
+/// 100ns 计数 -> 毫秒。
+pub fn wt_to_ms(ft100ns: u64) -> u64 {
+    return ft100ns / WT_MS_100NS;
+}
+
+/// 计数器差 -> 微秒（用 `freq` 做分母；freq 为 0 返回 0）。
+pub fn wt_counts_to_us(delta: u64, freq: u64) -> u64 {
+    if freq == 0 as u64 {
+        return 0 as u64;
+    }
+    return (delta * 1000000) / freq;
+}
+
+/// 睡 `ms` 毫秒。
+pub fn wt_sleep_ms(ms: u32) {
+    Sleep(ms);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_wtime_filetime_merge() -> bool {
+    let ft: ptr = alloc(8);
+    wtq_st64(ft, 0, 0 as u64);
+    // lo = 0x89ABCDEF, hi = 0x01234567
+    store8(ft, 0, 239 as u8);
+    store8(ft, 1, 205 as u8);
+    store8(ft, 2, 171 as u8);
+    store8(ft, 3, 137 as u8);
+    store8(ft, 4, 103 as u8);
+    store8(ft, 5, 69 as u8);
+    store8(ft, 6, 35 as u8);
+    store8(ft, 7, 1 as u8);
+    let v: u64 = wt_filetime_u64(ft);
+    if v != 81985529216486895 as u64 {
+        return false;
+    }
+    return true;
+}
+
+fn test_wtime_epoch_arithmetic() -> bool {
+    // 1970-01-01 的 FILETIME 恰好是 116444736000000000。
+    if wt_unix_seconds(WT_EPOCH_100NS) != 0 as i64 {
+        return false;
+    }
+    let one_day: u64 = 86400 as u64 * WT_SEC_100NS;
+    if wt_unix_seconds(WT_EPOCH_100NS + one_day) != 86400 {
+        return false;
+    }
+    return true;
+}
+
+fn test_wtime_units() -> bool {
+    if WT_SEC_100NS != 10000000 as u64 || WT_MS_100NS != 10000 as u64 {
+        return false;
+    }
+    if wt_to_ms(2500 as u64 * WT_MS_100NS) != 2500 as u64 {
+        return false;
+    }
+    if wt_counts_to_us(5 as u64, 0 as u64) != 0 as u64 {
+        return false;
+    }
+    if wt_counts_to_us(100 as u64, 1000000 as u64) != 100 as u64 {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,293 @@
+// world/words.lomt — 整数 -> 英文单词（基数词与序数词）
+//
+// 为什么现实世界需要它: 支票、合同、发票上的金额同时写数字和英文单词；
+// 读屏软件、教育类应用、测试夹具也都需要。英文数字的"规则"其实是一堆例外：
+// eleven/twelve/thirteen、twenty-one 的连字符、序数 first/second/third/fifth。
+//
+// 范围: -999,999,999,999 … 999,999,999,999（万亿以内）。超出返回 0（不写）。
+//
+// 约定: 基数词用连字符连接十位与个位（`twenty-one`），百位与十位之间用空格
+// （`one hundred twenty-one`），不带 `and`。序数词只改最后一个词。
+//
+// 命名: 公开 nw_*, 内部 wd_*。自检 test_words_*。
+
+module words
+
+pub const NW_ERR: u32 = 4294967295;
+
+fn wd_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn wd_one(v: u32) -> str {
+    if v == 0 { return "zero"; }
+    if v == 1 { return "one"; }
+    if v == 2 { return "two"; }
+    if v == 3 { return "three"; }
+    if v == 4 { return "four"; }
+    if v == 5 { return "five"; }
+    if v == 6 { return "six"; }
+    if v == 7 { return "seven"; }
+    if v == 8 { return "eight"; }
+    if v == 9 { return "nine"; }
+    if v == 10 { return "ten"; }
+    if v == 11 { return "eleven"; }
+    if v == 12 { return "twelve"; }
+    if v == 13 { return "thirteen"; }
+    if v == 14 { return "fourteen"; }
+    if v == 15 { return "fifteen"; }
+    if v == 16 { return "sixteen"; }
+    if v == 17 { return "seventeen"; }
+    if v == 18 { return "eighteen"; }
+    return "nineteen";
+}
+
+fn wd_ten(v: u32) -> str {
+    if v == 2 { return "twenty"; }
+    if v == 3 { return "thirty"; }
+    if v == 4 { return "forty"; }
+    if v == 5 { return "fifty"; }
+    if v == 6 { return "sixty"; }
+    if v == 7 { return "seventy"; }
+    if v == 8 { return "eighty"; }
+    return "ninety";
+}
+
+fn wd_below100(v: u32, out: ptr, cap: u32, pos0: u32) -> u32 {
+    let pos: u32 = pos0;
+    if v < 20 {
+        return wd_put(out, cap, pos, wd_one(v));
+    }
+    pos = wd_put(out, cap, pos, wd_ten(v / 10));
+    if v % 10 != 0 {
+        pos = wd_put(out, cap, pos, "-");
+        pos = wd_put(out, cap, pos, wd_one(v % 10));
+    }
+    return pos;
+}
+
+fn wd_below1000(v: u32, out: ptr, cap: u32, pos0: u32) -> u32 {
+    let pos: u32 = pos0;
+    let h: u32 = v / 100;
+    let r: u32 = v % 100;
+    if h > 0 {
+        pos = wd_put(out, cap, pos, wd_one(h));
+        pos = wd_put(out, cap, pos, " hundred");
+        if r > 0 {
+            pos = wd_put(out, cap, pos, " ");
+        }
+    }
+    if r > 0 {
+        pos = wd_below100(r, out, cap, pos);
+    }
+    return pos;
+}
+
+fn wd_scale(i: u32) -> str {
+    if i == 1 { return " thousand"; }
+    if i == 2 { return " million"; }
+    if i == 3 { return " billion"; }
+    if i == 4 { return " trillion"; }
+    return "";
+}
+
+/// 基数词。返回完整长度；超出范围返回 NW_ERR。
+pub fn nw_cardinal(n: i64, out: ptr, cap: u32) -> u32 {
+    let a: u64 = 0 as u64;
+    let pos: u32 = 0;
+    if n == (0 as i64) {
+        return wd_put(out, cap, pos, "zero");
+    }
+    if n < (0 as i64) {
+        pos = wd_put(out, cap, pos, "minus ");
+        a = (0 as i64 - n) as u64;
+    } else {
+        a = n as u64;
+    }
+    if a > 999999999999 as u64 {
+        return NW_ERR;
+    }
+    let g0: u32 = (a % (1000 as u64)) as u32;
+    let g1: u32 = ((a / (1000 as u64)) % (1000 as u64)) as u32;
+    let g2: u32 = ((a / (1000000 as u64)) % (1000 as u64)) as u32;
+    let g3: u32 = ((a / (1000000000 as u64)) % (1000 as u64)) as u32;
+    let g4: u32 = (a / (1000000000000 as u64)) as u32;
+    let wrote: u32 = 0;
+    if g4 > 0 {
+        pos = wd_below1000(g4, out, cap, pos);
+        pos = wd_put(out, cap, pos, wd_scale(4));
+        wrote = 1;
+    }
+    if g3 > 0 {
+        if wrote == 1 {
+            pos = wd_put(out, cap, pos, " ");
+        }
+        pos = wd_below1000(g3, out, cap, pos);
+        pos = wd_put(out, cap, pos, wd_scale(3));
+        wrote = 1;
+    }
+    if g2 > 0 {
+        if wrote == 1 {
+            pos = wd_put(out, cap, pos, " ");
+        }
+        pos = wd_below1000(g2, out, cap, pos);
+        pos = wd_put(out, cap, pos, wd_scale(2));
+        wrote = 1;
+    }
+    if g1 > 0 {
+        if wrote == 1 {
+            pos = wd_put(out, cap, pos, " ");
+        }
+        pos = wd_below1000(g1, out, cap, pos);
+        pos = wd_put(out, cap, pos, wd_scale(1));
+        wrote = 1;
+    }
+    if g0 > 0 {
+        if wrote == 1 {
+            pos = wd_put(out, cap, pos, " ");
+        }
+        pos = wd_below1000(g0, out, cap, pos);
+    }
+    return pos;
+}
+
+fn wd_is_sep(c: u32) -> bool {
+    return c == 32 || c == 45;
+}
+
+/// 序数词：只改最后一个词（twenty-one -> twenty-first）。
+pub fn nw_ordinal(n: i64, out: ptr, cap: u32) -> u32 {
+    let tmp: ptr = alloc(128);
+    let len: u32 = nw_cardinal(n, tmp, 128);
+    if len == NW_ERR {
+        return NW_ERR;
+    }
+    let cut: u32 = 0;
+    let i: u32 = 0;
+    while i < len {
+        if wd_is_sep(load8(tmp, i)) {
+            cut = i + 1;
+        }
+        i = i + 1;
+    }
+    let pos: u32 = 0;
+    let k: u32 = 0;
+    while k < cut {
+        if pos < cap {
+            store8(out, pos, load8(tmp, k) as u8);
+        }
+        pos = pos + 1;
+        k = k + 1;
+    }
+    let wl: u32 = len - cut;
+    let w: ptr = alloc(16);
+    let j: u32 = 0;
+    while j < wl {
+        store8(w, j, load8(tmp, cut + j) as u8);
+        j = j + 1;
+    }
+    store8(w, wl, 0 as u8);
+    return wd_ordinal_tail(out, cap, pos, w);
+}
+
+fn wd_ordinal_tail(out: ptr, cap: u32, pos0: u32, w: ptr) -> u32 {
+    let pos: u32 = pos0;
+    let n: u32 = 0;
+    while load8(w, n) != 0 {
+        n = n + 1;
+    }
+    if n == 3 && load8(w, 0) == 111 && load8(w, 1) == 110 && load8(w, 2) == 101 {
+        return wd_put(out, cap, pos, "first");
+    }
+    if n == 3 && load8(w, 0) == 116 && load8(w, 1) == 119 && load8(w, 2) == 111 {
+        return wd_put(out, cap, pos, "second");
+    }
+    if n == 5 && load8(w, 0) == 116 && load8(w, 1) == 104 && load8(w, 2) == 114
+        && load8(w, 3) == 101 && load8(w, 4) == 101 {
+        return wd_put(out, cap, pos, "third");
+    }
+    if n == 4 && load8(w, 0) == 102 && load8(w, 1) == 105 && load8(w, 2) == 118
+        && load8(w, 3) == 101 {
+        return wd_put(out, cap, pos, "fifth");
+    }
+    if n == 5 && load8(w, 0) == 101 && load8(w, 1) == 105 && load8(w, 2) == 103
+        && load8(w, 3) == 104 && load8(w, 4) == 116 {
+        return wd_put(out, cap, pos, "eighth");
+    }
+    if n == 4 && load8(w, 0) == 110 && load8(w, 1) == 105 && load8(w, 2) == 110
+        && load8(w, 3) == 101 {
+        return wd_put(out, cap, pos, "ninth");
+    }
+    if n == 6 && load8(w, 0) == 116 && load8(w, 1) == 119 && load8(w, 2) == 101
+        && load8(w, 3) == 108 && load8(w, 4) == 118 && load8(w, 5) == 101 {
+        return wd_put(out, cap, pos, "twelfth");
+    }
+    if load8(w, n - 1) == 121 { // y -> ieth
+        let p: u32 = pos;
+        let i: u32 = 0;
+        while i + 1 < n {
+            if p < cap {
+                store8(out, p, load8(w, i) as u8);
+            }
+            p = p + 1;
+            i = i + 1;
+        }
+        return wd_put(out, cap, p, "ieth");
+    }
+    let p2: u32 = pos;
+    let k: u32 = 0;
+    while k < n {
+        if p2 < cap {
+            store8(out, p2, load8(w, k) as u8);
+        }
+        p2 = p2 + 1;
+        k = k + 1;
+    }
+    return wd_put(out, cap, p2, "th");
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_words_cardinal() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = nw_cardinal(123 as i64, o, 128);
+    let want: str = "one hundred twenty-three";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_words_ordinal() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = nw_ordinal(21 as i64, o, 128);
+    let want: str = "twenty-first";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

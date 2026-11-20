@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Loment (Rust surface grammar)",
+  "scopeName": "source.loment.rust",
+  "comment": "一份 Loment 源，文件头写了 `choose write grammar rust` —— 正文是 Rust 写法、语义仍是 Loment（docs/188、docs/285）。这是**严格 Rust 子集**：Tur 的扩展不落在这里。上色借宿主的 `source.rust`（由 Rust 扩展提供）；宿主没装时只有声明那一行着色。",
+  "patterns": [
+    { "include": "source.loment#grammar-decl" },
+    { "include": "source.rust" }
+  ]
+}

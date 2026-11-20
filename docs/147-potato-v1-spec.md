@@ -112,7 +112,7 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
 
 ## 5. 版本化与回放（M51）
 
-- 对象自带版本号；校验器接受 `v0` … **`v10`**，未知版本 = 非法。
+- 对象自带版本号；校验器接受 `v0` … **`v23`**，未知版本 = 非法。
   **版本是"字段集合"的台阶，只往上加** —— 往旧版加必填字段会让既有对象全变非法，而旧版
   是**承诺过能回放**的（本节的最后一条），所以每加一个必填字段就升一版：
 
@@ -129,8 +129,21 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   | `v8` | `gc` | `docs/175` §3.4 |
   | `v9` | `runtime` | `docs/175` §3.6 |
   | `v10` | `gc_ladder` | `docs/210` §3 / §5 |
+  | `v11` | `port` | `docs/222` §4 |
+  | `v12` | `surfaces` | `docs/224` |
+  | `v13` | `vm` | `docs/231` |
+  | `v14` | `net_ladder` | `docs/237` |
+  | `v15` | `lms` | `docs/253` §11.3 |
+  | `v16` | `lspe` | `docs/262` §8 |
+  | `v17` | `lms_levels` | `docs/253` §11.4 |
+  | `v18` | `lms_budgets` | `docs/253` §11.2.1 |
+  | `v19` | `gc_ladder.l0_5` | `docs/210` §2.10 |
+  | `v20` | **`systems`**（六个系统的索引；读者从这里开始读） | `docs/304` |
+  | `v21` | **`gc_control`**（`lgc` 的暂停/恢复/窗口计数 + `manual_collector`） | `docs/309` |
+  | `v22` | **`lifetime`**（`lifetime_no` / `lifetime_auto` / `lifetime_manual`） | `docs/299` §8 |
+  | `v23` | **`fp`**（`no_fp` / `fp`）—— 有没有间接调用边 | `docs/348` |
 
-  台阶是**累积**的：`v10` 要求它下面每一版的字段都在。
+  台阶是**累积**的：`v23` 要求它下面每一版的字段都在。
 
 - **`gc`（v8）**：**回收档**之一 —— `gc_manual`（回收由程序显式做）、`gc_auto`
   （运行期负责回收）、或 `gc_auto_alpha`（**混合**档：静态内存管理 + 动态回收，
@@ -152,17 +165,43 @@ Wrap<Outer<Inner<u32>>>  -> Wrap_Outer__Inner___u32
   **`gc_manual` 不在这一条里**：`runtime` + `gc_manual`（"要运行期、但内存我自己管"）
   是合法档，不许拒。理由见 `docs/175` §3.6。
 
+  **2026-10-10 起这一维是一句保证**（`docs/227`）—— 上面那句"不读源码可判"从
+  **承诺**变成了**断言**：`no_runtime` 的产物里**一定没有**那段运行期，凡会把它拖进来的
+  构造（`/` `%` `alloc` `free` `str_concat` `str_eq` `panic` `guard`）在**这一档下编译期拒**
+  （E022）；`runtime` 反过来**强制**把那段带进产物。**字段形状一个字没动**（不升版、
+  不加字段），变的是这句话的分量；`gc_manual` + `runtime` 那条合法档照旧。
+- **`port`（v11）**：**产物通不通着世界** —— `sealed`（封闭，默认）或 `hosted`（对外）。
+  与 `mode` / `gc` / `runtime` 同级同形：一个字符串取值、**必填**、只有根单元能定，
+  于是"这份产物允不允许有对外端口"是**不读源码可判**的 —— 这正是 `docs/219` §7 那句
+  "测量强于声明"在这一维的落法（不问"源码里写没写 `choose hosted`"，读对象里的那个值）。
+  取值**刻意不带生态名**（今天是 libc/zlib，明天是 JVM/CPython）—— 与 `runtime` 同一条纪律。
+  校验器**独立判得了**那两条：`port=hosted` 与 `mode=no_std`（`no_std` 说「底下没有
+  东西」、`hosted` 说「往下链东西」，`docs/222` §4.2），以及 `port=hosted` 与
+  `gc=gc_auto_alpha`（混合档的 L2 是分配器前沿回卷，而外部库把指针放进它自己的结构里，
+  那些指针在 Loment 的栈之外 —— `docs/219` §6.1）。
+  **`gc_manual` / `gc_auto` 不在这一条里**：`hosted` + 手动或自动回收
+  （"要对外、但内存我自己管"）是合法档，不许拒。
+
 - **`boundary`（v7）**：一份单元里越过语言保证的那些**调用点**有几个 —— 机调用
-  （`syscall4`/`syscall6`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元
+  （`syscall4`/`syscall6`/`syscall7`）、裸指针变换（`ptr_add`/`ptr_sub`/`str_ptr`）、以及调用本单元
   `extern fn` 声明过的名字。**口径是词法的**：只看"这个名字被调用了没有"，不判类型、
   不判危险 —— `docs/204` R5 那一格要的正是"可 grep、可计数、可审计"。
   形状是五个非负整数 `{extern_declared, extern_calls, syscalls, ptr_transforms,
   total_sites}`，其中 `total_sites` 必须等于后三项之和。**那一条是校验器独立判得了的**：
   它读不到源码，所以判不了"这几个数数得对不对"，但判得了"它们自相矛盾"。
   `loment stat` 报的是**同一组数**（那份由参考实现真正的词法器独立对过）。
-  那份内建清单（`syscall4`/`syscall6`/`ptr_add`/`ptr_sub`/`str_ptr`）住在
+  那份内建清单（`syscall4`/`syscall6`/`syscall7`/`ptr_add`/`ptr_sub`/`str_ptr`）住在
   `tools/potato.py` 的 `BOUNDARY_BUILTINS` —— 放在那儿是因为这个校验器按 M47
   **不许 import 编译器**，而"哪些内建越界"恰恰是审计要用的东西。
+
+- **`surfaces`（v12）**：把 `boundary.syscalls` 数的那**同一批站点**按"面"分一分 ——
+  `{面名: 站点数, …, total_sites}`，面名由用的人定（`file`/`mem`/`net`/`proc` 是本仓库的划法，
+  `other` 是兜底：首参不是整数字面量的、或号不在表里的）。零计数的面不写出来（零站点写
+  `{"total_sites": 0}`）。校验器独立判得了**两条**：各面之和等于 `total_sites`，
+  而且 `total_sites` **等于 `boundary.syscalls`**（每个站点落在恰好一个面里 ⇒ 两处数的是
+  同一批站点）。号 → 面那张表在 `tools/lomentc.py::SURFACE_NUMBERS`，它必须与 PE 运行时
+  的派发表逐条相同（`loment_pe_test::test_pe_surface_table_matches_the_artifact_counter`）。
+  全貌见 `docs/222`。
 
 - **`v6` 曾经只有 `tools/potato_from.py` 在发**（那一档的产出方是"翻译出来的单元"）。
   主编译器是**加 `v7` 的时候才把 `grammar` 一起接上**的：台阶累积，而它此前一直发 `v5`，

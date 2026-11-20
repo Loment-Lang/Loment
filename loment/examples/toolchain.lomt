@@ -1,4 +1,5 @@
 module toolchain
+choose runtime
 
 // P6 工具链演示 (docs/148): fmt / doc / diag / ir / test / bench / cov 的输入。
 

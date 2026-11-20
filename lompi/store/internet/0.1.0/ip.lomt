@@ -1,0 +1,622 @@
+// internet/ip.lomt — IP 地址 (RFC 791 IPv4 / RFC 4291 IPv6) 的文本 <-> 字节
+//
+// 为什么需要它: 网络这一层到处要在"人能读的文本"与"线缆上的字节"之间做转换, 而这两件
+// 转换的规则比看上去细 —— IPv4 的段**不接受前导零**、IPv6 的 `::` 只能出现一次、
+// 格式化要按 RFC 5952 选**最长且靠左**的零段压缩、IPv4 映射地址要写成 `::ffff:a.b.c.d`。
+// 抄错一处的后果是"解析接受了非法输入"或"格式化和别人不一样", 两样都不会当场报错。
+//
+// 边界 (刻意划的, 不是没做完):
+//   * 纯逻辑: 不发系统调用。缓冲区一律**调用方给** (与 std/url.lomt 同一约定);
+//     自检里那几块是 `alloc` 的暂存, 不在公开面上。
+//   * **不做域名解析** —— 那是 `dns` 模块的报文层; 工具链里也没有 getaddrinfo。
+//   * 本文件**不 `use` 任何模块**: 自足。理由不是风格, 是工具链的两条硬限制 ——
+//     一个单元只允许一条名字形式 `use`, 且带 import 的单元字符串字面量容量会大跌
+//     (SKILL.md 6.3.22)。纯逻辑模块自己写十几个字节助手, 比背上那两条便宜。
+//
+// 命名: 公开 ip_*, 内部 ipp_*。自检 test_ip_*。
+// 对照物: CPython 的 `ipaddress` (判据逐字节比), 不是手写的期望值。
+
+module ip
+
+/// 内部哨兵: 只用于**模块内部**的辅助函数。
+///
+/// **公开面不用它** —— 这一条是判据逼出来的: `255.255.255.255` 是一个完全合法的 IPv4
+/// 地址 (它的整数值**正好**是 4294967295), 拿 4294967295 当"失败"会让
+/// `ip_v4_parse("255.255.255.255")` 被读成失败。所以公开的那两个解析函数一律
+/// **返回 1/0 表示成败, 值从出参走** (与 `ip_v6_parse` 同形)。
+const IPP_NO: u32 = 4294967295;
+
+// ---------------------------------------------------------------- IPv4
+
+/// 十进制段 (0..255)。空 / 非数字 / **前导零** / 超 255 一律 IPP_NO ——
+/// 前导零这条是 CPython `ipaddress` 的规矩 ("01.2.3.4" 非法), 不是我们加的。
+fn ipp_dec(d: ptr, o: u32, n: u32) -> u32 {
+    if n == 0 {
+        return IPP_NO;
+    }
+    if n > 1 && load8(d, o) == 48 {
+        return IPP_NO;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(d, o + i);
+        if c < 48 || c > 57 {
+            return IPP_NO;
+        }
+        v = v * 10 + (c - 48);
+        if v > 255 {
+            return IPP_NO;
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn ipp_dec_len(v: u32) -> u32 {
+    let n: u32 = 1;
+    let t: u32 = v;
+    while t >= 10 {
+        t = t / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+fn ipp_dec_out(out: ptr, o: u32, v: u32) -> u32 {
+    let n: u32 = ipp_dec_len(v);
+    let x: u32 = v;
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + (n - 1 - i), (48 + x % 10) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 解析 `a.b.c.d` -> 大端值 (a<<24 | b<<16 | c<<8 | d) 写进 out_val (u32 小端 4 字节)。
+/// **成功返回 1, 非法返回 0** —— 值域是满的, 没有哨兵可用 (见 IPP_NO 那条注解)。
+/// 段数必须正好 4, 每段 0..255, 不接受前导零。
+pub fn ip_v4_parse(d: ptr, o: u32, n: u32, out_val: ptr) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let v: u32 = 0;
+    let seg: u32 = 0;
+    let i: u32 = 0;
+    while seg < 4 {
+        let start: u32 = i;
+        while i < n && load8(d, o + i) != 46 {
+            i = i + 1;
+        }
+        let pv: u32 = ipp_dec(d, o + start, i - start);
+        if pv == IPP_NO {
+            return 0;
+        }
+        v = (v << 8) | pv;
+        seg = seg + 1;
+        if seg < 4 {
+            if i >= n {
+                return 0;
+            }
+            i = i + 1;
+        }
+    }
+    if i != n {
+        return 0;
+    }
+    store8(out_val, 0, v as u8);
+    store8(out_val, 1, (v >> 8) as u8);
+    store8(out_val, 2, (v >> 16) as u8);
+    store8(out_val, 3, (v >> 24) as u8);
+    return 1;
+}
+
+fn ipp_rd32(p: ptr) -> u32 {
+    return load8(p, 0) | (load8(p, 1) << 8) | (load8(p, 2) << 16) | (load8(p, 3) << 24);
+}
+
+/// 格式化 `a.b.c.d` 写进 out; 返回写的字节数。
+pub fn ip_v4_fmt(out: ptr, o: u32, v: u32) -> u32 {
+    let p: u32 = o + ipp_dec_out(out, o, (v >> 24) & 255);
+    store8(out, p, 46 as u8);
+    let p2: u32 = p + 1 + ipp_dec_out(out, p + 1, (v >> 16) & 255);
+    store8(out, p2, 46 as u8);
+    let p3: u32 = p2 + 1 + ipp_dec_out(out, p2 + 1, (v >> 8) & 255);
+    store8(out, p3, 46 as u8);
+    return (p3 + 1 + ipp_dec_out(out, p3 + 1, v & 255)) - o;
+}
+
+/// `a.b.c.d` 的字节数 —— 给"先算长度再要缓冲"的调用方。
+pub fn ip_v4_fmt_len(v: u32) -> u32 {
+    return ipp_dec_len((v >> 24) & 255) + ipp_dec_len((v >> 16) & 255)
+         + ipp_dec_len((v >> 8) & 255) + ipp_dec_len(v & 255) + 3;
+}
+
+// ---------------------------------------------------------------- CIDR
+
+/// 前 `bits` 位全 1 的掩码。bits 取 0..32 (超出按 32 算)。
+pub fn ip_v4_mask(bits: u32) -> u32 {
+    if bits == 0 {
+        return 0;
+    }
+    if bits >= 32 {
+        return 4294967295;
+    }
+    return 4294967295 - ((1 << (32 - bits)) - 1);
+}
+
+/// `v` 是否落在 `net/bits` 里。两边都按掩码归一后再比 —— 于是 net 带主机位也不影响。
+pub fn ip_v4_in_net(v: u32, net: u32, bits: u32) -> bool {
+    let m: u32 = ip_v4_mask(bits);
+    return (v & m) == (net & m);
+}
+
+/// 解析 `a.b.c.d/len`; **地址那一半** (不按掩码归一) 写进 out_addr, 前缀长度写进
+/// out_bits (两块各 4 字节, u32 小端)。没有 `/len` 时按 /32 处理; 成功返回 1, 非法返回 0。
+pub fn ip_cidr_parse(d: ptr, o: u32, n: u32, out_addr: ptr, out_bits: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < n && load8(d, o + i) != 47 {
+        i = i + 1;
+    }
+    let b: u32 = 32;
+    let ok: u32 = 0;
+    if i == n {
+        ok = ip_v4_parse(d, o, n, out_addr);
+    } else {
+        ok = ip_v4_parse(d, o, i, out_addr);
+        b = ipp_dec(d, o + i + 1, n - i - 1);
+        if b == IPP_NO || b > 32 {
+            return 0;
+        }
+    }
+    if ok == 0 {
+        return 0;
+    }
+    store8(out_bits, 0, b as u8);
+    store8(out_bits, 1, 0 as u8);
+    store8(out_bits, 2, 0 as u8);
+    store8(out_bits, 3, 0 as u8);
+    return 1;
+}
+
+// ---------------------------------------------------------------- IPv6
+
+fn ipp_hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return IPP_NO;
+}
+
+/// 1..4 个十六进制位 -> 值; 空 / 超 4 位 / 含非十六进制字符返回 IPP_NO。
+fn ipp_hex4(d: ptr, o: u32, n: u32) -> u32 {
+    if n == 0 || n > 4 {
+        return IPP_NO;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let hv: u32 = ipp_hexval(load8(d, o + i));
+        if hv == IPP_NO {
+            return IPP_NO;
+        }
+        v = (v << 4) | hv;
+        i = i + 1;
+    }
+    return v;
+}
+
+/// `:` 分隔的段数 (`a:b` 是 2, 空串是 0)。
+fn ipp_groups(d: ptr, o: u32, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let c: u32 = 1;
+    let i: u32 = 0;
+    while i < n {
+        if load8(d, o + i) == 58 {
+            c = c + 1;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+/// 区域里最后一个 `.` 的相对位置; 没有返回 IPP_NO。
+fn ipp_last_dot(d: ptr, o: u32, n: u32) -> u32 {
+    let k: u32 = 0;
+    let dot: u32 = IPP_NO;
+    while k < n {
+        if load8(d, o + k) == 46 {
+            dot = k;
+        }
+        k = k + 1;
+    }
+    return dot;
+}
+
+/// 最后一个 `:` 之后的下标 (没有 `:` 返回 0)。
+fn ipp_after_colon(d: ptr, o: u32, n: u32) -> u32 {
+    let k: u32 = 0;
+    let c: u32 = 0;
+    while k < n {
+        if load8(d, o + k) == 58 {
+            c = k + 1;
+        }
+        k = k + 1;
+    }
+    return c;
+}
+
+/// 该区域占几个 16 位组。**末尾的点分四段算 2 组** (RFC 4291 的 IPv4 嵌入写法)。
+fn ipp_count(d: ptr, o: u32, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    if ipp_last_dot(d, o, n) == IPP_NO {
+        return ipp_groups(d, o, n);
+    }
+    let s: u32 = ipp_after_colon(d, o, n);
+    if s > 0 {
+        return ipp_groups(d, o, s - 1) + 2;
+    }
+    return 2;
+}
+
+/// 把该区域写进 out 的 start 组起 (每组 2 字节网络序)。返回写了几个组; 出错 IPP_NO。
+fn ipp_write(d: ptr, o: u32, n: u32, out: ptr, start: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let dot: u32 = ipp_last_dot(d, o, n);
+    if dot == IPP_NO {
+        let g: u32 = 0;
+        let s: u32 = 0;
+        while s < n {
+            let i: u32 = s;
+            while i < n && load8(d, o + i) != 58 {
+                i = i + 1;
+            }
+            let v: u32 = ipp_hex4(d, o + s, i - s);
+            if v == IPP_NO {
+                return IPP_NO;
+            }
+            store8(out, (start + g) * 2, ((v >> 8) & 255) as u8);
+            store8(out, (start + g) * 2 + 1, (v & 255) as u8);
+            g = g + 1;
+            s = i + 1;
+        }
+        return g;
+    }
+    let s: u32 = ipp_after_colon(d, o, n);
+    let g: u32 = 0;
+    if s > 0 {
+        let w: u32 = ipp_write(d, o, s - 1, out, start);
+        if w == IPP_NO {
+            return IPP_NO;
+        }
+        g = w;
+    }
+    // 点分四段: 逐段解析、直接写 4 个字节 (不经过 u32 —— 值域是满的, 没有哨兵可用)
+    let q: u32 = s;
+    let k: u32 = 0;
+    while k < 4 {
+        let e: u32 = q;
+        while e < n && load8(d, o + e) != 46 {
+            e = e + 1;
+        }
+        let sv: u32 = ipp_dec(d, o + q, e - q);
+        if sv == IPP_NO {
+            return IPP_NO;
+        }
+        if k < 3 {
+            if e >= n {
+                return IPP_NO;
+            }
+        } else {
+            if e != n {
+                return IPP_NO;
+            }
+        }
+        store8(out, (start + g) * 2 + k, sv as u8);
+        k = k + 1;
+        q = e + 1;
+    }
+    return g + 2;
+}
+
+fn ipp_be32(p: ptr, o: u32) -> u32 {
+    return (load8(p, o) << 24) | (load8(p, o + 1) << 16)
+         | (load8(p, o + 2) << 8) | load8(p, o + 3);
+}
+
+/// 解析 IPv6 文本 -> 16 字节网络序写进 out; 非法返回 0。
+/// 认 `::` 压缩 (最多一次)、大小写十六进制、以及末尾的点分四段 (`::ffff:1.2.3.4`)。
+pub fn ip_v6_parse(d: ptr, o: u32, n: u32, out: ptr) -> u32 {
+    let z: u32 = 0;
+    while z < 16 {
+        store8(out, z, 0 as u8);
+        z = z + 1;
+    }
+    if n == 0 {
+        return 0;
+    }
+    let dc: u32 = IPP_NO;
+    let i: u32 = 0;
+    while i < n {
+        if load8(d, o + i) == 58 && i + 1 < n && load8(d, o + i + 1) == 58 {
+            if dc != IPP_NO {
+                return 0;
+            }
+            dc = i;
+            i = i + 2;
+        } else {
+            i = i + 1;
+        }
+    }
+    let leftn: u32 = 0;
+    let rightn: u32 = 0;
+    let ro: u32 = 0;
+    if dc == IPP_NO {
+        leftn = n;
+    } else {
+        leftn = dc;
+        rightn = n - (dc + 2);
+        ro = dc + 2;
+    }
+    // RFC 4291 §2.2: 内嵌的点分四段**只能落在最后 32 位**。有 `::` 时左半边出现 `.`
+    // 就意味着四段在压缩之前 (`1.2.3.4::`) —— CPython 的 `ipaddress` 拒, 这里也拒 (#677)。
+    if dc != IPP_NO {
+        let dot: u32 = 0;
+        while dot < leftn {
+            if load8(d, o + dot) == 46 {
+                return 0;
+            }
+            dot = dot + 1;
+        }
+    }
+    let lg: u32 = ipp_count(d, o, leftn);
+    let rg: u32 = ipp_count(d, ro, rightn);
+    if dc == IPP_NO {
+        if lg != 8 {
+            return 0;
+        }
+    } else {
+        if lg + rg > 7 {
+            return 0;
+        }
+    }
+    let wl: u32 = ipp_write(d, o, leftn, out, 0);
+    if wl != lg {
+        return 0;
+    }
+    let wr: u32 = ipp_write(d, ro, rightn, out, 8 - rg);
+    if wr != rg {
+        return 0;
+    }
+    return 1;
+}
+
+/// 往 out 写一个字符串字面量的字节; 返回新游标。
+fn ipp_put(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+/// 写一个小写十六进制组 (无前导零); 返回写的字符数。
+fn ipp_hex16(out: ptr, o: u32, v: u32) -> u32 {
+    if v == 0 {
+        store8(out, o, 48 as u8);
+        return 1;
+    }
+    let n: u32 = 0;
+    let t: u32 = v;
+    while t > 0 {
+        t = t >> 4;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let d: u32 = (v >> ((n - 1 - i) * 4)) & 15;
+        let ch: u32 = 48;
+        if d > 9 {
+            ch = 87;
+        }
+        store8(out, o + i, (ch + d) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 按 RFC 5952 格式化 16 字节地址: 小写、去前导零、**最长且靠左**的零段压成 `::`、
+/// IPv4 映射 (::ffff:0:0/96) 写成 `::ffff:a.b.c.d`。返回写的字节数。
+pub fn ip_v6_fmt(out: ptr, o: u32, a: ptr) -> u32 {
+    let mapped: u32 = 1;
+    let k: u32 = 0;
+    while k < 10 {
+        if load8(a, k) != 0 {
+            mapped = 0;
+        }
+        k = k + 1;
+    }
+    if load8(a, 10) != 255 || load8(a, 11) != 255 {
+        mapped = 0;
+    }
+    if mapped == 1 {
+        let p: u32 = ipp_put(out, o, "::ffff:");
+        return (p + ip_v4_fmt(out, p, ipp_be32(a, 12))) - o;
+    }
+    let grp: [u32; 8] = [0, 0, 0, 0, 0, 0, 0, 0];
+    let i: u32 = 0;
+    while i < 8 {
+        grp[i] = ((load8(a, i * 2) as u32) << 8) | (load8(a, i * 2 + 1) as u32);
+        i = i + 1;
+    }
+    let best_s: u32 = 0;
+    let best_l: u32 = 0;
+    let cs: u32 = 0;
+    let cl: u32 = 0;
+    i = 0;
+    while i < 8 {
+        if grp[i] == 0 {
+            if cl == 0 {
+                cs = i;
+            }
+            cl = cl + 1;
+            if cl > best_l {
+                best_l = cl;
+                best_s = cs;
+            }
+        } else {
+            cl = 0;
+        }
+        i = i + 1;
+    }
+    if best_l < 2 {
+        best_l = 0;
+    }
+    let p: u32 = o;
+    let idx: u32 = 0;
+    let sep: u32 = 0;
+    while idx < 8 {
+        if best_l >= 2 && idx == best_s {
+            p = ipp_put(out, p, "::");
+            idx = idx + best_l;
+            sep = 0;
+        } else {
+            if sep == 1 {
+                p = ipp_put(out, p, ":");
+            }
+            p = p + ipp_hex16(out, p, grp[idx]);
+            idx = idx + 1;
+            sep = 1;
+        }
+    }
+    return p - o;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 缓冲区里的 n 字节是否等于字面量 s。
+fn ipp_is(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) != str_byte(s, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_ip_v4_parse_ok() -> bool {
+    let b: ptr = alloc(16);
+    let v: ptr = alloc(4);
+    let o: u32 = ipp_put(b, 0, "255.1.0.9");
+    return ip_v4_parse(b, 0, o, v) == 1 && ipp_rd32(v) == 4278255625;
+}
+
+fn test_ip_v4_broadcast_is_not_failure() -> bool {
+    // 255.255.255.255 的整数值**正好**是 4294967295 —— 拿它当"失败"是错的。
+    let b: ptr = alloc(16);
+    let v: ptr = alloc(4);
+    let o: u32 = ipp_put(b, 0, "255.255.255.255");
+    return ip_v4_parse(b, 0, o, v) == 1 && ipp_rd32(v) == 4294967295;
+}
+
+fn test_ip_v4_reject_leading_zero() -> bool {
+    let b: ptr = alloc(16);
+    let v: ptr = alloc(4);
+    let o: u32 = ipp_put(b, 0, "01.2.3.4");
+    return ip_v4_parse(b, 0, o, v) == 0;
+}
+
+fn test_ip_v4_reject_short() -> bool {
+    let b: ptr = alloc(16);
+    let v: ptr = alloc(4);
+    let o: u32 = ipp_put(b, 0, "1.2.3");
+    return ip_v4_parse(b, 0, o, v) == 0;
+}
+
+fn test_ip_v4_roundtrip() -> bool {
+    let b: ptr = alloc(32);
+    let v: ptr = alloc(4);
+    let n: u32 = ip_v4_fmt(b, 0, 3232235777);
+    return n == ip_v4_fmt_len(3232235777)
+        && ip_v4_parse(b, 0, n, v) == 1 && ipp_rd32(v) == 3232235777;
+}
+
+fn test_ip_cidr() -> bool {
+    let b: ptr = alloc(32);
+    let o: u32 = ipp_put(b, 0, "10.0.0.0/8");
+    let a: ptr = alloc(4);
+    let bits: ptr = alloc(4);
+    let ok: u32 = ip_cidr_parse(b, 0, o, a, bits);
+    return ok == 1 && ipp_rd32(a) == 167772160 && load8(bits, 0) == 8
+        && ip_v4_in_net(167772171, ipp_rd32(a), 8);
+}
+
+fn test_ip_v6_parse_compress() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = ipp_put(b, 0, "2001:db8::1");
+    let a: ptr = alloc(16);
+    let ok: u32 = ip_v6_parse(b, 0, o, a);
+    return ok == 1 && load8(a, 0) == 32 && load8(a, 1) == 1 && load8(a, 14) == 0
+        && load8(a, 15) == 1;
+}
+
+fn test_ip_v6_fmt_longest_leftmost() -> bool {
+    // 2001:0:0:1:0:0:0:1 —— 后面那段零 (3 组) 比前面 (2 组) 长, 压后面
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(64);
+    store8(a, 0, 32 as u8);
+    store8(a, 1, 1 as u8);
+    store8(a, 7, 1 as u8);
+    store8(a, 15, 1 as u8);
+    let n: u32 = ip_v6_fmt(b, 0, a);
+    return ipp_is(b, n, "2001:0:0:1::1");
+}
+
+fn test_ip_v6_fmt_mapped() -> bool {
+    // ::ffff:1.2.3.4 —— IPv4 映射走点分写法
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(64);
+    store8(a, 10, 255 as u8);
+    store8(a, 11, 255 as u8);
+    store8(a, 12, 1 as u8);
+    store8(a, 13, 2 as u8);
+    store8(a, 14, 3 as u8);
+    store8(a, 15, 4 as u8);
+    let n: u32 = ip_v6_fmt(b, 0, a);
+    return ipp_is(b, n, "::ffff:1.2.3.4");
+}
+
+fn test_ip_v6_fmt_all_zero() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(64);
+    let n: u32 = ip_v6_fmt(b, 0, a);
+    return ipp_is(b, n, "::");
+}
+
+fn test_ip_v6_reject_two_dc() -> bool {
+    let b: ptr = alloc(64);
+    let o: u32 = ipp_put(b, 0, "1::2::3");
+    let a: ptr = alloc(16);
+    return ip_v6_parse(b, 0, o, a) == 0;
+}

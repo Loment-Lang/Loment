@@ -1,6 +1,0 @@
-choose write grammar rust
-module gdecl
-
-fn main() -> u32 {
-    return 7;
-}

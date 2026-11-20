@@ -1,0 +1,193 @@
+// system/signalfd.lomt — signalfd: 把信号变成一次可读的事件
+//
+// 为什么系统工具需要它: 装处理函数要函数指针（本语言今天没有，见 `os/signal`
+// 的头），而"信号与 socket 一起等"更不能靠 `sigaction`。signalfd 把一组信号
+// **屏蔽**（`rt_sigprocmask` 挡住它们）之后，让它们以**读事件**的形式出现在同一个
+// epoll 里 —— 读出来的是内核的 `siginfo_t` 前 128 字节。
+//
+// 用法是三步，少一步就不工作（所以写在头里）:
+//   1. `sfd_set_add` 往 8 字节掩码里加信号号；
+//   2. 用 `rt_sigprocmask(SIG_BLOCK, ...)` 把这些信号**挡住** —— 挡不住的话它们
+//      会被默认动作处理掉（大多数是杀进程），根本轮不到 fd；
+//   3. `sfd_create` 建 fd，然后 `read`。
+//
+// 掩码布局: 内核的 `sigset_t` 是 **1024 位 = 128 字节**；这里只做前 64 个信号
+// （8 字节，bit `signum-1`），因为 Linux 的普通信号只有 1..64。
+//
+// 不做的: 装处理函数、`SA_RESTORER`、`siginfo_t` 的联合体（只解前三个 i32：
+// signo / errno / code）、实时信号的排队语义。
+//
+// 命名: 公开 sfd_*, 内部 sd_*。自检 test_signalfd_*。
+
+module signalfd
+
+/// 子进程不继承。
+pub const SFD_CLOEXEC: u32 = 524288;
+/// 非阻塞读。
+pub const SFD_NONBLOCK: u32 = 2048;
+
+/// 掩码的字节数。
+pub const SFD_SET_BYTES: u32 = 8;
+/// `siginfo_t` 至少要有这么多字节才解得开前三个字段。
+pub const SFD_INFO_BYTES: u32 = 128;
+
+const SD_SYS_READ: u64 = 0;
+const SD_SYS_SIGNALFD4: u64 = 289;
+
+fn sd_signame(signum: u32) -> str {
+    if signum == 1 { return "SIGHUP"; }
+    if signum == 2 { return "SIGINT"; }
+    if signum == 3 { return "SIGQUIT"; }
+    if signum == 4 { return "SIGILL"; }
+    if signum == 5 { return "SIGTRAP"; }
+    if signum == 6 { return "SIGABRT"; }
+    if signum == 7 { return "SIGBUS"; }
+    if signum == 8 { return "SIGFPE"; }
+    if signum == 9 { return "SIGKILL"; }
+    if signum == 10 { return "SIGUSR1"; }
+    if signum == 11 { return "SIGSEGV"; }
+    if signum == 12 { return "SIGUSR2"; }
+    if signum == 13 { return "SIGPIPE"; }
+    if signum == 14 { return "SIGALRM"; }
+    if signum == 15 { return "SIGTERM"; }
+    if signum == 16 { return "SIGSTKFLT"; }
+    if signum == 17 { return "SIGCHLD"; }
+    if signum == 18 { return "SIGCONT"; }
+    if signum == 19 { return "SIGSTOP"; }
+    if signum == 20 { return "SIGTSTP"; }
+    if signum == 21 { return "SIGTTIN"; }
+    if signum == 22 { return "SIGTTOU"; }
+    if signum == 28 { return "SIGWINCH"; }
+    if signum == 29 { return "SIGIO"; }
+    return "?";
+}
+
+fn sd_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn sd_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 信号名（只覆盖最常见的 1..22、28、29）。未知返回 `"?"`。
+pub fn sfd_name(signum: u32) -> str {
+    return sd_signame(signum);
+}
+
+/// 标志位 -> 名字串。0 返回 `"0"`。
+pub fn sfd_flags_text(flags: u32, out: ptr, cap: u32) -> u32 {
+    if flags == 0 {
+        return sd_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (flags & SFD_CLOEXEC) != 0 {
+        pos = sd_put(out, cap, pos, "SFD_CLOEXEC");
+    }
+    if (flags & SFD_NONBLOCK) != 0 {
+        if pos > 0 {
+            pos = sd_put(out, cap, pos, "|");
+        }
+        pos = sd_put(out, cap, pos, "SFD_NONBLOCK");
+    }
+    return pos;
+}
+
+/// 往 8 字节掩码里加一个信号（bit `signum-1`）。越界返回 0。
+pub fn sfd_set_add(set: ptr, signum: u32) -> u32 {
+    if signum == 0 || signum > 64 {
+        return 0;
+    }
+    let idx: u32 = signum - 1;
+    let byte: u32 = idx / 8;
+    let bit: u32 = idx % 8;
+    let v: u32 = load8(set, byte);
+    store8(set, byte, (v | ((1 as u32) << bit)) as u8);
+    return 1;
+}
+
+/// 掩码里有没有这个信号。
+pub fn sfd_set_has(set: ptr, signum: u32) -> bool {
+    if signum == 0 || signum > 64 {
+        return false;
+    }
+    let idx: u32 = signum - 1;
+    let v: u32 = load8(set, idx / 8);
+    return (v & ((1 as u32) << (idx % 8))) != 0;
+}
+
+/// 把掩码清零（8 字节）。
+pub fn sfd_set_clear(set: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < SFD_SET_BYTES {
+        store8(set, i, 0 as u8);
+        i = i + 1;
+    }
+    return SFD_SET_BYTES;
+}
+
+/// `signalfd4(fd, set, 8, flags)` —— `fd` 传 `18446744073709551615` 表示新建。
+pub fn sfd_create(fd: u64, set: ptr, flags: u32) -> i64 {
+    return syscall7(SD_SYS_SIGNALFD4, fd, set as u64, SFD_SET_BYTES as u64,
+                    flags as u64, 0, 0);
+}
+
+/// `read(fd, info, 128)`。
+pub fn sfd_read(fd: u64, info: ptr) -> i64 {
+    return syscall4(SD_SYS_READ, fd, info as u64, SFD_INFO_BYTES as u64);
+}
+
+/// `siginfo_t` 的 signo（偏移 0，i32 的位）。
+pub fn sfd_info_signo(info: ptr) -> u32 {
+    return sd_ld32(info, 0);
+}
+
+/// `siginfo_t` 的 errno（偏移 4）。
+pub fn sfd_info_errno(info: ptr) -> u32 {
+    return sd_ld32(info, 4);
+}
+
+/// `siginfo_t` 的 code（偏移 8）—— 说明"是谁发的"。
+pub fn sfd_info_code(info: ptr) -> u32 {
+    return sd_ld32(info, 8);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_signalfd_set() -> bool {
+    let s: ptr = alloc(8);
+    let _c: u32 = sfd_set_clear(s);
+    let _a: u32 = sfd_set_add(s, 2);
+    let _b: u32 = sfd_set_add(s, 15);
+    return sfd_set_has(s, 2) && sfd_set_has(s, 15) && !sfd_set_has(s, 9)
+        && load8(s, 0) == 2 && load8(s, 1) == 64;
+}
+
+fn test_signalfd_bounds() -> bool {
+    let s: ptr = alloc(8);
+    let _c: u32 = sfd_set_clear(s);
+    let a: u32 = sfd_set_add(s, 0);
+    let b: u32 = sfd_set_add(s, 65);
+    return a == 0 && b == 0 && !sfd_set_has(s, 0) && !sfd_set_has(s, 65);
+}
+
+fn test_signalfd_names() -> bool {
+    return str_eq(sfd_name(9), "SIGKILL") && str_eq(sfd_name(17), "SIGCHLD")
+        && str_eq(sfd_name(29), "SIGIO") && str_eq(sfd_name(30), "?");
+}

@@ -20,6 +20,7 @@
 // 用法: `lompotato <obj.json>` —— 退出码 0 = 合法 / 1 = 有错；stdout 打 `ok` 或 `err N`。
 
 module lompotato
+choose runtime
 
 use bytes
 use json
@@ -300,6 +301,94 @@ fn jstr_field_is(mem: ptr, doc: u32, key: str, s: str) -> u32 {
     return 0;
 }
 
+/// `obj[key]` 是不是**非负整数**。v16 的台账计数用它（`docs/262` §8）。
+/// 与 Python 的 `isinstance(v, int) and not isinstance(v, bool) and v >= 0` 对齐：
+/// `jkind` 对 bool 另有一类，所以 `!= 4` 已经把它挡掉了。
+fn jkey_nonneg(mem: ptr, obj: u32, key: str) -> u32 {
+    let n: u32 = jget(mem, obj, key);
+    if n == NOTFOUND || jkind(mem, n) != 4 {
+        return 0;
+    }
+    if jint_signed(mem, n) < 0 {
+        return 0;
+    }
+    return 1;
+}
+
+/// `lspe` / `floor_detail` / `invariants` 是**封闭**对象：未知键必须报。
+fn is_lspe_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "state") == 1 { return 1; }
+    if eq_lit(kp, kl, "set_by") == 1 { return 1; }
+    if eq_lit(kp, kl, "mode") == 1 { return 1; }
+    if eq_lit(kp, kl, "level") == 1 { return 1; }
+    if eq_lit(kp, kl, "sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "obligations") == 1 { return 1; }
+    if eq_lit(kp, kl, "proved") == 1 { return 1; }
+    if eq_lit(kp, kl, "undecided") == 1 { return 1; }
+    if eq_lit(kp, kl, "deferred") == 1 { return 1; }
+    if eq_lit(kp, kl, "refused") == 1 { return 1; }
+    if eq_lit(kp, kl, "floors") == 1 { return 1; }
+    if eq_lit(kp, kl, "floor_detail") == 1 { return 1; }
+    if eq_lit(kp, kl, "per_kind") == 1 { return 1; }
+    if eq_lit(kp, kl, "invariants") == 1 { return 1; }
+    if eq_lit(kp, kl, "acked") == 1 { return 1; }
+    if eq_lit(kp, kl, "passes") == 1 { return 1; }
+    if eq_lit(kp, kl, "pass_sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "passed_sites") == 1 { return 1; }
+    if eq_lit(kp, kl, "pass_ratio") == 1 { return 1; }
+    return 0;
+}
+
+/// `passes` 元素的键（`docs/262` §5.16）—— **恰好**这五个，与 `tools/potato.py` 同表。
+fn is_pass_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "id") == 1 { return 1; }
+    if eq_lit(kp, kl, "line") == 1 { return 1; }
+    if eq_lit(kp, kl, "end_line") == 1 { return 1; }
+    if eq_lit(kp, kl, "reason") == 1 { return 1; }
+    if eq_lit(kp, kl, "sites") == 1 { return 1; }
+    return 0;
+}
+
+/// `lms_levels` 的七个键（`docs/253` §11.4）—— 与参考实现的 `LMS_TOGGLES` 同表，
+/// 与自举侧 `pt_lms_levels` 同序。
+fn is_lms_level_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "lms_check") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_manage") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_guard") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_reject") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_crash") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_restart") == 1 { return 1; }
+    if eq_lit(kp, kl, "lms_seed") == 1 { return 1; }
+    return 0;
+}
+
+/// v18（`docs/253` §11.2.1，#1023）的**四个预算取值**。
+fn is_lms_budget(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "none") == 1 { return 1; }
+    if eq_lit(kp, kl, "instructions") == 1 { return 1; }
+    if eq_lit(kp, kl, "state") == 1 { return 1; }
+    if eq_lit(kp, kl, "outside") == 1 { return 1; }
+    return 0;
+}
+
+fn is_floor_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "assumed") == 1 { return 1; }
+    if eq_lit(kp, kl, "stale_wf") == 1 { return 1; }
+    if eq_lit(kp, kl, "budget") == 1 { return 1; }
+    if eq_lit(kp, kl, "drop_honest") == 1 { return 1; }
+    if eq_lit(kp, kl, "pass") == 1 { return 1; }
+    return 0;
+}
+
+fn is_inv_key(kp: ptr, kl: u32) -> u32 {
+    if eq_lit(kp, kl, "i1") == 1 { return 1; }
+    if eq_lit(kp, kl, "i2") == 1 { return 1; }
+    if eq_lit(kp, kl, "i3") == 1 { return 1; }
+    if eq_lit(kp, kl, "i4") == 1 { return 1; }
+    if eq_lit(kp, kl, "i5") == 1 { return 1; }
+    return 0;
+}
+
 /// 结点里的字符串**解码**进 buf（去引号、解转义），返回长度。
 fn jstr(mem: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
     return json_str_into(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), n, buf, cap);
@@ -363,6 +452,56 @@ fn jstr_len(mem: ptr, n: u32) -> u32 {
         return NOTFOUND;
     }
     return jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+}
+
+/// `"覆盖/总数"` 吗：两边都是**ASCII** 十进制数字，中间恰好一个 `/`。
+/// 与 `tools/potato.py` 的 `re.fullmatch(r"[0-9]+/[0-9]+", ...)` 同一条
+/// （两边的判决要一样，见 `potato_test` 的孪生那一格）。
+fn jratio_ok(mem: ptr, n: u32) -> u32 {
+    if n == NOTFOUND || jkind(mem, n) != 3 {
+        return 0;
+    }
+    let ln: u32 = jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+    if ln < 3 {
+        return 0;
+    }
+    let p: ptr = ptr_add(mem, M_SB2);
+    let sl: u32 = 0;
+    let k: u32 = 0;
+    while k < ln {
+        let c: u32 = load8(p, k) as u32;
+        if c == 47 {
+            sl = sl + 1;
+        } else if c < 48 || c > 57 {
+            return 0;
+        }
+        k = k + 1;
+    }
+    if sl != 1 {
+        return 0;
+    }
+    if (load8(p, 0) as u32) == 47 || (load8(p, ln - 1) as u32) == 47 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 字符串结点的**解码后正文只有空白**吗（含空串）。与 Python 的 `not .strip()` 同义。
+fn jstr_blank(mem: ptr, n: u32) -> u32 {
+    if n == NOTFOUND || jkind(mem, n) != 3 {
+        return 1;
+    }
+    let ln: u32 = jstr(mem, n, ptr_add(mem, M_SB2), 8192);
+    let p: ptr = ptr_add(mem, M_SB2);
+    let k: u32 = 0;
+    while k < ln {
+        let c: u32 = load8(p, k) as u32;
+        if c != 32 && c != 9 && c != 10 && c != 11 && c != 12 && c != 13 {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
 }
 
 // ---------------------------------------------------------------- 类型表达式
@@ -560,6 +699,58 @@ fn is_top_key(ver: u32, kp: ptr, kl: u32) -> u32 {
     }
     // v10 = v9 + **GC 的组成**（`docs/210` §3/§5）：四层梯各领走几个 `alloc` 站点。
     if ver >= 10 && eq_lit(kp, kl, "gc_ladder") == 1 {
+        return 1;
+    }
+    // v11 = v10 + **对外端口在不在**（`docs/222` §4）：`sealed` / `hosted`。
+    if ver >= 11 && eq_lit(kp, kl, "port") == 1 {
+        return 1;
+    }
+    // v12 = v11 + **面的组成**（`docs/224`）：机调用站点按面分一分。
+    if ver >= 12 && eq_lit(kp, kl, "surfaces") == 1 {
+        return 1;
+    }
+    // v14 = v13 + **联网站点的宽度组成**（`docs/237`）：四档各领走几个联网站点。
+    if ver >= 14 && eq_lit(kp, kl, "net_ladder") == 1 {
+        return 1;
+    }
+    // v13 = v12 + **执行模型**（`docs/231`）：`vm` / `no_vm`。与 `mode`/`gc`/`runtime`/`port`
+    // 同级同形 —— 必填，所以"这份产物是给 VM 的还是原生的"是**不读源码可判**的。
+    if ver >= 13 && eq_lit(kp, kl, "vm") == 1 {
+        return 1;
+    }
+    // v15 = v14 + **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
+    // 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。
+    if ver >= 15 && eq_lit(kp, kl, "lms") == 1 {
+        return 1;
+    }
+    // v16 = v15 + **LSPE 台账**（`docs/262`，用户 2026-10-18 定第七维）：`lspe` 对象。
+    // 它是 LSPE 的第四件 —— 没有它，"这份产物有没有被审计"读不出来。
+    if ver >= 16 && eq_lit(kp, kl, "lspe") == 1 {
+        return 1;
+    }
+    // v17 = v16 + **实际开着哪几级**（`docs/253` §11.4）：`lms_levels` 对象。
+    if ver >= 17 && eq_lit(kp, kl, "lms_levels") == 1 {
+        return 1;
+    }
+    // v18 = v17 + **七级的运行期预算**（`docs/253` §11.2.1，#1023）：`lms_budgets` 对象。
+    if ver >= 18 && eq_lit(kp, kl, "lms_budgets") == 1 {
+        return 1;
+    }
+    // v20 = v19 + **系统索引**（`docs/147` §5 / `#1022`）：`systems` 对象。
+    if ver >= 20 && eq_lit(kp, kl, "systems") == 1 {
+        return 1;
+    }
+    // v21 = v20 + **GC 的时间控制**（`docs/309`）：`gc_control` 对象。
+    if ver >= 21 && eq_lit(kp, kl, "gc_control") == 1 {
+        return 1;
+    }
+    // v22 = v21 + **生命周期档**（`docs/299`）：`lifetime`。
+    if ver >= 22 && eq_lit(kp, kl, "lifetime") == 1 {
+        return 1;
+    }
+    // v23 = v22 + **间接分派**（`docs/348`，第九维）：`no_fp` / `fp`。
+    // 必填 —— "这份产物里有没有间接调用边"是**不读源码可判的**（`docs/208` §4 的边界）。
+    if ver >= 23 && eq_lit(kp, kl, "fp") == 1 {
         return 1;
     }
     return 0;
@@ -846,6 +1037,9 @@ fn chk_consts(mem: ptr, doc: u32) -> u32 {
             let _e: u32 = bad(mem);
         } else {
             let _n: u32 = name_field(mem, c, TB_CS);
+            // `docs/342`：2026.3 起 `const NAME: str = "…"` —— 类型可以是 `str`，
+            // 那时值是**字符串**；其余常量仍是整型 + JSON 数字。
+            let is_str: u32 = 0;
             let ty: u32 = jget(mem, c, "type");
             if ty == NOTFOUND {
                 let _t: u32 = bad(mem);
@@ -853,13 +1047,21 @@ fn chk_consts(mem: ptr, doc: u32) -> u32 {
                 let _t2: u32 = bad(mem);
             } else {
                 let l: u32 = jstr(mem, ty, ptr_add(mem, M_SB2), 4096);
-                if is_int_type(ptr_add(mem, M_SB2), l) == 0 {
+                if eq_lit(ptr_add(mem, M_SB2), l, "str") == 1 {
+                    is_str = 1;
+                } else if is_int_type(ptr_add(mem, M_SB2), l) == 0 {
                     let _t3: u32 = bad(mem);
                 }
             }
             let vv: u32 = jget(mem, c, "value");
-            if vv == NOTFOUND || jkind(mem, vv) != 4 {
+            if vv == NOTFOUND {
                 let _v: u32 = bad(mem);
+            } else if is_str == 1 {
+                if jkind(mem, vv) != 3 {
+                    let _v2: u32 = bad(mem);
+                }
+            } else if jkind(mem, vv) != 4 {
+                let _v3: u32 = bad(mem);
             }
         }
         c = jsib(mem, c);
@@ -1447,7 +1649,8 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let lg: u32 = jstr(mem, gc, ptr_add(mem, M_SB), 4096);
             if eq_lit(ptr_add(mem, M_SB), lg, "gc_manual") == 1
                     || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto") == 1
-                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto_alpha") == 1 {
+                    || eq_lit(ptr_add(mem, M_SB), lg, "gc_auto_alpha") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lg, "no_gc") == 1 {
                 gok = 1;
             }
         }
@@ -1489,12 +1692,317 @@ fn chk_v1(mem: ptr, doc: u32, ver: u32) -> u32 {
             let _c9: u32 = bad(mem);
         }
     }
+    if ver >= 11 {
+        // **必填**（`docs/222` §4）—— 与 `mode` / `gc` / `runtime` 同一条纪律：不存在
+        // "缺这项"的形态。于是"这份产物通不通着世界"是**不读源码可判**的。
+        let pv: u32 = jget(mem, doc, "port");
+        let pok: u32 = 0;
+        if pv != NOTFOUND && jkind(mem, pv) == 3 {
+            let lp: u32 = jstr(mem, pv, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lp, "sealed") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lp, "hosted") == 1 {
+                pok = 1;
+            }
+        }
+        if pok == 0 {
+            let _p11: u32 = bad(mem);
+        }
+        // **两条冲突，校验器独立判得了**（两个取值都在对象里，不需要读源码）——
+        // 与 `runtime` 那一条同口径。`gc_manual` / `gc_auto` 与 `hosted` **不冲突**：
+        // "要对外、但内存我自己管"是一条必须能表达的档。
+        if pok == 1 && jstr_field_is(mem, doc, "port", "hosted") == 1
+                && jstr_field_is(mem, doc, "mode", "no_std") == 1 {
+            let _c11a: u32 = bad(mem);
+        }
+        if pok == 1 && jstr_field_is(mem, doc, "port", "hosted") == 1
+                && jstr_field_is(mem, doc, "gc", "gc_auto_alpha") == 1 {
+            let _c11b: u32 = bad(mem);
+        }
+    }
+    if ver >= 13 {
+        // **必填**（`docs/231`）—— 与 `mode` / `gc` / `runtime` / `port` 同一条纪律：
+        // 不存在"缺这项"的形态。于是"这份产物是给 VM 的还是原生的"是**不读源码可判**的。
+        // **这里刻意不写冲突**：`vm` 与 `runtime` 今天确实合不来（VM 要用运行期），但那条由
+        // 编译器那边 `docs/227` 的既有检查接住 —— 对象里判不了它，因为"用不用得到运行期"
+        // 要读源码。少写一条判不了的冲突，比写一条判不准的强（`docs/188` 的"宁拒勿猜"）。
+        // ⚠ **每个不合法情形恰好一次 `bad`** —— 两份校验器比的是**错误条数**。
+        let vv: u32 = jget(mem, doc, "vm");
+        let vok: u32 = 0;
+        if vv != NOTFOUND && jkind(mem, vv) == 3 {
+            let lv: u32 = jstr(mem, vv, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), lv, "vm") == 1
+                    || eq_lit(ptr_add(mem, M_SB), lv, "no_vm") == 1 {
+                vok = 1;
+            }
+        }
+        if vok == 0 {
+            let _v13: u32 = bad(mem);
+        }
+    }
+    if ver >= 15 {
+        // v15（`docs/253`）：`lms`。⚠ **刻意不写与 `no_runtime` 的冲突** —— LMS 的四格落的
+        // 都是**指令**（一条 `cmp` / 一个 `llvm.trap`）、**不发运行期组件**，所以
+        // `lms_open` + `no_runtime` 不矛盾（`docs/253` §11.2）。多写一条反而把结论说反。
+        let lm: u32 = jget(mem, doc, "lms");
+        let lok: u32 = 0;
+        if lm != NOTFOUND && jkind(mem, lm) == 3 {
+            let ll: u32 = jstr(mem, lm, ptr_add(mem, M_SB), 4096);
+            if eq_lit(ptr_add(mem, M_SB), ll, "lms_full") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_forensic_admin") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_daily_admin") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_manage_only_admin") == 1
+                    || eq_lit(ptr_add(mem, M_SB), ll, "lms_close_admin") == 1 {
+                lok = 1;
+            }
+        }
+        if lok == 0 {
+            let _v15: u32 = bad(mem);
+        }
+    }
+    if ver >= 16 {
+        // v16（`docs/262`）：LSPE 台账。与 Python 的 `potato.validate` 逐条对齐 ——
+        // 连错的条数都要一致。P0 只判**骨架字段**：state / set_by / mode / level /
+        // 八个计数 / floor_detail 的自洽 / per_kind 与 invariants 的存在。
+        let lp: u32 = jget(mem, doc, "lspe");
+        if lp == NOTFOUND || jkind(mem, lp) != 1 {
+            let _v16: u32 = bad(mem);
+        } else {
+            // 封闭对象：`lspe` 里出现不认识的键 -> 一次错。
+            let km: u32 = jfirst(mem, lp);
+            while km != NOTFOUND {
+                let kn: u32 = jmkey(mem, km);
+                let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+                if is_lspe_key(ptr_add(mem, M_SB2), kl) == 0 {
+                    let _uk: u32 = bad(mem);
+                }
+                km = jsib(mem, km);
+            }
+            let sok: u32 = 0;
+            if jstr_field_is(mem, lp, "state", "lspe_open_admin") == 1
+                    || jstr_field_is(mem, lp, "state", "lspe_close_admin") == 1 {
+                sok = 1;
+            }
+            if sok == 0 {
+                let _a: u32 = bad(mem);
+            }
+            let bok: u32 = 0;
+            if jstr_field_is(mem, lp, "set_by", "default") == 1
+                    || jstr_field_is(mem, lp, "set_by", "source") == 1
+                    || jstr_field_is(mem, lp, "set_by", "policy") == 1 {
+                bok = 1;
+            }
+            if bok == 0 {
+                let _b: u32 = bad(mem);
+            }
+            let mok: u32 = 0;
+            if jstr_field_is(mem, lp, "mode", "full") == 1
+                    || jstr_field_is(mem, lp, "mode", "quiet") == 1
+                    || jstr_field_is(mem, lp, "mode", "strict") == 1 {
+                mok = 1;
+            }
+            if mok == 0 {
+                let _c: u32 = bad(mem);
+            }
+            let lv: u32 = jget(mem, lp, "level");
+            let lok: u32 = 0;
+            if lv != NOTFOUND && jkind(mem, lv) == 4 {
+                let n: i64 = jint_signed(mem, lv);
+                if n >= 0 && n <= 4 {
+                    lok = 1;
+                }
+            }
+            if lok == 0 {
+                let _d: u32 = bad(mem);
+            }
+            if jkey_nonneg(mem, lp, "sites") == 0 { let _e1: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "obligations") == 0 { let _e2: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "proved") == 0 { let _e3: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "undecided") == 0 { let _e4: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "deferred") == 0 { let _e5: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "refused") == 0 { let _e6: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "floors") == 0 { let _e7: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "acked") == 0 { let _e8: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "pass_sites") == 0 { let _e9: u32 = bad(mem); }
+            if jkey_nonneg(mem, lp, "passed_sites") == 0 { let _e10: u32 = bad(mem); }
+            // `lspe pass` 的收据（`docs/262` §5.16 / `#786`）：`pass_ratio` 是
+            // `"覆盖/总数"`，`passes` 的元素必须**恰好**是
+            // id / line / end_line / reason / sites —— 与参考实现 `tools/potato.py`
+            // 逐条同形（孪生判据比的是判决，不是报错文案）。
+            let prx: u32 = jget(mem, lp, "pass_ratio");
+            if jratio_ok(mem, prx) == 0 {
+                let _e11: u32 = bad(mem);
+            }
+            let psx: u32 = jget(mem, lp, "passes");
+            if psx == NOTFOUND || jkind(mem, psx) != 2 {
+                let _e12: u32 = bad(mem);
+            } else {
+                let pe: u32 = jfirst(mem, psx);
+                while pe != NOTFOUND {
+                    let pn: u32 = 0;
+                    let pm: u32 = jfirst(mem, pe);
+                    while pm != NOTFOUND {
+                        let pkn: u32 = jmkey(mem, pm);
+                        let pkl: u32 = jstr(mem, pkn, ptr_add(mem, M_SB2), 4096);
+                        if is_pass_key(ptr_add(mem, M_SB2), pkl) == 0 {
+                            let _pk: u32 = bad(mem);
+                        }
+                        pn = pn + 1;
+                        pm = jsib(mem, pm);
+                    }
+                    if pn != 5 {
+                        let _pn2: u32 = bad(mem);
+                    }
+                    let pid: u32 = jget(mem, pe, "id");
+                    if pid == NOTFOUND || jstr_len(mem, pid) == 0 {
+                        let _pi: u32 = bad(mem);
+                    }
+                    let prs: u32 = jget(mem, pe, "reason");
+                    if prs == NOTFOUND || jstr_blank(mem, prs) != 0 {
+                        let _pr: u32 = bad(mem);
+                    }
+                    if jkey_nonneg(mem, pe, "line") == 0 { let _pl: u32 = bad(mem); }
+                    if jkey_nonneg(mem, pe, "end_line") == 0 { let _ple: u32 = bad(mem); }
+                    if jkey_nonneg(mem, pe, "sites") == 0 { let _ps2: u32 = bad(mem); }
+                    pe = jsib(mem, pe);
+                }
+            }
+            let fd: u32 = jget(mem, lp, "floor_detail");
+            if fd == NOTFOUND || jkind(mem, fd) != 1 {
+                let _f: u32 = bad(mem);
+            } else {
+                let fm: u32 = jfirst(mem, fd);
+                while fm != NOTFOUND {
+                    let fkn: u32 = jmkey(mem, fm);
+                    let flk: u32 = jstr(mem, fkn, ptr_add(mem, M_SB2), 4096);
+                    if is_floor_key(ptr_add(mem, M_SB2), flk) == 0 {
+                        let _uf: u32 = bad(mem);
+                    }
+                    fm = jsib(mem, fm);
+                }
+                let fa: u32 = jkey_nonneg(mem, fd, "assumed");
+                let fb: u32 = jkey_nonneg(mem, fd, "stale_wf");
+                let fc: u32 = jkey_nonneg(mem, fd, "budget");
+                let fdd: u32 = jkey_nonneg(mem, fd, "drop_honest");
+                let fdp: u32 = jkey_nonneg(mem, fd, "pass");
+                if fa == 0 { let _g1: u32 = bad(mem); }
+                if fb == 0 { let _g2: u32 = bad(mem); }
+                if fc == 0 { let _g3: u32 = bad(mem); }
+                if fdd == 0 { let _g4: u32 = bad(mem); }
+                if fdp == 0 { let _g5: u32 = bad(mem); }
+                if fa == 1 && fb == 1 && fc == 1 && fdd == 1 && fdp == 1 {
+                    let fl: u32 = jget(mem, lp, "floors");
+                    if fl != NOTFOUND && jkind(mem, fl) == 4 {
+                        let s1: i64 = jint_signed(mem, jget(mem, fd, "assumed"));
+                        let s2: i64 = jint_signed(mem, jget(mem, fd, "stale_wf"));
+                        let s3: i64 = jint_signed(mem, jget(mem, fd, "budget"));
+                        let s4: i64 = jint_signed(mem, jget(mem, fd, "drop_honest"));
+                        let s5: i64 = jint_signed(mem, jget(mem, fd, "pass"));
+                        let sum: i64 = s1 + s2 + s3 + s4 + s5;
+                        if jint_signed(mem, fl) != sum {
+                            let _h: u32 = bad(mem);
+                        }
+                    }
+                }
+            }
+            let pk: u32 = jget(mem, lp, "per_kind");
+            if pk == NOTFOUND || jkind(mem, pk) != 1 {
+                let _i: u32 = bad(mem);
+            }
+            let inv: u32 = jget(mem, lp, "invariants");
+            if inv == NOTFOUND || jkind(mem, inv) != 1 {
+                let _j: u32 = bad(mem);
+            } else {
+                let im: u32 = jfirst(mem, inv);
+                while im != NOTFOUND {
+                    let inn: u32 = jmkey(mem, im);
+                    let ilk: u32 = jstr(mem, inn, ptr_add(mem, M_SB2), 4096);
+                    if is_inv_key(ptr_add(mem, M_SB2), ilk) == 0 {
+                        let _ui: u32 = bad(mem);
+                    }
+                    im = jsib(mem, im);
+                }
+                if jget(mem, inv, "i1") == NOTFOUND { let _k1: u32 = bad(mem); }
+                if jget(mem, inv, "i2") == NOTFOUND { let _k2: u32 = bad(mem); }
+                if jget(mem, inv, "i3") == NOTFOUND { let _k3: u32 = bad(mem); }
+                if jget(mem, inv, "i4") == NOTFOUND { let _k4: u32 = bad(mem); }
+                if jget(mem, inv, "i5") == NOTFOUND { let _k5: u32 = bad(mem); }
+            }
+        }
+    }
+    if ver >= 17 {
+        // v17（`docs/253` §11.4）：七级开关。与 Python 的 `potato.validate` 逐条对齐 ——
+        // 连错的条数都要一致。判三件事：对象 / 键封闭且七个别缺 / 值都是布尔。
+        let lv: u32 = jget(mem, doc, "lms_levels");
+        if lv == NOTFOUND || jkind(mem, lv) != 1 {
+            let _v17: u32 = bad(mem);
+        } else {
+            let km: u32 = jfirst(mem, lv);
+            while km != NOTFOUND {
+                let kn: u32 = jmkey(mem, km);
+                let kl2: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+                if is_lms_level_key(ptr_add(mem, M_SB2), kl2) == 0 {
+                    let _u17: u32 = bad(mem);
+                }
+                let vn: u32 = jmval(mem, km);
+                if jkind(mem, vn) != 5 && jkind(mem, vn) != 6 {
+                    let _b17: u32 = bad(mem);
+                }
+                km = jsib(mem, km);
+            }
+            if jget(mem, lv, "lms_check") == NOTFOUND { let _m1: u32 = bad(mem); }
+            if jget(mem, lv, "lms_manage") == NOTFOUND { let _m2: u32 = bad(mem); }
+            if jget(mem, lv, "lms_guard") == NOTFOUND { let _m3: u32 = bad(mem); }
+            if jget(mem, lv, "lms_reject") == NOTFOUND { let _m4: u32 = bad(mem); }
+            if jget(mem, lv, "lms_crash") == NOTFOUND { let _m5: u32 = bad(mem); }
+            if jget(mem, lv, "lms_restart") == NOTFOUND { let _m6: u32 = bad(mem); }
+            if jget(mem, lv, "lms_seed") == NOTFOUND { let _m7: u32 = bad(mem); }
+        }
+    }
+    if ver >= 18 {
+        // v18（`docs/253` §11.2.1，#1023）：七级预算。与 Python 的 `potato.validate`
+        // 逐条对齐 —— 连错的条数都要一致：对象 / 键封闭且七个别缺 / 值是四个预算之一。
+        let lb: u32 = jget(mem, doc, "lms_budgets");
+        if lb == NOTFOUND || jkind(mem, lb) != 1 {
+            let _v18: u32 = bad(mem);
+        } else {
+            let kb: u32 = jfirst(mem, lb);
+            while kb != NOTFOUND {
+                let knb: u32 = jmkey(mem, kb);
+                let klb: u32 = jstr(mem, knb, ptr_add(mem, M_SB2), 4096);
+                if is_lms_level_key(ptr_add(mem, M_SB2), klb) == 0 {
+                    let _u18: u32 = bad(mem);
+                }
+                let vnb: u32 = jmval(mem, kb);
+                let bok: u32 = 0;
+                if jkind(mem, vnb) == 3 {
+                    let vlb: u32 = jstr(mem, vnb, ptr_add(mem, M_SB2), 4096);
+                    if is_lms_budget(ptr_add(mem, M_SB2), vlb) == 1 {
+                        bok = 1;
+                    }
+                }
+                if bok == 0 {
+                    let _b18: u32 = bad(mem);
+                }
+                kb = jsib(mem, kb);
+            }
+            if jget(mem, lb, "lms_check") == NOTFOUND { let _n1: u32 = bad(mem); }
+            if jget(mem, lb, "lms_manage") == NOTFOUND { let _n2: u32 = bad(mem); }
+            if jget(mem, lb, "lms_guard") == NOTFOUND { let _n3: u32 = bad(mem); }
+            if jget(mem, lb, "lms_reject") == NOTFOUND { let _n4: u32 = bad(mem); }
+            if jget(mem, lb, "lms_crash") == NOTFOUND { let _n5: u32 = bad(mem); }
+            if jget(mem, lb, "lms_restart") == NOTFOUND { let _n6: u32 = bad(mem); }
+            if jget(mem, lb, "lms_seed") == NOTFOUND { let _n7: u32 = bad(mem); }
+        }
+    }
     if ver >= 6 {
         let gr: u32 = jget(mem, doc, "grammar");
         let gok: u32 = 0;
         if gr != NOTFOUND && jkind(mem, gr) == 3 {
             let l2: u32 = jstr(mem, gr, ptr_add(mem, M_SB), 4096);
             if eq_lit(ptr_add(mem, M_SB), l2, "loment") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "tur2026.1") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "tur2026.2") == 1
+                    || eq_lit(ptr_add(mem, M_SB), l2, "tur2026.3") == 1
                     || eq_lit(ptr_add(mem, M_SB), l2, "c") == 1
                     || eq_lit(ptr_add(mem, M_SB), l2, "python") == 1
                     || eq_lit(ptr_add(mem, M_SB), l2, "java") == 1
@@ -1574,6 +2082,45 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         if eq_lit(t, l, "v10") == 1 {
             ver = 10;
         }
+        if eq_lit(t, l, "v11") == 1 {
+            ver = 11;
+        }
+        if eq_lit(t, l, "v12") == 1 {
+            ver = 12;
+        }
+        if eq_lit(t, l, "v13") == 1 {
+            ver = 13;
+        }
+        if eq_lit(t, l, "v14") == 1 {
+            ver = 14;
+        }
+        if eq_lit(t, l, "v15") == 1 {
+            ver = 15;
+        }
+        if eq_lit(t, l, "v16") == 1 {
+            ver = 16;
+        }
+        if eq_lit(t, l, "v17") == 1 {
+            ver = 17;
+        }
+        if eq_lit(t, l, "v18") == 1 {
+            ver = 18;
+        }
+        if eq_lit(t, l, "v19") == 1 {
+            ver = 19;
+        }
+        if eq_lit(t, l, "v20") == 1 {
+            ver = 20;
+        }
+        if eq_lit(t, l, "v21") == 1 {
+            ver = 21;
+        }
+        if eq_lit(t, l, "v22") == 1 {
+            ver = 22;
+        }
+        if eq_lit(t, l, "v23") == 1 {
+            ver = 23;
+        }
     }
     if ver == NOTFOUND {
         let _c: u32 = bad(mem);
@@ -1629,7 +2176,381 @@ fn validate(mem: ptr, tot: u32) -> u32 {
         chk_boundary(mem, doc);
     }
     if ver >= 10 {
-        chk_gc_ladder(mem, doc);
+        chk_gc_ladder(mem, doc, ver);
+    }
+    if ver >= 12 {
+        chk_surfaces(mem, doc);
+    }
+    if ver >= 14 {
+        chk_net_ladder(mem, doc);
+    }
+    if ver >= 20 {
+        chk_systems(mem, doc);
+    }
+    if ver >= 21 {
+        chk_gc_control(mem, doc);
+    }
+    if ver >= 22 {
+        chk_lifetime(mem, doc);
+    }
+    if ver >= 23 {
+        chk_fp(mem, doc);
+    }
+    return 0;
+}
+
+/// 两段缓冲逐字节相等吗（动态字符串比较 —— `eq_lit` 只比字面量）。
+fn mem_eq(a: ptr, na: u32, b: ptr, nb: u32) -> u32 {
+    if na != nb {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < na {
+        if load8(a, i) != load8(b, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `systems` 里某个条目的 `state` 与顶层字段（`lspe` 取台账的 `state`）相同吗。
+fn sys_state_ok(mem: ptr, doc: u32, e: u32, k: str) -> u32 {
+    let got: u32 = jget(mem, e, "state");
+    if got == NOTFOUND || jkind(mem, got) != 3 {
+        return 0;
+    }
+    let want: u32 = 0;
+    if eq_lit(str_ptr(k), str_len(k), "lspe") == 1 {
+        let lp: u32 = jget(mem, doc, "lspe");
+        if lp == NOTFOUND || jkind(mem, lp) != 1 {
+            return 0;
+        }
+        want = jget(mem, lp, "state");
+    } else {
+        want = jget(mem, doc, k);
+    }
+    if want == NOTFOUND || jkind(mem, want) != 3 {
+        return 0;
+    }
+    let lg: u32 = jstr(mem, got, ptr_add(mem, M_SB), 4096);
+    let lw: u32 = jstr(mem, want, ptr_add(mem, M_SB2), 4096);
+    return mem_eq(ptr_add(mem, M_SB), lg, ptr_add(mem, M_SB2), lw);
+}
+
+/// `detail` 那一格对不对：有明细的系统必须是那个**字段名**，没有的必须是 `null`。
+fn sys_detail_ok(mem: ptr, e: u32, has: u32, det: str) -> u32 {
+    let d: u32 = jget(mem, e, "detail");
+    if has == 0 {
+        if d != NOTFOUND && jkind(mem, d) == 7 {
+            return 1;
+        }
+        return 0;
+    }
+    if d == NOTFOUND || jkind(mem, d) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, d, ptr_add(mem, M_SB), 4096);
+    return eq_lit(ptr_add(mem, M_SB), l, det);
+}
+
+/// 明细字段**算得出来**的总数；算不出（明细本身不合法）时返回 `NOTFOUND` ——
+/// 与 Python 的 `_system_cost` 同一条：那时上面已经报过，不再级联。
+fn sys_cost_want(mem: ptr, doc: u32, k: str) -> u32 {
+    if eq_lit(str_ptr(k), str_len(k), "gc") == 1 {
+        let gl: u32 = jget(mem, doc, "gc_ladder");
+        if gl == NOTFOUND || jkind(mem, gl) != 1 {
+            return NOTFOUND;
+        }
+        let tot: u32 = jget(mem, gl, "total_sites");
+        if tot == NOTFOUND || jnonneg(mem, tot) == 0 {
+            return NOTFOUND;
+        }
+        return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), tot);
+    }
+    if eq_lit(str_ptr(k), str_len(k), "lms") == 1 {
+        // 与 Python 的 `_system_cost` 同一条：只看**七级**那七格，全为布尔才数
+        // "为真的级数"；任何一格缺失/不是布尔 ⇒ 算不出（上面已经报过）。
+        let lv: u32 = jget(mem, doc, "lms_levels");
+        if lv == NOTFOUND || jkind(mem, lv) != 1 {
+            return NOTFOUND;
+        }
+        let n: u32 = 0;
+        let j: u32 = 0;
+        let ix: u32 = 0;
+        while ix < 7 {
+            let nm: str = "lms_check";
+            if ix == 1 { nm = "lms_manage"; }
+            if ix == 2 { nm = "lms_guard"; }
+            if ix == 3 { nm = "lms_reject"; }
+            if ix == 4 { nm = "lms_crash"; }
+            if ix == 5 { nm = "lms_restart"; }
+            if ix == 6 { nm = "lms_seed"; }
+            j = jget(mem, lv, nm);
+            if j == NOTFOUND || jbool(mem, j) == 0 {
+                return NOTFOUND;
+            }
+            if jkind(mem, j) == 5 {
+                n = n + 1;
+            }
+            ix = ix + 1;
+        }
+        return n;
+    }
+    if eq_lit(str_ptr(k), str_len(k), "lspe") == 1 {
+        let lp: u32 = jget(mem, doc, "lspe");
+        if lp == NOTFOUND || jkind(mem, lp) != 1 {
+            return NOTFOUND;
+        }
+        let s: u32 = jget(mem, lp, "sites");
+        if s == NOTFOUND || jnonneg(mem, s) == 0 {
+            return NOTFOUND;
+        }
+        return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), s);
+    }
+    return NOTFOUND;
+}
+
+/// 一个系统的 `cost` 那一格（单键对象；没有明细的系统必须是 `null`）。
+fn sys_cost_ok(mem: ptr, doc: u32, e: u32, k: str, has: u32, ck: str) -> u32 {
+    let c: u32 = jget(mem, e, "cost");
+    if has == 0 {
+        if c != NOTFOUND && jkind(mem, c) == 7 {
+            return 1;
+        }
+        return 0;
+    }
+    if c == NOTFOUND || jkind(mem, c) != 1 {
+        return 0;
+    }
+    // 键集合必须**恰好**是 {ck}：多一个、少一个都红（Python 那边是一条消息）。
+    let cm: u32 = jfirst(mem, c);
+    let cnt: u32 = 0;
+    let v: u32 = NOTFOUND;
+    while cm != NOTFOUND {
+        cnt = cnt + 1;
+        let kn: u32 = jmkey(mem, cm);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        if eq_lit(ptr_add(mem, M_SB2), kl, ck) == 1 {
+            v = jmval(mem, cm);
+        }
+        cm = jsib(mem, cm);
+    }
+    if cnt != 1 || v == NOTFOUND {
+        return 0;
+    }
+    if jnonneg(mem, v) == 0 {
+        return 0;
+    }
+    let got: u32 = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+    let want: u32 = sys_cost_want(mem, doc, k);
+    if want == NOTFOUND {
+        return 1;                      // 明细不合法：那一条已经报过（不级联）
+    }
+    if got == want {
+        return 1;
+    }
+    return 0;
+}
+
+/// `gc_control`（v21，`docs/309`）里的一格：非负整数就回值，否则记一次错并回 `NOTFOUND`。
+fn ctl_count(mem: ptr, g: u32, key: str) -> u32 {
+    let v: u32 = jget(mem, g, key);
+    if v == NOTFOUND || jnonneg(mem, v) == 0 {
+        let _b: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+}
+
+/// 顶层 `gc` 的取值是不是 `want`。
+fn gc_is(mem: ptr, doc: u32, want: str) -> u32 {
+    let g: u32 = jget(mem, doc, "gc");
+    if g == NOTFOUND || jkind(mem, g) != 3 {
+        return 0;
+    }
+    let l: u32 = jstr(mem, g, ptr_add(mem, M_SB2), 4096);
+    return eq_lit(ptr_add(mem, M_SB2), l, want);
+}
+
+/// `lifetime`（v22，`docs/299`）：三个合法档名。**必填** —— 与 `gc` / `lms` 同一条
+/// 纪律，所以"这份产物有没有静态借用证明"是**不读源码可判的**。
+fn chk_lifetime(mem: ptr, doc: u32) -> u32 {
+    let ok: u32 = 0;
+    if jstr_field_is(mem, doc, "lifetime", "lifetime_no") == 1
+            || jstr_field_is(mem, doc, "lifetime", "lifetime_auto") == 1
+            || jstr_field_is(mem, doc, "lifetime", "lifetime_manual") == 1 {
+        ok = 1;
+    }
+    if ok == 0 {
+        let _b: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `fp`（v23，`docs/348`）：两档。**必填** —— 与 `gc` / `lifetime` 同一条纪律，
+/// 所以"这份产物里有没有间接调用边"是**不读源码可判的**。
+fn chk_fp(mem: ptr, doc: u32) -> u32 {
+    let ok: u32 = 0;
+    if jstr_field_is(mem, doc, "fp", "no_fp") == 1
+            || jstr_field_is(mem, doc, "fp", "fp") == 1 {
+        ok = 1;
+    }
+    if ok == 0 {
+        let _b: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `gc_control`（v21，`docs/309`）: 五个键、四条不变量。
+///
+///   * 四个计数非负；`timed_windows <= windows`；
+///   * `manual_collector` 是布尔，且**恰好**等于"手动档 + 至少一处 `lgc`"；
+///   * `no_gc` 下出现任何 `lgc` 都是自相矛盾（E039 是编译期拒绝）。
+///
+/// 与 Python 的 `potato.validate` 逐条对齐，**连错的条数都要一致**。
+fn chk_gc_control(mem: ptr, doc: u32) -> u32 {
+    let g: u32 = jget(mem, doc, "gc_control");
+    if g == NOTFOUND || jkind(mem, g) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let np: u32 = ctl_count(mem, g, "pauses");
+    let nr: u32 = ctl_count(mem, g, "resumes");
+    let nw: u32 = ctl_count(mem, g, "windows");
+    let nt: u32 = ctl_count(mem, g, "timed_windows");
+    let mc: u32 = jget(mem, g, "manual_collector");
+    let mcv: u32 = 0;
+    if mc == NOTFOUND || jbool(mem, mc) == 0 {
+        let _c: u32 = bad(mem);
+        mc = NOTFOUND;
+    } else if jkind(mem, mc) == 5 {
+        mcv = 1;
+    }
+    // 不认识的键: 一整批只记一次错（与 Python 的 `sorted(set - …)` 一条消息同形）。
+    let nextra: u32 = 0;
+    let m: u32 = jfirst(mem, g);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "pauses") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "resumes") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "windows") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "timed_windows") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "manual_collector") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            nextra = nextra + 1;
+        }
+        m = jsib(mem, m);
+    }
+    if nextra > 0 {
+        let _x: u32 = bad(mem);
+    }
+    if np != NOTFOUND && nr != NOTFOUND && nw != NOTFOUND && nt != NOTFOUND
+            && mc != NOTFOUND {
+        if nt > nw {
+            let _t: u32 = bad(mem);
+        }
+        let total: u32 = np + nr + nw;
+        if gc_is(mem, doc, "no_gc") == 1 && total > 0 {
+            let _n: u32 = bad(mem);
+        }
+        let want: u32 = 0;
+        if gc_is(mem, doc, "gc_manual") == 1 && total > 0 {
+            want = 1;
+        }
+        if mcv != want {
+            let _m: u32 = bad(mem);
+        }
+    }
+    return 0;
+}
+
+/// `systems`（v20，`docs/147` §5 / `#1022`）: 六个系统各一条
+/// `{state, detail, cost}`，三格都要与它们指向的字段一致。
+///
+/// 与 Python 的 `potato.validate` **逐条同形**（连错的条数都一致）：未知系统每个一条、
+/// 缺一个一条；条目里未知键**一批**一条；state / detail / cost **各**一条。
+fn chk_systems(mem: ptr, doc: u32) -> u32 {
+    let sy: u32 = jget(mem, doc, "systems");
+    if sy == NOTFOUND || jkind(mem, sy) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    // 不认识的系统：**每个**一条（Python 是 `for k in sorted(...)` 逐条 append）。
+    let m: u32 = jfirst(mem, sy);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "gc") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "runtime") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "port") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "vm") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "lms") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "lspe") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            let _u: u32 = bad(mem);
+        }
+        m = jsib(mem, m);
+    }
+    // 六个系统逐个查。次序与 Python 的 `SYSTEM_KEYS` 相同（不影响条数）。
+    let i: u32 = 0;
+    while i < 6 {
+        let k: str = "gc";
+        let has: u32 = 0;
+        let ck: str = "";
+        if i == 0 { k = "gc"; has = 1; ck = "sites"; }
+        if i == 1 { k = "runtime"; has = 0; ck = ""; }
+        if i == 2 { k = "port"; has = 0; ck = ""; }
+        if i == 3 { k = "vm"; has = 0; ck = ""; }
+        if i == 4 { k = "lms"; has = 1; ck = "levels"; }
+        if i == 5 { k = "lspe"; has = 1; ck = "sites"; }
+        let e: u32 = jget(mem, sy, k);
+        if e == NOTFOUND {
+            let _m: u32 = bad(mem);
+        } else if jkind(mem, e) != 1 {
+            let _n: u32 = bad(mem);
+        } else {
+            // 条目里不认识的键：**一批**一条（Python 是 `sorted(set(e) - …)` 一条消息）。
+            let extra: u32 = 0;
+            let em: u32 = jfirst(mem, e);
+            while em != NOTFOUND {
+                let en: u32 = jmkey(mem, em);
+                let el: u32 = jstr(mem, en, ptr_add(mem, M_SB2), 4096);
+                let kk: u32 = 0;
+                if eq_lit(ptr_add(mem, M_SB2), el, "state") == 1
+                        || eq_lit(ptr_add(mem, M_SB2), el, "detail") == 1
+                        || eq_lit(ptr_add(mem, M_SB2), el, "cost") == 1 {
+                    kk = 1;
+                }
+                if kk == 0 {
+                    extra = extra + 1;
+                }
+                em = jsib(mem, em);
+            }
+            if extra > 0 {
+                let _e2: u32 = bad(mem);
+            }
+            if sys_state_ok(mem, doc, e, k) == 0 {
+                let _s: u32 = bad(mem);
+            }
+            let det: str = "gc_ladder";
+            if i == 4 { det = "lms_levels"; }
+            if i == 5 { det = "lspe"; }
+            if sys_detail_ok(mem, e, has, det) == 0 {
+                let _d: u32 = bad(mem);
+            }
+            if sys_cost_ok(mem, doc, e, k, has, ck) == 0 {
+                let _c: u32 = bad(mem);
+            }
+        }
+        i = i + 1;
     }
     return 0;
 }
@@ -1692,11 +2613,11 @@ fn bnd_part(mem: ptr, b: u32, key: str) -> u32 {
     return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
 }
 
-/// `gc_ladder`（`docs/210` §3/§5, v10）: 四个**分层计数**都是非负整数, 四项之和等于
-/// `total_sites`, 而且没有不认识的键。**与 `chk_boundary` 同形** —— 这是校验器
+/// `gc_ladder`（`docs/210` §3/§5, v10；v19 起多一格 `l0_5`）: **分层计数**都是非负整数,
+/// 各格之和等于 `total_sites`, 而且没有不认识的键。**与 `chk_boundary` 同形** —— 这是校验器
 /// **独立判得了**的那部分: 读不到源码, 判不了"数得对不对", 但判得了"它们自相矛盾"。
 /// 逐条与 Python 的 `potato.validate` 对齐, **连错的条数都要一致**。
-fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
+fn chk_gc_ladder(mem: ptr, doc: u32, ver: u32) -> u32 {
     let gl: u32 = jget(mem, doc, "gc_ladder");
     if gl == NOTFOUND || jkind(mem, gl) != 1 {
         let _b: u32 = bad(mem);
@@ -1706,11 +2627,17 @@ fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
     let n1: u32 = gl_part(mem, gl, "l1");
     let n2: u32 = gl_part(mem, gl, "l2");
     let n3: u32 = gl_part(mem, gl, "l3");
+    // v19 起多一格 `l0_5`（`docs/210` §2.10）：v10–v18 的对象仍然只有四格。
+    let n5: u32 = 0;
+    if ver >= 19 {
+        n5 = gl_part(mem, gl, "l0_5");
+    }
     let tot: u32 = gl_part(mem, gl, "total_sites");
     // 分量不合法时 `gl_part` 已经记过一次错, 这里**不再重复记** —— 与 Python 那边的
-    // `elif` 同形: 和数只在五项都是合法整数时才去对。
+    // `elif` 同形: 和数只在每一格都是合法整数时才去对。
     if n0 != NOTFOUND && n1 != NOTFOUND && n2 != NOTFOUND && n3 != NOTFOUND
-            && tot != NOTFOUND && tot != n0 + n1 + n2 + n3 {
+            && n5 != NOTFOUND && tot != NOTFOUND
+            && tot != n0 + n5 + n1 + n2 + n3 {
         let _t: u32 = bad(mem);
     }
     // 不认识的键: **一整批只记一次错**（Python 那边是 `sorted(set(gl) - …)` 一条消息）。
@@ -1721,6 +2648,7 @@ fn chk_gc_ladder(mem: ptr, doc: u32) -> u32 {
         let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
         let known: u32 = 0;
         if eq_lit(ptr_add(mem, M_SB2), kl, "l0") == 1
+                || (ver >= 19 && eq_lit(ptr_add(mem, M_SB2), kl, "l0_5") == 1)
                 || eq_lit(ptr_add(mem, M_SB2), kl, "l1") == 1
                 || eq_lit(ptr_add(mem, M_SB2), kl, "l2") == 1
                 || eq_lit(ptr_add(mem, M_SB2), kl, "l3") == 1
@@ -1743,6 +2671,196 @@ fn gl_part(mem: ptr, gl: u32, key: str) -> u32 {
     let v: u32 = jget(mem, gl, key);
     if v == NOTFOUND || jnonneg(mem, v) == 0 {
         let _v: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);
+}
+
+/// `surfaces`（`docs/224`, v12）: **面名 → 站点数**（面名由用的人定：`net`/`file`/…
+/// 只是仓库自己的划法），外加一个保留键 `total_sites`。**与 `chk_boundary` /
+/// `chk_gc_ladder` 同形** —— 校验器读不到源码，判不了"数得对不对"，但判得了
+/// "它们自相矛盾"：各面之和要等于 `total_sites`。
+///
+/// 比前两个多一条**交叉不变量**：每个机调用站点落在**恰好一个**面里，所以
+/// `total_sites` 必须等于 `boundary.syscalls` —— 两处数的是同一批站点，读不到源码
+/// 也能判它们打架。逐条与 Python 的 `potato.validate` 对齐，**连错的条数都要一致**。
+fn chk_surfaces(mem: ptr, doc: u32) -> u32 {
+    let sf: u32 = jget(mem, doc, "surfaces");
+    if sf == NOTFOUND || jkind(mem, sf) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    // 逐键：名字得是标识符、值得是非负整数 —— **每个键最多记一次错**（Python 那边是
+    // `if`/`elif`：名字都不合法时就不再挑值的错）。但**值的合法性另记一个闸**：
+    // Python 的 `all(...)` 看的是 `parts.values()`，名字不合格的键只要值合格照样进和。
+    let sum: u32 = 0;
+    let vals_ok: u32 = 1;
+    let tot: u32 = 0;
+    let tot_ok: u32 = 0;
+    let tot_seen: u32 = 0;
+    let m: u32 = jfirst(mem, sf);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let vn: u32 = jmval(mem, m);
+        let vok: u32 = 0;
+        let vv: u32 = 0;
+        if vn != NOTFOUND && jnonneg(mem, vn) == 1 {
+            vok = 1;
+            vv = json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), vn);
+        }
+        if eq_lit(ptr_add(mem, M_SB2), kl, "total_sites") == 1 {
+            tot_seen = 1;
+            if vok == 1 {
+                tot = vv;
+                tot_ok = 1;
+            } else {
+                let _t: u32 = bad(mem);
+            }
+        } else {
+            if ident_node(mem, kn, ptr_add(mem, M_SB2)) == NOTFOUND {
+                let _k: u32 = bad(mem);
+            } else if vok == 0 {
+                let _v: u32 = bad(mem);
+            }
+            if vok == 1 {
+                sum = sum + vv;
+            } else {
+                vals_ok = 0;
+            }
+        }
+        m = jsib(mem, m);
+    }
+    // `total_sites` 缺项与取值不合法在 Python 那边是同一条错（`sf.get` 拿到 `None`），
+    // 所以这里也**只记一次**：取值不合法在环里已经记过，缺项在这里补上。
+    if tot_seen == 0 {
+        let _t: u32 = bad(mem);
+    }
+    if tot_ok == 1 {
+        // 和数只在**分量都合法**时才去对（与 `boundary` / `gc_ladder` 同口径：否则是级联，
+        // 而两份校验器比的正是错误条数）。
+        if vals_ok == 1 && tot != sum {
+            let _s: u32 = bad(mem);
+        }
+        // 交叉不变量：`boundary` 得是个对象、`syscalls` 得是个**整数**（负数也算数 ——
+        // Python 那边是 `isinstance(int)`），缺了就不判。
+        let bnd: u32 = jget(mem, doc, "boundary");
+        if bnd != NOTFOUND && jkind(mem, bnd) == 1 {
+            let bs: u32 = jget(mem, bnd, "syscalls");
+            if bs != NOTFOUND && jkind(mem, bs) == 4 {
+                if (tot as i64) != jint_signed(mem, bs) {
+                    let _c: u32 = bad(mem);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/// 整数结点的**带符号**值（`jkind` 是 4 时才有意义）。Python 那边的交叉不变量用的是
+/// `isinstance(int)`，负数也算数 —— `jnonneg` 判掉的那种形态在这里还得读得出来。
+fn jint_signed(mem: ptr, n: u32) -> i64 {
+    let i: u32 = json_raw_off(ptr_add(mem, M_ARENA), n);
+    let neg: u32 = 0;
+    let c0: u32 = load8(ptr_add(mem, M_IN), i);
+    if c0 == 45 {
+        neg = 1;
+        i = i + 1;
+    } else if c0 == 43 {
+        i = i + 1;
+    }
+    // 位数上界只是防跑飞：真结点是解析器吐出来的，位数有限。
+    let acc: i64 = 0;
+    let k: u32 = 0;
+    let go: u32 = 1;
+    while k < 32 && go == 1 {
+        let c: u32 = load8(ptr_add(mem, M_IN), i);
+        if c < 48 || c > 57 {
+            go = 0;
+        } else {
+            acc = acc * 10 + ((c - 48) as i64);
+            i = i + 1;
+            k = k + 1;
+        }
+    }
+    if neg == 1 {
+        return 0 - acc;
+    }
+    return acc;
+}
+
+/// `net_ladder`（`docs/237`, v14）: 四档都是非负整数, 总数等于四者之和, 而且总数必须等于
+/// `surfaces.net` —— 每个联网站点落在一档里, 而它在 `surfaces` 里落在 `net` 面里。
+///
+/// 逐条与 Python 的 `potato.validate` 的 v14 那一段对齐: **连错的条数都要一致**,
+/// `potato_test` 的孪生判据比的正是条数。
+fn chk_net_ladder(mem: ptr, doc: u32) -> u32 {
+    let nl: u32 = jget(mem, doc, "net_ladder");
+    if nl == NOTFOUND || jkind(mem, nl) != 1 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    let n0: u32 = nl_part(mem, nl, "w0");
+    let n1: u32 = nl_part(mem, nl, "w1");
+    let n2: u32 = nl_part(mem, nl, "w2");
+    let n3: u32 = nl_part(mem, nl, "w3");
+    let tot: u32 = nl_part(mem, nl, "total_net");
+    // 分量不合法时 `nl_part` 已经记过一次错, 这里**不再重复记** —— 同 `chk_gc_ladder`:
+    // 和数只在五项都是合法整数时才去对。
+    if n0 != NOTFOUND && n1 != NOTFOUND && n2 != NOTFOUND && n3 != NOTFOUND
+            && tot != NOTFOUND && tot != n0 + n1 + n2 + n3 {
+        let _t: u32 = bad(mem);
+    }
+    // **交叉不变量**：`surfaces` 得是个对象、它的 `net` 得是**整数**。Python 那边写的是
+    // `sf.get("net", 0)` —— 所以**缺项按 0 算**（会出现"总数 != 0"这一条），而值是别的类型
+    // （比如字符串）时 Python 的 `isinstance` 不成立、**根本不比**。两种情形在这里分开。
+    if tot != NOTFOUND {
+        let sf: u32 = jget(mem, doc, "surfaces");
+        if sf != NOTFOUND && jkind(mem, sf) == 1 {
+            let nv: u32 = jget(mem, sf, "net");
+            let cmp: u32 = 0;
+            let nvv: i64 = 0;
+            if nv == NOTFOUND {
+                cmp = 1;
+            } else if jkind(mem, nv) == 4 {
+                cmp = 1;
+                nvv = jint_signed(mem, nv);
+            }
+            if cmp == 1 && (tot as i64) != nvv {
+                let _c: u32 = bad(mem);
+            }
+        }
+    }
+    // 不认识的键: **一整批只记一次错**（Python 那边是 `sorted(set(nl) - …)` 一条消息）。
+    let nextra: u32 = 0;
+    let m: u32 = jfirst(mem, nl);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(mem, m);
+        let kl: u32 = jstr(mem, kn, ptr_add(mem, M_SB2), 4096);
+        let known: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB2), kl, "w0") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "w1") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "w2") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "w3") == 1
+                || eq_lit(ptr_add(mem, M_SB2), kl, "total_net") == 1 {
+            known = 1;
+        }
+        if known == 0 {
+            nextra = nextra + 1;
+        }
+        m = jsib(mem, m);
+    }
+    if nextra > 0 {
+        let _x: u32 = bad(mem);
+    }
+    return 0;
+}
+
+/// `net_ladder` 里的一个计数: 非负整数就返回它的值, 否则记**一次**错并返回 `NOTFOUND`。
+fn nl_part(mem: ptr, nl: u32, key: str) -> u32 {
+    let v: u32 = jget(mem, nl, key);
+    if v == NOTFOUND || jnonneg(mem, v) == 0 {
+        let _p: u32 = bad(mem);
         return NOTFOUND;
     }
     return json_as_u32(ptr_add(mem, M_IN), ptr_add(mem, M_ARENA), v);

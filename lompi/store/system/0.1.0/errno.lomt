@@ -1,0 +1,176 @@
+// system/errno.lomt — Linux errno 编号与名字
+//
+// 为什么系统工具需要它: 系统调用只回一个负数；`-13` 是"不允许"还是"参数错"，
+// 全在编号表里。日志里写 `EACCES (13)` 比 `-13` 有用得多，而错误处理分支更不能
+// 靠记忆写魔数。
+//
+// 覆盖: x86-64 Linux 的常用项（编号在 Linux 各架构上基本一致；个别架构如 MIPS
+// 不同，不在覆盖范围）。名字与 Python `errno` 模块一致。
+//
+// 命名: 公开 er_*, 内部 eq_*。自检 test_errno_*。
+
+module errno
+
+fn eq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 编号 -> 名字（如 `ENOENT`）。未知返回 `"EUNKNOWN"`。
+pub fn er_name(num: i64, out: ptr, cap: u32) -> u32 {
+    let s: str = "EUNKNOWN";
+    if num == 1 { s = "EPERM"; }
+    else if num == 2 { s = "ENOENT"; }
+    else if num == 3 { s = "ESRCH"; }
+    else if num == 4 { s = "EINTR"; }
+    else if num == 5 { s = "EIO"; }
+    else if num == 6 { s = "ENXIO"; }
+    else if num == 7 { s = "E2BIG"; }
+    else if num == 8 { s = "ENOEXEC"; }
+    else if num == 9 { s = "EBADF"; }
+    else if num == 10 { s = "ECHILD"; }
+    else if num == 11 { s = "EAGAIN"; }
+    else if num == 12 { s = "ENOMEM"; }
+    else if num == 13 { s = "EACCES"; }
+    else if num == 14 { s = "EFAULT"; }
+    else if num == 16 { s = "EBUSY"; }
+    else if num == 17 { s = "EEXIST"; }
+    else if num == 18 { s = "EXDEV"; }
+    else if num == 19 { s = "ENODEV"; }
+    else if num == 20 { s = "ENOTDIR"; }
+    else if num == 21 { s = "EISDIR"; }
+    else if num == 22 { s = "EINVAL"; }
+    else if num == 23 { s = "ENFILE"; }
+    else if num == 24 { s = "EMFILE"; }
+    else if num == 25 { s = "ENOTTY"; }
+    else if num == 26 { s = "ETXTBSY"; }
+    else if num == 27 { s = "EFBIG"; }
+    else if num == 28 { s = "ENOSPC"; }
+    else if num == 29 { s = "ESPIPE"; }
+    else if num == 30 { s = "EROFS"; }
+    else if num == 31 { s = "EMLINK"; }
+    else if num == 32 { s = "EPIPE"; }
+    else if num == 33 { s = "EDOM"; }
+    else if num == 34 { s = "ERANGE"; }
+    else if num == 35 { s = "EDEADLK"; }
+    else if num == 36 { s = "ENAMETOOLONG"; }
+    else if num == 37 { s = "ENOLCK"; }
+    else if num == 38 { s = "ENOSYS"; }
+    else if num == 39 { s = "ENOTEMPTY"; }
+    else if num == 40 { s = "ELOOP"; }
+    else if num == 42 { s = "ENOMSG"; }
+    else if num == 43 { s = "EIDRM"; }
+    else if num == 61 { s = "ENODATA"; }
+    else if num == 62 { s = "ETIME"; }
+    else if num == 71 { s = "EPROTO"; }
+    else if num == 74 { s = "EBADMSG"; }
+    else if num == 75 { s = "EOVERFLOW"; }
+    else if num == 84 { s = "EILSEQ"; }
+    else if num == 88 { s = "ENOTSOCK"; }
+    else if num == 89 { s = "EDESTADDRREQ"; }
+    else if num == 90 { s = "EMSGSIZE"; }
+    else if num == 91 { s = "EPROTOTYPE"; }
+    else if num == 92 { s = "ENOPROTOOPT"; }
+    else if num == 93 { s = "EPROTONOSUPPORT"; }
+    else if num == 97 { s = "EAFNOSUPPORT"; }
+    else if num == 98 { s = "EADDRINUSE"; }
+    else if num == 99 { s = "EADDRNOTAVAIL"; }
+    else if num == 100 { s = "ENETDOWN"; }
+    else if num == 101 { s = "ENETUNREACH"; }
+    else if num == 103 { s = "ECONNABORTED"; }
+    else if num == 104 { s = "ECONNRESET"; }
+    else if num == 105 { s = "ENOBUFS"; }
+    else if num == 106 { s = "EISCONN"; }
+    else if num == 107 { s = "ENOTCONN"; }
+    else if num == 110 { s = "ETIMEDOUT"; }
+    else if num == 111 { s = "ECONNREFUSED"; }
+    else if num == 112 { s = "EHOSTDOWN"; }
+    else if num == 113 { s = "EHOSTUNREACH"; }
+    else if num == 114 { s = "EALREADY"; }
+    else if num == 115 { s = "EINPROGRESS"; }
+    else if num == 116 { s = "ESTALE"; }
+    else if num == 122 { s = "EDQUOT"; }
+    else if num == 125 { s = "ECANCELED"; }
+    else if num == 130 { s = "EOWNERDEAD"; }
+    else if num == 131 { s = "ENOTRECOVERABLE"; }
+    return eq_put(out, cap, s);
+}
+
+/// 编号 -> 一句人话。未知返回 `"unknown error"`。
+pub fn er_text(num: i64, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown error";
+    if num == 1 { s = "operation not permitted"; }
+    else if num == 2 { s = "no such file or directory"; }
+    else if num == 3 { s = "no such process"; }
+    else if num == 4 { s = "interrupted system call"; }
+    else if num == 5 { s = "input/output error"; }
+    else if num == 9 { s = "bad file descriptor"; }
+    else if num == 11 { s = "resource temporarily unavailable"; }
+    else if num == 12 { s = "cannot allocate memory"; }
+    else if num == 13 { s = "permission denied"; }
+    else if num == 14 { s = "bad address"; }
+    else if num == 16 { s = "device or resource busy"; }
+    else if num == 17 { s = "file exists"; }
+    else if num == 20 { s = "not a directory"; }
+    else if num == 21 { s = "is a directory"; }
+    else if num == 22 { s = "invalid argument"; }
+    else if num == 24 { s = "too many open files"; }
+    else if num == 28 { s = "no space left on device"; }
+    else if num == 32 { s = "broken pipe"; }
+    else if num == 38 { s = "function not implemented"; }
+    else if num == 39 { s = "directory not empty"; }
+    else if num == 110 { s = "connection timed out"; }
+    else if num == 111 { s = "connection refused"; }
+    return eq_put(out, cap, s);
+}
+
+/// perror 风格：`name: text`，返回完整长度。
+pub fn er_perror(num: i64, out: ptr, cap: u32) -> u32 {
+    let tmp: ptr = alloc(64);
+    let n1: u32 = er_name(num, tmp, 64);
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    while i < n1 {
+        if pos < cap {
+            store8(out, pos, load8(tmp, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    if pos < cap { store8(out, pos, 58 as u8); }
+    pos = pos + 1;
+    if pos < cap { store8(out, pos, 32 as u8); }
+    pos = pos + 1;
+    let n2: u32 = er_text(num, tmp, 64);
+    i = 0;
+    while i < n2 {
+        if pos < cap {
+            store8(out, pos, load8(tmp, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_errno_name() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = er_name(2 as i64, o, 32);
+    return n == 6 && load8(o, 0) == 69 && load8(o, 1) == 78; // "ENOENT"
+}
+
+fn test_errno_perror() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = er_perror(13 as i64, o, 128);
+    let want: str = "EACCES: permission denied";
+    return n == str_len(want) && load8(o, 0) == 69;
+}

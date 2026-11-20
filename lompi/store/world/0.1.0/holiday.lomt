@@ -1,0 +1,109 @@
+// world/holiday.lomt — 现实日历里的"第几个星期几"与复活节
+//
+// 为什么现实世界需要它: 节假日几乎不写死日期 —— 写死的那一半是"某月某日"，
+// 另一半是"三月第二个周一"（美国）或"五月最后一个周一"（英国）。复活节更极端：
+// 它是**天文历法**的产物，每年移动，还带动耶稣受难日、五旬节等一串。
+//
+// 算法: 复活节用 Meeus/Jones/Butcher 格里高利算法；其余按"第 n 个星期几"算。
+// 所有函数返回 **1970-01-01 起的天数**（交给 `calendar.cd_civil_from_days` 变年月日）。
+//
+// 命名: 公开 hd_*, 内部 hh_*。自检 test_holiday_*。
+
+module holiday
+
+use "calendar.lomt"
+
+fn hh_day_in_week(y: i64, m: i64, d: i64) -> u32 {
+    return cd_weekday(cd_days_from_civil(y, m, d));
+}
+
+/// 第 n 个星期几（n=1 起）。超出本月返回 -1。
+pub fn hd_nth_weekday(y: i64, m: i64, n: u32, weekday: u32) -> i64 {
+    let first: i64 = cd_days_from_civil(y, m, 1 as i64);
+    let fw: u32 = cd_weekday(first);
+    let mut_delta: u32 = 0;
+    if weekday >= fw {
+        mut_delta = weekday - fw;
+    } else {
+        mut_delta = weekday + (7 - fw);
+    }
+    let day: u32 = 1 + mut_delta + (n - 1) * 7;
+    let dim: u32 = cd_days_in_month(y, m);
+    if day < 1 || day > dim {
+        return 0 as i64 - 1;
+    }
+    return first + (day as i64) - (1 as i64);
+}
+
+/// 本月最后一个星期几。
+pub fn hd_last_weekday(y: i64, m: i64, weekday: u32) -> i64 {
+    let dim: u32 = cd_days_in_month(y, m);
+    let last: i64 = cd_days_from_civil(y, m, dim as i64);
+    let lw: u32 = cd_weekday(last);
+    let back: u32 = 0;
+    if lw >= weekday {
+        back = lw - weekday;
+    } else {
+        back = 7 - (weekday - lw);
+    }
+    return last - (back as i64);
+}
+
+/// 固定日期。
+pub fn hd_fixed(y: i64, m: i64, d: i64) -> i64 {
+    return cd_days_from_civil(y, m, d);
+}
+
+/// 复活节星期日（格里高利历）。
+pub fn hd_easter(y: i64) -> i64 {
+    let a: i64 = y % (19 as i64);
+    let b: i64 = y / (100 as i64);
+    let c: i64 = y % (100 as i64);
+    let d: i64 = b / (4 as i64);
+    let e: i64 = b % (4 as i64);
+    let f: i64 = (b + (8 as i64)) / (25 as i64);
+    let g: i64 = (b - f + (1 as i64)) / (3 as i64);
+    let h: i64 = ((19 as i64) * a + b - d - g + (15 as i64)) % (30 as i64);
+    let i: i64 = c / (4 as i64);
+    let k: i64 = c % (4 as i64);
+    let l: i64 = ((32 as i64) + (2 as i64) * e + (2 as i64) * i - h - k) % (7 as i64);
+    let mm: i64 = (a + (11 as i64) * h + (22 as i64) * l) / (451 as i64);
+    let month: i64 = (h + l - (7 as i64) * mm + (114 as i64)) / (31 as i64);
+    let day: i64 = ((h + l - (7 as i64) * mm + (114 as i64)) % (31 as i64)) + (1 as i64);
+    return cd_days_from_civil(y, month, day);
+}
+
+/// 耶稣受难日（复活节前两个工作日：周五本身 = 前 2 天）。
+pub fn hd_good_friday(y: i64) -> i64 {
+    return hd_easter(y) - (2 as i64);
+}
+
+/// 某天是星期几（0=周日）。
+pub fn hd_weekday(y: i64, m: i64, d: i64) -> u32 {
+    return hh_day_in_week(y, m, d);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_holiday_easter() -> bool {
+    // 2024-03-31、2025-04-20 是已知的复活节
+    let o: ptr = alloc(12);
+    cd_civil_from_days(hd_easter(2024 as i64), o);
+    if mem_load32(o, 0) != 2024 || mem_load32(o, 4) != 3 || mem_load32(o, 8) != 31 {
+        return false;
+    }
+    cd_civil_from_days(hd_easter(2025 as i64), o);
+    return mem_load32(o, 4) == 4 && mem_load32(o, 8) == 20;
+}
+
+fn test_holiday_nth_weekday() -> bool {
+    // 2024 年 5 月的第二个周日是 12 日（母亲节）
+    let o: ptr = alloc(12);
+    cd_civil_from_days(hd_nth_weekday(2024 as i64, 5 as i64, 2, 0), o);
+    if mem_load32(o, 8) != 12 {
+        return false;
+    }
+    // 2024 年 5 月最后一个周一是 27 日（美国阵亡将士纪念日）
+    cd_civil_from_days(hd_last_weekday(2024 as i64, 5 as i64, 1), o);
+    return mem_load32(o, 8) == 27;
+}

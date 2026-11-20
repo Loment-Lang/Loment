@@ -8,7 +8,7 @@
 // 所以 lompi 用**线性链**组织 (每个文件只 use 前一个), 而"跟宿主打交道"的东西
 // 收在本文件里。换参考工具链 (python tools/loment.py) 时这一层可以整体换成 std/host。
 //
-// PE 边界 (实测, 见 dev/ 的探针): 只有 8 个 syscall 有实现, 其中 **没有 mkdir (83)
+// PE 边界 (实测, 见 dev/ 的探针): 派发面里有 29 个号, 其中 **没有 mkdir (83)
 // 也没有 unlink (87)** —— 能写进已存在的目录, 但建不了目录、删不了文件。这一层的
 // sys_mkdir 就是把那个事实显式写出来, 让上层能据它分支。
 //
@@ -17,8 +17,9 @@
 // 超了直接 abort (SIGILL), 而 lompi 要装整棵源码树。
 
 module lpi_sys
+choose runtime
 
-const SYS_READ: u64 = 0;
+pub const SYS_READ: u64 = 0;
 const SYS_WRITE: u64 = 1;
 const SYS_CLOSE: u64 = 3;
 const SYS_BRK: u64 = 12;
@@ -182,12 +183,75 @@ pub fn sys_put_bytes(dst: ptr, p: ptr, off: u32, n: u32) -> u32 {
     return n;
 }
 
-/// a + "/" + b, 补 NUL。返回总长。a 为空时不加分隔符。
+/// 把静态字面量**追加**到 dst[off..] 再补 NUL。返回新的长度 (不含 NUL)。
+/// 与 `sys_put_lit` 的分工: 那个从 0 写起, 这个接在已有内容后面拼路径。
+pub fn sys_append_lit(dst: ptr, off: u32, lit: str) -> u32 {
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, off + i, str_byte(lit, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, off + n, 0 as u8);
+    return off + n;
+}
+
+/// 把运行期串 (p, n) **追加**到 dst[off..] 再补 NUL。返回新的长度。
+pub fn sys_append_bytes(dst: ptr, off: u32, p: ptr, n: u32) -> u32 {
+    sys_copy(dst, off, p, 0, n);
+    store8(dst, off + n, 0 as u8);
+    return off + n;
+}
+
+/// 这个产物是不是跑在 **PE 垫片**上 —— 一次**运行时探针**, 不是猜, 也不是编译期常量。
+///
+/// 探针用 `unlink`(87): 垫片的派发面里没有它, 而且**在取路径之前**就返回 `-ENOSYS`(-38);
+/// Linux 侧对空指针返回 `-EFAULT`(-14)。所以**不需要缓冲区**, 也**没有副作用**。
+/// 判定写成"比 -30 更负"而不是跟一个负字面量比相等 (那条语法有坑, 见 docs/228)。
+///
+/// 特意**不用** `sys_can_mkdir()` 当探针: 那一条是**策略**("lompi 不建目录", 两个平台
+/// 都成立), 与"这是哪个平台"是两回事。
+///
+/// **这条探针依赖"PE 垫片不派发 87"**。哪天它派发了, 这里会**静默**翻面 —— 那时
+/// `sys_can_mkdir()` 与 `docs/167` 的号表也要一起动, 而 `loment_lompi_test::`
+/// `test_paths_use_the_platform_separator` 在两个方向上都拦得住。
+pub fn sys_is_pe() -> bool {
+    let p: ptr = 0 as ptr;
+    let rc: i64 = syscall4(87, p as u64, 0, 0);
+    return rc < (0 - 30);
+}
+
+/// 路径分隔符: PE 是 `\`(92), 其余是 `/`(47)。**只在这一处判**, 别处一律用它。
+///
+/// 这个常量以前是**写死在十几处**的 `"\\"` 与 `92 as u8` —— 于是同一份源码在 ELF 上把
+/// 路径拼成 `/tmp\.lompi\cache\...`: POSIX 上反斜杠是**普通字符**, 那不是一条路径, 是
+/// **一个扁平的文件名**。`loment_lompi_test` 的 fetch 那条判据当场抓到了它。
+pub fn sys_sep() -> u8 {
+    if sys_is_pe() {
+        return 92 as u8;
+    }
+    return 47 as u8;
+}
+
+/// `dst[off..] = <分隔符>`, 补 NUL。返回新长度 (不含 NUL)。
+pub fn sys_append_sep(dst: ptr, off: u32) -> u32 {
+    store8(dst, off, sys_sep());
+    store8(dst, off + 1, 0 as u8);
+    return off + 1;
+}
+
+/// `dst[off..] = <分隔符> + lit`, 补 NUL。返回新长度 (不含 NUL)。
+pub fn sys_put_sep(dst: ptr, off: u32, lit: str) -> u32 {
+    store8(dst, off, sys_sep());
+    return sys_append_lit(dst, off + 1, lit);
+}
+
+/// a + <分隔符> + b, 补 NUL。返回总长。a 为空时不加分隔符。
 pub fn sys_join(scr: ptr, a: ptr, an: u32, b: ptr, bn: u32) -> u32 {
     sys_copy(scr, 0, a, 0, an);
     let o: u32 = an;
     if an > 0 {
-        store8(scr, o, 47 as u8);
+        store8(scr, o, sys_sep());
         o = o + 1;
     }
     sys_copy(scr, o, b, 0, bn);
@@ -376,8 +440,10 @@ fn test_sys_join() -> bool {
     sys_put_lit(a, "store");
     sys_put_lit(b, "mathutil");
     let n: u32 = sys_join(s, a, 5, b, 8);
-    let ok1: bool = n == 14 && load8(s, 5) == 47 && load8(s, 6) == 109;
-    // 空前缀: 不该多出一个斜杠。
+    // 分隔符钉的是**平台那一个** (`sys_sep()`), 不是写死的 47 —— 写死的话这条自检
+    // 在 PE 上就是错的。
+    let ok1: bool = n == 14 && load8(s, 5) == sys_sep() && load8(s, 6) == 109;
+    // 空前缀: 不该多出一个分隔符。
     let n2: u32 = sys_join(s, a, 0, b, 8);
     return ok1 && n2 == 8 && load8(s, 0) == 109;
 }

@@ -1,0 +1,29 @@
+choose write grammar java
+
+/*
+ * j101.lomt —— 超大型 Java 项目的第 101 个模块（**Java 语法**写的 Loment）。
+ *
+ * 整份是一个 `class` 外壳（翻译器抹成等长空白，行号不漂），里面的 `public static`
+ * 方法成为顶层函数。函数名带 `j101_` 前缀 —— **发射符号是平的**（ABI），跨模块同名会撞。
+ * 生成器见 `tools/loment_megaproject_test.py`，判据钉着这份产物不漂。
+ *
+ * 这一门的写法限制（实测）：`i++` / `i += x` 都**不收**，循环变量要写开
+ * （`i = i + 1`）；没有字段/全局量，所以一个类常量都不写。
+ */
+
+public class C101 {
+
+    public static int j101_entry() {
+        int s = 0;
+        for (int k = 0; k < 3; k = k + 1) {
+            s = s + k * 6;
+        }
+        int v = s + 11;
+        if (v > 100) {
+            v = v - 100;
+        } else if (v > 10) {
+            v = v * 2;
+        }
+        return (v + 101) % 251;
+    }
+}

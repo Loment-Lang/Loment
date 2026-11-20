@@ -1,0 +1,81 @@
+{
+  "potato": "v13",
+  "unit": "cmd_hello",
+  "language": "loment",
+  "grammar": "loment",
+  "mode": "std",
+  "gc": "gc_manual",
+  "runtime": "no_runtime",
+  "port": "sealed",
+  "vm": "no_vm",
+  "switches": [],
+  "dialects": [],
+  "bodies": [],
+  "imports": [],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "loment_command",
+      "params": [],
+      "ret": "str"
+    },
+    {
+      "name": "command_main",
+      "params": [
+        {
+          "name": "argv",
+          "type": "ptr"
+        },
+        {
+          "name": "argc",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    }
+  ],
+  "layouts": [],
+  "consts": [],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "boundary": {
+    "extern_declared": 0,
+    "extern_calls": 0,
+    "syscalls": 1,
+    "ptr_transforms": 0,
+    "total_sites": 1
+  },
+  "gc_ladder": {
+    "l0": 0,
+    "l1": 0,
+    "l2": 0,
+    "l3": 0,
+    "total_sites": 0
+  },
+  "surfaces": {
+    "file": 1,
+    "total_sites": 1
+  },
+  "excluded": []
+}

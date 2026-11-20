@@ -17,6 +17,7 @@
 //   * 输出结尾 `.rstrip() + 换行`。
 
 module lomstatus
+choose runtime
 
 use bytes
 

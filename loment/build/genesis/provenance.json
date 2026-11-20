@@ -1,0 +1,34 @@
+{
+  "chain": [
+    "clang(seed) -> stage1",
+    "stage1(mirror) -> mirror.ll",
+    "clang(mirror.ll) -> genesis"
+  ],
+  "format": 1,
+  "genesis": {
+    "mode": "100755",
+    "name": "lomelf-linux-x64.elf",
+    "sha256": "e4e635e092dc85d7a883559d6ace7b69974c7c9c344d0f3765a85fd414e6a57c",
+    "size": 229800
+  },
+  "inputs": {
+    "mirror": {
+      "path": "loment/tools/lomelf.lomt",
+      "sha256": "52997974f70f698e649d0bd8fbdfcac4771eb73dd2455f43583b5b59852a5e26",
+      "size": 316278
+    },
+    "seed": {
+      "path": "loment/build/selfhost_driver.ll",
+      "sha256": "a37c9977c6c38b33a009b42915dfaeb26002ac777d2bbfd8707c2e3273ac083d",
+      "size": 7216170
+    }
+  },
+  "mirror_ir": {
+    "sha256": "ef9474bbc34ac6dd13185118d0a912d280372c59d9f8dce236b0cf64b3c63655",
+    "size": 1323125
+  },
+  "toolchain": {
+    "clang": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",
+    "target": "x86_64-unknown-linux-gnu"
+  }
+}

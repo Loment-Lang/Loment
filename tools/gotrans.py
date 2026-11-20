@@ -782,9 +782,49 @@ class Emitter:
         self.int_default = int_default
         self.vars: dict[str, str] = {}
         self.varty: dict[str, str] = {}
+        #: **块作用域栈**（`#235` / `#237`）。与 `trans_core` 里 C 那门同一个手法：
+        #: 块里的遮蔽声明改名，出块时把外层原值还回去。Go 有块作用域而本语言没有，
+        #: 不补这一层，同一个程序在 `grammar go` 与 `grammar c` 下算出不同的数
+        #: （`#237` 实例 1：`int y` 遮蔽后 Go 读 50、C 读 10）。
+        self.scopes: list[dict[str, tuple[str | None, str | None]]] = []
         self.ret = "()"
         self.n = 0
         self.lines: list[str] = []
+
+    def decl_bind(self, name: str, line: int) -> str:
+        """一条声明要发出去的名字 —— 保住源语言的块作用域（同 `trans_core.decl_bind`）。"""
+        if self.scopes:
+            cur = self.scopes[-1]
+            if name in cur:
+                raise Unsupported(
+                    f"第 {line} 行: `{name}` 在同一个块里声明了两次（Go 里这是编译错）")
+            old = self.vars.get(name)
+            cur[name] = (old, self.varty.get(name))
+            if old is not None:
+                nm = self.fresh(name)
+                self.vars[name] = nm
+                return nm
+        elif name in self.vars:
+            raise Unsupported(
+                f"第 {line} 行: `{name}` 在同一个函数里声明了两次（Go 里这是编译错）")
+        self.vars[name] = name
+        return name
+
+    def block(self, body: list, depth: int) -> None:
+        """发一个块并**保住源语言的块作用域**（`if` / `while` / `for` 的体）。"""
+        saved: dict[str, tuple[str | None, str | None]] = {}
+        self.scopes.append(saved)
+        try:
+            self.stmts(body, depth)
+        finally:
+            self.scopes.pop()
+            for name, (old, oldty) in saved.items():
+                if old is None:
+                    self.vars.pop(name, None)
+                    self.varty.pop(name, None)
+                else:
+                    self.vars[name] = old
+                    self.varty[name] = oldty      # type: ignore[assignment]
 
     def fresh(self, base: str) -> str:
         while True:
@@ -874,12 +914,12 @@ class Emitter:
 
     def stmt(self, s: object, depth: int) -> None:
         if isinstance(s, Decl):
-            self.vars[s.name] = s.name
+            nm = self.decl_bind(s.name, s.line)
             self.varty[s.name] = s.ty
             if s.init is None:
-                self.out(f"let {s.name}: {s.ty} = 0;", depth)
+                self.out(f"let {nm}: {s.ty} = 0;", depth)
             else:
-                self.out(f"let {s.name}: {s.ty} = "
+                self.out(f"let {nm}: {s.ty} = "
                          f"{self.ex(s.init, self.want_of(s.ty))};", depth)
             return
         if isinstance(s, Assign):
@@ -896,19 +936,19 @@ class Emitter:
         if isinstance(s, If):
             self.gap()
             self.out(f"if {self.ex(s.cond, 'bool')} {{", depth)
-            self.stmts(s.then, depth + 1)
+            self.block(s.then, depth + 1)
             if s.els is None:
                 self.out("}", depth)
             else:
                 self.out("} else {", depth)
-                self.stmts(s.els, depth + 1)
+                self.block(s.els, depth + 1)
                 self.out("}", depth)
             return
         if isinstance(s, While):
             self.gap()
             cond = "true" if s.cond is None else self.ex(s.cond, "bool")
             self.out(f"while {cond} {{", depth)
-            self.stmts(s.body, depth + 1)
+            self.block(s.body, depth + 1)
             self.out("}", depth)
             return
         if isinstance(s, For3):
@@ -946,7 +986,7 @@ class Emitter:
 
         cond = self.ex(s.cond, "bool") if s.cond is not None else "true"
         self.out(f"while {cond} {{", depth)
-        self.stmts(s.body, depth + 1)
+        self.block(s.body, depth + 1)
         if s.post is not None:
             self.stmt(s.post, depth + 1)
         self.out("}", depth)

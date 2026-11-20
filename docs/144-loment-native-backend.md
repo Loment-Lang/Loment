@@ -32,7 +32,16 @@ docs/143 §7 把 **v2 原生后端** 与 **v3 自举** 列为剩余的真活—�
 - **函数末尾不可达时发 `unreachable`**：语言允许"并非所有路径都 return"，M0 不为此加
   检查规则（YAGNI），代价是落到该块的执行是 UB。
 - **有符号/无符号按声明类型选指令**：`icmp slt/ult`、`sdiv/udiv`、`ashr/lshr`、`srem/urem`。
-- **除零/溢出语义与 Rust 路径不同**（LLVM 是 UB，Rust 是 panic）：M0 不处理，M2 前必须定规则。
+- **除零/溢出语义**：**2026-10-16 定了**（issue #19 的第 1、3 条；这一行从前写的是
+  "M0 不处理，M2 前必须定规则"）——
+  * **溢出按模回绕**，而且它是**定义好的**行为，不是 UB：发射出来的 `add`/`sub`/`mul`
+    **从不带 `nsw`/`nuw`**（带了才是"溢出即 UB"），判据 `lomentc_test::
+    test_arithmetic_is_defined_to_wrap_never_undefined` 钉着这一点。语言没有
+    `checked_add` 一类的内建，要判就自己写在算式**之前**。
+  * **除零/取模零是 trap**：`b == 0` 时发射器走一个 `call void @__loment_abort()` 的块
+    （`__loment_abort` = `llvm.trap` + `unreachable`），所以是**定义好的 abort**，
+    不是"看 CPU 心情"（`test_m18_wrap_and_divzero` 钉着 IR 形状）。
+  * 两条都写进了用户读的那张表（`SKILL.md` §6.2 第 15/16 条）。
 
 ## 4. 验证方式
 

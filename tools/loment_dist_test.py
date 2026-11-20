@@ -6,6 +6,8 @@
 #      (PS 5.1 用 ANSI 读无 BOM 的非 ASCII 会把后续行解析坏 —— docs/157 §3.4)
 #   2. 归档内容 == payload (逐个 sha256 对得上, 不是"大概在")
 #   3. 归档**确定性**: 同样输入两次写出字节相同 (zip 固定时间戳 + tar.gz mtime=0)
+#      + **宿主无关**: 换掉 `sys.platform` 再压一遍, zip 字节必须一模一样
+#      (容器里 `create_system` 那一个字段; 见 test_archives 里那条注解)。
 #   4. `--check` 对产物与 SHA256SUMS 一致
 #   5. install.sh 端到端 (WSL 里): tar → 装进临时前缀 → `loment version` →
 #      `loment ir` 的产物与参考实现**逐字节相同** → `loment run` 打出东西 →
@@ -22,6 +24,7 @@ import io
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -33,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import loment_dist  # noqa: E402
+import loment_seed  # noqa: E402
 import lomentc  # noqa: E402
 
 #: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
@@ -41,6 +45,13 @@ import lomentc  # noqa: E402
 _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = loment_dist.ROOT
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 OUT = loment_dist.OUT
 IT_OUT = loment_dist.STAGE / "it-out"   # 测试专用产物目录 (不碰 loment/dist)
 VER = loment_dist.VER
@@ -62,7 +73,7 @@ def wsl(*args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     `install.sh 端到端` 那条）。所以这里按平台分流，**不是跳过** —— 换到 Linux 之后这些
     判据反而跑的是原生那条路（在 Linux 上验 `install.sh` 正是该做的事）。
     """
-    argv = list(args) if sys.platform != "win32" else ["wsl", "-e", *args]
+    argv = list(args) if sys.platform != "win32" else [*_WSLCMD, *args]
     return subprocess.run(argv, capture_output=True, text=True,
                           shell=False, encoding="utf-8", errors="replace", timeout=timeout)
 
@@ -75,20 +86,66 @@ def wsl_path(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
+#: `--opt` 的**试金石**：一段有"按字节铺"与"按字节搬"两种循环的程序。
+#:
+#: 为什么需要它：`-O2` 会把这两种循环改写成 `memset` / `memcpy` / `memmove` 的调用，而
+#: Loment 是无 libc 的 —— 少补一个符号，clang 就在**链接期**报 `undefined symbol: memset`
+#: （实测）。`user_hello` 只有一次 `write`，没有这种循环，所以光靠它那一条 `--opt` 判据
+#: 是看不见这一格的。这段程序**故意**两样都有：铺（`store8(p, i, 常量)`）与搬
+#: （`store8(d, i, load8(s, i))`），且长度是运行期参数，优化器不会把它折没了。
+#: `_start` 读到最后一个字节再退出，于是"跑起来"这件事本身就是"搬对了"。
+OPT_LIBCALL_PROBE = """\
+module optlibcall_probe
+choose runtime
+
+fn fill(p: ptr, n: u32, v: u8) {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, v);
+        i = i + 1;
+    }
+}
+
+fn copy(d: ptr, s: ptr, n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        store8(d, i, load8(s, i) as u8);
+        i = i + 1;
+    }
+}
+
+fn _start() {
+    let p: ptr = alloc(4096);
+    let q: ptr = alloc(4096);
+    fill(p, 2048, 7);
+    copy(q, p, 2048);
+    exit(load8(q, 2047) as u64);
+}
+
+fn exit(code: u64) -> i64 {
+    return syscall4(60, code, 0, 0);
+}
+"""
+
+
 # ------------------------------------------------------------------ 1. 布局
 
 def test_layout() -> None:
     lin = loment_dist.payload("linux", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     win = loment_dist.payload("windows", {"loment-driver": (b"\x7fELF-fake", b"MZ-fake")})
     want_common = {"bin/loment", "share/loment/version", "share/loment/seed.ll",
-                   "share/loment/examples/user_hello.lomt", "README.md", "LICENSE"}
+                   "share/loment/examples/user_hello.lomt", "README.md",
+                   "LICENSE-MIT", "LICENSE-APACHE"}
     check("payload 公共布局齐全", want_common <= set(lin))
     check("linux 有 install.sh 且可执行",
           lin.get("install.sh", (b"", 0))[1] == 0o755)
-    check("windows 有 install.ps1/install.cmd/loment.ico",
-          {"install.ps1", "install.cmd", "bin/loment.ico"} <= set(win))
+    check("windows 有 install.ps1/install.cmd/welcome.ps1/logo/loment.ico",
+          {"install.ps1", "install.cmd", "welcome.ps1", "loment-logo.png",
+           "bin/loment.ico"} <= set(win))
     check("windows zip 里没有 install.sh (不混淆两种装法)",
           "install.sh" not in win and "install.ps1" not in lin)
+    check("loment-logo.png 真的是 PNG (从 editors/loment.ico 最大的那帧抽的)",
+          win["loment-logo.png"][0][:8] == b"\x89PNG\r\n\x1a\n")
     check("ELF 权限位是 755", all(m == 0o755 for (rel, (b, m)) in lin.items()
                                   if rel.startswith("bin/loment-")))
 
@@ -98,11 +155,29 @@ def test_layout() -> None:
     check("linux 脚本纯 ASCII", not bad_ascii, ",".join(bad_ascii))
     ps1 = win["install.ps1"][0]
     check("install.ps1 纯 ASCII", all(c <= 0x7E for c in ps1))
-    for rel in ("install.ps1", "install.cmd"):
+    # welcome.ps1 是同一类东西（PS 5.1 按 ANSI 读无 BOM 的 .ps1），卫生规则也同一套。
+    for rel in ("install.ps1", "install.cmd", "welcome.ps1"):
         blob = win[rel][0]
+        check(f"{rel} 纯 ASCII", all(c <= 0x7E for c in blob))
         check(f"{rel} 是 CRLF", b"\r\n" in blob and b"\n" not in blob.replace(b"\r\n", b""))
     check("bin/loment 是 LF (WSL/Linux 侧)",
           b"\r" not in lin["bin/loment"][0])
+
+    # 安装器的两张脸。**无参数（= 双击）走窗口，带参数走控制台** —— 而 2026-10-12 用户报的
+    # 「双击 setup.exe 毫无反应」，实测下来是包解开了、脚本真跑了、东西也真装上了，只是
+    # 那条路上**没有一个看得见的窗口**。这一条钉**静态形状**（跨平台跑得到）：下面那条
+    # 真开窗口的判据只在 Windows 上做，而门禁只有 ubuntu runner。
+    cmd = win["install.cmd"][0].decode("ascii")
+    check("install.cmd 两张脸: 无参数 -> 窗口(welcome.ps1), 有参数 -> 控制台",
+          "welcome.ps1" in cmd and ":console" in cmd and "goto console" in cmd
+          and cmd.index("welcome.ps1") < cmd.index(":console"),
+          "两条分支都要在, 且窗口那条排在前")
+    wps = win["welcome.ps1"][0].decode("ascii")
+    # 断言抓的是**重写的特征**（校验原语 / 复制载荷），不是某个词的出现 —— 第一版抓
+    # `SHA256SUMS` 这个词，结果被窗口自己的一句注释绊倒（2026-10-12 实测），那是假红。
+    check("welcome.ps1 只驱动 install.ps1, 不重写安装逻辑 (一份逻辑两张脸)",
+          "install.ps1" in wps and "Get-FileHash" not in wps and "Copy-Item" not in wps,
+          "窗口不该自己校验/复制载荷 —— 那是 install.ps1 的活")
     # Windows 包里工具都带 .exe, 而 `test -x name` 只在 MSYS 下自动补后缀 —— WSL 不会。
     # 所以启动器必须经 tool() 解析路径; 裸 `$here/loment-` 一旦回归就是「假报缺组件」。
     launcher = lin["bin/loment"][0].decode("ascii")
@@ -120,6 +195,100 @@ def test_layout() -> None:
     check("loment.cmd usage 块所有非空行均以 echo 开头",
           all(ln.startswith("echo") for ln in usage_lines),
           str([ln for ln in usage_lines if not ln.startswith("echo")]))
+
+
+# ------------------------------------------------- 安装器与发布链的加固 (0.1.5 security)
+#
+# 这一组是**静态形状**判据：它们不构建包，所以在 ubuntu runner 上也跑得到。
+# 真跑那半在下面 `test_install_sh` / `test_windows_installer` 里（需要 sh / Windows）。
+
+def test_installer_hardening() -> None:
+    lin = loment_dist.INSTALL_SH
+    win = loment_dist.INSTALL_PS1
+    cmd = loment_dist.INSTALL_CMD
+    wps = loment_dist.WELCOME_PS1
+
+    # ---- #422: 裸名 `powershell` 会先搜当前目录（= 攻击者控制的解包目录）
+    bare = [ln.strip() for ln in (cmd + "\n" + wps).splitlines()
+            if re.match(r"^\s*powershell(\.exe)?\s", ln, re.I)]
+    check("安装脚本不按裸名调用 powershell (#422)", not bare, str(bare[:2]))
+    abs_ps = "System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+    check("install.cmd 用 System32 下的绝对 powershell 路径 (#422)", abs_ps in cmd)
+    check("setup 启动器用绝对 powershell 路径 (#422)", abs_ps in wps)
+    check("install.cmd 关掉当前目录搜索 (#422)",
+          "NoDefaultCurrentDirectoryInExePath" in cmd)
+
+    # ---- #423: 解包前逐条校验；越界条目拒绝；目录随机而非 PID 可猜
+    check("install.ps1 手工读 zip 并在写盘前校验条目 (#423)",
+          "ZipFile" in win and "GetFullPath" in win and "SHA256SUMS" in win)
+    check("install.ps1 拒绝越出解包根的条目 (#423)",
+          "escapes the extraction root" in win)
+    check("install.ps1 解包目录用随机名, 不再用 PID (#423)",
+          "loment-setup-' + $PID" not in win and "NewGuid" in win)
+
+    # ---- #424: 校验的是清单，复制的也必须只有清单
+    check("install.sh 不再按目录通配复制 (#424)",
+          'cp -f "$src/bin/"*' not in lin and 'cp -R "$src/share' not in lin,
+          "仍按目录复制: 清单外文件会被装上")
+    check("install.sh 按 SHA256SUMS 逐条复制 (#424)",
+          "while IFS= read -r" in lin and "SHA256SUMS" in lin)
+    check("install.sh 对清单外的 bin/ 文件硬报错 (#424)",
+          "unlisted file in package" in lin)
+    check("install.ps1 不再按目录通配复制 (#424)",
+          "Get-ChildItem -LiteralPath (Join-Path $Payload 'bin') -File" not in win)
+    check("install.ps1 对清单外的文件硬报错 (#424)",
+          "unlisted file in package" in win)
+
+    # ---- #425: 没有校验器时**拒绝**，不是跳过
+    check("install.sh 没有 SHA-256 校验器时拒绝安装 (#425)",
+          "no SHA-256 verifier" in lin and "skipping package verification" not in lin)
+    check("install.sh 有显式的 --no-verify 退出开关 (#425)",
+          "--no-verify" in lin)
+
+    # ---- #419: 摘要要能被用户拿到归档之外核对
+    low = lin.lower()
+    check("install.sh 打印 SHA256SUMS 摘要供离线核对 (#419)",
+          "release page" in low and "digest" in low)
+    loww = win.lower()
+    check("install.ps1 打印 SHA256SUMS 摘要供离线核对 (#419)",
+          "release page" in loww and "digest" in loww)
+
+    # ---- 冒烟编译不能被编译器的 stderr 中止（0.1.5.1 setup.exe 的实际故障）
+    # PowerShell 5.1 在 $ErrorActionPreference='Stop' 下把原生命令写往 stderr 的
+    # 一行（`loment: grammar default -> tur2026.3`）当成终止 RemoteException，
+    # 于是编译成功也会让安装失败。冒烟只看退出码，两个流都必须吞掉。
+    smoke = [ln for ln in win.splitlines()
+             if "'loment.cmd'" in ln]
+    check("install.ps1 的两条冒烟命令都吞掉 stderr 与 stdout (*> $null)",
+          len(smoke) == 2 and all("*> $null" in ln for ln in smoke), str(smoke))
+    check("install.ps1 冒烟期间放宽 $ErrorActionPreference 并还原",
+          "$prevEap = $ErrorActionPreference" in win
+          and "$ErrorActionPreference = 'Continue'" in win
+          and "$ErrorActionPreference = $prevEap" in win)
+
+
+def test_release_integrity_anchor() -> None:
+    rel = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    for asset in ("SHA256SUMS.asc", "loment-signing.asc", "FINGERPRINT"):
+        check(f"release.yml 把 {asset} 挂成发布资产 (#419)", asset in rel)
+    check("release.yml 对 SHA256SUMS 做分离签名 (#419)", "detach-sign" in rel)
+    check("release.yml 没密钥时拒绝发布 (#419)",
+          "LOMENT_RELEASE_SIGNING_KEY" in rel)
+    check("release.yml 把摘要写进 release 正文 (归档之外的第二个渠道) (#419)",
+          "sha256sum" in rel and "release edit" in rel)
+
+    manifest = (ROOT / ".github" / "workflows" / "manifest.yml").read_text(encoding="utf-8")
+    check("manifest.yml 不再在 fork 的树上跑写权限 job (#420)",
+          not re.search(r"^  pull_request_target:", manifest, re.M)
+          and "maintainer_can_modify" not in manifest
+          and "github.event.pull_request" not in manifest,
+          "fork 的树仍能进入带写权限 token 的作业")
+
+    co = ROOT / ".github" / "CODEOWNERS"
+    body = co.read_text(encoding="utf-8") if co.exists() else ""
+    check(".github/CODEOWNERS 罩住门禁、判据预算与工作流 (#421)",
+          co.exists() and "tools/ci.py" in body and "gate-floors.txt" in body
+          and ".github/workflows/" in body)
 
 
 # ------------------------------------------------------------------ 2/3. 归档
@@ -165,6 +334,30 @@ def test_archives() -> None:
     check("tar.gz 两次写出字节相同",
           loment_dist._tar_gz("loment-x", lin) == loment_dist._tar_gz("loment-x", lin))
 
+    # 3b. **宿主无关**: zip 容器里 `create_system` 那一个字段由 `zipfile` 按
+    # `sys.platform` 填 (win32 → 0, 其余 → 3)。内容一个字节不差, 但"同一 tag 在两个
+    # runner 上出两个哈希"。2026-10-10 咬到过一次: `skill_zip()` 自己建的那份 ZipFile
+    # 漏了 `create_system = 3` (`_zip` 一直有), 而发布流水线正好要从 ubuntu 挪到
+    # windows —— 第五件 setup.exe 要 Windows 自带的 iexpress。
+    #
+    # **为什么不能只断言"等于 3"**: 默认值本来就是"除 win32 外都是 3", 于是在 ubuntu
+    # 门禁上两种写法都过 —— 那条断言是空的。真正的性质是**不随 `sys.platform` 变**,
+    # 所以这里在同一个进程里把它换成另一个值再压一遍、比字节。
+    # **两个平台都判得动**: 在 Windows 上它盯 `skill_zip` 那一半, 在 ubuntu 上盯 `_zip`
+    # 那一半 —— 而"只在 Windows 上现形"正是这条缺陷当初能溜过去的理由。
+    here = {"_zip": loment_dist._zip("loment-x", win),
+            "skill_zip": loment_dist.skill_zip()}
+    real_plat = sys.platform
+    try:
+        sys.platform = "linux" if real_plat == "win32" else "win32"
+        other = {"_zip": loment_dist._zip("loment-x", win),
+                 "skill_zip": loment_dist.skill_zip()}
+    finally:
+        sys.platform = real_plat
+    drifted = [k for k in here if here[k] != other[k]]
+    check("zip 字节不随 sys.platform 变 (容器里 create_system 那一个字段)",
+          not drifted, ",".join(drifted))
+
 
 def read_zip_bytes(blob: bytes) -> dict[str, bytes]:
     with zipfile.ZipFile(__import__("io").BytesIO(blob)) as zf:
@@ -189,10 +382,20 @@ def build() -> tuple[Path, Path]:
     check("产物存在 (tar.gz + zip)", tar.exists() and zipf.exists())
     check("--check 与 SHA256SUMS 一致",
           loment_dist.main(["--check", "--out", str(IT_OUT)]) == 0)
-    # 归档里的 driver == 同一份 IR 现链出来的（中间没被动过）
+    # 归档里的 driver == **本包实际用的那个种子**现链出来的（中间没被动过）。
+    #
+    # ⚠ **包是发行版**（`docs/231` §2.3）：`emit()` 会把 `ACTIVE_SEED` 换成
+    # **发行版种子**（只改 `loment/selfhost/checker.lomt` 那一行渠道常量，再重算）。
+    # 这里原先写死的是 `loment_dist.SEED` —— **仓库里那份 dev 种子** —— 所以渠道闸一进来
+    # 就当场红（2026-10-12 那次 CI 里 50 条判据中唯一的新红）。
+    # 这不是"放宽判据"：比的是**同一个东西**（归档里的 driver 与种子链产物逐字节相同），
+    # 只是那份种子现在**按渠道**取；下面那条断言把"有没有走发行版"单独钉住。
+    assert loment_dist.ACTIVE_SEED == loment_dist.RELEASE_SEED, (
+        "打包没有走发行版种子 —— 包里会是 dev 工具链，于是发行版照样收 `choose vm`"
+        "（`docs/231` §2.3）")
     driver = loment_dist._lomelf_link(
-        (loment_dist.STAGE / "driver.ll").read_text(encoding="utf-8"), "elf")
-    check("归档里的 loment-driver == 构建产物",
+        loment_dist.ACTIVE_SEED.read_text(encoding="utf-8"), "elf")
+    check("归档里的 loment-driver == 种子链出来的",
           read_tar(tar)["bin/loment-driver"] == driver)
     check("归档里有 loment-lomelf（`loment build/run` 的链接器）",
           "bin/loment-lomelf" in read_tar(tar))
@@ -246,6 +449,54 @@ def test_install_sh(tar: Path) -> None:
     check("loment run 编译+链接+运行并打出东西",
           r.returncode == 0 and r.stdout.strip() != "", (r.stderr or "")[-200:])
 
+    # `--opt` (docs/212 §5 A): hand the IR to clang -O2 when clang is on PATH, else **say so**
+    # and fall back to the self-hosted lomelf linker. Either way the binary must run; the
+    # two branches are pinned separately so a silent no-op `--opt` cannot pass.
+    ex = f"{PREFIX_IT}/share/loment/examples/user_hello.lomt"
+    d_bin, o_bin = "/tmp/loment_def_bin", "/tmp/loment_opt_bin"
+    wsl(f"{PREFIX_IT}/bin/loment", "build", ex, "-o", d_bin)
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", ex, "--opt", "-o", o_bin)
+    check("loment build --opt 产出可运行二进制",
+          r.returncode == 0, (r.stderr or "")[-200:])
+    # `build` does not set the exec bit (only `run` chmods -- pre-existing, both backends),
+    # so set it before running. **只在产物真的存在时**才 chmod：那条 `check` 已经在失败时
+    # 记录了 `--opt` 的 stderr，这里再无条件 chmod 只会用 FileNotFoundError 盖掉真正的原因。
+    if r.returncode == 0:
+        wsl("chmod", "755", o_bin)
+        rr = wsl(o_bin)
+        check("build --opt 的产物跑得起来",
+              rr.returncode == 0 and rr.stdout.strip() != "", (rr.stderr or "")[-160:])
+    has_clang = wsl("sh", "-c", "command -v clang >/dev/null && echo y || echo n").stdout.strip() == "y"
+    if has_clang:
+        check("有 clang 时 --opt 走优化路径（不说 fallback）",
+              "falling back" not in (r.stderr or ""), (r.stderr or "")[-160:])
+        sz = lambda p: int(wsl("sh", "-c", f"wc -c < {p}").stdout.strip() or "0")
+        check("有 clang 时 --opt 是**另一个后端**的产物（与默认不同）",
+              sz(o_bin) != sz(d_bin), f"default={sz(d_bin)} opt={sz(o_bin)}")
+    else:
+        check("无 clang 时 --opt **点名**退回 lomelf（不静默）",
+              "no clang" in (r.stderr or ""), (r.stderr or "")[-160:])
+
+    # 上面那条 `--opt` 判据只说明"编译得动 user_hello"。**链得起来**是另一件事：`-O2`
+    # 会把字节循环改写成 memset/memcpy/memmove，而这个运行期没有 libc。见 OPT_LIBCALL_PROBE。
+    IT_OUT.mkdir(parents=True, exist_ok=True)
+    probe = IT_OUT / "optlibcall_probe.lomt"
+    probe.write_text(OPT_LIBCALL_PROBE, encoding="utf-8", newline="\n")
+    p_src = wsl_path(probe)
+    p_def, p_opt = f"{_T}probe_def", f"{_T}probe_opt"
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", p_src, "-o", p_def)
+    check("有字节循环的程序 build 得动（默认后端）",
+          r.returncode == 0, (r.stderr or "")[-200:])
+    r = wsl(f"{PREFIX_IT}/bin/loment", "build", p_src, "--opt", "-o", p_opt)
+    check("有字节循环的程序 --opt 也**链得起来**（合成的 libcall 有人补）",
+          r.returncode == 0 and "undefined symbol" not in (r.stderr or ""),
+          (r.stderr or "")[-240:])
+    if has_clang and r.returncode == 0:
+        wsl("chmod", "755", p_opt)
+        rr = wsl(p_opt)
+        check("补齐 libcall 的产物跑出正确结果（搬对了）",
+              rr.returncode == 7, f"rc={rr.returncode} {(rr.stderr or '')[-120:]}")
+
     # `loment help [COMMAND]` 必须**走得到那一页**。启动器只转发 `help` 而不带后面的参数时,
     # 详细页永远看不到 —— 而目录页里印的正是 `loment help [COMMAND]`。`loment-cli help build`
     # 直呼是好的, 所以这条**只能由装好的启动器**来测 (源码级判据看不见这一层)。
@@ -253,6 +504,40 @@ def test_install_sh(tar: Path) -> None:
     check("装完后 `loment help build` 打到详细页 (sh 启动器转发了参数)",
           r.returncode == 0 and "Compile and link to an executable" in r.stdout,
           (r.stdout or r.stderr)[:140])
+
+    # #659: `--max` 后面没跟数 —— 那是**启动器**的用法错，不是渲染器的。
+    # 修之前它被原样转发成裸 `--max`，lomenterr 把诊断文件当成上限、打自己的 usage，
+    # 用户的编译错误一条都看不到。
+    r = wsl(f"{PREFIX_IT}/bin/loment", "check", ex, "--max")
+    out = (r.stdout or "") + (r.stderr or "")
+    check("`loment check FILE --max` 是启动器的用法错，不是渲染器的 (#659)",
+          r.returncode == 2 and "--max needs a number" in out
+          and "usage: lomenterr" not in out, f"rc={r.returncode} out={out[-200:]}")
+
+    # #673: 编译器写完一条诊断之后**被信号杀死**。只渲染那条记录，读起来像一次普通
+    # 编译错误 —— 用户看不出编译器根本没跑完。这里用一个会 SIGSEGV 的假驱动验它。
+    drv = f"{PREFIX_IT}/bin/loment-driver"
+    wsl("mv", drv, drv + ".real")
+    stub = IT_OUT / "crash-driver.sh"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do\n"
+        "  case \"$1\" in --diag-out) shift; d=$1 ;; esac\n"
+        "  shift\n"
+        "done\n"
+        "printf '{\"file\":\"x.lomt\",\"line\":1,\"col\":1,\"code\":\"E002\","
+        "\"message\":\"m\"}\\n' > \"$d\"\n"
+        "kill -SEGV $$\n", encoding="utf-8", newline="\n")
+    wsl("cp", wsl_path(stub), drv)
+    wsl("chmod", "755", drv)
+    r = wsl(f"{PREFIX_IT}/bin/loment", "check", ex)
+    wsl("rm", "-f", drv)
+    wsl("mv", drv + ".real", drv)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("编译器写了一条诊断后被信号杀死：说破，且退出码不压成 1 (#673)",
+          r.returncode == 139 and "killed by signal 11" in out
+          and "may be incomplete" in out and "E002" in out,
+          f"rc={r.returncode} out={out[-260:]}")
 
     # 缺件时的报错要指名：临时把 fmt 拿掉，`loment fmt` 应该明确说"这个包没包含"
     wsl("rm", "-f", f"{PREFIX_IT}/bin/loment-fmt")
@@ -266,6 +551,32 @@ def test_install_sh(tar: Path) -> None:
     r = wsl("sh", wsl_path(install), "--prefix", PREFIX_IT, "--no-path")
     check("重复安装幂等", r.returncode == 0, (r.stderr or "")[-160:])
 
+    # #424: 清单之外的 bin/ 文件必须**硬报错**，不能"装上去但没校验过"。
+    # 复制一棵树再加一个文件 —— 校验和仍然全对，只有"复制集合 == 校验集合"能抓到它。
+    tamper = work / "tamper"
+    pfx_evil = PREFIX_IT + "_evil"
+    wsl("rm", "-rf", pfx_evil)
+    if tamper.exists():
+        shutil.rmtree(tamper)
+    shutil.copytree(root, tamper)
+    (tamper / "bin" / "loment-evil").write_bytes(b"#!/bin/sh\nexit 0\n")
+    r = wsl("sh", wsl_path(tamper / "install.sh"), "--prefix", pfx_evil, "--no-path")
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.sh 拒绝清单外的 bin/ 文件 (#424)",
+          r.returncode != 0 and "unlisted file in package" in out, out[-200:])
+    wsl("rm", "-rf", pfx_evil)
+
+    # #425: 没有任何 SHA-256 校验器时必须**停下**。PATH 清空后 `sh` 仍由绝对路径启动，
+    # `command -v` 什么也找不到 —— 这正是最小容器/加固环境里的形状。
+    pfx_nv = PREFIX_IT + "_nv"
+    wsl("rm", "-rf", pfx_nv)
+    r = wsl("env", "PATH=/nonexistent", "/bin/sh", wsl_path(install),
+            "--prefix", pfx_nv, "--no-path")
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.sh 没有 SHA-256 校验器时拒绝安装 (#425)",
+          r.returncode != 0 and "verifier" in out, out[-200:])
+    wsl("rm", "-rf", pfx_nv)
+
     # 卸载: 清干净
     r = wsl("sh", wsl_path(install), "--uninstall", "--prefix", PREFIX_IT)
     r2 = wsl("test", "-e", f"{PREFIX_IT}/bin/loment")
@@ -274,13 +585,57 @@ def test_install_sh(tar: Path) -> None:
 
 # ------------------------------------------------------------------ 6. Windows 安装脚本
 
+def test_installers_name_an_earlier_lompi() -> None:
+    """更靠前的 `lompi`/`loment` 会**静默**盖过我们装的那份 —— 两份安装脚本都要点名它。
+
+    **Why**：2026-10-12 用户报"敲 `lompi` 显示 0.1.0"。查下来是 `~/.local/bin/lompi.exe`
+    （一个月前单独装的那份）在 PATH 上排得更前：安装器是**追加** PATH 的（刻意不打乱别人的
+    机器），所以更早的那份永远赢，而装完**没有任何一句话**提到这件事 —— 版本号看着不对，
+    却无从归因。
+
+    **为什么不能只靠真跑**：真跑那半在 `test_windows_installer` 里（Windows-only），而门禁
+    只有 ubuntu runner —— 光靠它的话，这个缺陷在 CI 里谁都拦不住。这一条钉**静态形状**，
+    哪台机都跑得到：两份脚本里都要有这段检查，且**真的被调用**（定义在而没人调 = 没有）。
+    """
+    for label, src, fn in (("install.ps1", loment_dist.INSTALL_PS1, "Show-Shadowed"),
+                           ("install.sh", loment_dist.INSTALL_SH, "warn_shadowed")):
+        n = src.count(fn)
+        check(f"{label} 有'更靠前的同名命令'检查且被真的调用 (定义+调用 >= 2 处)",
+              n >= 2, f"{fn} 出现 {n} 次")
+        body = src.split(fn, 1)[1] if n else ""
+        check(f"{label} 的检查同时管 loment 与 lompi (只管一个就漏一半)",
+              "loment" in body and "lompi" in body, f"检查体里少了名字: {body[:90]!r}")
+
+
+def test_setup_shapes_are_pinned_statically() -> None:
+    """自解压包的两条性质, 用**静态形状**钉住 —— 因为真跑那半只在 Windows 上。
+
+    2026-10-21 发布出去的那个 `setup.exe` 有两处静默:
+      1. 载荷是从**发行目录**压的 (每条目带 `loment-<ver>-.../`), 而 install.ps1 只在
+         zip 根上找 `SHA256SUMS` —— 完整包被当成 "package is incomplete" 拒绝;
+      2. 失败原因走的是**终止性错误**, 它绕过窗口那条 `*>` 重定向 —— 日志是空的,
+         回执却写着 "see the log above"。
+    真跑的两条在 `test_windows_installer` 里; 门禁只有 ubuntu runner, 所以这一条在两个
+    平台都跑得到, 钉的是"这两个形状还在代码里"。
+    """
+    ps = loment_dist.INSTALL_PS1
+    check("install.ps1 有'单层目录载荷'的归一化 (0.1.5 那个形状)",
+          "$tops.Count -eq 1" in ps and "$e.FullName.Substring($top.Length)" in ps,
+          "载荷带一层共用目录时会被当成 package incomplete")
+    wp = loment_dist.WELCOME_PS1
+    check("welcome.ps1 把子进程的终止性错误也写进日志 (0.1.5 是空日志)",
+          "'try { & '" in wp and "} catch {" in wp and "-Append" in wp,
+          "throw 绕过 *> 重定向 —— 窗口又会看不见原因")
+
+
 def test_windows_installer(zipf: Path) -> None:
     if sys.platform != "win32":
         # 这一条验的是 install.ps1 / install.cmd 那套 Windows 安装脚本。runner 上**有
         # PowerShell**（所以原先那道 `if not ps` 守卫拦不住），但没有 `cmd` —— 会走到
         # 一半才炸 `FileNotFoundError: 'cmd'`。按本文件对 Windows 专属判据的既有写法
         # 整条跳过，并写明这一半在 CI 上**不覆盖**。
-        print("      SKIP: 非 Windows —— Windows 安装脚本在 CI 上不覆盖（要覆盖得用 Windows runner）")
+        print("  SKIP  Windows安装脚本: 非 Windows —— 这一半在 CI 上不覆盖"
+              "（要覆盖得用 Windows runner）")
         return
     work = loment_dist.STAGE / "it-win"
     if work.exists():
@@ -292,7 +647,7 @@ def test_windows_installer(zipf: Path) -> None:
     ps1 = root / "install.ps1"
     ps = shutil.which("powershell") or shutil.which("pwsh")
     if not ps:
-        print("  SKIP  install.ps1 -DryRun (没有 powershell)")
+        print("  SKIP  install.ps1 -DryRun: 没有 powershell")
         return
     r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                         "-DryRun"], capture_output=True, text=True, shell=False,
@@ -311,13 +666,90 @@ def test_windows_installer(zipf: Path) -> None:
     check("install.ps1 -PayloadZip (自解压包路径) 也能跑",
           r.returncode == 0 and "payload" in out, out[-220:])
 
+    # 2026-10-21: the released 0.1.5 setup.exe carried a payload zipped from the
+    # distribution **directory** -- every entry prefixed `loment-<ver>-.../`. The old
+    # fixture was hand-built root-flat, so it could never catch that; install.ps1 looked
+    # for SHA256SUMS at the archive root and called a complete package incomplete.
+    # Fixture note: `payload(..., {})` carries no binaries, so a **real** install would
+    # stop later at the smoke test. That is why this one stays `-DryRun`: reaching the
+    # plan at all means the payload was accepted, verified and unpacked. (Checked by hand
+    # on 2026-10-21 against the same fixture: the real run gets past "[1/6] SHA256SUMS
+    # verified" and copies bin/ + share/, then fails only on the absent driver.)
+    wrapped = work / "payload-wrapped.zip"
+    wrapped.write_bytes(loment_dist._zip(f"loment-{VER}-windows-x64",
+                                         loment_dist.payload("windows", {})))
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-DryRun", "-PayloadZip", str(wrapped)], capture_output=True,
+                       text=True, shell=False, encoding="utf-8", errors="replace",
+                       timeout=180)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.ps1 -PayloadZip 认单层目录的载荷 (0.1.5 那个形状)",
+          r.returncode == 0 and "dry-run" in out and "package is incomplete" not in out,
+          out[-220:])
+
+    # The window must show WHY the install failed. `*>` does not capture a terminating
+    # error (throw / $ErrorActionPreference='Stop'), so on 0.1.5 the log stayed empty and
+    # the receipt said "see the log above" over nothing. Run the real window with the
+    # real child wiring against a script that only throws, and look for the marker.
+    marker = "boom-marker-4f2a"
+    thrower = work / "throws.ps1"
+    thrower.write_text(f"throw '{marker}'\n", encoding="ascii")
+    tdir = Path(tempfile.gettempdir())
+    before = set(tdir.glob("loment-setup-*.log"))
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        str(root / "welcome.ps1"), "-InstallPs1", str(thrower),
+                        "-AutoRun", "-AutoClose", "-Prefix", str(work / "inst-gui"),
+                        "-NoPath", "-NoFileType", "-NoSkill", "-DryRun"],
+                       capture_output=True, text=True, shell=False,
+                       encoding="utf-8", errors="replace", timeout=180)
+    fresh = set(tdir.glob("loment-setup-*.log")) - before
+    hit = False
+    for p in fresh:
+        data = p.read_bytes()
+        # `*>` writes UTF-16LE; Out-File -Append matches it. Accept either, so this
+        # criterion measures "the text arrived", not the encoding choice.
+        if marker.encode() in data or marker.encode("utf-16-le") in data:
+            hit = True
+    check("welcome.ps1 把 install.ps1 的终止性错误写进日志 (0.1.5 是空的)", hit,
+          f"new logs={len(fresh)} rc={r.returncode} {(r.stderr or '')[-160:]}")
+
+    # #423: 一个把条目写到解包目录之外的 zip 必须被**写盘之前**拒绝。
+    # `..\loment-escape.txt` 就是最小形状；不校验时它会落到 %TEMP% 根上。
+    evil = work / "evil.zip"
+    with zipfile.ZipFile(evil, "w") as zf:
+        zf.writestr("SHA256SUMS", b"")
+        zf.writestr("../loment-escape.txt", b"pwned\n")
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-DryRun", "-PayloadZip", str(evil)], capture_output=True, text=True,
+                       shell=False, encoding="utf-8", errors="replace", timeout=180)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.ps1 拒绝越出解包根的 zip 条目 (#423)",
+          r.returncode != 0 and "escapes the extraction root" in out, out[-220:])
+    with contextlib.suppress(OSError):
+        (Path(tempfile.gettempdir()) / "loment-escape.txt").unlink()
+
+    # #424: 清单之外的文件必须拒绝装上（真跑 install.ps1，不是只看文本）。
+    tamper = work / "tamper"
+    if tamper.exists():
+        shutil.rmtree(tamper)
+    shutil.copytree(root, tamper)
+    (tamper / "bin" / "loment-evil.exe").write_bytes(b"MZ" + b"\0" * 32)
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
+                        "-PayloadDir", str(tamper), "-Prefix", str(work / "inst-tamper"),
+                        "-NoPath", "-NoFileType", "-NoSkill"],
+                       capture_output=True, text=True, shell=False,
+                       encoding="utf-8", errors="replace", timeout=300)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("install.ps1 拒绝清单外的 bin/ 文件 (#424)",
+          r.returncode != 0 and "unlisted file in package" in out, out[-220:])
+
     exe = OUT / f"loment-{VER}-windows-x64-setup.exe"  # 正式产物目录里的 (测试不重建 exe)
     if exe.exists():
         head = exe.read_bytes()[:2]
         check("setup.exe 是 PE 且非空", head == b"MZ" and exe.stat().st_size > 100000,
               f"head={head!r} size={exe.stat().st_size}")
     else:
-        print("  SKIP  setup.exe 存在性 (本次 --emit 用了 --no-exe)")
+        print("  SKIP  setup.exe 存在性: 本次 --emit 用了 --no-exe")
 
     # 先把**静态形状**钉住 —— 这条跨平台, 门禁 (ubuntu) 跑得到。
     # 下面那条真跑只在 Windows 上做, 而 CI 里没有 Windows runner, 所以只靠它的话
@@ -345,7 +777,7 @@ def test_windows_installer(zipf: Path) -> None:
     #   这条判据就永远测不到东西。
     ie = shutil.which("iexpress") or r"C:\Windows\System32\iexpress.exe"
     if os.name != "nt" or not Path(ie).exists():
-        print("  SKIP  wextract 真跑一遍 (非 Windows / 没有 iexpress)")
+        print("  SKIP  wextract 真跑一遍: 非 Windows / 没有 iexpress")
     else:
         run_dir = loment_dist.STAGE / "exe-run"
         if run_dir.exists():
@@ -354,7 +786,7 @@ def test_windows_installer(zipf: Path) -> None:
         landed = run_dir / "landed.txt"
         if not str(landed).isascii():
             # install.cmd 是 ASCII 脚本 (docs/157 §3.4), 塞不进非 ASCII 路径
-            print("  SKIP  wextract 真跑一遍 (临时目录路径含非 ASCII)")
+            print("  SKIP  wextract 真跑一遍: 临时目录路径含非 ASCII")
         else:
             (run_dir / "install.cmd").write_bytes(
                 b"@echo off\r\necho landed > \"" + str(landed).encode("ascii") + b"\"\r\n")
@@ -363,7 +795,9 @@ def test_windows_installer(zipf: Path) -> None:
             built = run_dir / "run-setup.exe"
             sed.write_text(loment_dist.iexpress_sed(built, run_dir, files),
                            encoding="ascii", newline="\r\n")
-            subprocess.run([ie, "/N", str(sed)], capture_output=True, cwd=str(run_dir),
+            # `/Q` 与正式件同口径（`emit_exe`）：没有它，无可交互控制台时 IExpress
+            # 会弹向导等输入，180 秒后抛 TimeoutExpired（#1077）。
+            subprocess.run([ie, "/N", "/Q", str(sed)], capture_output=True, cwd=str(run_dir),
                            timeout=180)
             if not built.exists():
                 check("自解压包能打出 (iexpress)", False, "iexpress 没产出 exe")
@@ -403,13 +837,57 @@ def test_windows_installer(zipf: Path) -> None:
     (home / ".codex").mkdir(parents=True)
     codex = home / ".codex" / "AGENTS.md"
     codex.write_text("MY OWN RULES\nsecond line\n", encoding="utf-8", newline="\n")
+    # ★ 更靠前的 `lompi`/`loment` 会**静默**盖过我们装的那份。2026-10-12 用户报障：
+    #   敲 `lompi` 拿到的是一个月前单独装的那份（0.1.0）。安装器是**追加** PATH 的（刻意
+    #   不打乱别人的机器），所以更早的那份永远赢，而装完没有一句话提到它 —— 版本号看着不
+    #   对，却无从归因。就地造一个假 `lompi` 放在 PATH 最前面，装一遍，要求它被**点名**。
+    decoy = work / "decoy"
+    if decoy.exists():
+        shutil.rmtree(decoy)
+    decoy.mkdir(parents=True)
+    (decoy / "lompi.cmd").write_bytes(b"@echo off\r\necho decoy-lompi\r\n")
     env = dict(os.environ, USERPROFILE=str(home))
+    env["PATH"] = str(decoy) + os.pathsep + env.get("PATH", "")
     r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1),
                         "-Prefix", str(pfx), "-PayloadDir", str(root),
                         "-NoPath", "-NoFileType"], capture_output=True, text=True,
                        shell=False, encoding="utf-8", errors="replace", timeout=300, env=env)
+    inst_out = (r.stdout or "") + (r.stderr or "")
     check("install.ps1 真装 (临时前缀, 原生 PE, 无 WSL) 退出 0", r.returncode == 0,
+          inst_out[-260:])
+    check("更靠前的 lompi 被点名 (给出路径, 而不是只说一句注意 PATH)",
+          "WARNING" in inst_out and str(decoy).lower() in inst_out.lower(), inst_out[-300:])
+
+    # ★ 窗口那条路真跑一遍。静态那两条只证明"两个分支在"；这两条证明它**开得起来、
+    #   装得完、拿得回退出码**。-AutoRun 自动按下 Install，-ShotDone 让窗口把完成页画成
+    #   PNG（窗口自己画自己 —— 判据不去截桌面，不拍不属于它的东西），装到沙箱前缀，
+    #   不动用户的 PATH 与文件类型。
+    wsplash = work / "shot-splash.png"
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", str(root / "welcome.ps1"),
+                        "-InstallPs1", str(root / "install.ps1"),
+                        "-LogoPath", str(root / "loment-logo.png"),
+                        "-Screenshot", str(wsplash)],
+                       capture_output=True, text=True, shell=False, encoding="utf-8",
+                       errors="replace", timeout=180, env=env)
+    check("welcome.ps1 能画出 splash（自画自截，不碰桌面）",
+          r.returncode == 0 and wsplash.exists() and wsplash.stat().st_size > 3000,
+          ((r.stdout or "") + (r.stderr or ""))[-200:])
+
+    gp = work / "gui-prefix"
+    gdone = work / "shot-done.png"
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-File", str(root / "welcome.ps1"),
+                        "-InstallPs1", str(root / "install.ps1"),
+                        "-LogoPath", str(root / "loment-logo.png"),
+                        "-Prefix", str(gp), "-NoPath", "-NoFileType", "-NoSkill",
+                        "-AutoRun", "-AutoClose", "-ShotDone", str(gdone)],
+                       capture_output=True, text=True, shell=False, encoding="utf-8",
+                       errors="replace", timeout=900, env=env)
+    check("窗口那条路真装一遍（AutoRun 到沙箱前缀），退出 0 且真装出东西",
+          r.returncode == 0 and (gp / "bin/loment.cmd").exists(),
           ((r.stdout or "") + (r.stderr or ""))[-260:])
+    check("完成页画得出来（绿勾那页）", gdone.exists() and gdone.stat().st_size > 3000, "")
     cmd = pfx / "bin/loment.cmd"
     body = cmd.read_text(encoding="utf-8", errors="replace") if cmd.exists() else ""
     check("装出 loment.cmd, 它调本机 exe, 且**不再出现 wsl**",
@@ -435,20 +913,37 @@ def test_windows_installer(zipf: Path) -> None:
           r2b.returncode == 0 and "Compile and link to an executable" in (r2b.stdout or ""),
           (r2b.stdout or r2b.stderr or "")[:140])
 
-    # issue #13: 未知开关要被**拒绝**，不能当成源文件、也不能静默忽略。
-    # `--diag-out` 是**驱动**的开关（docs/182 §5），`loment check` 上并没有这一条 ——
-    # 所以这里要的不是"支持它"，而是"别装作支持"：原先它会落到 :scan_arg 里
-    # "第一个非开关词就是源文件"那一支，于是被无声吞掉（bash 侧同形状退 2）。
-    stray = work / "should_not_exist.jsonl"
+    # issue #13（2026-10-18 修）：`--diag-out PATH` 是**驱动**那一层的开关，`check` 现在
+    # 真的把它转交过去 —— 文件要出现在用户点名的地方（干净的单元也要留一个空文件，
+    # 否则"没有文件"与"开关没生效"分不开）。原先这条钉的是"被拒、不写文件"（当时的已知
+    # 缺陷），按棘轮规矩**反转**，不是删掉。
+    stray = work / "diag-out.jsonl"
     ex_src = pfx / "share/loment/examples/user_hello.lomt"
-    r_unknown = subprocess.run(
+    r_dout = subprocess.run(
         ["cmd", "/c", str(cmd), "check", str(ex_src), "--diag-out", str(stray)],
         capture_output=True, text=True, shell=False, encoding="utf-8",
         errors="replace", timeout=180)
-    check("装完后 `loment check FILE --diag-out P` 被拒 (未知开关, 退 2, 不写文件)",
-          r_unknown.returncode == 2 and "unknown option" in (r_unknown.stderr or "")
-          and not stray.exists(),
-          f"rc={r_unknown.returncode} err={(r_unknown.stderr or '')[:90]}")
+    check("装完后 `loment check FILE --diag-out P` 写出那份文件",
+          r_dout.returncode == 0 and stray.exists(),
+          f"rc={r_dout.returncode} exists={stray.exists()} "
+          f"err={(r_dout.stderr or '')[:90]}")
+
+    # 同一条 issue 的另一半：`--max N` 的**值**必须跟着开关一起到渲染器。cmd 侧原先
+    # 只记了 `--max` 本身、把下一个词当"源文件"跳过，于是 `lomenterr --max d.jsonl`
+    # 把文件当成了上限、打自己的用法 —— 用户要的诊断一条都看不到。
+    bad_max = work / "bad_max.lomt"
+    bad_max.write_text("module m\nfn _start() {\n    let a: u32 = zz;\n"
+                       "    let b: u32 = yy;\n    syscall4(60, 0, 0, 0);\n}\n",
+                       encoding="utf-8", newline="\n")
+    r_max = subprocess.run(
+        ["cmd", "/c", str(cmd), "check", str(bad_max), "--max", "1"],
+        capture_output=True, text=True, shell=False, encoding="utf-8",
+        errors="replace", timeout=180)
+    blob_max = (r_max.stderr or "") + (r_max.stdout or "")
+    check("装完后 `loment check FILE --max 1` 是截断，不是用法错",
+          r_max.returncode == 1 and "usage: lomenterr" not in blob_max
+          and "error[E091]" in blob_max,     # 未声明的变量 = E091（`docs/338`）
+          f"rc={r_max.returncode} err={blob_max[:120]}")
 
     # ★ 全链判据: `loment run` 在本机编出 PE 并跑起来 —— 这才是"去 WSL"的意义
     ex = pfx / "share/loment/examples/user_hello.lomt"
@@ -466,6 +961,20 @@ def test_windows_installer(zipf: Path) -> None:
           skill.exists() and skill.read_bytes() == want, f"缺或不符: {skill}")
     check("随包的 skill 也留在前缀里 (share/loment/skill)",
           (pfx / "share/loment/skill/SKILL.md").exists(), "缺 share/loment/skill/SKILL.md")
+
+    # ★ The LomentSkill suite: every topic skill is its own discovered skill, and each
+    #   installed copy is byte-identical to the package copy. A suite member that is
+    #   listed but not shipped would leave the entry's map pointing at nothing.
+    for sname, srel in loment_dist.SKILL_SUITE:
+        pkgrel = f"share/loment/skill/{loment_dist.skill_pkg_name(sname)}"
+        pkg = pfx / pkgrel.replace("/", "\\")
+        inst = home / ".claude" / "skills" / sname / "SKILL.md"
+        check(f"随包套件 {sname} 在 {pkgrel}",
+              pkg.exists() and pkg.read_bytes() == (loment_dist.ROOT / srel).read_bytes(),
+              f"缺或不符: {pkg}")
+        check(f"装完 {sname} 落到 ~/.claude/skills/{sname}/SKILL.md",
+              inst.exists() and inst.read_bytes() == (loment_dist.ROOT / srel).read_bytes(),
+              f"缺或不符: {inst}")
 
     # ★ 跨 agent 广播: 别家 agent 读不到 .claude/skills/, 所以往它自己认的文件里写**指针**。
     #   这条同时钉住"不碰原有内容"与"带标记所以可精确摘除"。
@@ -565,6 +1074,134 @@ def test_windows_installer(zipf: Path) -> None:
 
 # ------------------------------------------------------------------ main
 
+def test_driver_seed_matches_reference() -> None:
+    """`SEED` 必须**就是**参考实现为 `loment/selfhost/driver.lomt` 发射的 IR。
+
+    **为什么这条在这个文件里也要有**（`loment_seed_test` 已经有一条一样的）：包里的
+    `bin/loment-driver` 现在**取自种子**，不再现场重编（见 `loment_dist.SEED_TOOL`）——
+    于是"包里那个 driver 确实等于从 driver.lomt 编出来的东西"就全押在种子上，而种子
+    一旦悄悄过期，**发行包判据自己看不出来**。这条把那个前提钉在**同一个判据**里。
+
+    代价是参考实现发射一次 driver（本机 2.5s），换掉的是原来那 273s 的重编 —— 同一件事
+    的**第一遍**，由本地跑的这条钉住；`loment_seed_test` 的 `bootstrap` 另有一条
+    "stage1 自编 == 种子"的定点判据。
+    """
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = loment_seed.check()
+    check("种子 == 参考实现为 driver.lomt 发射的 IR（包里 driver 的来源）", rc == 0)
+
+
+def test_opt_driver_runs() -> None:
+    """`--opt` 编出来的**驱动自己**必须跑得起来，而且与 `-O0` 产物**逐字节同输出**。
+
+    **为什么单起一条**：包里 `bin/loment-driver` 的来源就是 `SEED`（3.2 MB IR，全仓最大的
+    一个入口），而 `--opt` 会把这份 IR 直接交给 clang `-O2`。2026-10-10 实测过它的下场：
+    `-O0` 编出来一切正常，`-O1/-O2` 编出来**一跑就 SIGSEGV**（`docs/212` §5.2）。
+    `user_hello` 那条 `--opt` 判据**看不见它** —— 那条编的是**用户程序**，不是驱动。
+
+    根因是入口 `_start` 缺 `stackrealign`（进程入口的 `rsp` 比 SysV 函数入口约定少 8），
+    修法见 `docs/212` §5.2。这条判据钉的就是"修好了"这件事：同一个程序，优化过的驱动与
+    没优化的驱动必须**行为相同**——这不是"跑得动"能替代的（编错的值照样跑得动）。
+
+    **Why `-O0` 当对照而不是跟参考实现比**：不需要第二份真源，而且它直接测的正是那条通用
+    主张本身（同一份 IR 换个优化档不该改行为）。代价是 3.2 MB IR 上两趟 clang。
+    """
+    cc = loment_dist.clang_path()
+    if cc is None:
+        print("  SKIP  驱动 --opt: 没有 clang —— 这条要真编一次才作数")
+        return
+    # Windows 上交叉编出的是 Linux ELF, 本机跑不了, 得借 WSL (与 `wsl()` 同一条分流)。
+    if sys.platform == "win32" and not shutil.which("wsl"):
+        print("  SKIP  驱动 --opt: 没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        (td / "seed.ll").write_text(loment_dist.SEED.read_text(encoding="utf-8"),
+                                    encoding="utf-8", newline="\n")
+        # 与打包那一步**同一份文本**：`-O2` 会合成 memset/memcpy/memmove（docs/212 §5.1）
+        (td / "libcalls.ll").write_text(loment_dist._FREESTANDING_LIBCALLS,
+                                        encoding="utf-8", newline="\n")
+        src = ROOT / "loment" / "examples" / "user_hello.lomt"
+        got: dict[str, tuple[int, bytes]] = {}
+        for lvl in ("0", "2"):
+            exe = td / f"driver_O{lvl}"
+            b = subprocess.run(
+                [cc, "--target=x86_64-unknown-linux-gnu", "-nostdlib", "-ffreestanding",
+                 "-static", "-fno-pie", "-Wl,-e,_start", f"-O{lvl}", str(td / "seed.ll"),
+                 str(td / "libcalls.ll"), "-o", str(exe)],
+                capture_output=True, text=True, shell=False)
+            if b.returncode != 0:
+                check(f"驱动 IR 能被 clang -O{lvl} 编出来", False, b.stderr[-200:])
+                return
+            # **拷到 WSL 自己的盘上再跑** —— DrvFs (/mnt/c...) 上执行不了 ELF。
+            tag = f"{_T}optdrv_O{lvl}.bin"
+            outp = td / f"out_O{lvl}.txt"
+            r = wsl("sh", "-c",
+                    f"cd {wsl_path(ROOT)} && rm -f {tag} && cp {wsl_path(exe)} {tag} && "
+                    f"chmod +x {tag} && timeout 300 {tag} {wsl_path(src)} "
+                    f"> {wsl_path(outp)} 2>/dev/null; echo -n $?")
+            try:
+                rc = int(r.stdout.strip())
+            except ValueError:
+                rc = -1
+            got[lvl] = (rc, outp.read_bytes() if outp.exists() else b"")
+        check("驱动自己在 -O2 下编出来跑得起来 (rc=0)", got["2"][0] == 0, f"rc={got['2'][0]}")
+        check("驱动 -O2 与 -O0 的产物逐字节同输出",
+              got["0"][1] == got["2"][1] and got["0"][1] != b"",
+              f"{len(got['0'][1])}B vs {len(got['2'][1])}B")
+
+
+#: 给"包里那个 VM 真能跑"用的一份最小程序：`exit(42)`。
+_VM_PROG = """define void @_start() {
+entry:
+  %x = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 42, i64 0, i64 0)
+  ret void
+}
+"""
+
+
+def test_lvm_ships_and_runs_a_program() -> None:
+    """`loment-lvm` 随包发，而且**包里那个二进制真的能跑一份程序**（`docs/264`，`#355`）。
+
+    ⚠ 这一条**刻意不是清单断言**：`#355` 的第三半原话是 "a packaged-build test that runs
+    one, **not just a manifest assertion**"。所以它在这里**真编一次**
+    （`build_tools({"loment-lvm"})` —— 与打包那一步同一份工具链），再把那份 ELF 拿去跑一份 `.ll`。
+
+    没有 clang 就 SKIP：`build_tools` 要先由种子造 stage1，那一步要 clang。
+    """
+    check("loment-lvm 在 TOOLS 里",
+          any(row[0] == "loment-lvm" for row in loment_dist.TOOLS))
+    if loment_dist.clang_path() is None:
+        print("  SKIP  loment-lvm: 没有 clang —— 要真编一次 stage1 才作数")
+        return
+    if sys.platform == "win32" and not shutil.which("wsl"):
+        print("  SKIP  loment-lvm: 没有 WSL —— 交叉编出来的 ELF 在本机跑不了")
+        return
+    # ⚠ `build_tools(only)` 按**全名**过滤（`--only` 的短名映射在 CLI 那层）——
+    # 传 `{"lvm"}` 会一条都匹配不到、静默返回 {}，判据于是红在"没编出东西"上。
+    built = loment_dist.build_tools({"loment-lvm"})
+    if "loment-lvm" not in built:
+        check("loment-lvm 编出来了", False, f"build_tools 只给了 {sorted(built)}")
+        return
+    check("loment-lvm 编出来了", len(built["loment-lvm"][0]) > 1000,
+          f"{len(built['loment-lvm'][0])}B")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = td / "lvm.bin"
+        exe.write_bytes(built["loment-lvm"][0])
+        prog = td / "prog.ll"
+        prog.write_text(_VM_PROG, encoding="utf-8", newline="\n")
+        tag = f"{_T}lvm_ship.bin"
+        r = wsl("sh", "-c",
+                f"rm -f {tag} {tag}.ll && cp {wsl_path(exe)} {tag} && chmod +x {tag} && "
+                f"cp {wsl_path(prog)} {tag}.ll && timeout 60 {tag} {tag}.ll; echo -n $?")
+        try:
+            rc = int(r.stdout.strip())
+        except ValueError:
+            rc = -1
+    check("包里那份 loment-lvm 跑一份程序，退出码是 42", rc == 42, f"rc={rc}")
+
+
 def test_check_detects_staleness() -> None:
     """`--check` 必须能发现"归档里那份来源文件不是当前源码"。
 
@@ -600,6 +1237,39 @@ def test_check_detects_staleness() -> None:
     ver = loment_dist.version_text()
     check("version 文件的提交号就是当前 HEAD",
           loment_dist._git("rev-parse", "--short", "HEAD") in ver, ver.strip())
+
+
+#: **只给本仓开发者、不随语言包发**的 skill 目录。`loment-dev` 讲的是这个开发仓的
+#: 提交流程（分支/PR/种子），装给终端用户只会是噪声；它与 `SKILL_SUITE` 是两件事，
+#: 所以在这里显式列名，而不是塞进套件让 `loment_dist` 发出去。
+DEV_ONLY_SKILLS = frozenset({"loment-dev"})
+
+
+def test_skill_suite_members() -> None:
+    """The suite table, the directories on disk and each frontmatter `name` agree.
+
+    **Why**: a new topic skill that is not in `SKILL_SUITE` is silently left out of the
+    package and the install; one that is listed but not on disk makes the entry's map point
+    at nothing. Both are cheap to check and expensive to discover from a user's machine.
+    """
+    import re
+    disk = {p.name for p in (ROOT / ".claude/skills").glob("loment-*")
+            if (p / "SKILL.md").exists()}
+    listed = {n for n, _ in loment_dist.SKILL_SUITE if n != "loment"}
+    check("套件的 loment-* 目录 == SKILL_SUITE 清单",
+          disk - DEV_ONLY_SKILLS == listed,
+          f"盘上多 {sorted((disk - DEV_ONLY_SKILLS) - listed)}, "
+          f"清单多 {sorted(listed - (disk - DEV_ONLY_SKILLS))}")
+    for name, rel in loment_dist.SKILL_SUITE:
+        f = ROOT / rel
+        check(f"{name}: 文件在", f.exists(), str(f))
+        if not f.exists():
+            continue
+        parts = f.read_text(encoding="utf-8").split("---", 2)
+        fm = parts[1] if len(parts) >= 3 else ""
+        m = re.search(r"^name:\s*(\S+)", fm, re.M)
+        check(f"{name}: frontmatter name 与目录名一致",
+              bool(m) and m.group(1) == name, fm[:100])
 
 
 def test_skill_example_sync() -> None:
@@ -643,7 +1313,11 @@ def test_skill_example_sync() -> None:
 #: **`docs/manual/` 也不在**: 它的示例页**就是从 `loment/examples/*.lomt` 生成出来的**
 #: (`tools/loment_manual.py:44-52` 逐个示例 `lomdoc.render`), 所以那些"代码块"由
 #: `loment_p9_test` 与 `loment_elf_test` 覆盖 —— 在这里再扫一遍是重复, 不是覆盖。
-DOC_SAMPLES = [loment_dist.SKILL, "README.md", "QUICKSTART.md"]
+DOC_SAMPLES = [loment_dist.SKILL,
+               *[p for n, p in loment_dist.SKILL_SUITE
+                 if n in ("loment-syntax", "loment-tur", "loment-safety",
+                          "loment-ffi", "loment-toolchain")],
+               "README.md", "QUICKSTART.md"]
 
 
 def test_docs_samples_compile() -> None:
@@ -686,10 +1360,199 @@ def test_docs_samples_compile() -> None:
     print(f"      {len(DOC_SAMPLES)} 份文档共 {total} 块 rust 样例全过前端")
 
 
+def test_java_dependency_autolinks() -> None:
+    """#1062: `use mathlib` + `deps/mathlib/link.txt` -> a native product.
+
+    The package is built the same way the release builds it (stage1 -> tool IR ->
+    lomelf), then a project is compiled by the **shipped launcher** with a PATH that
+    has no `java`, `javac`, `jar`, `wsl` or `clang`. The launcher must find the IR
+    through `deps/*/link.txt`, verify its sha256, merge it, and produce a product
+    that runs and imports no JVM DLL.
+    """
+    import lomjava
+
+    work = loment_dist.STAGE / "java-link"
+    if work.exists():
+        shutil.rmtree(work)
+    pkg, proj = work / "pkg", work / "proj"
+    (pkg / "bin").mkdir(parents=True)
+    (pkg / "share" / "loment").mkdir(parents=True)
+    (proj / "deps" / "mathlib").mkdir(parents=True)
+
+    built = loment_dist.build_tools({"loment-driver", "loment-lomelf"})
+    for name in ("loment-driver", "loment-lomelf"):
+        elf, pe = built[name]
+        exe = pkg / "bin" / (f"{name}.exe" if os.name == "nt" else name)
+        exe.write_bytes(pe if os.name == "nt" else elf)
+        if os.name != "nt":
+            exe.chmod(0o755)          # `[ -x ]` 在启动器的 `need` 里就是这么问的
+    if os.name == "nt":
+        launcher = pkg / "bin" / "loment.cmd"
+        launcher.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_CMD)
+                             .replace("\n", "\r\n").encode("ascii"))
+        path_var = r"C:\Windows\System32;C:\Windows"
+    else:
+        launcher = pkg / "bin" / "loment"
+        launcher.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_SH).encode("ascii"))
+        launcher.chmod(0o755)
+        # CI 的 `/usr/bin` 里有 java（runner 镜像自带 JRE），所以"PATH 里没有 java"
+        # 不能靠 `/usr/bin:/bin` 来说 —— 那只是**这台机器**恰好没有。造一个只放
+        # 启动器真正要用到的命令的目录，PATH 只有它。
+        pathbin = pkg / "pathbin"
+        pathbin.mkdir()
+        for cmd in ("bash", "env", "dirname", "mktemp", "rm", "ls", "cat", "sed",
+                    "sort", "uniq", "cut", "grep", "sha256sum", "chmod"):
+            real = shutil.which(cmd)
+            if real:
+                (pathbin / cmd).symlink_to(real)
+        path_var = str(pathbin)
+    for tool in ("java", "javac", "jar", "clang"):
+        check(f"PATH 里没有 {tool}", shutil.which(tool, path=path_var) is None)
+    # `wsl.exe` 本身就住在 System32 里，拿 PATH 排除不掉；`cmd`/`certutil`/`findstr`
+    # 却非它不可。所以这一条判**启动器不调用它**（与 ELF 那条原生执行合起来才是完整的话）。
+    ltext = launcher.read_text(encoding="utf-8", errors="replace")
+    # 只看代码行（注释里说"under WSL"不算调用）；`wslpath` 是路径转换，不是转发。
+    lcode = "\n".join(l for l in ltext.splitlines() if not l.lstrip().startswith(("#", "rem")))
+    check("启动器不调用 wsl", not re.search(r"\bwsl(?!path)", lcode, re.I))
+
+    # The runtime ships with the toolchain; every Java closure needs it (the
+    # generated interface calls `jrt_uncaught` at the exception boundary).
+    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True, exist_ok=True)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0" / "jrt.ll").write_bytes(
+        (ROOT / "loment" / "lib" / "jrt" / "jrt.ll").read_bytes())
+    classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/MathLib.class")
+    ir = proj / "deps" / "mathlib" / "mathlib.ll"
+    lomjava.emit("mathlib", classes, ir, proj / "deps" / "mathlib" / "mathlib.lomt")
+    (proj / "deps" / "mathlib" / "link.txt").write_text(
+        "# lompi link v1\n"
+        f"ir mathlib.ll {hashlib.sha256(ir.read_bytes()).hexdigest()}\n"
+        "runtime jrt 0.1.0\n",
+        encoding="utf-8", newline="\n")
+    (proj / "app.lomt").write_text(
+        "module app\nuse mathlib\n\nfn _start() {\n"
+        "    let r: i32 = mathlib_add(2, 3);\n"
+        "    syscall4(60, r as u64, 0, 0);\n}\n",
+        encoding="utf-8", newline="\n")
+
+    env = dict(os.environ, PATH=path_var)
+    if os.name == "nt":
+        cmd = [r"C:\Windows\System32\cmd.exe", "/c", str(launcher), "build", "app.lomt", "-o", "app"]
+    else:
+        cmd = [str(launcher), "build", "app.lomt", "-o", "app"]
+    r = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, env=env)
+    exe = proj / ("app.exe" if os.name == "nt" else "app")
+    check("deps/*/link.txt 自动链接出一个产物", r.returncode == 0 and exe.exists(),
+          ((r.stdout or "") + (r.stderr or ""))[-300:])
+    if exe.exists():
+        if os.name != "nt":
+            # `build` 不设执行位（只有 `run` chmod —— 既有行为，与后端的其余判据一致）。
+            exe.chmod(0o755)
+        rr = subprocess.run([str(exe)], capture_output=True)
+        check("产物原生跑：mathlib_add(2,3) = 5", rr.returncode == 5, f"rc={rr.returncode}")
+        if os.name == "nt":
+            blob = exe.read_bytes()
+            pe = struct.unpack_from("<I", blob, 0x3C)[0]
+            opt = pe + 24
+            magic = struct.unpack_from("<H", blob, opt)[0]
+            dd = opt + (112 if magic == 0x20B else 96)
+            irva, _isz = struct.unpack_from("<II", blob, dd + 8)
+            secs = struct.unpack_from("<H", blob, pe + 6)[0]
+            optsz = struct.unpack_from("<H", blob, pe + 20)[0]
+            base = pe + 24 + optsz
+
+            def off(rva: int) -> int | None:
+                for k in range(secs):
+                    o = base + k * 40
+                    vs, va, rs, rp = struct.unpack_from("<IIII", blob, o + 8)
+                    if va <= rva < va + max(vs, rs):
+                        return rp + rva - va
+                return None
+
+            dlls, k = [], 0
+            while True:
+                o = off(irva + k * 20)
+                ilt, _ts, _fc, name_rva, _iat = struct.unpack_from("<IIIII", blob, o)
+                if ilt == 0 and name_rva == 0:
+                    break
+                no = off(name_rva)
+                dlls.append(blob[no:blob.index(b"\0", no)].decode().lower())
+                k += 1
+            # `#1493`（lmgr）给 Windows 产物加了 PDH / PSAPI（cpu.load / mem.phys 走的
+            # 就是它们）。断言跟着链接器的**实际**导入表走，不钉旧的那两个。
+            check("PE 导入表是 kernel32 + ws2_32 + pdh + psapi",
+                  dlls == ["kernel32.dll", "ws2_32.dll", "pdh.dll", "psapi.dll"], str(dlls))
+            check("PE 导入表里没有 jvm.dll / java.dll",
+                  not ({"jvm.dll", "java.dll"} & set(dlls)), str(dlls))
+
+    # ---- 缺 IR：包装器点名（不是静默链了别的东西）
+    ir.rename(ir.with_suffix(".bak"))
+    r = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, env=env)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("link.txt 里点名的 IR 不在 -> 点名报错",
+          r.returncode != 0 and "does not exist" in out, out[-300:])
+    ir.with_suffix(".bak").rename(ir)
+    # ---- 缺 link.txt：链接器点名未定义符号（不是静默成功）
+    lt = proj / "deps" / "mathlib" / "link.txt"
+    lt.rename(lt.with_suffix(".bak"))
+    r = subprocess.run(cmd, cwd=str(proj), capture_output=True, text=True, env=env)
+    out = (r.stdout or "") + (r.stderr or "")
+    check("删掉 link.txt -> 未定义符号，非零退出",
+          r.returncode != 0 and "undefined label" in out, out[-300:])
+    lt.with_suffix(".bak").rename(lt)
+
+    # ---- #1060: the shared runtime, once per closure, from the package's share/
+    import loment_jrt
+    check("jrt.ll 与 jrt.lomt 一致（不是手改的旧产物）",
+          loment_jrt.main(["--check"]) == 0)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0").mkdir(parents=True, exist_ok=True)
+    (pkg / "share" / "loment" / "jrt" / "0.1.0" / "jrt.ll").write_bytes(
+        (ROOT / "loment" / "lib" / "jrt" / "jrt.ll").read_bytes())
+    proj2 = work / "proj2"
+    (proj2 / "deps" / "printlib").mkdir(parents=True)
+    classes = lomjava.load_classes(ROOT / "tools/fixtures/java/com/example/PrintLib.class")
+    pir = proj2 / "deps" / "printlib" / "printlib.ll"
+    lomjava.emit("printlib", classes, pir, proj2 / "deps" / "printlib" / "printlib.lomt")
+    (proj2 / "deps" / "printlib" / "link.txt").write_text(
+        "# lompi link v1\n"
+        f"ir printlib.ll {hashlib.sha256(pir.read_bytes()).hexdigest()}\n"
+        "runtime jrt 0.1.0\n", encoding="utf-8", newline="\n")
+    (proj2 / "app.lomt").write_text(
+        "module app\nuse printlib\n\nfn _start() {\n"
+        "    printlib_hello();\n    syscall4(60, 0, 0, 0);\n}\n",
+        encoding="utf-8", newline="\n")
+    if os.name == "nt":
+        cmd2 = [r"C:\Windows\System32\cmd.exe", "/c", str(launcher),
+                "build", "app.lomt", "-o", "app"]
+    else:
+        cmd2 = [str(launcher), "build", "app.lomt", "-o", "app"]
+    r = subprocess.run(cmd2, cwd=str(proj2), capture_output=True, text=True, env=env)
+    exe2 = proj2 / ("app.exe" if os.name == "nt" else "app")
+    check("runtime jrt 从包里加上（不用 --java-lib）",
+          r.returncode == 0 and exe2.exists(),
+          ((r.stdout or "") + (r.stderr or ""))[-300:])
+    if exe2.exists():
+        if os.name != "nt":
+            exe2.chmod(0o755)
+        rr = subprocess.run([str(exe2)], capture_output=True)
+        check("println/print 的输出与 JVM 相同",
+              rr.returncode == 0
+              and rr.stdout == b"hello\n42\n-7\nx=1234567890123\n5\n3\n9\n"
+              and rr.stderr == b"e\n", repr(rr.stdout[-80:]) + repr(rr.stderr[-40:]))
+
+
 def main() -> int:
     print("loment_dist_test —— 发行包判据 (docs/162)")
-    for name, fn in (("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
+    for name, fn in (("driver 的来源：种子 == 参考实现", test_driver_seed_matches_reference),
+                     ("--opt 编出来的驱动自己跑得起来", test_opt_driver_runs),
+                     ("包里那个 VM 真跑一份程序", test_lvm_ships_and_runs_a_program),
+                     ("Java 依赖经 link.txt 自动链接", test_java_dependency_autolinks),
+                     ("布局与脚本卫生", test_layout), ("归档内容与确定性", test_archives),
+                     ("安装脚本点名更靠前的同名命令", test_installers_name_an_earlier_lompi),
+                     ("自解压包的两种载荷形状 (静态)", test_setup_shapes_are_pinned_statically),
+                     ("安装器加固 (0.1.5 security)", test_installer_hardening),
+                     ("发布完整性锚与工作流权限面", test_release_integrity_anchor),
                      ("--check 的新鲜度", test_check_detects_staleness),
+                     ("套件清单与盘上目录一致", test_skill_suite_members),
                      ("skill 与示例同步", test_skill_example_sync),
                      ("读者文档里的样例都能编", test_docs_samples_compile)):
         try:

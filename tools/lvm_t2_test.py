@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+"""lvm_t2_test.py — LVM 第二格（T2：基线编译）的判据（`docs/232` §4.4，issue #325）。
+
+四条，每一条都能证伪：
+
+* **A 产物等价** —— 同一份程序，**原生产物 / T0 / T2** 三者 stdout 字节 + 退出码相同。
+  这是"换引擎没换答案"的全部证据（`docs/232` §4.4 那行就是这么写的）。
+* **B 剖面不变** —— T1 的剖面在 T0 与 T2 下**逐字节相同**。换引擎不许改变被记录的行为
+  （`docs/247` 判据 D 的同一条纪律，只是这次换的是引擎不是开关）。
+* **C 执行期**不再解码**（**这一格的**自证**，而且是**确定性的**：把 `lomelf.parse_type` /
+  `parse_operand` 包起来数调用次数 —— 编译完的那一趟必须是 **0**，而解档那一趟必须 **> 0**
+  （否则这条判据量到的是"包没接上"，不是"没解码"）。
+* **D 一个函数只解一次**（#1028）—— 确定性的工作量计数，与机器无关：`decode_requests`
+  可以很多次，但 `decoded[函数] == 1`；T0 的 `decodes == instructions`（它是**每条重解**），
+  T2 的 `tuple_lookups == instructions`（每条执行到的指令读一次编译好的元组）。
+  ⚠ 墙钟比值**不再是判据**（那条教训：同一个量测出 3.2× / 4.13× / 5.4×）；耗时只在
+  `lvm_perf_test` 里作为绝对天花板与打印报告存在。
+
+用法: python tools/lvm_t2_test.py
+"""
+
+from __future__ import annotations
+
+import io
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
+import lomelf  # noqa: E402
+import lomentc  # noqa: E402
+import lvm  # noqa: E402
+import lvm_t2  # noqa: E402
+import lvm_test as LT  # noqa: E402
+import loment_elf_test as ELF  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
+
+#: 语料**复用**，不另抄一份（抄了必然漂）。参考实现自己跑不了的那几份由
+#: `lvm_test.VM_KNOWN_GAPS` 那张棘轮点名 —— 这里跟着跳过，不另立一张表。
+CORPUS = ELF.CORPUS
+
+
+def _ir(rel: str) -> str:
+    src = ROOT / rel
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{src.name} 自己检查不过: {errs[:2]}"
+    return lomentc.emit_llvm(mod, ROOT, deps)
+
+
+def test_t2_matches_t0_and_native() -> None:
+    """判 A：原生产物 / T0 / T2 三者逐字节相同。"""
+    if sys.platform == "win32" and not ELF._wsl():
+        print("      SKIP: Windows 上没有 WSL —— 交叉编出来的 ELF 本机跑不了")
+        return
+    ran, skipped = [], []
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for rel in CORPUS:
+            stem = Path(rel).stem
+            if stem in LT.VM_KNOWN_GAPS:
+                skipped.append(stem)                 # 参考自己跑不了 —— 出局，不是缺口
+                continue
+            ir = _ir(rel)
+            b0, b2 = io.BytesIO(), io.BytesIO()
+            rc0 = lvm.run_ir(ir, b0, None, [rel])
+            rc2 = lvm_t2.run_ir_t2(ir, b2, None, [rel])
+            assert (rc0, b0.getvalue()) == (rc2, b2.getvalue()), (
+                f"[{stem}] T0 与 T2 对不上：T0 rc={rc0} {b0.getvalue()[:40]!r} / "
+                f"T2 rc={rc2} {b2.getvalue()[:40]!r}")
+            # 原生产物
+            try:
+                blob, _ = lomelf.compile_ll(ir, [])
+            except (lomelf.ElfError, lomelf.Unsupported) as e:  # noqa: BLE001
+                skipped.append(stem)
+                assert stem not in [Path(r).stem for r in CORPUS], e
+                continue
+            elf = td / f"{stem}.elf"
+            elf.write_bytes(blob)
+            rc_nat, out_nat = LT._run_native(elf, td, rel)       # noqa: SLF001
+            assert (rc_nat, out_nat) == (rc2, b2.getvalue()), (
+                f"[{stem}] 原生产物与 T2 对不上：原生 rc={rc_nat} {out_nat[:40]!r} / "
+                f"T2 rc={rc2} {b2.getvalue()[:40]!r}")
+            ran.append(stem)
+    assert ran, "一份都没跑成 —— 判据没测到东西"
+    print(f"      原生 / T0 / T2 三者逐字节相同: {len(ran)}/{len(ran)}（{', '.join(ran)}）")
+    if skipped:
+        print(f"      出局（参考实现自己也跑不了 / 发不出来）: {', '.join(skipped)}")
+
+
+def test_profile_identical_across_tiers() -> None:
+    """判 B：T1 的剖面在 T0 与 T2 下逐字节相同。"""
+    ran = []
+    for rel in CORPUS:
+        stem = Path(rel).stem
+        if stem in LT.VM_KNOWN_GAPS:
+            continue
+        ir = _ir(rel)
+        p0, p2 = lvm.Profile(), lvm.Profile()
+        lvm.run_ir(ir, io.BytesIO(), p0, [rel])
+        lvm_t2.run_ir_t2(ir, io.BytesIO(), p2, [rel])
+        a, b = p0.text(), p2.text()
+        if a != b:
+            la, lb = a.split("\n"), b.split("\n")
+            k = next((i for i in range(max(len(la), len(lb))) if la[i:i + 1] != lb[i:i + 1]), -1)
+            raise AssertionError(f"[{stem}] 剖面不同 @第 {k} 行: T0 {la[k:k + 1]} / T2 {lb[k:k + 1]}")
+        ran.append(stem)
+    assert ran, "一份都没跑到 —— 判据没测到东西"
+    print(f"      剖面逐字节相同（T0 vs T2）: {len(ran)} 份")
+
+
+def test_t2_stops_decoding_at_run_time() -> None:
+    """判 C：编译完之后，执行期**一次** `parse_type` / `parse_operand` 都不调。
+
+    这条是这一格**自己的**主张（"把解码整体搬到执行之前"）的证伪面，而且是**确定性的** ——
+    不靠计时。⚠ 反向那一半同样重要：**解档那一趟必须 > 0**，否则说明包没接上，
+    这条判据会变成一条永远绿的**空判据**。
+    """
+    rel = "loment/examples/lumtui_demo.lomt"
+    ir = _ir(rel)
+    hits = {"n": 0}
+    orig = (lomelf.parse_type, lomelf.parse_operand)
+
+    def wrap(fn):
+        def counted(*a, **k):
+            hits["n"] += 1
+            return fn(*a, **k)
+        return counted
+
+    lomelf.parse_type = wrap(orig[0])
+    lomelf.parse_operand = wrap(orig[1])
+    try:
+        # 解档（T0）：每执行一条指令都要重解一遍
+        hits["n"] = 0
+        lvm.run_ir(ir, io.BytesIO())
+        t0_hits = hits["n"]
+
+        # 编译档（T2）：**先把每个函数都编掉**（只编译、不执行），再把计数器清零跑一趟。
+        # ⚠ 不能"跑两趟、第二趟算数" —— 一个 VM 实例**只能跑一次**（`Mem` 被那次跑改过：
+        # 堆游标、全局都被写过，第二趟会分配不出来而走到 `__loment_abort`）。T0 也是
+        # 一回事（每次 `run_ir` 新建一个执行体），所以这里复刻同一个前提。
+        g, f, e = lomelf.parse_ll(ir)
+        hits["n"] = 0
+        vm = lvm_t2.T2Executor(g, f, e, io.BytesIO())
+        for name in list(vm.prog.funcs):
+            vm.prog.cfunc(name)
+        warm_hits = hits["n"]
+        hits["n"] = 0
+        try:
+            vm.call_t2(vm.prog.cfunc("_start"), [], entry=True)
+        except lvm._Exit:                                # noqa: SLF001  `_start` 里 exit(60)
+            pass
+        run_hits = hits["n"]
+    finally:
+        lomelf.parse_type, lomelf.parse_operand = orig
+
+    assert t0_hits > 0, "T0 那趟一次解码都没有 —— 计数没接上，这条判据是空的"
+    assert warm_hits > 0, "T2 编译那趟一次解码都没有 —— 计数没接上"
+    assert run_hits == 0, (
+        f"T2 编译完之后又解码了 {run_hits} 次 —— 说明还有指令在执行期读文本，"
+        "这一格的主张不成立")
+    print(f"      T0 执行期解码 {t0_hits} 次；T2 编译期 {warm_hits} 次、**执行期 0 次**")
+
+
+#: 一个函数被**调用 1001 次**的夹具：T2 必须只解它一次。删掉 `Program.cfunc` 的缓存，
+#: `decoded["f"]` 会变成 1001 —— 这条判据当场红。
+_DECODE_FIXTURE = """module decodeonce
+choose runtime
+
+fn f(x: u32) -> u32 {
+    return x + 1;
+}
+
+fn _start() -> u32 {
+    let i: u32 = 0;
+    let s: u32 = 0;
+    while i < 1001 {
+        s = f(s);
+        i = i + 1;
+    }
+    syscall4(60, s as u64, 0, 0);
+    return 0;
+}
+"""
+
+
+def test_t2_decodes_each_function_at_most_once() -> None:
+    """判 D（#1028）：T2 每个函数**最多真解一次**，即使它被执行上千次。
+
+    这条是**确定性的**：计数由程序与档位决定，与机器负载无关。三个方向都钉：
+
+    * `f` 被执行了 1001 次，但 `decoded["f"] == 1`（删掉 `cfuncs` 缓存 ⇒ 1001，红）；
+    * `decode_requests` 明显多于 `decodes`（缓存真的在挡，而不是没人来问）；
+    * T0 的 `decodes == instructions`（**每条重解**），T2 的 `tuple_lookups == instructions`
+      （每条执行到的指令读一次编译好的元组）—— 否则"计数没接上"也能绿。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        src = Path(tds) / "decodeonce.lomt"
+        with src.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(_DECODE_FIXTURE)
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, errs
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+
+    c2 = lvm.Counters()
+    rc2 = lvm_t2.run_ir_t2(ir, io.BytesIO(), None, ["decodeonce"], counters=c2)
+    c0 = lvm.Counters()
+    rc0 = lvm.run_ir(ir, io.BytesIO(), None, ["decodeonce"], counters=c0)
+
+    assert rc0 == rc2 == (1001 & 0xFF), (rc0, rc2)
+    assert c2.instructions > 1000, c2.instructions
+    assert c2.decoded.get("f") == 1, (
+        f"`f` 被执行 1001 次，却被解码了 {c2.decoded.get('f')} 次 —— "
+        "`Program.cfunc` 的缓存没在挡")
+    assert all(n == 1 for n in c2.decoded.values()), c2.decoded
+    assert c2.decode_requests > c2.decodes, (
+        f"解码请求 {c2.decode_requests} 次、真解 {c2.decodes} 次 —— 缓存没有命中过，"
+        "这条判据量到的不是「只解一次」")
+    assert c0.decodes == c0.instructions > 0, (
+        f"T0 应当每条指令重解一次：instructions={c0.instructions} decodes={c0.decodes}")
+    assert c2.tuple_lookups == c2.instructions > 0, (
+        f"T2 每条执行到的指令应当读一次元组：instructions={c2.instructions} "
+        f"tuple_lookups={c2.tuple_lookups}")
+    print(f"      f 执行 1001 次、解码 {c2.decoded['f']} 次；"
+          f"T0 decodes==instructions={c0.instructions}；"
+          f"T2 tuple_lookups==instructions={c2.instructions}")
+
+
+_DEAD_CODE = {
+    "不可达块里的坏跳转": """define i32 @_start() {
+entry:
+  ret i32 0
+dead:
+  br label %nope
+}
+""",
+    "不可达块里的坏指令": """define i32 @_start() {
+entry:
+  ret i32 0
+dead:
+  %x = frobnicate i32 1
+  ret i32 0
+}
+""",
+    "终结指令之后的坏指令": """define i32 @_start() {
+entry:
+  ret i32 0
+  %x = frobnicate i32 1
+}
+""",
+}
+
+
+def test_t2_acceptance_matches_t0_on_dead_code() -> None:
+    """判 E（issue #715）：**走不到**的代码不参与拒绝。
+
+    T0 是执行到一条解不了的指令才报错；T2 编译整块，所以它以前把不可达块里的坏跳转/
+    坏指令当硬错误。现在这些错误**延迟到执行到那一条**才发 —— 三份 IR 在 T0 与 T2
+    下必须给出同一个 `(rc, stdout)`，而不是一边跑完、一边拒绝。
+
+    反向那一半同样断言：**可达**的坏指令仍要拒（否则这条判据会退化成"什么都不检查"）。
+    """
+    for name, ir in _DEAD_CODE.items():
+        b0, b2 = io.BytesIO(), io.BytesIO()
+        r0, r2 = lvm.run_ir(ir, b0), lvm_t2.run_ir_t2(ir, b2)
+        assert (r0, b0.getvalue()) == (r2, b2.getvalue()), (
+            f"[{name}] T0 / T2 对不上：T0 rc={r0} {b0.getvalue()!r} / "
+            f"T2 rc={r2} {b2.getvalue()!r}")
+    live = """define i32 @_start() {
+entry:
+  %x = frobnicate i32 1
+  ret i32 0
+}
+"""
+    for name, fn in (("T0", lvm.run_ir), ("T2", lvm_t2.run_ir_t2)):
+        try:
+            fn(live, io.BytesIO())
+        except lvm.LvmError:
+            pass
+        else:
+            raise AssertionError(f"[{name}] 可达的坏指令被放过去了")
+    print(f"      不可达 / 终结之后的坏代码：T0 与 T2 同为 rc=0（{len(_DEAD_CODE)} 份）；"
+          "可达的坏指令仍被拒")
+
+
+_DYN_GEP = """define i32 @_start() {
+entry:
+  %p = alloca {i32,i32}
+  %f0 = getelementptr {i32,i32}, ptr %p, i32 0, i32 0
+  store i32 11, ptr %f0
+  %f1 = getelementptr {i32,i32}, ptr %p, i32 0, i32 1
+  store i32 22, ptr %f1
+  %i = add i32 1, 0
+  %q = getelementptr {i32,i32}, ptr %p, i32 0, i32 %i
+  %v = load i32, ptr %q
+  %c = icmp eq i32 %v, 22
+  br i1 %c, label %ok, label %bad
+ok:
+  ret i32 0
+bad:
+  unreachable
+}
+"""
+
+
+def test_t2_runs_dynamic_struct_index_gep() -> None:
+    """判 F（issue #715）：结构体下标**不是常数**时 T2 也跑得对。
+
+    LLVM 不允许这种下标，但 T0 一直在**运行期**用 `field_offset` 走类型链，自举镜像
+    也一样 —— 所以 T2 静态走不动时必须退到同一份实现，而不是点名拒。
+    证伪是**取值**：`%i` = 1 时读到的必须是第二个字段（22）；读错会走到 `unreachable`。
+    """
+    b0, b2 = io.BytesIO(), io.BytesIO()
+    r0, r2 = lvm.run_ir(_DYN_GEP, b0), lvm_t2.run_ir_t2(_DYN_GEP, b2)
+    assert (r0, b0.getvalue()) == (0, b""), f"T0 自己没跑对：rc={r0} {b0.getvalue()!r}"
+    assert (r2, b2.getvalue()) == (r0, b0.getvalue()), (
+        f"T2 与 T0 对不上：T0 rc={r0} {b0.getvalue()!r} / T2 rc={r2} {b2.getvalue()!r}")
+    print("      非恒定结构体下标：T0 / T2 都读到第二个字段，rc=0")
+
+
+_CALLEE = """define void @f(i32 %a, i32 %b) {
+entry:
+  ret void
+}
+"""
+
+
+def _message(fn, ir: str) -> str:
+    try:
+        fn(ir, io.BytesIO())
+    except lvm.LvmError as e:
+        return str(e)
+    raise AssertionError(f"这份 IR 跑起来了，而它应当被拒：{ir!r}")
+
+
+def test_t2_arity_and_negative_shift_match_t0() -> None:
+    """判 G（issue #716 / #717）：两种错在 T0 与 T2 下是**同一句话**。
+
+    * 少一个实参、多一个（未定义值的）实参 ⇒ `实参个数与形参不符` —— T2 以前对
+      多出来的那个报"读未定义的值"，连"这是个数问题"都看不出来；
+    * 负移位量 ⇒ `移位量是负数` —— 以前两边都抛 `ValueError: negative shift count`，
+      是一条 traceback，不是诊断。
+    """
+    few = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1)
+  ret i32 0
+}
+"""
+    extra = _CALLEE + """define i32 @_start() {
+entry:
+  call void @f(i32 1, i32 2, i32 %zzz)
+  ret i32 0
+}
+"""
+    for name, ir in (("少一个实参", few), ("多一个实参", extra)):
+        m0, m2 = _message(lvm.run_ir, ir), _message(lvm_t2.run_ir_t2, ir)
+        assert m0 == m2 == "实参个数与形参不符", f"[{name}] T0 {m0!r} / T2 {m2!r}"
+    for op in ("shl", "lshr", "ashr"):
+        ir = f"""define i32 @_start() {{
+entry:
+  %q = {op} i32 5, -1
+  %r = trunc i32 %q to i32
+  ret i32 %r
+}}
+"""
+        m0, m2 = _message(lvm.run_ir, ir), _message(lvm_t2.run_ir_t2, ir)
+        assert m0 == m2 == "移位量是负数", f"[{op}] T0 {m0!r} / T2 {m2!r}"
+    print("      实参个数不符 / 负移位量：T0 与 T2 报同一句话")
+
+
+TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+
+
+def main() -> int:
+    return loment_suite.run(TESTS, "lvm_t2_test")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

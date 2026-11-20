@@ -4,6 +4,7 @@
 // 双路径验证: --emit-rust (rustc) 与 --emit-llvm (clang) 输出须逐值一致。
 
 module native_str
+choose runtime
 
 fn hello_len() -> u32 {
     return str_len("hello");

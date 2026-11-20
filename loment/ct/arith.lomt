@@ -3,6 +3,7 @@
 // expect: OK 2
 // 期望: (7 + 3) * 2 - 1 = 19, 19 % 17 = 2
 module ct_arith
+choose runtime
 
 fn main() -> u64 {
     let a: u64 = 7;

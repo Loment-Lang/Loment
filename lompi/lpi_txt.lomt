@@ -9,6 +9,7 @@
 // 命名: 公开 txt_*, 自检 test_txt_*。
 
 module lpi_txt
+choose runtime
 
 use "lpi_sys.lomt"
 

@@ -1,4 +1,5 @@
 module fuc_node
+choose runtime
 
 // M69: FUI 控件 —— 按 lom/fuc.lom 的 Node 布局 (64B, 小端) 打包。
 // 与 tools/fuic.py 的 NODE_FMT 对账 (loment_p7_test)。

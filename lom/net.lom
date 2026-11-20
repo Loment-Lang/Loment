@@ -1,0 +1,89 @@
+// lom/net.lom — 联网面契约：Linux 系统调用号 → 面 (L0 单一真源)
+//
+// 取代两处平行实现 (docs/229 §2):
+//   tools/lomentc.py  SURFACE_NUMBERS  —— 编译器：把单元里的机调用站点按面分类 → Potato 的 `surfaces`
+//   tools/lomelf.py   PE_SYSCALLS      —— 链接器：PE 运行时派发哪些号、各属哪一面
+// 另有两处**只认 net 那几个号**的派生用法（同上，一并由审计对账）：
+//   loment/selfhost/checker.lomt  chk_num_is_net   (excluded 的行为轴, docs/227 §3)
+//   loment/selfhost/potato.lomt   pt_surf_code     (自举侧的 `surfaces`)
+// 校验: python tools/lom_audit.py + python tools/loment_net_test.py
+//
+// 2026-10-12.1: 联网面补完 —— `sendmsg`(46)/`recvmsg`(47)/`socketpair`(53)/
+//   `epoll_wait`(232)/`epoll_ctl`(233)/`epoll_create1`(291) 一起从 NotDispatched 移进
+//   `Syscall`，于是那一族**空了**（`docs/234`）。`select` 那一笔见 2026-10-11.2。
+// 2026-10-11.2: `select`(23) 从 NotDispatched 移进 Syscall —— PE 运行时真的派发它了
+//   (docs/231: 位图 ↔ WinSock fd_set、exceptfds 归一化、SO_ERROR 补挂账)。
+//   这是**契约变更**不是新增: 依赖方是本表自己那张"同宽"的保证(gates.why_equal) ——
+//   `Syscall` 今天与 PE 派发面取相等，多一个号就得不一致，所以运行时落地了就必须跟着挪。
+
+module net
+
+meta {
+  schema = "fujo-net-spec/v1"
+  title = "network surface contract: Linux syscall number -> surface"
+  version = "2026-10-12.1"
+  authority = "docs/224 §3（面进 Potato）+ docs/227（收口账）：本文件是那张表的单源，两边实现由它校验"
+  layers {
+    surface = "号 → 面的划分。**面名由用的人定** —— file/mem/net/proc 只是本仓库自己的划法，other 是兜底"
+    runtime = "PE 运行时**真的派发**哪些号。今天它与 surface **同宽**（见 gates.why_equal）：表外的号在 PE 上回 -ENOSYS，不是「另一个面」"
+    not_dispatched = "Linux 有、本仓运行时**故意不派发**的号。它们**不进 Syscall**：计数词汇与派发面保持同宽，否则产物会数出一个跑不了的站点（docs/227 §5）。**2026-10-12 起这一族是空的** —— 联网面补完了（docs/234），留着枚举是为了让“点名不做”继续可数"
+  }
+  gates {
+    why_equal = "`surfaces` 是**不读源码可判**的数（docs/224），而它的价值在「数与行为对得上」。若 `Syscall` 比派发面宽，产物就会说出「3 个 net 站点」而其中一个是 PE 答不了的号 —— 那正是 docs/217 要堵的缺口。所以两边今天取**相等**，而不是包含"
+    two_ways = "多一个号、少一个号、面不同，三种都算差异（`loment_net_test`）；方向反了也一样"
+    fallback = "表外号在 PE 上回 `-ENOSYS`（-38），不是 `-1`（EPERM）—— 见 lomelf.PE_ENOSYS 与 docs/227 §2"
+  }
+}
+
+//: 面 —— 一个号落在哪一类。`other` 是兜底：**不猜**（与 `docs/188` 那条"不猜，报错"同一条纪律，
+//: 只是这里没有可报的错 —— 用本仓运行时不实现的号在语言里是合法的）。
+enum Surface : u8 {
+  other = 0 { title = "兜底：本表没点名的号，或首参不是整数字面量的站点" }
+  file  = 1 { title = "文件与目录" }
+  mem   = 2 { title = "内存（brk）" }
+  net   = 3 { title = "联网：socket 那一族 + poll" }
+  proc  = 4 { title = "进程（exit）" }
+}
+
+//: 号 → 面。**数值是 Linux x86-64 的系统调用号** —— 不是内核 FUAI 原语号（那是 lom/fuai.lom 那张，
+//: 33555… 那一族），两张表**不是一张**（docs/227 §4 点过这件事）。
+//:
+//: 每个号一条 `surface =`，审计按**两个方向**对账（多了、少了、面不同）。
+enum Syscall : u32 {
+  read         = 0   { surface = "file" }
+  write        = 1   { surface = "file" }
+  close        = 3   { surface = "file" }
+  poll         = 7   { surface = "net"  }
+  brk          = 12  { surface = "mem"  }
+  select       = 23  { surface = "net"  }
+  socket       = 41  { surface = "net"  }
+  connect      = 42  { surface = "net"  }
+  accept       = 43  { surface = "net"  }
+  sendto       = 44  { surface = "net"  }
+  recvfrom     = 45  { surface = "net"  }
+  shutdown     = 48  { surface = "net"  }
+  bind         = 49  { surface = "net"  }
+  listen       = 50  { surface = "net"  }
+  getsockname  = 51  { surface = "net"  }
+  getpeername  = 52  { surface = "net"  }
+  setsockopt   = 54  { surface = "net"  }
+  getsockopt   = 55  { surface = "net"  }
+  exit         = 60  { surface = "proc" }
+  getdents64   = 217 { surface = "file" }
+  openat       = 257 { surface = "file" }
+  newfstatat   = 262 { surface = "file" }
+  accept4      = 288 { surface = "net"  }
+  sendmsg      = 46  { surface = "net"  }
+  recvmsg      = 47  { surface = "net"  }
+  socketpair   = 53  { surface = "net"  }
+  epoll_wait   = 232 { surface = "net"  }
+  epoll_ctl    = 233 { surface = "net"  }
+  epoll_create1 = 291 { surface = "net"  }
+}
+
+//: **点名不做**（`docs/221` §7 / `docs/234`）：**2026-10-12 起联网面没有这一族了** ——
+//: `select` / `sendmsg` / `recvmsg` / `socketpair` / `epoll_wait` / `epoll_ctl` /
+//: `epoll_create1` 全部落进了 `Syscall`。原来那个 `NotDispatched` 枚举是**删掉**的，
+//: 不是留空：Loment 的检查器不许空枚举（`loment_net_test` 当场报「枚举 NotDispatched
+//: 为空」），而留个空壳只会让人以为「点名不做」还活着。哪天又有号被点名不做，写回这里；
+//: 而「点名不做 ∩ 派发面 = ∅」那条审计在枚举缺席时按空集判 —— 判据本身还在。

@@ -5,6 +5,7 @@
 // 编译: clang -O1 -o native_exe.exe loment/build/native_driver.c loment/build/native.ll
 
 module native
+choose runtime
 
 const SCALE: u32 = 3;
 

@@ -1,4 +1,5 @@
 module ahci
+choose runtime
 
 // M68: AHCI 驱动核心 (纯逻辑, 寄存器块由调用方提供 -> 可在宿主/内核两侧复用)。
 use bytes

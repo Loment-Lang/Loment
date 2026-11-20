@@ -1,0 +1,19 @@
+// 有符号回绕与无符号比较（LLS §10.2 / §12.4）：
+// i8 的 127 + 1 是 -128；u16 的 0 - 1 是 65535；u64 的最大值比 1 大。
+module wrap2
+choose runtime
+
+fn main() {
+    let a: i8 = 127;
+    let b: i8 = a + 1;
+    print_num(b as i64);
+    print("\n");
+    let c: u16 = 0;
+    let d: u16 = c - 1;
+    print_num(d as i64);
+    print("\n");
+    let e: u64 = 18446744073709551615;
+    if e > 1 {
+        print("big\n");
+    }
+}

@@ -1,0 +1,192 @@
+// std/bitstream.lomt — 位流读写（LSB-first 与 MSB-first）
+//
+// 为什么标准库里要有它: DEFLATE 是 LSB-first、PNG/JPEG 头是 MSB-first、DNS 的标签
+// 长度是 6 位、ELF 的 `st_info` 是 4+4 位 —— "按位取数"是底层格式的共同动作。
+// 手写一次是移位，手写十次就有十种边界（最后不足一字节、跨字节、越界返回什么）。
+//
+// 状态（24 字节）:
+//   0  buf     指针（读写共用）
+//   8  cap     容量（**位**）
+//  12  pos     当前位下标
+//  16  mode    0 = LSB-first，1 = MSB-first
+//  20  err     非 0 = 越界过
+//
+// 约定: `bt_read` / `bt_write` 一次最多 32 位；越界**不读写**、置 err、返回 0。
+//
+// 命名: 公开 bt_*, 内部 bt_*。自检 test_bitstream_*。
+
+module bitstream
+
+use mem
+
+pub const BT_LSB: u32 = 0;
+pub const BT_MSB: u32 = 1;
+
+const BT_BUF: u32 = 0;
+const BT_CAP: u32 = 8;
+const BT_POS: u32 = 12;
+const BT_MODE: u32 = 16;
+const BT_ERR: u32 = 20;
+pub const BT_STATE: u32 = 24;
+
+pub fn bt_init(st: ptr, buf: ptr, cap_bits: u32, mode: u32) {
+    mem_store64(st, BT_BUF, buf as u64);
+    mem_store32(st, BT_CAP, cap_bits);
+    mem_store32(st, BT_POS, 0);
+    mem_store32(st, BT_MODE, mode);
+    mem_store32(st, BT_ERR, 0);
+}
+
+pub fn bt_pos(st: ptr) -> u32 {
+    return mem_load32(st, BT_POS);
+}
+
+pub fn bt_err(st: ptr) -> u32 {
+    return mem_load32(st, BT_ERR);
+}
+
+fn bt_buf(st: ptr) -> ptr {
+    return mem_load64(st, BT_BUF) as ptr;
+}
+
+fn bt_get_bit(st: ptr, pos: u32) -> u32 {
+    let b: u32 = load8(bt_buf(st), pos / 8);
+    let k: u32 = pos % 8;
+    if mem_load32(st, BT_MODE) == BT_MSB {
+        return (b >> (7 - k)) & 1;
+    }
+    return (b >> k) & 1;
+}
+
+fn bt_set_bit(st: ptr, pos: u32, v: u32) {
+    let old: u32 = load8(bt_buf(st), pos / 8);
+    let k: u32 = pos % 8;
+    let sh: u32 = k;
+    if mem_load32(st, BT_MODE) == BT_MSB {
+        sh = 7 - k;
+    }
+    let mask: u32 = 1 << sh;
+    let nv: u32 = old;
+    if v != 0 {
+        nv = old | mask;
+    } else {
+        nv = old & (mask ^ 255);
+    }
+    store8(bt_buf(st), pos / 8, nv as u8);
+}
+
+/// 读 n 位（n <= 32）。
+pub fn bt_read(st: ptr, n: u32) -> u32 {
+    if n > 32 {
+        mem_store32(st, BT_ERR, 1);
+        return 0;
+    }
+    let pos: u32 = mem_load32(st, BT_POS);
+    if pos + n > mem_load32(st, BT_CAP) {
+        mem_store32(st, BT_ERR, 1);
+        return 0;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let bit: u32 = bt_get_bit(st, pos + i);
+        if mem_load32(st, BT_MODE) == BT_MSB {
+            v = (v << 1) | bit;
+        } else {
+            v = v | (bit << i);
+        }
+        i = i + 1;
+    }
+    mem_store32(st, BT_POS, pos + n);
+    return v;
+}
+
+/// 写 n 位（n <= 32）。
+pub fn bt_write(st: ptr, v: u32, n: u32) -> u32 {
+    if n > 32 {
+        mem_store32(st, BT_ERR, 1);
+        return 0;
+    }
+    let pos: u32 = mem_load32(st, BT_POS);
+    if pos + n > mem_load32(st, BT_CAP) {
+        mem_store32(st, BT_ERR, 1);
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let bit: u32 = 0;
+        if mem_load32(st, BT_MODE) == BT_MSB {
+            let sh: u32 = n - 1 - i;
+            bit = (v >> sh) & 1;
+        } else {
+            bit = (v >> i) & 1;
+        }
+        bt_set_bit(st, pos + i, bit);
+        i = i + 1;
+    }
+    mem_store32(st, BT_POS, pos + n);
+    return n;
+}
+
+pub fn bt_skip(st: ptr, n: u32) {
+    let pos: u32 = mem_load32(st, BT_POS);
+    if pos + n > mem_load32(st, BT_CAP) {
+        mem_store32(st, BT_ERR, 1);
+        return;
+    }
+    mem_store32(st, BT_POS, pos + n);
+}
+
+/// 对齐到下一个字节边界。
+pub fn bt_align(st: ptr) {
+    let pos: u32 = mem_load32(st, BT_POS);
+    let np: u32 = ((pos + 7) / 8) * 8;
+    if np > mem_load32(st, BT_CAP) {
+        mem_store32(st, BT_ERR, 1);
+        return;
+    }
+    mem_store32(st, BT_POS, np);
+}
+
+/// 已经用掉的**字节数**（向上取整）。
+pub fn bt_bytes(st: ptr) -> u32 {
+    return (mem_load32(st, BT_POS) + 7) / 8;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_bitstream_lsb() -> bool {
+    let b: ptr = alloc(8);
+    let st: ptr = alloc(BT_STATE);
+    mem_fill(b, 0, 8, 0);
+    bt_init(st, b, 64, BT_LSB);
+    bt_write(st, 5, 3);   // 101
+    bt_write(st, 3, 2);   // 11
+    if bt_err(st) != 0 {
+        return false;
+    }
+    bt_init(st, b, 64, BT_LSB);
+    return bt_read(st, 3) == 5 && bt_read(st, 2) == 3;
+}
+
+fn test_bitstream_msb() -> bool {
+    let b: ptr = alloc(8);
+    let st: ptr = alloc(BT_STATE);
+    mem_fill(b, 0, 8, 0);
+    bt_init(st, b, 64, BT_MSB);
+    bt_write(st, 5, 3);   // 101 at the top of the byte
+    bt_write(st, 3, 2);
+    if load8(b, 0) != 184 { // 1011 1000 = 0xB8
+        return false;
+    }
+    bt_init(st, b, 64, BT_MSB);
+    return bt_read(st, 3) == 5 && bt_read(st, 2) == 3;
+}
+
+fn test_bitstream_overflow() -> bool {
+    let b: ptr = alloc(1);
+    let st: ptr = alloc(BT_STATE);
+    bt_init(st, b, 4, BT_LSB);
+    let _v: u32 = bt_read(st, 5);
+    return bt_err(st) != 0 && bt_pos(st) == 0;
+}

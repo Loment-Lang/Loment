@@ -7,6 +7,7 @@
 // v0 不做回收 (没有 free 语义的字符串), 所以拼接是"只增不减"的。
 
 module native_concat
+choose runtime
 
 fn concat_lit() -> u32 {
     let s: str = str_concat("fujo", "os");

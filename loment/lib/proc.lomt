@@ -15,12 +15,13 @@
 //
 // 命名: 单元是平名字空间 (docs/158 §2), 所以公开名字一律 `proc_*`, 内部 `pc_*`。
 //
-// 平台: **只在 Linux/ELF 上可用**。PE 垫片只放行 8 个 syscall (docs/167), 没有 fork/pipe,
+// 平台: **只在 Linux/ELF 上可用**。PE 垫片的派发面里没有 fork/pipe (docs/167 §5),
 // 所以 Windows 包里 `proc_sh` 一律返回 -1 —— **不是悄悄失败**, 调用方能看见。
 //
 // 语言只有字节级访存 (`load8`/`store8`, 没有 store64), 所以指针数组是逐字节拼的。
 
 module proc
+choose runtime
 
 /// 工作区大小: 路径 + 选项 + 命令行 + 管道 fd + argv 指针数组。
 const PROC_WS: u32 = 4096;

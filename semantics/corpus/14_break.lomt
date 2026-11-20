@@ -1,0 +1,17 @@
+// `break`（LLS §11.7）：循环在 i == 3 处停下 ⇒ 打出 3。
+choose write grammar tur2026.2
+
+module brk
+choose runtime
+
+fn main() {
+    let i: u32 = 0;
+    while i < 10 {
+        if i == 3 {
+            break;
+        }
+        i = i + 1;
+    }
+    print_num(i as i64);
+    print("\n");
+}

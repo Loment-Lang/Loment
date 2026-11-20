@@ -1,0 +1,401 @@
+// std/semver.lomt — Semantic Versioning 2.0.0 的解析、比较与递增
+//
+// 为什么标准库要有它: 版本号看起来是"三个数字用点分开"，但 SemVer 的比较规则里
+// **预发布标识**是最容易错的一半：`1.0.0-alpha` < `1.0.0`、`alpha.2` < `alpha.10`
+// （数字标识按数值比、字母标识按字典序比、数字 < 字母）。写错一次，依赖解析就会
+// 选到"看起来更新"的旧版本。
+//
+// 形状: `MAJOR.MINOR.PATCH[-PRERELEASE][+BUILD]`；数字不允许前导零；解析结果写进
+// 一块 32 字节的输出（数字 + 原文里的偏移/长度），不复制字符串。
+//
+// 不做的: 版本范围（`semrange`）、`v` 前缀（SemVer 不允许，这里也不收）、
+// 构建元数据的比较（SemVer 明文规定 `+build` **不参与**比较）。
+//
+// 命名: 公开 sv_*, 内部 sv_*。自检 test_semver_*。
+
+module semver
+
+use mem
+use numfmt
+
+pub const SV_OK: u32 = 0;
+pub const SV_ERR: u32 = 4294967295;
+
+// 输出布局（32 字节）
+pub const SV_MAJOR: u32 = 0;
+pub const SV_MINOR: u32 = 4;
+pub const SV_PATCH: u32 = 8;
+pub const SV_PRE_OFF: u32 = 12;
+pub const SV_PRE_LEN: u32 = 16;
+pub const SV_BUILD_OFF: u32 = 20;
+pub const SV_BUILD_LEN: u32 = 24;
+
+fn sv_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn sv_ident_char(c: u32) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 45;
+}
+
+/// 读一个数字段：返回 `[新下标:32][值:32]`；没有数字或前导零返回 0。
+fn sv_num(s: str, i0: u32, n: u32) -> u64 {
+    let i: u32 = i0;
+    if i >= n || !sv_digit(str_byte(s, i)) {
+        return 0 as u64;
+    }
+    if str_byte(s, i) == 48 && i + 1 < n && sv_digit(str_byte(s, i + 1)) {
+        return 0 as u64; // 前导零
+    }
+    let v: u32 = 0;
+    while i < n && sv_digit(str_byte(s, i)) {
+        v = v * 10 + (str_byte(s, i) - 48);
+        i = i + 1;
+    }
+    return ((i as u64) << 32) | (v as u64);
+}
+
+fn sv_ident_ok(s: str, st: u32, ln: u32) -> bool {
+    if ln == 0 {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if !sv_ident_char(str_byte(s, st + i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    // 数字标识不许有前导零
+    let all_digit: u32 = 1;
+    i = 0;
+    while i < ln {
+        if !sv_digit(str_byte(s, st + i)) {
+            all_digit = 0;
+        }
+        i = i + 1;
+    }
+    if all_digit == 1 && ln > 1 && str_byte(s, st) == 48 {
+        return false;
+    }
+    return true;
+}
+
+fn sv_pre_ok(s: str, st: u32, ln: u32) -> bool {
+    // 点分隔的非空标识序列
+    let i: u32 = 0;
+    let start: u32 = 0;
+    while i <= ln {
+        if i == ln || str_byte(s, st + i) == 46 {
+            if !sv_ident_ok(s, st + start, i - start) {
+                return false;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 解析 SemVer。成功返回 SV_OK 并写 32 字节到 `out`；失败 SV_ERR。
+pub fn sv_parse(s: str, out: ptr) -> u32 {
+    let n: u32 = str_len(s);
+    let r1: u64 = sv_num(s, 0, n);
+    if r1 == 0 {
+        return SV_ERR;
+    }
+    let i1: u32 = (r1 >> 32) as u32;
+    if i1 >= n || str_byte(s, i1) != 46 {
+        return SV_ERR;
+    }
+    let r2: u64 = sv_num(s, i1 + 1, n);
+    if r2 == 0 {
+        return SV_ERR;
+    }
+    let i2: u32 = (r2 >> 32) as u32;
+    if i2 >= n || str_byte(s, i2) != 46 {
+        return SV_ERR;
+    }
+    let r3: u64 = sv_num(s, i2 + 1, n);
+    if r3 == 0 {
+        return SV_ERR;
+    }
+    let i: u32 = (r3 >> 32) as u32;
+    mem_store32(out, SV_MAJOR, (r1 & 4294967295) as u32);
+    mem_store32(out, SV_MINOR, (r2 & 4294967295) as u32);
+    mem_store32(out, SV_PATCH, (r3 & 4294967295) as u32);
+    mem_store32(out, SV_PRE_OFF, i);
+    mem_store32(out, SV_PRE_LEN, 0);
+    mem_store32(out, SV_BUILD_OFF, i);
+    mem_store32(out, SV_BUILD_LEN, 0);
+    if i < n && str_byte(s, i) == 45 { // '-'
+        i = i + 1;
+        let st: u32 = i;
+        while i < n && str_byte(s, i) != 43 { // '+'
+            i = i + 1;
+        }
+        if !sv_pre_ok(s, st, i - st) {
+            return SV_ERR;
+        }
+        mem_store32(out, SV_PRE_OFF, st);
+        mem_store32(out, SV_PRE_LEN, i - st);
+    }
+    if i < n && str_byte(s, i) == 43 { // '+'
+        i = i + 1;
+        let st2: u32 = i;
+        while i < n {
+            let c: u32 = str_byte(s, i);
+            if !sv_ident_char(c) && c != 46 {
+                return SV_ERR;
+            }
+            i = i + 1;
+        }
+        if !sv_pre_ok(s, st2, i - st2) {
+            return SV_ERR;
+        }
+        mem_store32(out, SV_BUILD_OFF, st2);
+        mem_store32(out, SV_BUILD_LEN, i - st2);
+    }
+    if i != n {
+        return SV_ERR;
+    }
+    return SV_OK;
+}
+
+pub fn sv_valid(s: str) -> bool {
+    let out: ptr = alloc(32);
+    return sv_parse(s, out) == SV_OK;
+}
+
+fn sv_id_numeric(s: str, st: u32, ln: u32) -> bool {
+    if ln == 0 {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < ln {
+        if !sv_digit(str_byte(s, st + i)) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn sv_id_cmp(a: str, ao: u32, al: u32, b: str, bo: u32, bl: u32) -> i32 {
+    let an: bool = sv_id_numeric(a, ao, al);
+    let bn: bool = sv_id_numeric(b, bo, bl);
+    if an && bn {
+        // 无前导零，长度大者数值大；同长按字典序。
+        if al != bl {
+            if al > bl {
+                return 1 as i32;
+            }
+            return 0 as i32 - 1;
+        }
+    } else if an {
+        return 0 as i32 - 1; // 数字标识 < 字母标识
+    } else if bn {
+        return 1 as i32;
+    }
+    let m: u32 = al;
+    if bl < m {
+        m = bl;
+    }
+    let i: u32 = 0;
+    while i < m {
+        let x: u32 = str_byte(a, ao + i);
+        let y: u32 = str_byte(b, bo + i);
+        if x < y {
+            return 0 as i32 - 1;
+        }
+        if x > y {
+            return 1 as i32;
+        }
+        i = i + 1;
+    }
+    if al < bl {
+        return 0 as i32 - 1;
+    }
+    if al > bl {
+        return 1 as i32;
+    }
+    return 0 as i32;
+}
+
+fn sv_pre_cmp(a: str, pa: u32, la: u32, b: str, pb: u32, lb: u32) -> i32 {
+    // 点分隔标识逐个比；短的更小。
+    let ia: u32 = 0;
+    let ib: u32 = 0;
+    let sa: u32 = 0;
+    let sb: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let ea: u32 = ia;
+        while ea < la && str_byte(a, pa + ea) != 46 {
+            ea = ea + 1;
+        }
+        let eb: u32 = ib;
+        while eb < lb && str_byte(b, pb + eb) != 46 {
+            eb = eb + 1;
+        }
+        let c: i32 = sv_id_cmp(a, pa + sa, ea - sa, b, pb + sb, eb - sb);
+        if c != (0 as i32) {
+            return c;
+        }
+        let enda: bool = ea >= la;
+        let endb: bool = eb >= lb;
+        if enda && endb {
+            return 0 as i32;
+        }
+        if enda {
+            return 0 as i32 - 1;
+        }
+        if endb {
+            return 1 as i32;
+        }
+        ia = ea + 1;
+        ib = eb + 1;
+        sa = ia;
+        sb = ib;
+    }
+    return 0 as i32;
+}
+
+/// 比较两个版本字符串：a < b 返回 -1，相等 0，a > b 返回 1；任一非法返回 -2。
+pub fn sv_compare(a: str, b: str) -> i32 {
+    let x: ptr = alloc(32);
+    let y: ptr = alloc(32);
+    if sv_parse(a, x) != SV_OK || sv_parse(b, y) != SV_OK {
+        return 0 as i32 - 2;
+    }
+    let i: u32 = SV_MAJOR;
+    while i <= SV_PATCH {
+        let p: u32 = mem_load32(x, i);
+        let q: u32 = mem_load32(y, i);
+        if p < q {
+            return 0 as i32 - 1;
+        }
+        if p > q {
+            return 1 as i32;
+        }
+        i = i + 4;
+    }
+    let la: u32 = mem_load32(x, SV_PRE_LEN);
+    let lb: u32 = mem_load32(y, SV_PRE_LEN);
+    if la == 0 && lb == 0 {
+        return 0 as i32;
+    }
+    if la == 0 {
+        return 1 as i32; // 正式版 > 预发布
+    }
+    if lb == 0 {
+        return 0 as i32 - 1;
+    }
+    return sv_pre_cmp(a, mem_load32(x, SV_PRE_OFF), la,
+                      b, mem_load32(y, SV_PRE_OFF), lb);
+}
+
+fn sv_put(out: ptr, cap: u32, v: u32) -> u32 {
+    if cap < 32 {
+        return 0;
+    }
+    return numfmt_dec_into(out, v as u64);
+}
+
+fn sv_put_dot(out: ptr, cap: u32, pos: u32) -> u32 {
+    store8(out, pos, 46 as u8);
+    return pos + 1;
+}
+
+/// 递增主版本：X.0.0（丢掉预发布/构建）。
+pub fn sv_bump_major(s: str, out: ptr, cap: u32) -> u32 {
+    let p: ptr = alloc(32);
+    if sv_parse(s, p) != SV_OK || cap < 32 {
+        return 0;
+    }
+    let pos: u32 = 0;
+    pos = pos + sv_put(ptr_add(out, pos), cap - pos, mem_load32(p, SV_MAJOR) + 1);
+    pos = sv_put_dot(out, cap, pos);
+    store8(out, pos, 48 as u8);
+    pos = pos + 1;
+    pos = sv_put_dot(out, cap, pos);
+    store8(out, pos, 48 as u8);
+    pos = pos + 1;
+    store8(out, pos, 0 as u8);
+    return pos;
+}
+
+/// 递增次版本：X.Y+1.0。
+pub fn sv_bump_minor(s: str, out: ptr, cap: u32) -> u32 {
+    let p: ptr = alloc(32);
+    if sv_parse(s, p) != SV_OK || cap < 32 {
+        return 0;
+    }
+    let pos: u32 = 0;
+    pos = pos + sv_put(ptr_add(out, pos), cap - pos, mem_load32(p, SV_MAJOR));
+    pos = sv_put_dot(out, cap, pos);
+    pos = pos + sv_put(ptr_add(out, pos), cap - pos, mem_load32(p, SV_MINOR) + 1);
+    pos = sv_put_dot(out, cap, pos);
+    store8(out, pos, 48 as u8);
+    pos = pos + 1;
+    store8(out, pos, 0 as u8);
+    return pos;
+}
+
+/// 递增补丁：X.Y.Z+1。
+pub fn sv_bump_patch(s: str, out: ptr, cap: u32) -> u32 {
+    let p: ptr = alloc(32);
+    if sv_parse(s, p) != SV_OK || cap < 32 {
+        return 0;
+    }
+    let pos: u32 = 0;
+    pos = pos + sv_put(ptr_add(out, pos), cap - pos, mem_load32(p, SV_MAJOR));
+    pos = sv_put_dot(out, cap, pos);
+    pos = pos + sv_put(ptr_add(out, pos), cap - pos, mem_load32(p, SV_MINOR));
+    pos = sv_put_dot(out, cap, pos);
+    pos = pos + sv_put(ptr_add(out, pos), cap - pos, mem_load32(p, SV_PATCH) + 1);
+    store8(out, pos, 0 as u8);
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_semver_parse() -> bool {
+    let p: ptr = alloc(32);
+    if sv_parse("1.2.3-alpha.1+build.5", p) != SV_OK {
+        return false;
+    }
+    return mem_load32(p, SV_MAJOR) == 1 && mem_load32(p, SV_MINOR) == 2
+        && mem_load32(p, SV_PATCH) == 3 && mem_load32(p, SV_PRE_LEN) == 7
+        && mem_load32(p, SV_BUILD_LEN) == 7;
+}
+
+fn test_semver_rejects() -> bool {
+    return !sv_valid("1.2") && !sv_valid("01.2.3") && !sv_valid("1.2.3-")
+        && !sv_valid("1.2.3-01") && !sv_valid("v1.2.3");
+}
+
+fn test_semver_compare() -> bool {
+    return sv_compare("1.0.0", "1.0.1") < (0 as i32)
+        && sv_compare("1.0.0-alpha", "1.0.0") < (0 as i32)
+        && sv_compare("1.0.0-alpha.2", "1.0.0-alpha.10") < (0 as i32)
+        && sv_compare("1.0.0-alpha", "1.0.0-alpha.1") < (0 as i32)
+        && sv_compare("1.0.0+b1", "1.0.0+b2") == (0 as i32);
+}
+
+fn test_semver_bump() -> bool {
+    let out: ptr = alloc(32);
+    let n: u32 = sv_bump_minor("1.2.3-alpha", out, 32);
+    let want: str = "1.3.0";
+    if n != 5 {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < 5 {
+        if load8(out, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

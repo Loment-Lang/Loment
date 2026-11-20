@@ -90,8 +90,17 @@
 
     模块级    NAME = <整数>            （常量, 全大写才算 —— 与 potato_from 同一条判据）
               def f(a: int, b: int) -> int: …
-    语句      赋值/注解赋值/增量赋值   if/elif/else   while   for i in range(…)   return   f(…)
-    表达式    整数  名字  调用  一元 - + not   二元 算术/位/比较/`//`/`%`   布尔 and/or
+    语句      赋值/注解赋值/增量赋值   if/elif/else   while   for i in range(…)   return
+              f(…)   print(…)
+    表达式    整数  字符串  名字  调用  一元 - + not   二元 算术/位/比较/`//`/`%`   布尔 and/or
+
+**输出**：`print(x)` 翻成内建的 `print`（`str`）与 `print_num`（整数），**再补一个换行**
+—— Python 的 `print` 自己换行，而本语言那两个内建都不换行。内建按**实参类型**选；
+布尔、多个实参（Python 会插空格并自动转字符串）都点名拒。
+
+**字符串**：字面量照值重编码（`\n \t \r \0 \\ \"` 认得，别的控制字符点名拒）；
+`+` 只在**两边都是字符串**时映 `str_concat` —— `"a" + 1` 在 Python 里是自动转字符串
+再拼，本语言没有那个转换，所以拒。
 
 > **`~` 不在**（`docs/198` §1）：本语言的一元运算符只有 `-` 与 `!`，而 `~v` 是
 > "与全 1 异或" —— **按宽度**分别写作 `v ^ -1`（i32）或 `v ^ 255`（u8）。
@@ -100,8 +109,18 @@
 
 **不收的一律报错**（`docs/167`）：`break` / `continue` / `lambda` / 推导式 / `try` /
 `with` / 导入 / 元组解包 / 链式比较 / `**` / `/`（真除，出浮点）/ `~`（按位取反，
-按宽度写 `^ -1`）/ `str`·`list`·`dict` /
+按宽度写 `^ -1`）/ `list`·`dict` /
 `for … else` / `while … else`。理由与 C 那门一样：**跳过 = 产出一份少算一步却照样能编的单元**。
+
+**条件表达式** `a if c else b` **只在赋值或返回的右边收**：本语言没有表达式级的 `if`，
+那边能摊成两条语句（`x = …` → 先零值再 `if`/`else`；`return …` → 两条 `return`），
+求值顺序与 Python 一致（先算条件）。嵌进别的表达式里没有对应写法，点名拒。
+两个分支**必须同类型** —— 本语言没有公共类型可写。
+
+**脚本式写法**（没有 `def`，顶层语句就是程序）不归这一门管：`potato_from._synthesize_start`
+先把顶层语句折成 `def _start() -> None:` 的正文，再交给这里。所以这一门永远只看见
+`def` —— 而且这条规则**只对 `choose write grammar python` 成立**（用户 2026-11-10 的裁定），
+原生 Loment 与别的表层语法一行不动。
 
 ## 两条**决定**（不是翻译）
 
@@ -125,7 +144,7 @@ from pathlib import Path
 
 #: Python 注解 -> Loment 类型。与 `potato_from.PY_TYPES` **同表**（`int` 映 `i64`）——
 #: 两处对不上的话，`lomt_from` 发的签名与这里发出来的对不上，而那是**静默**的。
-_TYPES = {"int": "i64", "bool": "bool", "None": "()"}
+_TYPES = {"int": "i64", "bool": "bool", "str": "str", "None": "()"}
 
 #: 二元运算符 -> Loment 运算符。
 #: **`//` 与 `%` 都在**，且直接映本语言的 `/` 与 `%` —— 见文件头那条表：
@@ -163,6 +182,31 @@ def _safe(name: str) -> str:
     return name + "_py" if name in _LOMENT_KW else name
 
 
+#: 本语言认的转义 -> 那六个写法（`\n \t \r \0 \\ \"`）。
+_ESC = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\t": "\\t", "\r": "\\r",
+        "\0": "\\0"}
+
+
+def _str_lit(value: str, line: int) -> str:
+    """Python 的字符串**值** -> 本语言的写法。
+
+    `ast` 交过来的是**已经解过转义**的值，所以这里要重新编码。认不出的控制字符
+    **点名拒**：本语言只认 `\\n \\t \\r \\0 \\\\ \\"`，别的控制字符写进去就是一份
+    词法器不认的源，而报错会指向生成出来的那一份（找不到人）。
+    """
+    out = []
+    for ch in value:
+        if ch in _ESC:
+            out.append(_ESC[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            raise Unsupported(
+                f"第 {line} 行: 字符串里有控制字符 {ch!r} —— 本语言只认 "
+                '`\\n \\t \\r \\0 \\\\ \\"`，它没有别的转义写法')
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def _ty_of_annotation(node, where: str) -> str:
     """参数/返回注解 -> Loment 类型。**没有注解就报错** —— Python 不写注解就没有
     类型可用，而 Loment 必须有；猜一个宽度是把作者的意思改掉。"""
@@ -178,9 +222,15 @@ def _ty_of_annotation(node, where: str) -> str:
 class Emitter:
     """一个 `def` -> 一段 Loment 源码。"""
 
-    def __init__(self, fns: dict[str, str], consts: dict[str, str] | None = None) -> None:
+    def __init__(self, fns: dict[str, str], consts: dict[str, str] | None = None,
+                 params: dict[str, list[str]] | None = None) -> None:
         #: 本单元所有函数的**返回类型**。调用点的类型靠它。
         self.fns = fns
+        #: 本单元所有函数的**形参类型**（按声明顺序）。调用点（`raw()` 的 Call 分支）
+        #: 靠它决定每个实参要什么类型 —— **只查返回类型是不够的**（`#218`）：
+        #: 原先每个实参都硬写 `want="i64"`，于是一个 `bool` 形参永远没有调用点能对上，
+        #: 而 `pick(True)` 报的还是"这里要的是整数，给的是布尔"（把话反过来说了）。
+        self.params: dict[str, list[str]] = dict(params or {})
         #: 模块常量的名字 -> 类型。生成的 `pub const` 是模块级的，函数体里用得到。
         self.consts: dict[str, str] = dict(consts or {})
         #: 名字 -> 类型（`bool` / `i64`）。**推导出来的**，见文件头 §决定 2。
@@ -205,8 +255,10 @@ class Emitter:
                 return "bool"
             if isinstance(e.value, int):
                 return "i64"
+            if isinstance(e.value, str):
+                return "str"
             raise Unsupported(f"第 {e.lineno} 行: 不支持常量 {e.value!r}"
-                              f"（只收整数与 True/False）")
+                              f"（只收整数、字符串与 True/False）")
         if isinstance(e, ast.Name):
             if e.id in self.consts:
                 return self.consts[e.id]
@@ -217,6 +269,10 @@ class Emitter:
             f = e.func
             if not isinstance(f, ast.Name):
                 raise Unsupported(f"第 {e.lineno} 行: 只收直接函数调用")
+            if f.id == "print" and "print" not in self.fns:
+                # `print` 是**语句**（本语言的 `print` / `print_num` 都是语句位置的内建），
+                # 不返回值 —— 当值用就要在这里说清楚，别掉进"本单元没有这个函数"。
+                return "()"
             r = self.fns.get(f.id)
             if r is None:
                 raise Unsupported(
@@ -226,7 +282,18 @@ class Emitter:
         if isinstance(e, ast.UnaryOp):
             # Python 的 `not` **永远**出 bool（与 `and`/`or` 不同），所以它可翻。
             return "bool" if isinstance(e.op, ast.Not) else "i64"
+        if isinstance(e, ast.IfExp):
+            # 条件表达式：两个分支**必须同类型**（否则本语言没有共同的类型可写）。
+            a, b = self.ty_of(e.body), self.ty_of(e.orelse)
+            if a != b:
+                raise Unsupported(
+                    f"第 {e.lineno} 行: 条件表达式两个分支类型不同（{a} / {b}）—— "
+                    f"本语言没有公共类型可写，两边写成一样的")
+            return a
         if isinstance(e, ast.BinOp):
+            if isinstance(e.op, ast.Add) and (self.ty_of(e.left) == "str"
+                                              or self.ty_of(e.right) == "str"):
+                return "str"           # `"a" + "b"` 是拼接，不是整数加法
             return "i64"
         if isinstance(e, (ast.Compare, ast.BoolOp)):
             return "bool"
@@ -255,13 +322,31 @@ class Emitter:
                 f"Python 的 `bool` 是 `int` 的子类（`True + 1 == 2`），而 `and`/`or` "
                 f"返回的是**操作数**（`1 and 2` 是 `2`）—— 这个意思 Loment 表达不出来。"
                 f"把意思写清楚：要 0/1 就写 `1 if c else 0`，要操作数就写成 `if`/`else`")
+        if got == "str" or want == "str":
+            # **字符串不参与数值转换**。Python 会替你做 `"a" + 1`，本语言不会；
+            # 这里点名说清，别落进最后那句 `AssertionError`（那是一段 Python 栈）。
+            raise Unsupported(
+                f"第 {e.lineno} 行: 这里是**{'字符串' if want == 'str' else '数值/条件'}**"
+                f"场合，给的却是**{'字符串' if got == 'str' else '数值/条件'}**。"
+                f"本语言没有字符串与数值之间的隐式转换 —— 要输出数字用 `print` 单独打，"
+                f"要拼字符串两边都得是字符串")
         raise AssertionError((got, want))
 
     def raw(self, e) -> str:
         """表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。"""
+        if isinstance(e, ast.IfExp):
+            # 本语言没有**表达式级**的 if —— 三元只在赋值/返回的右边收（那边能摊成
+            # 两条语句，见 `_bind_ternary` / `stmt(Return)`）。嵌进别的表达式里就没有
+            # 对应的写法了，点名拒，别发一份编不过的源。
+            raise Unsupported(
+                f"第 {e.lineno} 行: 条件表达式只收在**赋值或返回的右边**"
+                f"（`x = a if c else b` / `return a if c else b`）—— 本语言没有"
+                f"表达式级的 `if`，嵌在别的表达式里没有对应写法。先存进一个变量再拼")
         if isinstance(e, ast.Constant):
             if isinstance(e.value, bool):
                 return "true" if e.value else "false"
+            if isinstance(e.value, str):
+                return _str_lit(e.value, e.lineno)
             return str(e.value)
         if isinstance(e, ast.Name):
             if e.id in self.consts:
@@ -275,7 +360,21 @@ class Emitter:
                 raise Unsupported(f"第 {e.lineno} 行: 只收直接函数调用")
             if e.keywords:
                 raise Unsupported(f"第 {e.lineno} 行: 不支持关键字实参")
-            return f"{_safe(f.id)}({', '.join(self.ex(a, 'i64') for a in e.args)})"
+            # **按被调函数的形参类型要实参**（`#218`）。原先一律 `want="i64"`：
+            # 一个 `bool` 形参在**任何**调用点都配不上 —— `pick(True)` 被拒，而理由
+            # 还反着说（"这里要的是整数"；其实是形参要 bool、调用点硬塞 i64）。
+            # 形参表是 `translate()` 从同一份 AST 上读的，不另推一遍。
+            want_ps = self.params.get(f.id)
+            if want_ps is None:
+                # `ty_of()` 已经保证被调函数在本单元里（Stage A 不跨单元），所以
+                # 走到这里只可能是调用方自己构造的 Emitter（没有传形参表）——
+                # 退回旧行为，别把"少一张表"变成一条假诊断。
+                return f"{_safe(f.id)}({', '.join(self.ex(a, 'i64') for a in e.args)})"
+            if len(want_ps) != len(e.args):
+                raise Unsupported(
+                    f"第 {e.lineno} 行: 调用 `{f.id}` 要 {len(want_ps)} 个实参，"
+                    f"这里给了 {len(e.args)} 个")
+            return f"{_safe(f.id)}({', '.join(self.ex(a, w) for a, w in zip(e.args, want_ps))})"
         if isinstance(e, ast.UnaryOp):
             if isinstance(e.op, ast.Not):
                 # Python 的 `not` 收任何真值、永远出 bool；Loment 的 `!` 只收 bool。
@@ -294,6 +393,16 @@ class Emitter:
                 return f"({op}{self.ex(e.operand, 'i64')})"
             raise Unsupported(f"第 {e.lineno} 行: 不支持一元 `{type(e.op).__name__}`")
         if isinstance(e, ast.BinOp):
+            if isinstance(e.op, ast.Add) and (self.ty_of(e.left) == "str"
+                                              or self.ty_of(e.right) == "str"):
+                # 拼接。**两边都得是字符串**：Python 的 `"a" + 1` 是自动转字符串再拼，
+                # 而本语言没有整数转字符串的写法（`print_num` 只往 stdout 写）。
+                if self.ty_of(e.left) != "str" or self.ty_of(e.right) != "str":
+                    raise Unsupported(
+                        f"第 {e.lineno} 行: 字符串只能和字符串拼（Python 会把数字自动转成"
+                        f"字符串，本语言没有这个转换）—— 拆成两次 `print`")
+                return (f"str_concat({self.ex(e.left, 'str')}, "
+                        f"{self.ex(e.right, 'str')})")
             if isinstance(e.op, ast.Pow):
                 raise Unsupported(f"第 {e.lineno} 行: 不支持 `**`"
                                   f"（Loment 没有乘方；写成一个循环或调用）")
@@ -326,6 +435,41 @@ class Emitter:
                           f"（{_expr_name(e)}）")
 
     # ---- 语句
+    def _print(self, call) -> None:
+        """`print(x)` -> 本语言的 `print` / `print_num`，**再补一个换行**。
+
+        Python 的 `print` 自己换行，而本语言的 `print` / `print_num` 都**不换行**
+        （playground 的示例里那个 `\\n` 是手写的）。所以一条 `print(x)` 发两行。
+
+        内建按**类型**选：字符串走 `print`、整数走 `print_num`。布尔没有对应的内建
+        （Python 打 `True`），多个实参之间的空格与自动转字符串也没有 —— 这些都点名拒，
+        不发一份"看着像、跑出来少几个字"的源。
+        """
+        if call.keywords:
+            raise Unsupported(
+                f"第 {call.lineno} 行: 不支持 `print` 的关键字实参"
+                f"（`sep=` / `end=` 本语言没有对应写法）")
+        if not call.args:
+            self.out('print("\\n");')
+            return
+        if len(call.args) > 1:
+            raise Unsupported(
+                f"第 {call.lineno} 行: `print` 只收一个实参"
+                f"（多个实参之间 Python 会插空格、并把每个都转成字符串 —— "
+                f"本语言没有整数转字符串的写法。拆成几行写）")
+        a = call.args[0]
+        kind = self.ty_of(a)
+        if kind == "str":
+            self.out(f"print({self.ex(a, 'str')});")
+        elif kind == "i64":
+            self.out(f"print_num({self.ex(a, 'i64')});")
+        else:
+            raise Unsupported(
+                f"第 {call.lineno} 行: `print` 打不了"
+                f"{'布尔值' if kind == 'bool' else '这个表达式'}"
+                f"（本语言只有 `print`（字符串）与 `print_num`（整数）两个内建）")
+        self.out('print("\\n");')
+
     def stmts(self, body: list) -> None:
         for st in body:
             self.stmt(st)
@@ -366,6 +510,15 @@ class Emitter:
                     f"第 {st.lineno} 行: 不支持不带值的 `return`。本语言的 `()` 函数"
                     f"**没有提前退出**——它跑到末尾就结束。把它改写成 `if`/`else` 让末尾成为"
                     f"唯一出口，或者把函数改成有返回值并用 `return 0`")
+            if isinstance(st.value, ast.IfExp):
+                # `return a if c else b` -> 两条 return（顺序与 Python 一致）。
+                self.out(f"if {self.ex(st.value.test, 'bool')} {{")
+                self.depth += 1
+                self.out(f"return {self.ex(st.value.body, self.ret)};")
+                self.depth -= 1
+                self.out("}")
+                self.out(f"return {self.ex(st.value.orelse, self.ret)};")
+                return
             self.out(f"return {self.ex(st.value, self.ret)};")
             return
         if isinstance(st, ast.If):
@@ -392,6 +545,10 @@ class Emitter:
                                   f"（只有函数第一句是文档字符串；注释用 `#`）")
             if not isinstance(st.value, ast.Call):
                 raise Unsupported(f"第 {st.lineno} 行: 表达式语句只收函数调用")
+            if isinstance(st.value.func, ast.Name) and st.value.func.id == "print" \
+                    and "print" not in self.fns:
+                self._print(st.value)
+                return
             self.out(f"{self.raw(st.value)};")
             return
         if isinstance(st, ast.Pass):
@@ -434,12 +591,53 @@ class Emitter:
             raise Unsupported(f"第 {st.lineno} 行: 循环体里给循环变量 `{name}` 赋值"
                               f"—— 见文件头 §`for` 的定义：那条降级式在这种写法下"
                               f"不成立（CPython 每轮都会重置它）。改用 `while`")
+        if isinstance(value, ast.IfExp):
+            # **在"已经赋过值"那一支之前**判：三元要摊成 if/else，纯赋值那条路
+            # 只会把它当表达式发（而本语言没有表达式级 if）。
+            self._bind_ternary(name, value, st)
+            return
         if name in self.vars:
             self.out(f"{sname} = {self.ex(value, self.vars[name])};")
             return
         ty = self._decl_type(st)
         self.vars[name] = ty
         self.out(f"let {sname}: {ty} = {self.ex(value, ty)};")
+
+    def _bind_ternary(self, name: str, value, st) -> None:
+        """`x = a if c else b` -> 先给零值，再 `if`/`else` 两条赋值。
+
+        **顺序不变**：Python 先算条件、再只算命中的那一支；这里也一样（先声明零值，
+        两支各在 `if` 里算一次）。写成 `let x = a; if !c { x = b }` 会先算 `a`，
+        带副作用时就不是同一个程序了。
+        """
+        if name in self._for_targets:
+            raise Unsupported(f"第 {st.lineno} 行: 循环体里给循环变量 `{name}` 赋值"
+                              f"—— 见文件头 §`for` 的定义：那条降级式在这种写法下"
+                              f"不成立（CPython 每轮都会重置它）。改用 `while`")
+        sname = _safe(name)
+        new = name not in self.vars
+        ty = self._decl_type(st) if new else self.vars[name]
+        if new:
+            self.vars[name] = ty
+            self.out(f"let {sname}: {ty} = {self._zero(ty)};")
+        self.out(f"if {self.ex(value.test, 'bool')} {{")
+        self.depth += 1
+        self.out(f"{sname} = {self.ex(value.body, ty)};")
+        self.depth -= 1
+        self.out("} else {")
+        self.depth += 1
+        self.out(f"{sname} = {self.ex(value.orelse, ty)};")
+        self.depth -= 1
+        self.out("}")
+
+    @staticmethod
+    def _zero(ty: str) -> str:
+        """声明用的零值（本语言的 `let` 要初值）。"""
+        if ty == "bool":
+            return "false"
+        if ty == "str":
+            return '""'
+        return "0"
 
     def _decl_type(self, st) -> str:
         """局部变量的类型：注解优先，否则看右值（比较/布尔/`not` 出 `bool`）。"""
@@ -615,10 +813,13 @@ def translate(src: str, keep: set[str] | None = None,
     """
     fns, mod_consts, doc = parse(src)
     sig: dict[str, str] = {}
+    psig: dict[str, list[str]] = {}
     for f in fns:
         sig[f.name] = _ty_of_annotation(f.returns, f"第 {f.lineno} 行 返回类型")
-        for a in f.args.args:                       # 顺带把参数注解也验一遍
+        # 形参类型**留着**（`#218`）：调用点要按它决定每个实参的类型。
+        psig[f.name] = [
             _ty_of_annotation(a.annotation, f"第 {f.lineno} 行 参数 {a.arg}")
+            for a in f.args.args]
     seen: set[str] = set()
     for f in fns:
         if f.name in seen:
@@ -641,7 +842,7 @@ def translate(src: str, keep: set[str] | None = None,
             continue
         if out:
             out.append("")
-        out.append(Emitter(sig, cenv).emit_fn(f))
+        out.append(Emitter(sig, cenv, psig).emit_fn(f))
     return "\n".join(out) + "\n"
 
 

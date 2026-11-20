@@ -51,6 +51,18 @@
 所以这个 job 红了也只是红了。要它真的成为门，得把 `lom/ 禁区` 设成 required status
 check。这一步在 `CONTRIBUTING.md` 里也写明了。
 
+**2026-10-11：判定的内容改了一格 —— 拦住的是"改"，不是"碰"。** 文档一直写的是
+"a pull request that **modifies** anything under `lom/`"，而实现是 `grep -E '^lom/'`
+（碰到就拦）。两者在**新增**这一格上不一致，而差的那一格恰好是唯一能扩大接口面、
+又不碰任何既有契约的动作（既有的三份那儿，对面在另一个仓库；新增一份没有对面可坏）。
+现在按 `gh api` 的 `status` 分流：`added` 放行并在 summary 里列出来，
+`modified`/`removed`/`renamed` 照旧拦，**列表形状不对**（缺 `status` 列）一律红
+（fail closed —— 不给"API 换了形状就静默放行"留缝）。同一轮加了第四份契约
+`lom/net.lom`，它是这条改动的第一个用例（`docs/229`）。
+
+**这条改动本身没有让门变硬**：`lom/ 禁区` 仍然不是 required status，所以"新增放行"
+在今天的实际效果是"不再对合法的扩展动作报一次红"，而不是"挡不住别的什么"。
+
 ## 2. 发布清单 `GLOBS`：没有"该列而没列"的判据
 
 `loment_release.GLOBS` 是**显式清单**（不扫目录），而 `loment_rel_test` 比的是
@@ -72,6 +84,14 @@ check。这一步在 `CONTRIBUTING.md` 里也写明了。
 * 14 条补进 `loment_release.GLOBS` **与** `loment/tools/lomrel.lomt` 的 `globs_text()`，
   **插入位置逐条对齐**（两份不同序 = `loment_rel_test` 报"同集合不同顺序"，
   症状是 `落盘不同: 47434B vs 47434B`）。
+
+**第三处登记（自举镜像）当时没有判据兜着 —— 2026-10-10 补上**：上面那条钉的是
+`tools/*.py` ↔ `GLOBS`，**比不到自举那一份** —— `loment/tools/lomrel.lomt` 的
+`globs_text()`。实测：`f262a67`（逃生舱·粒度 B）把 `tools/loment_opt_obj.py` 加进 `GLOBS`
+却漏了 `lomrel.lomt`，一路漂到 `main`（两侧工件数 539 / 538）。**CI 上看不见**：会抓它的
+那几条判据（`loment_rel_test` 的 `--check` / `--emit` / `--checksums`）全要 WSL，ubuntu 的
+runner 上 SKIP。补法是 `loment_rel_test::test_lomrel_globs_match_python_globs` ——
+**纯 Python**（不编链、不跑 WSL），逐条同序比两份清单，所以在 CI 上真跑。
 
 **故意的例外**：`docs/i18n/` 不管。`docs/i18n/glossary.md` §1 明写它是**译者向工件**、
 "sits outside every release GLOB … and is not shipped"——那一格的"没进清单"是设计，

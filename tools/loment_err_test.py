@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import loment  # noqa: E402  (build_lomenterr: 报错器在这里编一次, 全测复用)
 import lomentc  # noqa: E402
 
@@ -126,8 +127,8 @@ def test_render_carries_the_whole_card():
     f, d = _check(SEMANTIC)
     rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out[:200])
-    assert "error[E002]:" in out, out[:200]
-    assert "符号未声明" in out, "没查 surface_data 的标题"
+    assert "error[E091]:" in out, out[:200]
+    assert "变量没有声明" in out, "没查 surface_data 的标题"
     assert "-->" in out, out[:200]
     assert ":4" in out, "位置里没有行号"
     assert "return z;" in out, "没有把源行印出来"
@@ -137,36 +138,39 @@ def test_render_carries_the_whole_card():
     # 修法编号成列, 且 >= 3 条 (门槛)
     for i in (1, 2, 3):
         assert f"  {i}. " in out, f"没有第 {i} 条修法: {out[-300:]!r}"
-    assert " 4. " in out, "这一条的卡有 4 条修法, 生成器把第 4 条丢了?"
+    assert " 3. " in out and " 4. " not in out, "这一条的卡有 3 条修法, 生成器没印全或印多了?"
     print("      渲染完整: 位置 + 插入符 + 四段说明卡 + 编号修法(>=3)")
 
 @test
 def test_both_error_channels_render_differently():
     """两条**报错通道**都要有输出, 而且位置那条要如实地分岔。
 
-    这两个源走的是**不同的代码路径** (check() 与 raise LomError), 落进 --diag-out 时形状也
-    不同: check() 只给行号 (`col = 0`), LomError 给 `行:列`。所以渲染必须**如实分岔**:
-    有列时插入符落在那一列, 没列时划整行的可见部分 —— 而不是给一个"猜的列"。
-    只测一条通道的话, 另一条的缺口就是静默的 (docs/182 §5.1 那个判据自己犯过)。
+    这两个源走的是**不同的代码路径** (check() 与 raise LomError)。落到 --diag-out 时
+    两条都带列号，但**来源不同**：LomError 的列是词法器给的（可信）；check() 的列是
+    `diag_record` 从消息里**推断**的（`#5`：消息里恰好一个名字在那一行恰好出现一次）。
+    推断不出来时仍是 `col = 0`，渲染划整行的可见部分 —— 不是给一个"猜的列"。
+    只测一条通道的话，另一条的缺口就是静默的 (docs/182 §5.1 那个判据自己犯过)。
     """
-    _, ds = _check(SEMANTIC)     # check()  -> col = 0
-    _, dp = _check(PARSE)        # LomError -> col = 1
+    _, ds = _check(SEMANTIC)     # check()  -> 推断列
+    _, dp = _check(PARSE)        # LomError -> 词法器列
 
     rcs, outs = _render(ds, lang=ZH)
     rcp, outp = _render(dp, lang=ZH)
     assert rcs == 1 and rcp == 1
 
-    # 语义错: 只给行号 -> **不写列**, 且划整行 (源行 `    return z;` 的可见部分)
-    assert ":4\n" in outs, f"check() 那条不该写列号: {outs[:200]}"
-    assert "^^^^^^^^^" in outs, f"没有划整行的可见部分: {outs[:200]}"
-    # 解析错: 给了 1:1 -> 写列, 插入符只有一格 (`@@@` 的第一个字符)
+    # 语义错: 推断出 `z` 的列（12），插入符只有一格
+    assert ":4:12" in outs, f"check() 那条该带推断出来的列号: {outs[:200]}"
+    cl = [ln for ln in outs.splitlines() if "^" in ln][0]
+    assert cl.count("^") == 1 and cl.split("|", 1)[1].strip() == "^", (
+        f"插入符该落在 z 上: {cl!r}")
+    # 解析错: 词法器的 1:1 -> 写列，插入符只有一格 (`@@@` 的第一个字符)
     assert ":6:1" in outp, f"LomError 那条该写 行:列: {outp[:200]}"
-    assert "| ^\n" in outp, f"插入符该落在第 1 列、只有一格: {outp[:200]}"
+    assert "| ^" + chr(10) in outp, f"插入符该落在第 1 列、只有一格: {outp[:200]}"
     assert "^^^^^" not in outp, "解析错那条不该划整行"
 
     # 位置形状不同 => 两条通道确实都渲染过, 不是同一个模板打出来的
     assert outs != outp
-    print("      两条通道都渲染, 且位置形状如实分岔 (有列/无列)")
+    print("      两条通道都渲染, 且位置来源如实分岔 (推断列 / 词法器列)")
 
 
 @test
@@ -266,16 +270,206 @@ def test_unknown_code_is_said_out_loud():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td) / "d.jsonl"
         d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 2,
-                                 "code": "E042", "message": "未来才有这个码"}) + "\n",
+                                 "code": "E0300", "message": "未来才有这个码"}) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _render(d, lang=ZH)
     assert rc == 1, (rc, out)
-    assert "E042" in out, "码本身要原样印出来"
+    assert "E0300" in out, "码本身要原样印出来"
     assert "未知错误码" in out, f"没说不认识这个码: {out[:200]}"
     assert "没有说明卡" in out, f"没交代四段为什么缺席: {out[-300:]!r}"
     assert "不在表面数据表里" in out, f"没解释为什么没有建议: {out[:200]}"
     assert "未来才有这个码" in out, "消息原文要保留"
     print("      未知码: 说出来了, 而且建议那条不是静默缺失")
+
+
+@test
+def test_codes_outside_the_catalogue_are_never_minted():
+    """`#662` / `#667`: 码的形状不对时，**不许**归口重写成一个像真码的假码。
+
+    * `34`（没有 `E`）—— 原先解成 34，`em_code` 印成 `E034`，而 E034 不在码表里；
+    * `E4294967298` —— 数字在 `u32` 里回绕成 2，卡片、标题、汇总全按 E002 出，读者
+      拿到的是**另一条规则的建议**。这比"未知"糟得多：它看着非常确定。
+
+    两条都必须走"未知码"那条路：原样印码、标题说不知道、汇总写 `E?`。
+    """
+    for code, fake in (("34", "E034"), ("E4294967298", "E002"), ("E0", "E000")):
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "d.jsonl"
+            d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                     "code": code, "message": "m"}) + "\n",
+                         encoding="utf-8", newline="\n")
+            rc, out = _render(d)
+        assert rc == 1, (code, rc, out[:200])
+        assert f"error[{code}]" in out, f"码要原样印出来: {out[:120]!r}"
+        assert "unknown error code" in out, f"{code}: 没说不知道: {out[:200]!r}"
+        assert fake not in out, f"{code}: 被归口成了真码 {fake}: {out[-200:]!r}"
+        assert "E?" in out, f"{code}: 汇总不该给它编一个码: {out[-200:]!r}"
+    print("      码的形状不对（无 E / 过长 / 零）: 一律未知，不编 E0NN")
+
+
+@test
+def test_control_bytes_in_the_source_are_escaped():
+    """`#654`: 源行是**逐字节**回显的，所以一个文件能让终端清屏、改色、伪造诊断。
+
+    控制字节（除 tab）现在印成 `\\xNN` 四个普通字符；caret 的宽度跟着按四列算，
+    所以对齐不受影响。`--no-color` 原先**帮不上忙** —— 它关的是渲染器自己的上色，
+    关不掉源文件里的字节。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "ansi.lomt"
+        # ESC 在 caret **前面**：转义把这几个字节从 1 列撑成 4 列，caret 必须跟着右移。
+        src.write_bytes('module m\n\nfn f() -> u32 {\n    return g("\x1b[2J", z);\n}\n'
+                        .encode("utf-8"))
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "ansi.lomt", "line": 4, "col": 22,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d)
+    assert rc == 1, (rc, out[:200])
+    assert "\x1b" not in out, "源文件里的 ESC 原样进了终端"
+    assert '\\x1b[2J", z);' in out, f"没有转义成 \\xNN: {out[:300]!r}"
+    # caret 与**渲染出来**的那一行对齐（不是与原始字节对齐）
+    lines = out.splitlines()
+    shown = next(ln for ln in lines if ln.startswith("4 | "))[len("4 | "):]
+    caret = next(ln for ln in lines if "^" in ln)
+    # 渲染出来的那一行是纯 ASCII（`\xNN` 是人看的字符），所以字符下标 == 显示列。
+    assert caret.index("^") - len("  | ") == shown.index("z"), (caret, shown)
+    print("      源行的控制字节印成 \\xNN，caret 仍对齐")
+
+
+@test
+def test_a_filled_buffer_says_the_whole_diagnostic_was_cut():
+    """`#671`: 一行超长源码能把 32 KiB 渲染缓冲占满，插入符、消息和整张卡片随之消失。
+
+    剩下的那句提示原先**粘在源行末尾**，读起来像"这一行被截了"—— 而真正丢的是整条诊断。
+    现在它自己占一行，并且说清丢的是什么。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "long.lomt"
+        src.write_text("module m\n\nfn f() -> u32 {\n    return g(" + "1 + " * 120000
+                       + "1);\n}\n", encoding="utf-8", newline="\n")
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": str(src), "line": 4, "col": 12,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, rc
+    notice = ("lomenterr: this diagnostic was too long "
+              "to render in full (the source line alone filled the 32 KiB buffer)")
+    # 它必须**自成一行**：前一行是被填满的缓冲（一段没写完的源行），不是提示粘在它尾巴上
+    assert "\n" + notice + "\n" in out, f"截断提示没有单独占一行: {out[-300:]!r}"
+    assert "\n\n" + notice not in out, "提示前多了一个空行"
+    print("      缓冲被占满：截断提示另起一行，并说清丢的是整条诊断")
+
+
+@test
+def test_a_cut_message_says_so_in_the_long_form_too():
+    """`#665`: 消息超过 `MSG_CAP` 就被截断，`--short`/`--json` 会说，长表原先不说。
+
+    被截断的消息与完整的长得一模一样 —— 这正是"静默"的形状。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 4, "col": 1,
+                                 "code": "E002", "message": "y" * 40000}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        s = Path(td) / "s.jsonl"
+        s.write_text(json.dumps({"file": "x.lomt", "line": 4, "col": 1,
+                                 "code": "E002", "message": "plain"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc2, out2 = _render(s)
+    assert rc == 1 and "[truncated]" in out, f"截断没说出来: {out[-300:]!r}"
+    assert rc2 == 1 and "[truncated]" not in out2, "没截断的消息不该带标记"
+    print("      长消息在完整渲染里也说 [truncated]；短消息不带")
+
+
+@test
+def test_json_output_is_always_valid_utf8():
+    """`#666`: `--json` 的消费者是 JSON 解析器 —— 一个非法字节就让**整份文档**解析失败。
+
+    诊断文件可能来自别的工具链 / 更老的版本 / 夹具，所以渲染器是最后一道防线：多字节
+    序列验不过就写 U+FFFD，而不是把那个字节原样抄进去。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "bad.jsonl"
+        # 消息里放一个**单独的 0xFF**：不是任何 UTF-8 序列的一部分。
+        d.write_bytes(b'{"file":"x.lomt","line":1,"col":1,"code":"E002",'
+                      b'"message":"a\xffb"}\n')
+        r = subprocess.run([str(_bin()), "--no-color", "--json", str(d)],
+                           capture_output=True, shell=False, timeout=60, cwd=str(td))
+    assert r.returncode == 1, r.returncode
+    # 渲染器把诊断写 **fd 2**（`--json` 也是）；这一行就是判据：解不开就抛。
+    text = (r.stdout + r.stderr).decode("utf-8")
+    row = json.loads(text.splitlines()[0])
+    assert row["message"] == "a�b", repr(row["message"])
+    print("      --json 的非法字节写成 U+FFFD，整份输出仍是合法 UTF-8")
+
+
+@test
+def test_the_fallback_code_has_a_card():
+    """`#658`: E0999 是**兜底码**，原先它是唯一一个没有卡片的码 —— 报错器于是用"工具链版本
+    不齐"去解释编译器自己的兜底，而那句话是错的：分类表与编译器是同一个仓、同一次构建。
+
+    现在它有一张真卡片：说清"没归类"，并给出报告时要带的东西。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                 "code": "E0999", "message": "never seen this"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+    assert rc == 1, (rc, out[:200])
+    assert "error[E0999]: unclassified (please report)" in out, out[:200]
+    assert "not in the classification table" in out, out[:300]
+    assert "toolchain versions may not match" not in out, \
+        f"还在拿版本不齐解释兜底码: {out[-300:]!r}"
+    print("      兜底码 E0999 有卡片：说“没归类”，不再怪版本")
+
+
+@test
+def test_a_column_without_a_line_never_looks_like_a_line():
+    """`#664`: `line: 0` + `col: 12` 原先渲染成 `--> x.lomt:12` —— 与"第 12 行"同形。
+
+    没有行号的列在这里没有意义（编译器自己也没说那在第几行）。`--short` 同一条纪律。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "d.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 0, "col": 12,
+                                 "code": "E002", "message": "m"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out)
+        assert "--> x.lomt\n" in out, f"没有行号时只印文件名: {out[:160]!r}"
+        assert "x.lomt:12" not in out, f"列冒充成了行号: {out[:160]!r}"
+        rc2, short = _render(d, "--short")
+        assert rc2 == 1 and "x.lomt: error[E002]" in short, short[:160]
+    print("      没有行号时，列不再冒充行号（完整 / --short 两处）")
+
+
+@test
+def test_a_diagnostics_path_that_is_not_a_regular_file_is_refused():
+    """`#660` / `#661`: 不是普通文件的路径要**报出来并退 2**，不当空文件、也不挂住。
+
+    目录在 Linux 上**能 open**、读才失败 —— 原实现把那次失败读成"零条诊断"，于是报
+    `[OK] no diagnostics` 并退 0（编译可能刚失败）。FIFO 更糟：**open 就阻塞**，整个
+    报错器一声不响地挂住。两者都在 open 之前 stat 一次挡住。
+    """
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "out.jsonl"
+        d.mkdir()
+        rc, out = _run_in(Path(td), d)
+        assert rc == 2, (rc, out[:200])
+        assert "not a regular file" in out, out[:200]
+        # 不存在的路径仍走原来那句（既有文案与判据都没动）
+        rc2, out2 = _run_in(Path(td), Path(td) / "missing.jsonl")
+        assert rc2 == 2 and "cannot open" in out2, (rc2, out2[:200])
+        if hasattr(os, "mkfifo"):
+            f = Path(td) / "w.jsonl"
+            os.mkfifo(f)                      # 不给 writer：老实现会在这里挂到超时
+            rc3, out3 = _run_in(Path(td), f)
+            assert rc3 == 2 and "not a regular file" in out3, (rc3, out3[:200])
+    print("      目录 / FIFO / 不存在的路径：各自报出来并退 2，不挂住")
 
 
 @test
@@ -368,6 +562,31 @@ def test_overlong_record_says_it_was_cut():
     assert "error[E019]" in out, "截断之前那部分还是要印出来的"
     print("      超长记录: 明说被截断, 不静默少印")
 
+
+@test
+def test_a_cut_message_says_so_in_every_channel():
+    """**消息本身**被截断时，三个出口都要说（`#485`）。
+
+    与上一条不同：那条是**渲染**撞上缓冲，这条是消息在拷进来的时候就封顶了。
+    `--json` / `--short` 原先一个字都不说 —— 下游读到的是一条"看起来完整"的短句，
+    而它其实是半句话；CI 按消息内容做判断的会把半个句子当真。
+    """
+    long_msg = "x" * 20013
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td) / "long.jsonl"
+        d.write_text(json.dumps({"file": "a.lomt", "line": 1, "col": 1,
+                                 "code": "E002", "message": long_msg}) + "\n",
+                     encoding="utf-8", newline="\n")
+        _, full = _render(d)
+        rc_s, short = _run_in(Path(td), d, "--short", color=False)
+        rc_j, js = _run_in(Path(td), d, "--json", color=False)
+    assert "truncated" in full, f"完整模式没说截断: {full[-200:]!r}"
+    assert rc_s == 1 and "[truncated]" in short, f"--short 没说截断: {short[-200:]!r}"
+    assert rc_j == 1, (rc_j, js[:200])
+    obj = json.loads([l for l in js.splitlines() if l.strip()][0])
+    assert obj.get("truncated") is True, f"--json 里没有 truncated 字段: {list(obj)[:8]}"
+    print("      被截断的消息: full / --short / --json 三个出口都说了")
+
 # ---------------------------------------------------------------- 外源语言 (docs/188 §7.1)
 
 @test
@@ -401,7 +620,24 @@ def test_foreign_file_gets_a_language_section():
     assert "--impl" in out and ".iface.lomt" in out, "三条路没写全"
     assert "边界" in out, "没给这门语言的边界"
     assert "别拿它当结论" in out, "没说语言只是提示"
-    print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准")
+    # **顺序也是判据**（`#29`）：外源那条提示要**顶到卡片前面** —— 或者说，卡片那四段
+    # （错了什么 / 为什么错 / 怎么改 / 支持 / 不支持）**根本不该出现**，因为它们讲的
+    # 全是 Loment 的规矩，而这份文件不是 Loment。原先它排在**最后**，读的人先照着
+    # 一屏不适用的"修法"把一份好 C 改坏，翻到底才看见那句"这个文件不是 Loment"。
+    for label in ("错了什么:", "为什么错:", "怎么改:", "支持:", "不支持:"):
+        assert label not in out, f"外源文件不该给 Loment 的说明卡（{label}）: {out[-400:]!r}"
+    # **它是整条报告的起点**（`#29`）：第一行就该是那句语言提示，而不是
+    # `error[E019]`/`error[E002]` —— 解析器在错的语言上看到的东西一条都不该先出来
+    # （"`_start` 明明在下一行声明着"那种误导最伤）。
+    body = [ln for ln in out.splitlines() if ln.strip()]
+    assert body, out
+    assert "不是 Loment" in body[0], (
+        f"第一条不是语言提示: {body[:3]!r}")
+    assert not any(ln.lstrip().startswith("error[") for ln in out.splitlines()), (
+        f"外源文件还在印 Loment 的错误头: {out[:300]!r}")
+    assert "E002" not in out, f"还在用 E002（undeclared name）说一份 C 源: {out[-300:]!r}"
+    print("      外源文件: 认出语言 + 三条路 + 边界, 且语言以 --lang auto 为准；"
+          "它顶到最前，Loment 的错误头与说明卡都不再出现")
 
 
 @test
@@ -429,7 +665,7 @@ def test_foreign_words_in_a_comment_do_not_flag_a_loment_file():
                        errors="replace", shell=False, timeout=120)
     assert r.returncode == 1, (r.returncode, r.stderr[-200:])
     _, out = _render(d, lang=ZH)
-    assert "error[E002]" in out, out[:200]
+    assert "error[E091]" in out, out[:200]
     assert "不是 Loment" not in out, f"被注释带跑了: {out[-300:]!r}"
     print("      注释里的外源特征词不误报 (命中要在行首)")
 
@@ -683,7 +919,7 @@ def test_errconfig_switches_the_language_and_a_bad_one_falls_back():
             _errconfig(Path(td), body)
             rc, out = _run_in(Path(td), d)
         assert rc == 1, (body, rc, out[:120])
-        got_zh = "符号未声明" in out
+        got_zh = "变量没有声明" in out
         assert got_zh == want_zh, f"errconfig={body!r} 期望中文={want_zh} 得到 {got_zh}: {out[:200]!r}"
     print("      errconfig: zh/ZH/Chinese 切中文, en/乱值/注释里的伪标签都退回默认")
 
@@ -721,19 +957,42 @@ def test_the_toolchain_beside_errconfig_is_the_second_place_read():
             assert r.returncode == 1, (r.returncode, r.stderr[:120])
             return r.stdout + r.stderr
 
-        assert "符号未声明" in run(), "工具链旁边那份没被读到"
+        assert "变量没有声明" in run(), "工具链旁边那份没被读到"
         # 项目那份写了个认不出来的值 → **当作没配**，落到工具链那份（中文），而不是英文
         _errconfig(cwd, 'module errconfig\npub fn error_lang() -> str {\n'
                         '    return "klingon";\n}\n')
-        assert "符号未声明" in run(), "认不出来的值把系统级设置作废了 (该继续找下一份)"
+        assert "变量没有声明" in run(), "认不出来的值把系统级设置作废了 (该继续找下一份)"
         # 项目那份**有效**时必须压过工具链那份
         _errconfig(cwd, 'module errconfig\npub fn error_lang() -> str {\n'
                         '    return "en";\n}\n')
-        assert "undeclared name" in run(), "项目那份没有压过工具链那份"
+        assert "the variable is not declared" in run(), "项目那份没有压过工具链那份"
     print("      两份 errconfig: 项目优先、工具链兜底, 认不出来的值算'没配'")
 
 
 # ---------------------------------------------------------------- 汇总 (§15)
+
+@test
+def test_a_full_summary_table_says_what_it_left_out():
+    """`#670`: 汇总表只有 64 格。满了之后原先**静默丢码**，而总数照数 —— `100 errors:`
+    后面那串只加到 64，且没有任何标记。现在末尾明说漏了几个码。
+    """
+    def summary(n_codes: int) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "d.jsonl"
+            rows = [{"file": "x.lomt", "line": 1, "col": 1,
+                     "code": f"E{i + 1:03d}", "message": "m"} for i in range(n_codes)]
+            d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                         encoding="utf-8", newline="\n")
+            _rc, out = _render(d, "--max", "0")
+        return next(ln for ln in out.splitlines() if " errors:" in ln)
+
+    small = summary(30)
+    big = summary(100)
+    assert small.startswith("30 errors:") and "more codes" not in small, small
+    assert big.startswith("100 errors:"), big[:80]
+    assert "+36 more codes" in big, f"漏掉的码没说出来: {big[-120:]!r}"
+    print("      汇总表满 64 格后，末尾说出漏了几个码")
+
 
 @test
 def test_summary_groups_by_code_worst_first():
@@ -764,6 +1023,41 @@ def test_summary_groups_by_code_worst_first():
     print("      汇总按码分组、条数多的先出 (4 errors: E019 x3, E002 x1)")
 
 
+@test
+def test_summary_is_singular_and_points_only_at_codes_that_exist():
+    """一条写 `1 error`，而且 `more:` 那一行**只指真讲得出来的码**（`#487`）。
+
+    两件都在同一行汇总上：
+      * **单数** —— `1 errors:` 是英文里最便宜的那种破绽，而它是用户读到的最后一句；
+      * **不指空** —— 编译器可以吐出表面数据表里没有的码（旧报错器遇上新编译器，
+        或者别的工具写进来的 `E0999`）。那种码点开是 `(unknown code)`，比不指更坏：
+        用户会以为是自己抄错了码。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-one-") as td:
+        d = Path(td) / "one.jsonl"
+        d.write_text(json.dumps({"file": "x.lomt", "line": 1, "col": 1,
+                                 "code": "E0999", "message": "a"}) + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out[:200])
+        assert "1 error: E0999 x1" in out, f"单数没生效: {out[-200:]!r}"
+        # `#658` 之后 E0999 有一张真卡片，`explain E0999` 讲得出来 —— 指它是**对的**。
+        assert "more: loment explain E0999" in out, \
+            f"兜底码有卡片了就该指: {[l for l in out.splitlines() if 'more:' in l]!r}"
+
+        # 一真一假：真那个要指，**表里没有的**不许带出来。E777 是用户码段里的空号。
+        d2 = Path(td) / "mixed.jsonl"
+        d2.write_text("\n".join(json.dumps(r) for r in (
+            {"file": "x.lomt", "line": 1, "col": 1, "code": "E777", "message": "a"},
+            {"file": "x.lomt", "line": 1, "col": 1, "code": "E001", "message": "b"},
+        )) + "\n", encoding="utf-8", newline="\n")
+        rc, out = _render(d2)
+        assert rc == 1, (rc, out[:200])
+        more = [l for l in out.splitlines() if "more:" in l]
+        assert more and "E001" in more[0] and "E777" not in more[0], f"more 行不对: {more!r}"
+    print("      汇总: 一条用单数；more 只指表里有的码 (E001 与 E0999 指，E777 不指)")
+
+
 # ---------------------------------------------------------------- --short / --json (§15)
 
 @test
@@ -781,8 +1075,11 @@ def test_short_mode_is_one_line_per_diagnostic():
         src = Path(td) / "bad.lomt"
         src.write_text(SEMANTIC, encoding="utf-8", newline="\n")
         d = Path(td) / "d.jsonl"
+        # 第三条：消息里带 `\r`（`#669`）。只折 `\n` 不够 —— CR 会把光标送回行首，
+        # 后半句盖掉 `file:line:` 前缀，"一行一条"当场破掉。
         rows = [{"file": "a.lomt", "line": 3, "col": 7, "code": "E002", "message": "x\ny"},
-                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"}]
+                {"file": "b.lomt", "line": 9, "col": 0, "code": "E019", "message": "z"},
+                {"file": "c.lomt", "line": 2, "col": 1, "code": "E002", "message": "p\rq"}]
         d.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
                      encoding="utf-8", newline="\n")
         rc, out = _run_in(Path(td), d, "--short", color=True)
@@ -791,9 +1088,10 @@ def test_short_mode_is_one_line_per_diagnostic():
     assert lines[0] == "a.lomt:3:7: error[E002]: x y", f"短格式不对: {lines[0]!r}"
     # col=0 是"编译器只给了行号"（check() 的语义错就是这样），那时不该硬编一个列出来
     assert lines[1] == "b.lomt:9: error[E019]: z", f"没列时不该印列: {lines[1]!r}"
-    assert lines[2] == "2 errors: E002 x1, E019 x1", f"短模式不给汇总: {lines[2]!r}"
-    assert lines[3] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[3]!r}"
-    assert len(lines) == 4, f"两条诊断 + 汇总 + 指针 = 4 行, 得到 {len(lines)} 行: {out!r}"
+    assert lines[2] == "c.lomt:2:1: error[E002]: p q", f"CR 没折成空格: {lines[2]!r}"
+    assert lines[3] == "3 errors: E002 x2, E019 x1", f"短模式不给汇总: {lines[3]!r}"
+    assert lines[4] == "more: loment explain E002 E019", f"没有 explain 指针: {lines[4]!r}"
+    assert len(lines) == 5, f"三条诊断 + 汇总 + 指针 = 5 行, 得到 {len(lines)} 行: {out!r}"
     assert "\x1b" not in out, f"--short 不该上色 (管道里要能 grep): {out[:120]!r}"
     print("      --short: 一行一条 + 换行折空格 + 顺带关色 + 末尾汇总与 explain 指针")
 
@@ -834,6 +1132,36 @@ def test_json_mode_carries_the_whole_card_and_parses():
     assert first["file"] == "a.lomt" and first["line"] == 3 and first["col"] == 7
     assert "\x1b" not in out, "--json 不该上色"
     print("      --json: 每行可解析 + 卡片字段齐全 + 转义正确 + 不掺汇总行")
+
+
+@test
+def test_json_mode_keeps_a_corrupt_line_inside_the_stream():
+    """一行坏 JSON 进去，`--json` 出来的**每一行仍然可解析**（`#478`）。
+
+    原先那行是两行纯文本（`[lomenterr] this line …` + 原文），插在 JSONL 中间 ——
+    下游解析器当场坏，而它正在处理的恰恰是"诊断文件里有坏数据"这件事。
+    形状与诊断对象**不同**（`broken: true` + `text`）：那条记录唯一的事实就是
+    "这一行读不懂"，硬造一个 `E0999` 会让它看起来像一条真诊断（而 explain 讲不出来，
+    那正是 `#487` 刚清掉的东西）。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-broken-") as td:
+        d = Path(td) / "d.jsonl"
+        good1 = json.dumps({"file": "a.lomt", "line": 1, "col": 1,
+                            "code": "E001", "message": "a"})
+        good2 = json.dumps({"file": "b.lomt", "line": 2, "col": 1,
+                            "code": "E002", "message": "b"})
+        d.write_text(good1 + "\nnot json at all <<<\n" + good2 + "\n",
+                     encoding="utf-8", newline="\n")
+        rc, out = _run_in(Path(td), d, "--json", color=True)
+    assert rc == 1, (rc, out[:200])
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 3, f"坏行要变成**一个**对象，不能是两行文本: {out!r}"
+    objs = [json.loads(ln) for ln in lines]      # 每一行都必须可解析
+    broken = [o for o in objs if o.get("broken") is True]
+    assert len(broken) == 1 and broken[0]["text"] == "not json at all <<<", broken
+    codes = [o.get("code") for o in objs if "code" in o]
+    assert codes == ["E001", "E002"], codes
+    print("      --json: 坏行变成 {broken:true,text:…}，流仍是合法 JSONL")
 
 
 # ---------------------------------------------------------------- 拼写建议 (§14)
@@ -1058,8 +1386,36 @@ def test_json_suggestions_are_machine_applicable():
 
 
 @test
+def test_json_omits_an_empty_suggestions_array():
+    """没有候选时 `suggestions` **整个字段缺席**，不是 `[]`（`#51`）。
+
+    空数组在消费者眼里等于"这个错误没有可应用的修改"，而"这个码今天根本不产建议"
+    是另一件事 —— 两者混在一个形状里，编辑器就没法判断该不该找修法。字段缺席 = 后者；
+    字段在且非空 = 前者。与 `byte_start`/`byte_end` 只在指得准时出现同一条纪律。
+
+    夹具是 `p.zz`：E015（结构体没有这个字段）。E002 那条路（有候选）由上面那条判据
+    钉着 —— 所以这里的断言是"**同样的出口**在没东西可说时不写一个空壳"。
+    """
+    src = ("module m\n\n"
+           "struct P { a: u32, b: u32 }\n\n"
+           "fn _start() {\n"
+           "    let p: P = P { a: 1, b: 2 };\n"
+           "    let v: u32 = p.zz;\n"
+           "    syscall4(60, 0, 0, 0);\n"
+           "}\n")
+    _, d = _check(src)
+    rc, out = _run_in(d.parent, d, "--json")
+    assert rc == 1, (rc, out[:200])
+    obj = json.loads([ln for ln in out.splitlines() if ln.strip()][0])
+    assert obj["code"] == "E0138", obj
+    assert "suggestions" not in obj, (
+        f"E015 没有候选，却写了一个空 suggestions: {obj.get('suggestions')!r}")
+    print("      --json: 没有候选的码不写空 suggestions（字段缺席）")
+
+
+@test
 def test_the_tail_points_at_loment_explain():
-    """结尾一行 `more: loment explain E002` —— 抄 rustc 的 `try 'rustc --explain E0308'`。
+    """结尾一行 `more: loment explain E002` —— 抄 rustc 的 `try 'rustc --explain E0318'`。
 
     子代理实测 8 门语言：**没有一门**在给人看的输出里给出能点的文档入口（rustc 只给命令，
     C# 的 `helpUri` 只进 SARIF）。所以照最好的那个抄，落点在最末一行。
@@ -1190,6 +1546,295 @@ _LAUNCHER_ENV["PATH"] = (f"{_shp(Path('/usr/bin'))}:{_shp(Path('/bin'))}:"
                          f"{_LAUNCHER_ENV.get('PATH', '')}")
 
 
+#: 成功的那条路上用的桩驱动：吐一段不会触发 hosted 标记的 IR，退 0。
+_LAUNCHER_OK_DRIVER = ("#!/bin/sh\n"
+                       "printf '%s\\n' 'define i32 @_start() { ret i32 0 }'\n"
+                       "exit 0\n")
+
+
+def _launcher_build_pkg() -> tuple[Path, Path]:
+    """摆一个**能走到链接器**的桩包：驱动成功、`loment-lomelf` 把自己的 argv 写下来。
+
+    `_launcher_pkg` 的桩驱动故意失败（测渲染/诊断那几条）。`--link` 的参数形状要在
+    链接器那一侧看 —— 所以这里换一个**成功**的驱动，外加一个记录 argv 的桩链接器。
+    """
+    import loment_dist  # noqa: E402
+
+    t = Path(tempfile.mkdtemp(prefix="lomenterr-launcher-build-"))
+    pf = t / "pf"
+    (pf / "bin").mkdir(parents=True)
+    (pf / "share" / "loment").mkdir(parents=True)
+    (pf / "share" / "loment" / "version").write_bytes(b"stub\n")
+    (pf / "bin" / "loment-driver").write_text(_LAUNCHER_OK_DRIVER, encoding="utf-8",
+                                              newline="\n")
+    log = pf / "lomelf-argv.txt"
+    (pf / "bin" / "loment-lomelf").write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + _shp(log) + "'\nexit 0\n",
+        encoding="utf-8", newline="\n")
+    (pf / "bin" / "loment").write_text(
+        loment_dist._subst(loment_dist.LAUNCHER_SH), encoding="utf-8", newline="\n")
+    for p in (pf / "bin").iterdir():
+        p.chmod(0o755)
+    (pf / "src.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
+    return pf, log
+
+
+@test
+def test_version_prints_the_reporter_own_number():
+    """`lomenterr version` 打的是**报错器自己的**版本号，与语言版本是**两条线**（`docs/182` §17）。
+
+    报错器是一件独立交付的程序 —— 它有自己的命令行面、自己的判据、自己的孪生，改动也与
+    语言面无关（2026-09-18 到 10-13 之间它改了七八轮，语言版本只动过一次）。捆在一个号上
+    就只能记成"语言又升了一版"，那既不真，也让人没法回答"我用的是哪个报错器"。
+
+    四个断言，各挡一种退化：
+    * **三个写法**都认（`version` / `--version` / `-V`）—— 少一个就有人敲不出想要的东西；
+    * 退 **0**（不是 2）—— 版本不是用法错误；
+    * 那一行在 **stdout**，stderr 是空的 —— 脚本要 `v=$(lomenterr version)` 拿它，
+      而 fd 2 抓不到（别处一律 fd 2，这一行是**有意的例外**，见 §17.4）；
+    * 与 `loment_release.LOMENTERR` **逐字相同** —— 这一条同时是"没有第二份字面量"的判据：
+      真源改了而 `--dump-surface` 忘了重跑，这里与 `test_surface_data_is_up_to_date`
+      会一起红，而不是让一个编出来的号静静发出去。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_release  # noqa: E402
+    want = f"lomenterr {loment_release.LOMENTERR}"
+    assert re.fullmatch(r"\d+\.\d+(\.\d+)*", loment_release.LOMENTERR), (
+        f"真源里的版本号不像个版本号（被清空/写成占位符了？）: {loment_release.LOMENTERR!r}")
+    for spelling in ("version", "--version", "-V"):
+        r = subprocess.run([str(_bin()), spelling], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=60)
+        assert r.returncode == 0, (spelling, r.returncode, r.stderr[:120])
+        assert r.stdout.strip() == want, (
+            f"{spelling}: stdout={r.stdout!r}，期望 {want!r}")
+        assert r.stderr == "", (
+            f"{spelling}: 版本走 stdout，stderr 该是空的: {r.stderr!r}")
+    print(f"      lomenterr version: 三个写法都打 {want!r}（stdout，与真源逐字节相同）")
+
+
+@test
+def test_the_docs_show_the_version_the_binary_prints():
+    """README 与 QUICKSTART 里那两处 `lomenterr 0.1.2` 必须跟着真源走。
+
+    它们是**叙述**（不是第二份真源），但叙述里印着一个**具体的号**，就会过期 ——
+    而"文档说 0.1.2、二进制打 0.1.3"是最难被发现的那种不一致：两边单看都正常，
+    要同时看着两边才知道。本仓对这类"抄第二遍"的处置一向是二选一：要么**生成**它，
+    要么**判据盯着**它（`docs/182` §17.2）。这里选后者 —— 那两处是散文里嵌的一行示例，
+    生成进去反而读不通。
+
+    （`docs/182` §17 不进这份清单：它讲的是**机制**，引的是 `LOMENTERR` 那个常量名，
+    而不是"这个号现在是几"。）
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_release  # noqa: E402
+    want = f"lomenterr {loment_release.LOMENTERR}"
+    for name in ("README.md", "QUICKSTART.md"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert want in text, (
+            f"{name} 里没有 {want!r} —— 版本号改了而文档没跟上（docs/182 §17.2）")
+    print(f"      README 与 QUICKSTART 都跟着真源 ({want!r})")
+
+
+def _msg_template(node):
+    """把一处 `errs.append(...)` 的实参摊成一条模板；摊不出来就 None。
+
+    2026-11-11 之前只认**单条** f-string / 字面量 —— 于是 `f"…" f"…" + (f"…" if c else "")
+    + "…"` 这种拼接整条被跳过（`no_runtime` 那条诊断就是这样逃过了两条判据，
+    它一直停在族码 E031 上）。现在按 `+` 拆到底、条件表达式取 `body` 那一支。
+    """
+    import ast  # noqa: PLC0415
+
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "1" for v in node.values)
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        a, b = _msg_template(node.left), _msg_template(node.right)
+        return None if a is None or b is None else a + b
+    if isinstance(node, ast.IfExp):
+        return _msg_template(node.body)
+    return None
+
+
+@test
+def test_every_message_the_compiler_can_print_has_a_code():
+    """**编译器能说的每一句，报错器都得认得出是哪一类** —— 这是「减少静默」的机械落点。
+
+    分类是一张正则表（`loment_diag.RULES`）；落在表外的消息渲染成 **E0999「未分类，请报告」**。
+    那是一条**响亮的**退路（不是静默），但它把"我们没覆盖到"推给用户，而且只在真有人撞上时
+    才暴露 —— 加了新诊断而忘了补分类，中间那段时间**没有任何东西会红**。
+
+    所以这条判据把**编译器的诊断模板**枚举出来（AST 扫 `tools/lomentc.py` 里
+    `errs.append(...)` 与 `LomError(...)` 的调用点），逐条过 `classify()`，断言没有一条落到
+    E0999。加了新消息却没补分类 —— 这里当场红，而不是等用户来报。
+
+    **扫模板而不是跑语料**：模板是"编译器可能说什么"的**上界**，运行时的消息是它的实例化。
+    上界覆盖了实例化一定覆盖，反过来不成立 —— 跑一遍语料只碰得到其中一部分，而**碰不到的那些
+    恰恰是最容易漏的**（罕见路径）。这一轮实测：102 种模板，当时 0 条未分类。
+
+    `{…}` 占位代成**数字** `1`：消息里的数值位置（`需要 2 个实参`）靠 `\\d+` 匹配，
+    代成字母会**假红** —— 第一版就是这么误报的。
+    """
+    import ast
+    import loment_diag  # noqa: E402
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    template = _msg_template
+
+    def is_error_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    seen: set[str] = set()
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_error_sink(node):
+            t = template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)      # 去掉 `12: ` 那个行号前缀
+            if t in seen:
+                continue
+            seen.add(t)
+            if loment_diag.classify(t)[0] == "E0999":
+                bad.append(t)
+    assert seen, "一条诊断都没扫到 —— 提取方式跟编译器脱节了（这条判据在空转）"
+    assert not bad, (
+        f"这些编译器消息没有分类（会渲染成 E0999「请报告」）: {bad[:6]}"
+        f" —— 去 `loment_diag.RULES` 补一条，别让用户替我们兜")
+    print(f"      编译器 {len(seen)} 种诊断模板**全部**有分类（没有一条落到 E0999）")
+
+
+@test
+def test_every_template_has_its_own_code():
+    """**每一条诊断模板都有自己的码** —— 不许退回族码（E001..E041）。
+
+    用户 2026-11-10：**「每个码全部拆分」**。这一条是它唯一的长期保证：族码是兜底
+    （新消息还没写细分规则时落到它），而模板是"编译器可能说什么"的**上界** ——
+    上界里任何一条退回族码，都说明细分漏了一种处境。
+
+    与上一条的分工：上一条钉"有码"（不落 E0999），这一条钉"是自己的码"。
+    """
+    import ast
+    import loment_diag  # noqa: E402
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    template = _msg_template
+
+    def is_error_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    seen: set[str] = set()
+    fam: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_error_sink(node):
+            t = template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)
+            if t in seen:
+                continue
+            seen.add(t)
+            code = loment_diag.classify(t)[0]
+            if 1 <= loment_diag.code_num(code) <= 41:
+                fam.append(f"{code} <- {t[:60]}")
+    assert seen, "一条诊断都没扫到（这条判据在空转）"
+    assert not fam, (
+        f"这些模板还停在族码上（没有细分）: {fam[:8]} —— 去 `loment_diag.FINE` 补一条规则")
+    print(f"      {len(seen)} 种诊断模板全部落到了细分码（没有一条退回族码）")
+
+
+@test
+def test_classify_matches_the_reference_classifier():
+    """`lomenterr --classify FILE` 与参考实现的 `classify()` **逐条同码**。
+
+    2026-11-18 起文本分类在自举侧（`lompi/store/std/0.1.0/regex.lomt` +
+    `loment/tools/errdata.lomt` + `errclass.lomt`）。参考侧的 `loment_diag.classify`
+    仍在（`diag` / `--json` 要用），所以两边必须给出同一个码 —— 这是"两份实现同一条
+    口径"的判据（`docs/158` §5）。**吃文件而不是命令行文本**：Windows 的 PE 垫片合成
+    argv 时按空格切，带空格的消息根本到不了程序里。
+    """
+    import ast
+    import loment_diag
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+
+    def is_sink(call) -> bool:
+        f = call.func
+        if isinstance(f, ast.Attribute) and f.attr == "append" and isinstance(f.value, ast.Name):
+            return "err" in f.value.id.lower()
+        return isinstance(f, ast.Name) and "LomError" in f.id
+
+    msgs: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and node.args and is_sink(node):
+            t = _msg_template(node.args[0])
+            if not t:
+                continue
+            t = re.sub(r"^\{[^}]*\}:\s*", "", t)
+            if t not in seen:
+                seen.add(t)
+                msgs.append(t)
+    msgs += [
+        "使用未声明的变量 leftover",
+        "12: 类型 u32 与 i64 不匹配",
+        "is not an array or slice",
+        "完全认不出来的消息（这条不是编译器说的）",
+    ]
+    assert len(msgs) > 100, f"只抽到 {len(msgs)} 条消息 —— 模板提取跟编译器脱节了"
+
+    td = Path(tempfile.mkdtemp(prefix="lomenterr-classify-"))
+    bad: list[str] = []
+    for i, msg in enumerate(msgs):
+        f = td / f"m{i}.txt"
+        f.write_text(msg + chr(10), encoding="utf-8", newline=chr(10))
+        r = subprocess.run([str(_bin()), "--classify", str(f)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        want = loment_diag.classify(msg)[0]
+        if want == "E0999":
+            ok = r.returncode == 1 and r.stdout == ""
+        else:
+            ok = r.returncode == 0 and r.stdout.strip() == want
+        if not ok:
+            bad.append(f"{msg[:50]!r}: lomenterr={r.stdout.strip()!r}/rc={r.returncode} "
+                       f"python={want}")
+            if len(bad) >= 6:
+                break
+    assert not bad, "自举侧分类器与参考实现有分歧:" + chr(10) + "  " + (chr(10) + "  ").join(bad)
+    n_known = sum(1 for m in msgs if loment_diag.classify(m)[0] != "E0999")
+    assert n_known > 100, f"只认出 {n_known} 条 —— 分类器退化了"
+    print(f"      {len(msgs)} 条消息逐条同码（{n_known} 条认得出 / {len(msgs) - n_known} 条 E0999）")
+
+
+@test
+def test_code_numbers_use_the_two_display_widths():
+    """码的显示形状：**< 100 是 `E0xx`（`E042`），>= 100 是 `E0xxx`（`E0100`）**。
+
+    用户 2026-11-10 定的形状。它同时是**读回来的**判据：`code_num` 两侧都要解得开
+    （渲染器那边收 1..4 位数字），否则 `loment explain E0100` 会认不出自己。
+    """
+    import loment_diag
+    assert loment_diag._code_str(1) == "E001"
+    assert loment_diag._code_str(42) == "E042"
+    assert loment_diag._code_str(99) == "E099"
+    assert loment_diag._code_str(100) == "E0100"
+    assert loment_diag._code_str(207) == "E0207"
+    for n in (1, 42, 100, 207, 900, 999):
+        assert loment_diag.code_num(loment_diag._code_str(n)) == n, n
+    # 表里的码字面量必须就是显示形状 —— 否则 `error[E042]` 与 `loment codes` 两处会不一样。
+    for code, _p, _t, _h in loment_diag.RULES:
+        n = loment_diag.code_num(code)
+        if n:
+            assert code == loment_diag._code_str(n), code
+    print("      码形状：<100 是 E0xx、>=100 是 E0xxx；表里与显示同一份")
+
+
 def _launcher_run(bash: str, pf: Path, args: list, *, cmd: str = "check",
                   file_first: bool = True):
     """跑**真启动器**。`file_first=False` 把开关放在文件名前面 —— 两种位置都得能跑。
@@ -1266,6 +1911,110 @@ def test_launcher_renders_with_it_and_says_so_without_it():
 
 
 @test
+def test_launcher_writes_the_diag_out_file_the_user_named():
+    """`check FILE --diag-out P` 要在 **P** 写出 JSONL（`#13`）。
+
+    `lomenterr` 的用法行让用户敲的正是这条命令，而编辑器吃的 `byte_start`/`byte_end`
+    就在那些行里。原先 bash 报 `unknown option` 退 2、cmd 把它静默吞掉 —— 那条路整个
+    不可达。判据看的是**文件真的出现在用户点名的地方**，不是"开关被解析了"。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    pf = _launcher_pkg(True)
+    out = pf / "user-diag.jsonl"
+    r = _launcher_run(bash, pf, ["--diag-out", _shp(out)])
+    assert out.exists(), f"--diag-out 没写出文件: rc={r.returncode} {r.stderr[-200:]!r}"
+    text = out.read_text(encoding="utf-8")
+    assert '"code":"E019"' in text, f"写出来的不是诊断 JSONL: {text[:200]!r}"
+    # 用户那边看到的行为不变：诊断照旧渲染到 stderr
+    assert "RENDERED-BY-LOMENTERR" in (r.stdout + r.stderr), (
+        f"给了 --diag-out 就不再渲染了？{r.stdout}{r.stderr}"[:300])
+    print("      启动器: --diag-out PATH 写到用户点名的那一份，渲染照旧")
+
+
+def _launcher_crash_pkg(renderer: str | None) -> Path:
+    """一个**会崩的**桩包：驱动被 SIGSEGV 打死，`--diag-out` 一个字都不写。
+
+    这正是 `#773` 那条边界：诊断文件是空的，渲染器无事可做，启动器只留一个退出码 1。
+    `renderer` 是桩渲染器的脚本正文（`None` = 包里没有渲染器）。
+    """
+    import loment_dist  # noqa: E402
+
+    t = Path(tempfile.mkdtemp(prefix="lomenterr-crash-"))
+    pf = t / "pf"
+    (pf / "bin").mkdir(parents=True)
+    (pf / "share" / "loment").mkdir(parents=True)
+    (pf / "share" / "loment" / "version").write_bytes(b"stub\n")
+    (pf / "bin" / "loment-driver").write_text(
+        "#!/bin/sh\nkill -SEGV $$\n", encoding="utf-8", newline="\n")
+    (pf / "bin" / "loment").write_text(
+        loment_dist._subst(loment_dist.LAUNCHER_SH), encoding="utf-8", newline="\n")
+    if renderer is not None:
+        (pf / "bin" / "lomenterr").write_text(renderer, encoding="utf-8", newline="\n")
+    for p in (pf / "bin").iterdir():
+        p.chmod(0o755)
+    (pf / "src.lomt").write_text("module m\n", encoding="utf-8", newline="\n")
+    return pf
+
+
+@test
+def test_launcher_synthesizes_a_record_when_the_compiler_dies_silently():
+    """**#773**：编译器被信号打死、`--diag-out` 空着时，启动器要**合成一条 E0900**。
+
+    修之前：`report_diags` 看到空文件就只把驱动的 stderr 原样回吐（而崩溃时它是空的），
+    于是用户拿到一个退出码 1 与**零行**输出 —— 正好是"最需要解释"的那种失败。
+    修之后：启动器拿到 139（128+SIGSEGV），写一条 `line:0` 的记录（没有源码位置），
+    渲染器照常渲染；包里没有渲染器时，同一句话以裸行出现。退出码也**照实**回 139
+    （`#673`），不再压成 1。
+
+    判据跑**真启动器 + 会崩的桩驱动**，并且让桩渲染器 `cat` 出它拿到的文件 ——
+    所以"记录真的被写出来、真的交到了渲染器手里"是直接看得到的，不是读源码猜的。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+
+    # ① 有渲染器：它收到的是那份合成了 E0900 的 JSONL。
+    # 退出码是驱动自己的 139（`#673`：不再压成 1 —— 1 的意思是"源码有错"，
+    # 而这里编译器根本没跑完）。
+    pf = _launcher_crash_pkg('#!/bin/sh\ncat "$1"\n')
+    r = _launcher_run(bash, pf, [])
+    out = r.stdout + r.stderr
+    assert r.returncode == 139, (r.returncode, out[-300:])
+    recs = [json.loads(ln) for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
+    assert recs, f"渲染器没拿到 JSONL（或一条都没合成）: {out[-400:]!r}"
+    rec = recs[0]
+    assert rec["code"] == "E0900", rec
+    assert rec["line"] == 0, rec           # 没有源码位置 —— 与 docs/256 同一口径
+    assert rec["file"] == "loment-driver", rec
+    assert "SIGSEGV" in rec["message"] and "signal 11" in rec["message"], rec
+    assert "no diagnostic record" in rec["message"], rec
+
+    # ② 没有渲染器：同一句话必须**照样说出来**（裸行），不能因为没人渲染就消失。
+    pf = _launcher_crash_pkg(None)
+    r = _launcher_run(bash, pf, [])
+    out = r.stdout + r.stderr
+    assert r.returncode == 139, (r.returncode, out[-300:])
+    assert "E0900" in out and "SIGSEGV" in out and "loment-driver" in out, (
+        f"崩溃在无渲染器的包里又变成了零行: {out[-400:]!r}")
+    assert "no lomenterr" in out, f"没有渲染器这件事本身也要说: {out[-300:]!r}"
+
+    # ③ 渲染器**自己**崩了（同一个边界往下一层）：要说出它死了，并保留底层错误。
+    pf = _launcher_crash_pkg('#!/bin/sh\nkill -SEGV $$\n')
+    r = _launcher_run(bash, pf, [])
+    out = r.stdout + r.stderr
+    assert r.returncode == 139, (r.returncode, out[-300:])
+    assert "lomenterr died" in out and "E0900" in out, (
+        f"报错器崩了而启动器装作没事: {out[-400:]!r}")
+    assert "loment-driver was killed" in out, (
+        f"报错器崩了以后把底层错误也丢了: {out[-400:]!r}")
+    print("      #773: 编译器崩溃合成 E0900（有/无渲染器都说话）；渲染器崩溃也点名")
+
+
+@test
 def test_launcher_takes_exactly_one_input_file():
     """`check`/`ir` 只吃**一个**文件: 多给的那个要**报错退 2**, 不能静默只查第一个。
 
@@ -1308,6 +2057,64 @@ def test_launcher_takes_exactly_one_input_file():
           "且拒绝里说的是用户敲的那个命令名")
 
 
+@test
+def test_launcher_refuses_o_on_run():
+    """`loment run F -o X` 必须**退 2 并说清**，而不是退 0、什么也不写（`#636`）。
+
+    原先 `out` 在 run 那条路被临时路径无条件覆盖，`-o` 静默消失 —— "接受了却丢掉"
+    正是启动器别处反复挡的那一类。判据同时钉住**驱动没有被起**：拒绝了却还编一遍，
+    是既做了又不承认。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    pf = _launcher_pkg(False)
+    out = pf / "artifact"
+    r = subprocess.run(
+        [bash, _shp(pf / "bin" / "loment"), "run", _shp(pf / "src.lomt"),
+         "-o", _shp(out)],
+        cwd=str(pf), env=_LAUNCHER_ENV, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", shell=False, timeout=60)
+    blob = r.stdout + r.stderr
+    assert r.returncode == 2, f"`run -o` 该退 2, 实得 {r.returncode}: {blob!r}"
+    assert "-o is for build; run produces no artifact" in blob, blob
+    assert "PLAIN-DRIVER-OUTPUT" not in blob, (
+        f"拒绝了却还是把驱动起了: {blob!r}")
+    assert not out.exists(), f"`run` 仍然写出了一个产物: {out}"
+    print("      启动器: run -o 被拒(退 2, 驱动没起, 无产物)")
+
+
+@test
+def test_launcher_keeps_a_link_path_with_spaces():
+    """`--link "/tmp/my libs/add.o"` 必须作为一个参数到达链接器（`#635`）。
+
+    原先 `--link` 的值被拼进一个字符串再**不加引号展开**，路径里的空格把它劈成
+    `/tmp/my` 与 `libs/add.o`（前者被当成打不开的文件）。判据看的是**桩链接器收到的
+    argv**：`--link` 的下一个元素必须逐字是那条带空格的路径。bash 侧用数组；
+    cmd 侧已按 `#632` 整条拒掉，不再有拼接路径。
+    """
+    bash = shutil.which("bash")
+    if not bash:
+        print("        (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    pf, log = _launcher_build_pkg()
+    link = "/tmp/my libs/add.o"
+    r = subprocess.run(
+        [bash, _shp(pf / "bin" / "loment"), "build", _shp(pf / "src.lomt"),
+         "--link", link, "-o", _shp(pf / "out")],
+        cwd=str(pf), env=_LAUNCHER_ENV, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", shell=False, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stdout[-300:], r.stderr[-300:])
+    argv = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln]
+    assert "--link" in argv, f"链接器没收到 --link: {argv!r}"
+    i = argv.index("--link")
+    assert i + 1 < len(argv), f"--link 后面没有值: {argv!r}"
+    assert argv[i + 1] == link, (
+        f"带空格的 --link 值被劈开了: {argv[i:i + 3]!r}（应为 {link!r}）")
+    print("      启动器: 带空格的 --link 路径作为一个参数到达链接器")
+
+
 # ---------------------------------------------------------------- Loment 版（S1 第十一格）
 
 _TW = f"/tmp/loment-err-{os.getpid()}-"
@@ -1325,7 +2132,9 @@ _JSONL = {
                         "message": "4: 使用未声明的变量 z"}],
     "parse.jsonl": [{"file": "{F}/par.lomt", "line": 6, "col": 1, "code": "E002",
                      "message": "6:1: 语法错"}],
-    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E999",
+    # `#658` 之后 E0999 **有卡片**了（兜底码也该解释自己），所以"表里没有的码"这条
+    # 换成一个真正的空号：用户码段是 1..N 连续的，E777 不在表里。
+    "unknown.jsonl": [{"file": "{F}/bad.lomt", "line": 4, "col": 0, "code": "E777",
                        "message": "4: 无此码"}],
     "broken.jsonl": [{"file": "{F}/bad.lomt", "line": 99, "col": 0, "code": "E002",
                       "message": "99: 行号越界"}],
@@ -1428,11 +2237,18 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -1440,6 +2256,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -1499,7 +2317,7 @@ def test_err_check_matches_loment_twin():
         binn = f"{_TW}chk.bin"
         script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(wsl)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, text=True, timeout=300, shell=False)
         got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
     assert rr.stdout.strip() == "0", f"孪生该退 0（7 项全过）: rc={rr.stdout!r}\n{got[:300]}"
@@ -1529,31 +2347,133 @@ def test_err_twin_selfhost_compiles():
         binn = f"{_TW}s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomerrcheck.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomerrcheck.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
     print(f"      种子自举链编译 lomerrcheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_a_position_less_record_carries_no_line_number():
+    """`line == 0` = 编译器**没有位置可指**（`E031`..`E033`：文件读不到 / 写不出去 /
+    单元太大，`issue #8`）。三条一起立：
+
+      * `--> <file>` 后面**不带行号** —— `file:0` 看着像第 0 行，编辑器会照着跳；
+      * **不印 `(no such line in the source file)`** —— 那会让读者以为源码有问题，
+        而这几个码的 `file` 常常根本不是源码（`E032` 那个是一条**还不存在**的产物路径）；
+      * `--short` 那一路同理：`file: error[E031]` 而不是 `file:0:`。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-nopos-") as td:
+        d = Path(td) / "nopos.jsonl"
+        d.write_text(json.dumps({
+            "file": "nosuch.lomt", "line": 0, "col": 0, "code": "E031",
+            "message": "cannot open this file",
+        }) + "\n", encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out[:300])
+        assert "E031" in out and "cannot read this input file" in out, out[:300]
+        assert "--> nosuch.lomt\n" in out, f"位置那一行没只印文件: {out[:400]!r}"
+        assert "nosuch.lomt:0" not in out, f"`-->` 后面带了行号: {out[:400]!r}"
+        assert "no such line" not in out, f"去源里找了第 0 行: {out[:400]!r}"
+        rc, out = _render(d, "--short")
+        assert rc == 1, (rc, out[:300])
+        assert "nosuch.lomt: error[E031]" in out, out[:300]
+        assert "nosuch.lomt:0" not in out, out[:300]
+    print("      没有位置的记录：`--> 文件` 不带行号、不去源里找第 0 行，--short 同")
+
+
 # ---------------------------------------------------------------- 入口
+
+
+@test
+def test_the_caret_lands_under_the_offending_character_after_wide_text():
+    """`#477`：caret 按**显示宽度**排，不是按码点数空格。
+
+    `col` 数码点，终端按列排 —— 字符串里一个汉字占两列。原先 `h_snip` 印 `col-1` 个
+    空格，于是 `"日本語テキスト"` 之后的 `@` 被指到字符串中间（byte offset 26 处）。
+    制表符是同一个形状（终端按 8 对齐）。
+
+    这里直接量：渲染出来的 caret 前缀空格数 == 源码行前缀的**终端宽度**。
+    """
+    import unicodedata
+
+    def width(text: str) -> int:
+        w = 0
+        for ch in text:
+            if ch == "	":
+                w += 8 - (w % 8)
+            elif unicodedata.combining(ch):
+                pass
+            elif unicodedata.east_asian_width(ch) in ("W", "F"):
+                w += 2
+            else:
+                w += 1
+        return w
+
+    src = ('module m' + chr(10) + 'fn f() -> u32 {' + chr(10)
+           + '  let s: str = "日本語テキスト"; @ return 0;' + chr(10) + '}' + chr(10))
+    _f, d = _check(src)
+    rc, out = _render(d, lang=ZH)
+    lines = out.splitlines()
+    caret = [ln for ln in lines if "^" in ln]
+    assert caret, out
+    row = [ln for ln in lines if "日本語" in ln]
+    assert row, out
+    bar = row[0].index("|")
+    body = row[0][bar + 2:]
+    upto = body.index("@")
+    caret_body = caret[0][caret[0].index("|") + 2:]
+    lead = len(caret_body) - len(caret_body.lstrip(" "))
+    assert lead == width(body[:upto]), (
+        f"caret 前缀 {lead} 列，源码前缀显示宽度 {width(body[:upto])} 列")
+    print("      CJK 前缀之后：caret 落在 `@` 下（按显示宽度对齐）")
+
+
+@test
+def test_the_caret_lands_under_the_offending_character_after_tabs():
+    """`#668`: 源行**原样回显**（tab 还是 tab），caret 行铺的是空格 —— tab 必须按 8 对齐。
+
+    与上一条同一个量（渲染前缀的终端宽度），只是前缀是 tab：终端把它展开到下一个 8 的
+    倍数，caret 必须走同样多列。修它的是 `utf8_cell`（`#477`），这条判据把 tab 那一半
+    单独钉住，免得以后又只测 CJK。
+    """
+    import unicodedata
+
+    def width(text: str) -> int:
+        w = 0
+        for ch in text:
+            if ch == "\t":
+                w += 8 - (w % 8)
+            elif unicodedata.combining(ch):
+                pass
+            elif unicodedata.east_asian_width(ch) in ("W", "F"):
+                w += 2
+            else:
+                w += 1
+        return w
+
+    src = "module m\nfn f() -> u32 {\n\t\tlet s: str = \"日本語\"; @ return 0;\n}\n"
+    _f, d = _check(src)
+    _rc, out = _render(d)
+    lines = out.splitlines()
+    row = [ln for ln in lines if "日本語" in ln]
+    caret = [ln for ln in lines if "^" in ln]
+    assert row and caret, out
+    body = row[0][row[0].index("|") + 2:]
+    assert body.startswith("\t\t"), f"源行没有原样回显 tab: {body!r}"
+    upto = body.index("@")
+    caret_body = caret[0][caret[0].index("|") + 2:]
+    lead = len(caret_body) - len(caret_body.lstrip(" "))
+    assert lead == width(body[:upto]), (
+        f"caret 前缀 {lead} 列，源码前缀（含两个 tab）显示宽度 {width(body[:upto])} 列")
+    print("      tab 前缀之后：caret 仍落在 `@` 下（tab 按 8 对齐）")
 
 
 def main() -> int:
     print(f"loment_err_test: {len(TESTS)} 条\n")
     bad = 0
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except AssertionError as e:
-            bad += 1
-            print(f"  FAIL  {name}: {e}")
-        except Exception as e:                                   # noqa: BLE001
-            bad += 1
-            print(f"  ERR   {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_err_test: {len(TESTS) - bad}/{len(TESTS)} 通过")
-    return 1 if bad else 0
+    return loment_suite.run(TESTS, "loment_err_test")
 
 
 if __name__ == "__main__":

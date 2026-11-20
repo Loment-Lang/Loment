@@ -1,4 +1,5 @@
 choose write grammar python
+choose runtime
 
 # lumtui_math.lomt —— LumtUI 的标量计算核, **用 Python 写法写的 Loment**。
 #

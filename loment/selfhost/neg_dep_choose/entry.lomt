@@ -1,12 +1,10 @@
 module entry
 
-// 跨文件负例 (入口侧): 入口自己可以写 `choose`, 但它 use 进来的库**不许**写 ——
-// 见同目录 lib.lomt 的说明。这个入口本身是合法的, 被拒是因为依赖侧那一份。
+// 跨文件负例（入口侧）：这个入口本身**完全合法**，被拒是因为它 use 进来的那一份
+// （同目录 `lib.lomt`：用了 `alloc` 却不声明需求，而本单元没写 `choose runtime`）。
 
 use "loment/selfhost/neg_dep_choose/lib.lomt"
 
-choose no_std
-
-fn entry_pub(x: u32) -> u32 {
-    return dep_pub(x);
+fn entry_pub() -> ptr {
+    return dep_alloc();
 }

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Loment (Python surface grammar)",
+  "scopeName": "source.loment.python",
+  "comment": "一份 Loment 源，文件头写了 `choose write grammar python` —— 正文是 Python 写法、语义仍是 Loment（docs/188）。上色**借宿主的**语法：include `source.python`（由 Python 扩展提供）。宿主没装时这一格解析成空，只有声明那一行还着色 —— 这是刻意的：宁可不上色，也不要拿 Loment 的规则去染 Python 正文。",
+  "patterns": [
+    { "include": "source.loment#grammar-decl" },
+    { "include": "source.python" }
+  ]
+}

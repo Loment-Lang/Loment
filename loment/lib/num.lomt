@@ -1,4 +1,5 @@
 module num
+choose runtime
 
 // num.lomt — 整数与文本的互转 (std 核)
 //

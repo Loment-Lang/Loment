@@ -1,0 +1,168 @@
+// world/geohash.lomt — geohash 编码/解码（整数微度版）
+//
+// 为什么现实世界需要它: geohash 把经纬度压成一串可排序、可做前缀匹配的字符：
+// `wx4g0` 是"伦敦附近"，前 4 位相同就是同一个几公里格子。附近搜索、地图瓦片
+// 分桶都靠它。
+//
+// 约定: 坐标用**微度**（e6，1e-6 度）的 i32 —— 1 微度约 0.11 米，已经细于
+// geohash 8 位的格子（约 19 米），所以不会因为整数化而丢精度。
+//
+// 精度: 微度输入决定上限 —— 8 位（约 19 m）稳，更长就落进输入本身的量化误差。
+//
+// 算法: 交替二分经度/纬度，先经度后纬度；每 5 位一个字符，字母表是
+// `0123456789bcdefghjkmnpqrstuvwxyz`（没有 a/i/l/o）。
+//
+// 命名: 公开 gh_*, 内部 gg_*。自检 test_geohash_*。
+
+module geohash
+
+use mem
+
+fn gx_idx(c: u32) -> u32 {
+    let alpha: str = "0123456789bcdefghjkmnpqrstuvwxyz";
+    let i: u32 = 0;
+    while i < 32 {
+        if str_byte(alpha, i) == c {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 4294967295;
+}
+
+fn gx_put(out: ptr, cap: u32, pos: u32, c: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, c as u8);
+    }
+    return pos + 1;
+}
+
+/// 编码。`prec` 1..12；坐标越界或 prec 非法返回 0。
+pub fn gh_encode(lat_e6: i32, lon_e6: i32, prec: u32, out: ptr, cap: u32) -> u32 {
+    if prec < 1 || prec > 12 {
+        return 0;
+    }
+    if lat_e6 < (0 as i32) - 90000000 || lat_e6 > 90000000 {
+        return 0;
+    }
+    if lon_e6 < (0 as i32) - 180000000 || lon_e6 > 180000000 {
+        return 0;
+    }
+    let lat_lo: i64 = 0 as i64 - 90000000;
+    let lat_hi: i64 = 90000000;
+    let lon_lo: i64 = 0 as i64 - 180000000;
+    let lon_hi: i64 = 180000000;
+    let la: i64 = lat_e6 as i64;
+    let lo: i64 = lon_e6 as i64;
+    let pos: u32 = 0;
+    let bit: u32 = 0;
+    let ch: u32 = 0;
+    let total: u32 = prec * 5;
+    let k: u32 = 0;
+    while k < total {
+        let even: u32 = k % 2;
+        if even == 0 {
+            let mid: i64 = (lon_lo + lon_hi) / (2 as i64);
+            if lo >= mid {
+                ch = ch * 2 + 1;
+                lon_lo = mid;
+            } else {
+                ch = ch * 2;
+                lon_hi = mid;
+            }
+        } else {
+            let mid2: i64 = (lat_lo + lat_hi) / (2 as i64);
+            if la >= mid2 {
+                ch = ch * 2 + 1;
+                lat_lo = mid2;
+            } else {
+                ch = ch * 2;
+                lat_hi = mid2;
+            }
+        }
+        bit = bit + 1;
+        if bit == 5 {
+            pos = gx_put(out, cap, pos, str_byte("0123456789bcdefghjkmnpqrstuvwxyz", ch));
+            bit = 0;
+            ch = 0;
+        }
+        k = k + 1;
+    }
+    return pos;
+}
+
+/// 解码：写 [lat_min, lat_max, lon_min, lon_max] 四个 i32（微度）。返回精度。
+pub fn gh_decode(s: str, out: ptr) -> u32 {
+    let n: u32 = str_len(s);
+    if n < 1 || n > 12 {
+        return 0;
+    }
+    let lat_lo: i64 = 0 as i64 - 90000000;
+    let lat_hi: i64 = 90000000;
+    let lon_lo: i64 = 0 as i64 - 180000000;
+    let lon_hi: i64 = 180000000;
+    let k: u32 = 0;
+    while k < n {
+        let c: u32 = str_byte(s, k);
+        let idx: u32 = gx_idx(c);
+        if idx == 4294967295 {
+            return 0;
+        }
+        let b: u32 = 0;
+        while b < 5 {
+            let mask: u32 = (16 as u32) >> b;
+            let one: u32 = 0;
+            if (idx & mask) != 0 {
+                one = 1;
+            }
+            let bitpos: u32 = k * 5 + b;
+            if bitpos % 2 == 0 {
+                let mid: i64 = (lon_lo + lon_hi) / (2 as i64);
+                if one == 1 {
+                    lon_lo = mid;
+                } else {
+                    lon_hi = mid;
+                }
+            } else {
+                let mid2: i64 = (lat_lo + lat_hi) / (2 as i64);
+                if one == 1 {
+                    lat_lo = mid2;
+                } else {
+                    lat_hi = mid2;
+                }
+            }
+            b = b + 1;
+        }
+        k = k + 1;
+    }
+    mem_store32(out, 0, lat_lo as u32);
+    mem_store32(out, 4, lat_hi as u32);
+    mem_store32(out, 8, lon_lo as u32);
+    mem_store32(out, 12, lon_hi as u32);
+    return n;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_geohash_roundtrip() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = gh_decode("gcpuv", o);
+    if n != 5 {
+        return false;
+    }
+    // 格子应包住伦敦 (51.5, -0.12)
+    let lat_lo: i32 = mem_load32(o, 0) as i32;
+    let lat_hi: i32 = mem_load32(o, 4) as i32;
+    let lon_lo: i32 = mem_load32(o, 8) as i32;
+    let lon_hi: i32 = mem_load32(o, 12) as i32;
+    return lat_lo <= 51500000 && 51500000 <= lat_hi
+        && lon_lo <= (0 as i32) - 120000 && (0 as i32) - 120000 <= lon_hi;
+}
+
+fn test_geohash_encode() -> bool {
+    let o: ptr = alloc(16);
+    if gh_encode(51500000 as i32, (0 as i32) - 120000, 5, o, 16) != 5 {
+        return false;
+    }
+    return load8(o, 0) == 103 && load8(o, 1) == 99; // "gc"
+}

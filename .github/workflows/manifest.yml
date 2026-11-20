@@ -14,203 +14,188 @@
 # **CI 的树没有这个问题**：它 `checkout` 的就是那一个 commit，树是干净的、唯一的。
 # 所以"在 CI 上算清单"不只是省事 —— **它比在开发者机器上算更准**。
 #
-# ## 2026-09-24：把最后两件"必须回本机"的搬上来
+# ## 2026-10-16：**全树生成物从 PR 路径上撤下来**
 #
-# 此前 CI 只重算三件（发布清单 / SHA256SUMS / 手册）。另外两件是**生成物、有判据、
-# 却在白名单之外**，于是每次都要有人在开发机上跑一条命令：
+# 上面那套"每个 PR 都重算五件"有个没算到的代价：其中两件是**全树台账** ——
+# `release-manifest.json` 与 `SHA256SUMS` 记的是 `GLOBS` 里**每一个文件**的 sha256
+# （现在六百多条）。它们**每一行都是别人的文件**，于是：
+#
+#   * 任何一个 PR 碰了 `GLOBS` 里的任何文件（**`docs/*.md` 也在内**）都必须重算它们，
+#     否则 `loment_release` 那条门禁判据红 —— 那是**每个 PR 的固定税**；
+#   * 两个 PR 各改**互不相干**的文件时，写的是台账里**相邻的行**。`docs/` 那一段
+#     一百多条是**连续块**，而 git 的合并上下文只有 3 行 ⇒ **必冲突**。
+#
+# **实测**（2026-10-16，从 `origin/main` 起两个分支各加一份不同的 doc，只动自己的文件）：
+#
+#     合 A ← B  ⇒  冲突：loment/build/SHA256SUMS
+#                        loment/build/release-manifest.json
+#                 别处干净；两个文件各 1 个冲突块（add/add 在同一位置）
+#
+# 当时唯一开着的 `CONFLICTING` PR（#436）5 个文件里 3 个是生成物，冲突点同样是这两件。
+#
+# **判断的依据**：这份**入库**台账的唯一仓内消费者，就是"台账是否新鲜"那条判据本身
+# —— 循环的。真正有分量的东西在别处，而且都不读它：
+#
+#   * `loment_tools_test`（工具覆盖）读 `loment_release.GLOBS`；
+#   * `loment_lompi_test`（store 覆盖）读 `loment_release.build()` 的**内存**结果；
+#   * `loment_rel_test`（两个实现逐字节对拍）写**临时文件**再比；
+#   * `loment_publish` 完全不碰它。
+#
+# 所以这一轮把**全树生成物撤出 PR 路径**，改成 **`main` 上的单一写者**：
+#
+#   * **PR 路径**（下面的 `emit`）只重算**与这一个 PR 的改动一一对应**的东西 ——
+#     自举种子（随 `loment/selfhost/*.lomt` 变）、`surface_data.lomt`（随内建表/诊断码变）、
+#     以及**文档改号**（撞号时给新增的那一份换号，只动这一个 PR 的文件）。
+#     它们动了就是"这个 PR 真的改了那个源"，那时的冲突是**真冲突**，该让人看见。
+#   * **`main` 路径**（下面的 `emit-main`）由 `push: main` 触发，**与 `gate` 同时起跑**
+#     （不加 `needs:`、不用 `workflow_run` —— 排在门禁后面就变成"每次合并多等一轮"），
+#     重算全部五件 + 改号，推到固定分支，开/更新**一个**滚动 PR 并开 auto-merge。
+#     它只碰生成物，与任何人的 PR 都不重叠 ⇒ 那个 PR 永远不冲突。
+#
+# ## 为什么不是别的办法（想过的都写在这里，免得下一轮重想）
+#
+#   * **`merge=union`**：同一行两改时它把**两边**都留下 —— 同一路径两条哈希，
+#     是**静默损坏**（`--check` 用 dict，后写的赢；`sha256sum -c` 有一半必失败）。
+#     而且 GitHub 侧不跑自定义 merge driver，`merge=ours` 那类根本够不着。
+#   * **把台账缩到"非文档"**：只是把冲突从文档挪到代码，还让台账不再覆盖 `docs/`。
+#   * **留在 PR 里但不核新鲜度**：那入库的就是一份**没人核**的台账，比不存更坏。
+#
+# ## 撤下来换到了什么、丢掉了什么
+#
+#   **换到**：并发 PR 在**结构上**不可能因为生成物冲突 —— 不再靠快慢和运气。
+#   **丢掉**：一份 checkout 的台账不再自带"与树一致"的保证。那份保证现在由
+#   `emit-main` 在**每一次合并**后去做 —— 比原来"每个 PR 各做一次"更常做，而且只在
+#   **唯一权威的那棵树**上做。替代的判据在 `loment_tools_test`：**PR 侧不许再提交
+#   整树生成物**、**`main` 侧的重算作业必须存在、由 `push` 触发、且不排在门禁后面**。
+#
+# ## 2026-09-24 的旧记录（搬上来那两件，仍然成立）
+#
+# 此前 CI 只重算三件。另外两件是**生成物、有判据、却在白名单之外**，于是每次都要有人在
+# 开发机上跑一条命令：
 #
 #   * `loment/build/selfhost_driver.ll`（自举种子）—— `python tools/loment_seed.py --emit`，
 #     判据 `loment_seed_test::test_seed_matches_reference`。
-#     旧注释里"不重算它"给的理由是**代价**（"整条自举链，与'生成物'这个词不相称"）。
-#     实测下来那条理由搞混了两个东西：`--emit` 走的是**参考实现**（纯 Python，
-#     `lomentc.emit_llvm`，不碰 clang、不跑自举链），几秒钟；贵的是 `--bootstrap`。
-#     所以这里只 `--emit`，`bootstrap.sh` 那条定点链仍然只归 `loment_seed_test` 管。
+#     旧注释里"不重算它"给的理由是**代价**（"整条自举链"）。实测下来那条理由搞混了两个
+#     东西：`--emit` 走的是**参考实现**（纯 Python，`lomentc.emit_llvm`，几秒钟）；
+#     贵的是 `--bootstrap`。所以这里只 `--emit`。
 #
-#     **这不把那条判据变成同义反复。** 会变成同义反复的只有 `test_seed_matches_reference`
-#     （种子 == 参考实现的产物 —— 由这里保证），而它本来就是"允许把种子标成生成物、
-#     折叠出评审面"的前提（`docs/176` §4 A）。真正有分量的是同一套件里的
-#     `test_seed_bootstrap_fixed_point`：种子 -> stage1 -> **stage1 编译 driver.lomt == 种子**。
-#     那一条测的是**孪生自己的代码生成**，与种子是不是刚算出来的无关，所以它没被掩住。
+#     **这不把那条判据变成同义反复。** 会变成同义反复的只有 `test_seed_matches_reference`，
+#     而它本来就是"允许把种子标成生成物、折叠出评审面"的前提（`docs/176` §4 A）。
+#     真正有分量的是同一套件里的 `test_seed_bootstrap_fixed_point`：种子 -> stage1 ->
+#     **stage1 编译 driver.lomt == 种子**。那一条测的是**孪生自己的代码生成**，
+#     与种子是不是刚算出来的无关，所以它没被掩住。
 #   * `loment/tools/surface_data.lomt` —— `python tools/loment_diag.py --dump-surface <PATH>`，
-#     判据 `loment_tools_test::test_surface_data_is_up_to_date`。改内建表 / 诊断码 /
-#     表层语法就要重生成，而它此前**不在白名单里**（漏了，不是有意排除）。
+#     判据 `loment_tools_test::test_surface_data_is_up_to_date`。
 #
-# **两件都在 `GLOBS` 里，所以顺序是硬的**：先种子、再 surface、再手册、最后清单/校验和。
+# **五件都在 `GLOBS` 里，所以顺序是硬的**：改号 -> 种子 -> surface -> 手册 -> 清单/校验和。
 # 清单算的是**那一刻的树** —— 顺序错了，记进去的就是过期那一份的哈希。
 #
-# ## 三条设计决定（第 3 条 2026-09-24 改过）
+# ## 三条设计决定
 #
-# 1. **只在分支上跑，不在 `main` 上跑**（`branches-ignore: [main]`）。
-#    `main` 只收 PR 合并，而每个 PR 分支都被本 workflow 修过 ⇒ `main` 自然是对的。
-#    反过来，往 `main` 直接推 bot 提交会撞分支保护，那是一条**假失败**。
-#    真要在 `main` 上跑，用 `workflow_dispatch` 手动点。
+# 1. **PR 路径只在分支上跑**（`emit` 的 `if` 排掉 `refs/heads/main`）。`main` 只收 PR 合并，
+#    而每个 PR 分支都被本 workflow 修过 ⇒ `main` 自然是对的。`main` 那一路走 `emit-main`。
 #
-# 2. **`pull_request_target` 只用来覆盖 fork 的 PR**（原来没有这一路）。理由见下面那段。
+# 2. **只有 `push`**：fork 的 PR 没有 `push` 事件，因而它们不进这条流水线
+#    （原因见下面 `#420` 那一节）。
 #
-# 3. **只提交"生成物白名单"里的路径，别的一律拒绝**（下面那个 guard）。
+# 3. **只提交"生成物白名单"里的路径，别的一律拒绝**（两个 job 各有一个 guard）。
 #    如果生成物命令动了白名单之外的文件，说明**那条命令坏了**，那时应该**红**，
 #    而不是把一个来历不明的改动当作"生成物"提交上去。
 #
-# ## fork 的 PR：为什么是 `pull_request_target`，以及它换来了什么风险
+# ## 2026-10-18：fork 的 PR 不再走这里（`#420`）
 #
-# fork 的 PR 推的是**人家那个仓**，本仓因此不会收到 `push` 事件 —— 上面那条够不到它们。
-# 结果是外部贡献者的 PR 永远带一份过期清单，而 `loment_release` 是门禁里的一条判据，
-# 于是只能由维护者在**自己的机器上**补一笔。`pull_request_target` 是唯一能在本仓上下文里
-# 拿到写权限 token、又知道 PR 头的入口（它跑的是**默认分支上的这份文件**，所以 PR 改不动它）。
+# `pull_request_target` 曾经让 fork 的 PR 也能自动重算，代价是**用本仓的写权限 token
+# 执行别人树上的 `tools/*.py`**。唯一的护栏是"PR 文件列表里没有 `tools/`"：
 #
-# **风险要说清楚，不藏在注释里**：这一路由"别人的树 + 本仓的写权限 token"组成，
-# 所以它只做一件事 —— 用**可信的生成器**处理**不可信的数据**：
+#   * 文件列表走 API 读，checkout 又按 `refs/pull/<n>/head` 重新取 —— 两者之间可以插一次
+#     push（TOCTOU），被检查的树与被执行的不是同一棵；
+#   * 该 endpoint 最多返回 3000 个文件，超过就能把 `tools/` 的改动藏过去。
 #
-#   * 检出的树是 PR 的（不可信），但真正**被执行**的只有生成器（`tools/*.py`）；
-#     `loment/**` 全是**读进来算哈希/解析**的数据，不执行。
-#   * 所以第一道护栏是：**PR 一碰 `tools/` 就整条路跳过**。那时我们要执行的正是别人改过的
-#     代码，而"拿写权限 token 跑别人的代码"是这一整套设计里唯一不能做的事。
-#   * 第二道：**推回之前仍走白名单 guard**（与本地那条同一个）。恶意 PR 于是没法借这条
-#     路把任意文件提交上去。
-#   * 还有一条**不是漏洞、是限制**：fork PR 必须勾了 "Allow edits by maintainers"
-#     （`maintainer_can_modify`），否则推不回去 —— 那就跳过，走本地那条老路。
-#
-# **这条 fork 路还没被真跑过**（2026-09-24 落笔时仓里还没有过一个 fork PR）。
-# 第一次真来的时候，先看这个 job 的 summary：它把"跳过 / 推回"的决定写在那里。
+# **文件列表不是安全边界**，所以整条路撤掉：本 workflow 只跑 `push`（本仓的分支）。
+# fork 的 PR 由贡献者在本地跑 `--emit`（`CONTRIBUTING` 本来就是这么要求的），
+# 或由维护者在合并前补一笔。少一次自动重算，不换一次"别人的代码拿我们的写 token"。
 #
 # ## 边界
 #
-# * **不改任何判据、不碰 `lom/`** —— 它只是把几条机械命令放进 CI。
+# * **不碰 `lom/`** —— 它只是把几条机械命令放进 CI。
 # * **不新增 `tools/*.py`** —— 与 `gate.yml` 同一条理由（`GLOBS` 是显式清单），
 #   所以逻辑全在这个文件里。
 
 name: manifest
 
 on:
+  # 所有分支，**含 `main`**（`emit-main` 靠这个触发）。`**` 不匹配 tag，
+  # 所以打 tag 不会触发这里 —— 那是 `release.yml` 的事。
   push:
-    branches-ignore: [main]
-  # 见上面「fork 的 PR」。`types` 里不放 `closed` —— 合并完再修没有意义。
-  pull_request_target:
-    types: [opened, synchronize, reopened]
+    branches: ['**']
   workflow_dispatch:
 
+# 每个 job 自己声明要什么 —— 两条路的权限面**不一样**：`emit` 只处理本仓分支的 push，
+# `emit-main` 走的是本仓的默认分支。把权限写宽在顶层会让不需要的 job 白拿一份
+# `pull-requests: write`，那是不必要的暴露面。
 permissions:
-  contents: write
-  pull-requests: read
-
-# 同一个分支/PR 上串行 —— 两次并发重算会互相覆盖，而且会产生一条推不上去的提交
-concurrency:
-  group: manifest-${{ github.event.pull_request.number || github.ref_name }}
-  cancel-in-progress: false
+  contents: read
 
 jobs:
+  # ---------------------------------------------------------------- PR / 分支路径
   emit:
     # **回环守卫**：本 workflow 自己推的那一笔不再触发它自己。
-    # 用 `GITHUB_TOKEN` 推时 actor 就是 `github-actions[bot]`，所以这一条足够
-    # （推回 fork 之后同样会来一次 `synchronize`，也被这一条挡掉）。
-    # 刻意**不用** `[skip ci]`：那样连 `gate` 也会被跳过，而**我们要 `gate` 去验这一笔**
-    # （它跑完 `loment_release --check`，正是对重算结果的独立复核）。
+    # 用 `GITHUB_TOKEN` 推时 actor 就是 `github-actions[bot]`，所以这一条足够。
+    # 刻意**不用** `[skip ci]`：那样连 `gate` 也会被跳过，而**我们要 `gate` 去验这一笔**。
     #
-    # 第二条：`pull_request_target` **对本仓自己的 PR 也会触发**，而那些 PR 上面那条 `push`
-    # 已经在管了。按 `head.repo.fork` 分出来，省一次重复的重算。
-    # 顺带堵一个边角：fork 被删掉之后 `head.repo` 是 null，这一条会让 job 直接跳过
-    # （推不回去，本来也没得推），而不是拿一个空的 remote 去 `git push` 然后红。
+    # 只处理本仓分支的 `push`；`push: main` 归下面的 `emit-main`。**没有
+    # `pull_request_target`** —— fork 的树永远不进这个带写权限 token 的 job（`#420`）。
     if: >-
       github.actor != 'github-actions[bot]' &&
-      (github.event_name != 'pull_request_target' ||
-       github.event.pull_request.head.repo.fork == true)
+      !(github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    # 同一个分支上串行 —— 两次并发重算会互相覆盖，而且会产生一条推不上去的提交。
+    concurrency:
+      group: manifest-${{ github.ref_name }}
+      cancel-in-progress: false
     steps:
-      # 这一路两种事件合流：普通 push 推回**本仓**的分支，fork 的 PR 推回**人家**的分支。
       # 值一律走 `env` 传进来、不进 shell 源码 —— 分支名里 `"` 是合法的 git ref 字符，
       # 直接插进 `run:` 就是一条注入面。
       - name: 这是谁的树、推回哪里
         id: t
         env:
-          EVENT: ${{ github.event_name }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           REPO: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -eu
-          if [ "$EVENT" = "pull_request_target" ]; then
-            echo "fork=true" >> "$GITHUB_OUTPUT"
-            printf 'ref=refs/pull/%s/head\n' "$PR" >> "$GITHUB_OUTPUT"
-            printf 'remote=github.com/%s\n' "$HEAD_REPO" >> "$GITHUB_OUTPUT"
-            printf 'branch=%s\n' "$HEAD_REF" >> "$GITHUB_OUTPUT"
-          else
-            echo "fork=false" >> "$GITHUB_OUTPUT"
-            printf 'ref=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
-            printf 'remote=github.com/%s\n' "$REPO" >> "$GITHUB_OUTPUT"
-            printf 'branch=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
-          fi
+          printf 'ref=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
+          printf 'remote=github.com/%s\n' "$REPO" >> "$GITHUB_OUTPUT"
+          printf 'branch=%s\n' "$REF_NAME" >> "$GITHUB_OUTPUT"
 
-      # fork 的两道前置条件，只有它们都过了才 `ok=true`，后面的步骤才跑。
-      - name: fork 的护栏（碰了 `tools/` 就不跑）
-        id: guard
-        if: steps.t.outputs.fork == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          CAN_MODIFY: ${{ github.event.pull_request.maintainer_can_modify }}
-        run: |
-          set -euo pipefail
-          if [ "$CAN_MODIFY" != "true" ]; then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::fork PR 没勾 'Allow edits by maintainers' —— 推不回去，跳过（走本地重算那条老路）"
-            exit 0
-          fi
-          # **列不出来就按"不跑"算**（与 `gate.yml` 的 lom-door 同一个形状，方向相反）：
-          # 拿不到文件列表时下面的 grep 会空手而归、于是**放行** —— 那是最坏的失败形状。
-          # 这里 fail closed 的代价只是一条要人补的红，不是一次误判。
-          err=$(mktemp)
-          if ! files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' 2>"$err"); then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::列改动文件失败 —— 不重算（不拿写权限 token 赌）"
-            cat "$err"
-            exit 0
-          fi
-          bad=$(printf '%s\n' "$files" | grep -E '^tools/' || true)
-          if [ -n "$bad" ]; then
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "## fork PR：跳过生成物重算"
-              echo ""
-              echo '这个 PR 改了 `tools/`，而本 job 要执行的正是 PR 树上的 `tools/`。'
-              echo '拿本仓的写权限 token 去跑**别人改过的生成器**，是这条路上唯一不能做的事。'
-              echo ""
-              echo '请自己在本地跑一遍（CONTRIBUTING「Run the gate before you open a pull request」），'
-              echo '或者在合并前由维护者补一笔。'
-              echo '```'
-              echo "$bad"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-
-      # `refs/pull/<n>/head` 在本仓就有（不必加 fork 的 remote 去取）。
       - uses: actions/checkout@v4
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         with:
           ref: ${{ steps.t.outputs.ref }}
-          # 浅克隆推回 fork 有额外麻烦（新提交的父就是 fork 的头），全量取一次最省事，仓不大。
           fetch-depth: 0
 
       - uses: actions/setup-python@v5
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         with:
           python-version: "3.11"
 
-      # 顺序是硬的，见上面「最后两件」那一节：**名字进 GLOBS 的先生成，清单最后算**。
-      # 依赖顺序：种子 -> surface_data -> 手册 -> 发布清单 -> 校验和。
-      - name: 重算生成物
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
+      # **只重算"与这个 PR 的改动一一对应"的东西**（见文件头那节）。
+      # 全树那几件（手册 / 发布清单 / SHA256SUMS）归 `emit-main` —— 它们每一行都是
+      # 别人的文件，放在这里就是**每个 PR 的固定税 + 并发必冲突**。
+      # 顺序：改号排在最前（它改的是**文件名**，而 `surface_data.lomt` 与种子都按路径记账）。
+      - name: 重算生成物（只算与这个 PR 一一对应的）
         run: |
           set -e
+          git fetch -q origin main || true
+          rc=0
+          python tools/loment_docs.py --fix || rc=$?
+          case "$rc" in
+            0) : ;;
+            1) echo "::error::改号之后 docs/ 仍有重号"; exit 1 ;;
+            *) echo "::notice::这一轮没改号（取不到 origin/main，rc=$rc）" ;;
+          esac
           python tools/loment_seed.py --emit
           python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
-          python tools/loment_manual.py --emit docs/manual
-          python tools/loment_release.py --emit
-          python tools/loment_release.py --checksums loment/build/SHA256SUMS
           echo "--- 重算之后工作树里动了什么 ---"
           git status --porcelain
 
@@ -218,25 +203,17 @@ jobs:
       #
       # 看的是 `git diff HEAD`（**已跟踪**文件的改动），**不看未跟踪文件** —— 生成物本来就是
       # 跟踪着的；而未跟踪的东西可能是 checkout 之后的残留，拿它判"命令坏了"是**假红**。
-      # （本机测试时立刻踩到过这一个。）
       #
       # 命令是 `git diff HEAD --name-only`：出来就是**纯路径**，重命名只报**新**路径
       # （实测：一次 `git mv` 只打目标名）。所以 `cut -c1-` 是恒等的。
-      # 旧注释写的是 `-c4-`／`awk '{print $2}'` —— 那是配 `git status --porcelain` 或
-      # `--name-status` 的写法（只有那两个才有 `R  old -> new` 这种前缀），与这里的命令对不上。
-      # 代码是对的，注释是错的；已改。
       #
-      # **三个文件那几支要写 `$`**（2026-09-24 补）。原来只写了前缀，于是
-      # `loment/build/SHA256SUMS.bak` 这种**别的已跟踪文件**被当成允许的。实际危害不大
-      # （下面 `git add` 是点名的，那个文件进不了提交），但守卫会因此说"只动了允许的那几处"
-      # —— 那是假话，而这条守卫的全部价值就是它说的是真话。
-      # `docs/manual/` 那一支本来就该是前缀（里面会有新生成的页）。
+      # `docs/NNN-slug.md` 那一支是**改号**用的：撞号时 `--fix` 把**新增的那一份**换个号，
+      # 于是这里会出现**新路径**。刻意收窄到"带号的 .md" —— 别的文档改动仍判成 stray。
       - name: 白名单守卫（只许动生成物）
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         run: |
           set -e
           stray=$(git diff HEAD --name-only | cut -c1- \
-            | grep -v -E '^loment/build/(selfhost_driver\.ll|release-manifest\.json|SHA256SUMS)$|^loment/tools/surface_data\.lomt$|^docs/manual/' || true)
+            | grep -v -E '^loment/build/selfhost_driver\.ll$|^loment/tools/surface_data\.lomt$|^docs/[0-9]{1,4}-[^/]+\.md$' || true)
           if [ -n "$stray" ]; then
             echo "::error::重算动了**生成物白名单之外**的已跟踪文件 —— 拒绝提交。这通常意味着生成物命令坏了："
             echo "$stray"
@@ -245,7 +222,6 @@ jobs:
           echo "只动了允许的那几处。"
 
       - name: 变了就单独提交一笔（消息写明"只有生成物"）
-        if: steps.t.outputs.fork != 'true' || steps.guard.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REMOTE: ${{ steps.t.outputs.remote }}
@@ -258,10 +234,188 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # 点名 add，不用 `git add -A`（本仓纪律：提交要能一眼看清收了什么）
-          git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt \
-                  loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual
-          git commit -m "[生成物] 只有生成物：种子 + surface_data + 发布清单 + SHA256SUMS + 手册（CI 自动重算）"
-          # 推回的目标由上面那一步决定：普通 push 是本仓的分支，fork 的 PR 是**人家**的分支
-          # （后者要求 PR 勾了 "Allow edits by maintainers"，已在 guard 里查过）。
+          # 点名 add，不用 `git add -A`（本仓纪律：提交要能一眼看清收了什么）。
+          # `docs/` 是给**改号**留的：撞号时 `--fix` 会把新增那份改名，重命名要两边都收。
+          # 白名单守卫已经把可动的路径钉死了。
+          git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt docs
+          git commit -m "[生成物] 只有生成物：种子 + surface_data（CI 自动重算；撞号的 docs 会被改号）"
+          # 只推回本仓的同名分支。fork 的 PR 根本不进这个 job（`#420`）。
           git push "https://x-access-token:${GH_TOKEN}@${REMOTE}.git" "HEAD:${BRANCH}"
+  # ---------------------------------------------------------------- main 上的单一写者
+  #
+  # **与 `gate` 同时起跑**：两者都由同一次 `push: main` 触发，这里既没有 `needs:` 也没有
+  # 走 `workflow_run` —— 那两种写法都会把重算排在门禁**后面**，于是"合并一次多等一轮"。
+  # 重算本身是独立的、只读树 + 写生成物，没有理由等门禁。
+  #
+  # **曾经是直推 `main`，2026-10-18 改成"分支 + PR + auto-merge"**（`#891`）。
+  #
+  # 直推当时能成立的两个前提，一个是真的、一个正好是问题本身：
+  #
+  #   * **用 `GITHUB_TOKEN` 开的 PR 不触发 `pull_request`** —— 官方规则，`docs/159` 也撞过
+  #     亲戚（"机器人推送会把必需检查挂成 `action_required`"）。曾经因此改用属主 PAT
+  #     （`secrets.MANIFEST_TOKEN`）来开 PR。**现在不用了**：`workflow_dispatch` 是那条
+  #     规则的**例外**（`GITHUB_TOKEN` 触发的 dispatch 照样新建 run），所以 PR 用
+  #     `GITHUB_TOKEN` 开，再由这里显式 `gh workflow run gate.yml --ref chore/emit-main`
+  #     把门禁派发到 PR 的 head SHA 上。**没有任何长期凭据参与信任根的写入。**
+  #   * **直推之所以推得动，是因为 `enforce_admins=false`** —— 也就是这一笔**绕过必需检查**。
+  #     推进去的里面就有 `loment/build/selfhost_driver.ll`（每次构建的起点）：那条路等于
+  #     "一把凭据可以在无人复核、无门禁的情况下改写信任根"。那不是省一轮的取舍，那是**单凭据
+  #     后门**的形状。
+  #
+  # 现在的形状：重算完推到 `chore/emit-main` → 开 PR → `--auto --squash`，门禁绿了它自己落。
+  # **重算仍然不等门禁**（没有 `needs:` / `workflow_run`，`test_main_writer_is_not_behind_the_gate`
+  # 钉着）：等的是**合并**，不是计算。
+  #
+  # 前提：这个 job 要 **`contents: write`**（推分支）、**`pull-requests: write`**（开 PR /
+  # 开 auto-merge）、**`actions: write`**（派发门禁）。**一个仓 secret 都不需要** ——
+  # 用的全是这一次运行自己的 `GITHUB_TOKEN`，跑完即失效。
+  emit-main:
+    name: main 上的生成物（单一写者）
+    # **回环守卫**：只按**提交信息**判。旧版本还按 `github.actor` 判（"属主 PAT 推的"），
+    # 现在推它的是 `GITHUB_TOKEN` —— 那条 `push` 事件根本不会新建 run，守卫不负责这一步。
+    #
+    # `workflow_dispatch` 也收（手动点一次 = "现在就把 main 上的生成物对齐"）；
+    # PR 事件不收 —— 它们检出的是**别人的**树，拿它去写生成物是错的。
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      !startsWith(github.event.head_commit.message, '[生成物]') &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write       # 推 chore/emit-main
+      pull-requests: write  # 开 PR / 开 auto-merge
+      actions: write        # gh workflow run：把门禁派发到这个分支
+    # **`cancel-in-progress: true`**（与 `emit` 不同）：这个 job 每次都从**当前的 main 尖**上
+    # 重算，所以旧的那一轮被取消没有任何损失，而串行排队会让生成物越落越远。
+    concurrency:
+      group: manifest-main
+      cancel-in-progress: true
+    steps:
+      # 全量取 —— 改号那一步要在前一个 main 上看号（见下面「改号」）。
+      #
+      # **`persist-credentials: false`**：推送 URL 里自己带 `x-access-token:<GITHUB_TOKEN>`，
+      # 不想让 checkout 留下的 `AUTHORIZATION` 头与它混在一起。这个 job 现在本来就有
+      # `contents: write`，两条路都能推；钉成一条是为了"推的是谁"只有一个答案。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 顺序是硬的：**改号 -> 种子 -> surface -> 手册 -> 清单 -> 校验和**。
+      # 清单算的是**那一刻的树**，所以基点必须是**刚落下的那个 main 尖**，而不是本 job
+      # 开头 checkout 的那个（两者之间有一个窗口）。所以整套重算放在循环里：**每一次尝试
+      # 都重新落在最新的 main 上重来**，推不上去就再来一轮（最多三次）。
+      #
+      # **推的不是 force**：这是在 main 尖上长出来的一笔，本来就该是 fast-forward；
+      # 被拒只说明这一轮算的基点已经旧了（有人在这几秒里合了新的），重来一轮就好。
+      - name: 在最新的 main 上重算，然后推上去
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git config user.name  "loment-artifacts"
+          git config user.email "artifacts@users.noreply.github.com"
+
+          # git 出错时会把**整条 URL（含 token）**打进 stderr。GitHub 会遮密钥，
+          # 但这里再遮一层：那条日志是要被人读的。
+          redact() { sed "s|${GH_TOKEN}|<GITHUB_TOKEN>|g" "$1"; }
+
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            echo "=== 第 $attempt 次尝试 ==="
+            log=$(mktemp)
+            if ! git fetch -q "$URL" main >"$log" 2>&1; then
+              redact "$log"; exit 1
+            fi
+            # **落在当前 main 的尖上再算**：清单记的是那一刻的树，基点旧了记进去就是错的。
+            git checkout -q --detach FETCH_HEAD
+
+            # **改号**：两条线同时取一个号，各自看 `origin/main` 都是空的，于是都取到 254、
+            # 两边都合进来 —— main 上就有了重号，而 `loment_docs_test` 会因此红。这里以
+            # **前一个 main** 为 base：只有这一次合并**新带进来**的那一份会被挪号，已经在
+            # base 上的一个不动（`loment_docs.py` §1）。
+            rc=0
+            python tools/loment_docs.py --fix --base HEAD~1 || rc=$?
+            case "$rc" in
+              0) : ;;
+              1) echo "::error::改号之后 docs/ 仍有重号"; exit 1 ;;
+              *) echo "::notice::这一轮没改号（rc=$rc）" ;;
+            esac
+
+            python tools/loment_seed.py --emit
+            python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
+            python tools/loment_manual.py --emit docs/manual
+            python tools/loment_release.py --emit
+            python tools/loment_release.py --checksums loment/build/SHA256SUMS
+
+            # **白名单守卫**：生成物命令只许动这些路径。动了别处 = 那几条命令坏了 = 该红，
+            # 而不是把一个来历不明的改动当成"生成物"推上 main。
+            # `docs/.*\.md` 那一支比 `emit` 那边宽：改号会**重写全路径引用**
+            # `docs/NNN-slug`，那些引用散在整个仓的 `.md` 里（`loment_docs.rewrite_full_refs`）。
+            stray=$(git diff HEAD --name-only | cut -c1- \
+              | grep -v -E '^loment/build/(selfhost_driver\.ll|release-manifest\.json|SHA256SUMS)$|^loment/tools/surface_data\.lomt$|^docs/manual/|^docs/.*\.md$' || true)
+            if [ -n "$stray" ]; then
+              echo "::error::重算动了**生成物白名单之外**的已跟踪文件 —— 拒绝提交。这通常意味着生成物命令坏了："
+              echo "$stray"
+              exit 1
+            fi
+
+            if [ -z "$(git status --porcelain)" ]; then
+              echo "生成物本来就是最新的 —— main 上什么都不用改。"
+              exit 0
+            fi
+
+            git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt \
+                    loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual docs
+            git commit -q -m "[生成物] 只有生成物：种子 + surface_data + 手册 + 发布清单 + SHA256SUMS（main 上重算）"
+
+            # **推的是分支，不是 main**（`#891`）。直推 main 之所以能成，靠的是
+            # `enforce_admins=false` —— 也就是"这一笔绕过必需检查"。而推进去的里面就有
+            # `loment/build/selfhost_driver.ll`（每次构建的起点）：那条路等于**一把凭据
+            # 可以在无人复核、无门禁的情况下改写信任根**。
+            #
+            # 改成：推到 `chore/emit-main`，开 PR，打开 auto-merge —— 门禁在 PR 上跑，
+            # 绿了它自己落地。**重算仍然不等门禁**（`needs:` / `workflow_run` 一个都没有，
+            # 见 `test_main_writer_is_not_behind_the_gate`）：等的是**合并**，不是计算。
+            BRANCH=chore/emit-main
+            if git push --force "$URL" "HEAD:refs/heads/$BRANCH" >"$log" 2>&1; then
+              open_n=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open \
+                         --json number --jq 'length' 2>/dev/null || echo 0)
+              if [ "$open_n" = "0" ]; then
+                gh pr create --repo "$REPO" --base main --head "$BRANCH" \
+                  --title "[生成物] 只有生成物：main 上重算的种子 / surface / 手册 / 清单 / SHA256SUMS" \
+                  --body "自动任务重算出来的生成物，**必须过门禁才落地**（#891）。这一笔以前直推 main，靠的是 enforce_admins=false 绕过必需检查。" || {
+                    echo "::error::分支推上去了，但开不了 PR —— 检查这个 job 的 permissions 是否还有 **pull-requests: write**"
+                    exit 1
+                  }
+              fi
+              # **门禁不会自己起**：`GITHUB_TOKEN` 开的 PR 不触发 `pull_request`。而
+              # `workflow_dispatch` 是那条规则的**例外** —— 显式派发一次，必需检查就落在
+              # 这个分支当前的 head SHA 上（`lom/ 禁区` 在 dispatch 下是 skipped，
+              # 而 skipped 是必需检查接受的三种状态之一）。
+              gh workflow run gate.yml --repo "$REPO" --ref "$BRANCH"
+              # 已开着就再来一次也无害（auto-merge 已开时 gh 会报一句，不当失败）。
+              gh pr merge --repo "$REPO" "$BRANCH" --auto --squash 2>/dev/null || \
+                echo "::warning::auto-merge 没打开（PR 已存在、或仓库关了 auto-merge）—— 这一笔要人合"
+              echo "推上去了：分支 $BRANCH，门禁已派发，PR 等它: $(git log --oneline -1)"
+              exit 0
+            fi
+            redact "$log"
+            # **权限被拒 ≠ main 动了**。前者重试三轮也不会变好，而日志原先一律说
+            # "main 又动了" —— 那会把一个配置错误伪装成并发，正是这个仓最不肯让的形状。
+            if grep -qiE 'denied to |Permission to |" ?403|401 Unauthorized|Bad credentials|Authentication failed' "$log"; then
+              echo "::error::推被**权限**拒了，不是 main 动了 —— 检查这个 job 的 permissions 是否还有 **contents: write**。上面是 git 的原文。"
+              exit 1
+            fi
+            echo "::warning::推被拒了（main 又动了）—— 重新落在最新的 main 上再算一轮"
+            attempt=$((attempt + 1))
+          done
+          echo "::error::连试 3 轮都没推上去（main 一直在动）—— 这一轮生成物没刷新"
+          exit 1

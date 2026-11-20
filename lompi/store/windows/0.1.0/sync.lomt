@@ -1,0 +1,125 @@
+// windows/sync.lomt — 内核对象同步：事件、互斥量、等待
+//
+// 为什么标准库要有它: Windows 上"等一件事"统一落在 `WaitForSingleObject` 上 ——
+// 进程、线程、事件、互斥量、信号量都是它。而事件对象（`CreateEventA`）是那套里
+// 最常用的一件：手动/自动复位两种语义，`SetEvent` 唤醒等待者。
+//
+// **边界**: 与 `kernel32` 同一条 —— PE 还没有 FFI（#1262）。这里只给声明面；
+// 另外**没有**包 `WaitForMultipleObjects`（对象数组要 C 数组，本语言今天没有），
+// 也没有安全属性（`LPSECURITY_ATTRIBUTES` 一律传空）。
+//
+// 约定:
+//   * 句柄 u64；失败返回 0（CreateEventA 失败给 NULL，不是 INVALID_HANDLE_VALUE）。
+//   * `ws_wait` 返回 `WS_WAIT_OBJECT_0` / `WS_WAIT_TIMEOUT` / `WS_WAIT_FAILED`。
+//   * 互斥量**不**做递归计数语义的封装 —— `ReleaseMutex` 的次数由调用方配平。
+//
+// 命名: 公开 ws_*, 内部 wsq_*。自检 test_sync_*。
+
+module sync
+
+choose runtime
+choose hosted
+
+/// 手动复位事件：`SetEvent` 后一直保持有信号，直到 `ResetEvent`。
+pub const WS_MANUAL_RESET: u32 = 1;
+/// 初始就有信号。
+pub const WS_INITIAL_SIGNALED: u32 = 1;
+/// 等待成功。
+pub const WS_WAIT_OBJECT_0: u32 = 0;
+/// 等待超时。
+pub const WS_WAIT_TIMEOUT: u32 = 258;
+/// 等待失败。
+pub const WS_WAIT_FAILED: u32 = 4294967295;
+/// 无限等待。
+pub const WS_INFINITE: u32 = 4294967295;
+
+extern fn CreateEventA(sa: ptr, manual: u32, initial: u32, name: ptr) -> u64;
+extern fn SetEvent(h: u64) -> u32;
+extern fn ResetEvent(h: u64) -> u32;
+extern fn CreateMutexA(sa: ptr, owner: u32, name: ptr) -> u64;
+extern fn ReleaseMutex(h: u64) -> u32;
+extern fn WaitForSingleObject(h: u64, ms: u32) -> u32;
+
+/// 建一个手动复位事件。
+pub fn ws_event_manual(initial: bool) -> u64 {
+    let sig: u32 = 0;
+    if initial {
+        sig = 1;
+    }
+    return CreateEventA(0 as ptr, WS_MANUAL_RESET, sig, 0 as ptr);
+}
+
+/// 建一个自动复位事件（等一个人醒）。
+pub fn ws_event_auto() -> u64 {
+    return CreateEventA(0 as ptr, 0 as u32, 0 as u32, 0 as ptr);
+}
+
+/// 唤醒等待者。
+pub fn ws_set(h: u64) -> bool {
+    return SetEvent(h) != 0;
+}
+
+/// 复位事件。
+pub fn ws_reset(h: u64) -> bool {
+    return ResetEvent(h) != 0;
+}
+
+/// 建一个未持有的互斥量。
+pub fn ws_mutex() -> u64 {
+    return CreateMutexA(0 as ptr, 0 as u32, 0 as ptr);
+}
+
+/// 释放一次互斥量。
+pub fn ws_release(h: u64) -> bool {
+    return ReleaseMutex(h) != 0;
+}
+
+/// 等一个句柄。`ms` 用 `WS_INFINITE` 表示一直等。
+pub fn ws_wait(h: u64, ms: u32) -> u32 {
+    return WaitForSingleObject(h, ms);
+}
+
+/// 等成了吗（不是超时也不是失败）。
+pub fn ws_ok(w: u32) -> bool {
+    return w == WS_WAIT_OBJECT_0;
+}
+
+/// 超时了吗。
+pub fn ws_timed_out(w: u32) -> bool {
+    return w == WS_WAIT_TIMEOUT;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sync_wait_constants() -> bool {
+    if WS_WAIT_OBJECT_0 != 0 || WS_WAIT_TIMEOUT != 258 {
+        return false;
+    }
+    if WS_WAIT_FAILED != 4294967295 || WS_INFINITE != 4294967295 {
+        return false;
+    }
+    return true;
+}
+
+fn test_sync_wait_predicates() -> bool {
+    if !ws_ok(WS_WAIT_OBJECT_0) {
+        return false;
+    }
+    if ws_ok(WS_WAIT_TIMEOUT) {
+        return false;
+    }
+    if !ws_timed_out(WS_WAIT_TIMEOUT) {
+        return false;
+    }
+    if ws_timed_out(WS_WAIT_FAILED) {
+        return false;
+    }
+    return true;
+}
+
+fn test_sync_event_flags() -> bool {
+    if WS_MANUAL_RESET != 1 || WS_INITIAL_SIGNALED != 1 {
+        return false;
+    }
+    return true;
+}

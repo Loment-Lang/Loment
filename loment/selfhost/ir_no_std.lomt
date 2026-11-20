@@ -1,0 +1,7 @@
+module ir_no_std
+
+choose no_std
+
+fn f() -> u32 {
+    return 1;
+}

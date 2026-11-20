@@ -55,14 +55,14 @@ function invocation(o) {
   const cmd = (opts.dapCommand || '').trim();
   if (cmd) {
     const args = Array.isArray(opts.dapArgs) ? opts.dapArgs.map(String) : [];
-    return { cmd, args, how: '配置的 loment.dapCommand' };
+    return { cmd, args, how: 'configured loment.dapCommand' };
   }
   const script = ((opts.dapScript || '').trim()
                   || findDap(opts.root)
                   || findDap(opts.fileDir));
   if (!script) {
-    return { error: '找不到 tools/loment_dap.py（可用设置 loment.dapScript 指定绝对路径，'
-                    + '或改用 loment.dapCommand/dapArgs）' };
+    return { error: 'Cannot find tools/loment_dap.py (set loment.dapScript to an absolute path,'
+                    + ' or use loment.dapCommand/dapArgs)' };
   }
   if (opts.platform === 'win32') {
     return { cmd: 'wsl', args: ['-e', 'python3', wslPath(script)], how: 'WSL + python3' };

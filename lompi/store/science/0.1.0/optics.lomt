@@ -1,0 +1,119 @@
+// std/optics.lomt — 几何光学与光子（double；角度用**弧度**）
+//
+// 为什么角度用弧度: 所有公式（斯涅尔、衍射、临界角）在数学上都是弧度；库再把
+// 度/弧度换算收成两个函数，避免每个调用点自己乘 π/180。
+//
+// 不做的: 偏振、干涉的相位叠加、厚透镜矩阵、色散曲线 —— 那些要材料数据或复数场；
+// 这里是"一条光线"的几何。
+//
+// 命名: 公开 op_*, 内部 op_*。自检 test_optics_*。
+
+module optics
+
+use f64
+use f64conv
+use mathf
+use "physics.lomt"
+
+const OP_DEG: u64 = 0x3F91DF46A2529D39;  // pi/180
+const OP_RAD: u64 = 0x404CA5DC1A63C1F8;  // 180/pi
+
+pub fn op_deg_to_rad(d: u64) -> u64 {
+    return f64_mul(d, OP_DEG);
+}
+
+pub fn op_rad_to_deg(r: u64) -> u64 {
+    return f64_mul(r, OP_RAD);
+}
+
+/// 斯涅尔定律：n1 sin θ1 = n2 sin θ2，返回 θ2（弧度）。全反射返回 NaN。
+pub fn op_snell(n1: u64, n2: u64, theta1: u64) -> u64 {
+    if f64_le(n2, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    let s: u64 = f64_div(f64_mul(n1, mathf_sin(theta1)), n2);
+    if f64_gt(f64_abs(s), F64_ONE) {
+        return 0x7FF8000000000000; // 全反射
+    }
+    return mathf_asin(s);
+}
+
+/// 临界角 asin(n2/n1)（n1 > n2 才存在）。
+pub fn op_critical_angle(n1: u64, n2: u64) -> u64 {
+    if f64_le(n1, F64_POS_ZERO) || f64_ge(n2, n1) {
+        return 0x7FF8000000000000;
+    }
+    return mathf_asin(f64_div(n2, n1));
+}
+
+/// 薄透镜：1/f = 1/do + 1/di，返回 di。do == f 返回 +inf。
+pub fn op_lens_image(f: u64, do_: u64) -> u64 {
+    if f64_eq(do_, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    let inv: u64 = f64_sub(f64_div(F64_ONE, f), f64_div(F64_ONE, do_));
+    if f64_eq(inv, F64_POS_ZERO) {
+        return 0x7FF0000000000000;
+    }
+    return f64_div(F64_ONE, inv);
+}
+
+/// 薄透镜放大率 m = -di/do。
+pub fn op_magnification(f: u64, do_: u64) -> u64 {
+    let di: u64 = op_lens_image(f, do_);
+    if f64_eq(do_, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    return f64_neg(f64_div(di, do_));
+}
+
+/// 光栅/狭缝衍射：d sin θ = m λ，返回 θ（弧度）。|mλ/d| > 1 返回 NaN。
+pub fn op_diffraction(lambda: u64, d: u64, m: u64) -> u64 {
+    if f64_eq(d, F64_POS_ZERO) {
+        return 0x7FF8000000000000;
+    }
+    let s: u64 = f64_div(f64_mul(m, lambda), d);
+    if f64_gt(f64_abs(s), F64_ONE) {
+        return 0x7FF8000000000000;
+    }
+    return mathf_asin(s);
+}
+
+pub fn op_frequency(lambda: u64) -> u64 {
+    if f64_eq(lambda, F64_POS_ZERO) {
+        return 0x7FF0000000000000;
+    }
+    return f64_div(PH_C, lambda);
+}
+
+pub fn op_photon_energy(lambda: u64) -> u64 {
+    if f64_eq(lambda, F64_POS_ZERO) {
+        return 0x7FF0000000000000;
+    }
+    return f64_div(f64_mul(PH_H, PH_C), lambda);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_optics_snell_normal() -> bool {
+    // 垂直入射：θ2 = 0
+    let th: u64 = op_snell(F64_ONE, 0x3FF8000000000000, F64_POS_ZERO); // n2=1.5
+    return f64_eq(th, F64_POS_ZERO);
+}
+
+fn test_optics_critical() -> bool {
+    // 玻璃->空气：asin(1/1.5) ≈ 0.729727656
+    let th: u64 = op_critical_angle(0x3FF8000000000000, F64_ONE);
+    let d: u64 = f64_abs(f64_sub(th, 0x3FE759EDD04F68DE));
+    return f64_lt(d, 0x3E7AD7F29ABCAF48); // 1e-7
+}
+
+fn test_optics_lens() -> bool {
+    // f=10, do=30 -> di=15；m=-0.5
+    let f: u64 = 0x4024000000000000;  // 10
+    let do_: u64 = 0x403E000000000000; // 30
+    let di: u64 = op_lens_image(f, do_);
+    let m: u64 = op_magnification(f, do_);
+    return f64_eq(di, 0x402E000000000000) // 15
+        && f64_eq(m, 0xBFE0000000000000); // -0.5
+}

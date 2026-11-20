@@ -1,0 +1,58 @@
+// os/user.lomt — 进程与用户的**身份** (我是谁)
+//
+// 为什么需要它: 进程一开口就要回答"我是谁" —— 我是哪个进程 (`getpid`)、谁生了我
+// (`getppid`)、我以谁的身份在跑 (`getuid`/`geteuid`)。这几个数在**写日志、拼临时文件名、
+// 判断该不该要权限**时反复要用, 而它们每一个都是一条系统调用。
+//
+// 与 std/env.lomt 的分工 (不是重复): 那边是**解**环境块 —— 一块已经拿到的只读字节;
+// 这里是**拿**身份 —— 一个系统调用换一个数。两边都缺, 谁也不包含谁。
+//
+// 边界 (刻意划的):
+//   * 只读身份, **不改身份** —— `setuid`/`setgid` 在表上, 但故意没包: 一个库不该有
+//     "把进程降权/提权"的入口, 那是**调用方的决定**, 不是库的便利。
+//   * 号是 **x86-64 Linux** 的; PE 上除那 8 个之外一律返回 -1 —— 本模块的函数在 PE 上
+//     是**真的失败**, 不是静默。
+//   * **本模块没有自检**: 它全是系统调用。自检那条路 (`loment.py test`) 是把 Loment
+//     译成 Rust 跑, 而那里的 `syscall4` 是 Linux 的 `asm!("syscall")` —— 在 Windows 上
+//     它照样"返回一个数" (实测: 三条自检过两条), **那个数是巧合不是身份**。
+//     所以真实行为一律由 `tools/loment_os_test.py` 判, 自检不在这里假装。
+//   * 本文件不 `use` 任何模块 (与 internet 包同一纪律)。
+//
+// 命名: 公开 user_*, 内部 userp_*。
+
+module user
+
+/// getpid。
+pub fn user_getpid() -> u64 {
+    return syscall4(39, 0, 0, 0) as u64;
+}
+
+/// getppid。
+pub fn user_getppid() -> u64 {
+    return syscall4(110, 0, 0, 0) as u64;
+}
+
+/// 真实 uid。
+pub fn user_getuid() -> u64 {
+    return syscall4(102, 0, 0, 0) as u64;
+}
+
+/// 有效 uid。
+pub fn user_geteuid() -> u64 {
+    return syscall4(107, 0, 0, 0) as u64;
+}
+
+/// 真实 gid。
+pub fn user_getgid() -> u64 {
+    return syscall4(104, 0, 0, 0) as u64;
+}
+
+/// 有效 gid。
+pub fn user_getegid() -> u64 {
+    return syscall4(108, 0, 0, 0) as u64;
+}
+
+/// 让出 CPU (`sched_yield`)。忙等里插一条, 比空转礼貌。
+pub fn user_yield() -> i64 {
+    return syscall4(24, 0, 0, 0);
+}

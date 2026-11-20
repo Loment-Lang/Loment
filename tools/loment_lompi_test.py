@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 import lompi_sync  # noqa: E402
@@ -28,10 +29,14 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC_DIR = ROOT / "lompi"
 ENTRY = SRC_DIR / "lompi.lomt"
 IS_WIN = sys.platform == "win32"
-#: 随包发行的 lompi 版本 —— 用户 2026-09-15 定「完全稳定 0.1.0」。
+#: 随包发行的 **lompi 自己的版本**（命令行的那个号）。
 #: 它**同时写在 lpi_cli.lomt 里**（那是真源），这条常量的作用是：**改版本要过一次手动确认**，
 #: 不能悄悄漂（红了就说明被测的那个版本号 ≠ 我们说好要发的那个）。
-STABLE_VERSION = "0.1.0"
+LPI_VERSION = "0.2.0"
+#: 随包 store 里 `<name>/<version>/` 那一层的**包版本** —— 是 std/host 这两个库自己的版本,
+#: 不是 lompi 的版本。两者今天都是 0.1.x, 但**不是一回事**: 升 lompi 不该动它, 动了就得
+#: 同时改 `loment_release.GLOBS` 与 `loment/tools/lomrel.lomt` 里那两个写死的 glob。
+STORE_VERSION = "0.1.0"
 TESTS: list[tuple[str, object]] = []
 
 
@@ -69,8 +74,11 @@ def _build_entry(stem: str) -> Path | None:
         return None
     import loment_dist  # noqa: E402
     stage1 = loment_dist.build_stage1()
-    # 自举镜按 **CWD** 解析路径形式的 `use "lpi_cli.lomt"` —— 必须在 lompi/ 里编。
-    r = subprocess.run([str(stage1), f"{stem}.lomt"], cwd=str(SRC_DIR),
+    # 从**仓根**编 (入口写 `lompi/<stem>.lomt`)。路径形式的 `use "lpi_cli.lomt"` 会落到
+    # 导入文件所在目录; 而自举镜的**开发 checkout** store 根是 CWD 相对的 `lompi/store`
+    # —— `lpi_cli` 现在按名字取 `internet` 的模块 (issue #375), 所以在 lompi/ 里编会报
+    # "the name import does not resolve"。
+    r = subprocess.run([str(stage1), f"lompi/{stem}.lomt"], cwd=str(ROOT),
                        capture_output=True, shell=False, timeout=300)
     if r.returncode != 0 or not r.stdout:
         raise AssertionError(f"stage1 编 {stem} 失败: {r.stderr[-300:]!r}")
@@ -119,6 +127,175 @@ def test_reference_implementation_accepts_lompi():
     deps = lomentc.resolve_deps(mod, ROOT, SRC_DIR, entry=ENTRY)
     errs = lomentc.check(mod, deps=deps)
     assert not errs, f"参考实现检查不过: {errs[:3]}"
+
+
+#: issue #375 点名的那几个"lpi_cli 自带一份"的联网函数。前五个在本基线里真的存在并被
+#: 这一次删掉; 后三个 (状态行 / Content-Length / 段校验) 在 issue 写作时的那条线里存在,
+#: 这里一并**钉成不许出现** —— 重新长出来就是又开了第二份实现。
+_REMOVED_NET_FNS = (
+    "net_tcp4", "net_connect4", "net_send", "net_recv", "net_hdr_end",
+    "net_status_is_200", "net_content_length", "net_seg_ok",
+)
+
+
+@test
+def test_network_primitives_come_from_the_internet_package():
+    """#375: 联网只有 `internet` 一份实现 —— lpi_cli 不再自带传输 / 报文框架 / URL 拆解。
+
+    两半一起钉：
+
+    * **源码扫描**：被删掉的那几个 `fn` 一个都不许回来; `use tcp/http/uri/ip` 必须在;
+      旧的"头里某处出现 ` 200`"那种子串判定也不许回来。
+    * **依赖图**：按名字解析出来的单元里，`tcp`/`http`/`uri`/`ip`/`sock` 都真的住在
+      `lompi/store/internet/0.1.0/` —— 不是别处一份同名文件碰巧顶上。
+
+    留在 lpi_cli 的只有**编排**（`net_http_get` / `net_parse_http`）与一小块 `net_crlf`：
+    `http_req_build` 的形参是 `str`（字面量），而 lompi 的路径来自命令行，只能是 `ptr+len`。
+    """
+    src = (SRC_DIR / "lpi_cli.lomt").read_text(encoding="utf-8")
+    for name in _REMOVED_NET_FNS:
+        assert not re.search(rf"\bfn {name}\s*\(", src), \
+            f"lpi_cli 还留着 {name} 自己的实现 —— 又回到了两份"
+    for mod in ("tcp", "http", "uri", "ip"):
+        assert re.search(rf"^use {mod}\s*$", src, re.M), f"lpi_cli 没有按名字取 {mod}"
+    assert '" 200"' not in src, "旧的子串 200 判定回来了 —— 用 http_status_line"
+    m = re.search(r"pub fn net_http_get\(.*?\n\}", src, re.S)
+    assert m, "net_http_get 不见了"
+    assert "http_status_line(" in m.group(0), "net_http_get 没有走包里的状态行解析"
+    assert "http_body_start(" in m.group(0), "net_http_get 没有走包里的体起点"
+    assert "tcp_connect4(" in m.group(0) and "tcp_send_all(" in m.group(0), \
+        "net_http_get 没有走包里的传输层"
+
+    mod = lomentc.load(ENTRY)
+    deps = lomentc.resolve_deps(mod, ROOT, SRC_DIR, entry=ENTRY)
+    pkg = SRC_DIR / "store" / "internet" / "0.1.0"
+    for name in ("tcp", "http", "uri", "ip", "sock"):
+        hit = [d for d in deps if d.name == name]
+        assert hit, f"依赖图里没有 {name}"
+        assert hit[0].src and Path(hit[0].src).resolve().parent == pkg.resolve(), \
+            f"{name} 不是从 internet 包解析来的: {getattr(hit[0], 'src', None)}"
+
+
+#: #309/#375 的共享语料。以前它喂给两份实现（lpi_cli::net_hdr_end 与
+#: internet::http_hdr_end）做孪生对拍; 副本删掉之后，这一层比的是**唯一实现与
+#: CPython 的字节原语** —— 证明的是"这份实现对"，不只是"两边一致"。
+_TWIN_CORPUS = [
+    b"X: 1\r\n\r\nbody",
+    b"X: 1\n\nbody",
+    b"HTTP/1.0 200 OK\r\nX: 1\r\n\r\nBODY\r\n\r\nTAIL",
+    b"HTTP/1.0 200 OK\nX: 1\n\nBODY\r\n\r\nTAIL",
+    b"A\r\n\r\n",
+    b"no terminator here",
+    b"\r\n\r\n",
+    b"\n\n",
+    b"X: 1\r\nY: 2\n\nZ\r\n\r\n",
+    b"",
+]
+
+
+def _hdr_end_oracle(blob: bytes) -> int | None:
+    """CPython 的字节原语：两种空行结束形式**一起看、谁先出现谁赢**。
+
+    这不是把 Loment 的循环抄一遍 —— 用的是 `bytes.find` (C 实现)；旧实现"先在全缓冲里
+    找 CRLFCRLF、找不到才退到 LFLF"会让 LF-only 的头把 body 里的 CRLFCRLF 当成头结束，
+    语料 3/8 立刻把它抓出来。
+    """
+    hits = [p for p in (blob.find(b"\r\n\r\n"), blob.find(b"\n\n")) if p >= 0]
+    return min(hits) if hits else None
+
+
+@test
+def test_hdr_end_agrees_with_the_reference_oracle():
+    """#309 的孪生对拍在 #375 之后的形态：**唯一实现 vs CPython 的字节原语**。
+
+    副本已经删掉，不能再拿两份 Loment 实现互比 —— 那只能证明"两边一起对/一起错"。
+    这里把包里的 `http_hdr_end` 在共享语料上跑一遍，逐个对 `bytes.find` 的最小值：
+    它证明的是**这一份实现对**，而不只是"没有漂"。（lpi_cli 现在调的就是这一份。）
+    """
+    prelude = """
+fn w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn wd(v: u32) -> u32 {
+    let b: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 { store8(b, 0, 48 as u8); n = 1; }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn hx(s: str, out: ptr) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = hv(str_byte(s, i * 2));
+        let lo: u32 = hv(str_byte(s, i * 2 + 1));
+        store8(out, i, ((hi * 16 + lo) & 255) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn hv(c: u32) -> u32 {
+    let i: u32 = 0;
+    let tbl: str = "0123456789abcdef";
+    while i < 16 {
+        if str_byte(tbl, i) == c { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+"""
+    body = []
+    for i, blob in enumerate(_TWIN_CORPUS):
+        body.append(f"    let b{i}: ptr = alloc(256);")
+        body.append(f'    let n{i}: u32 = hx("{blob.hex()}", b{i});')
+        body.append(f"    let r{i}: u32 = http_hdr_end(b{i}, 0, n{i});")
+        body.append(f'    w("H|{i}|");')
+        body.append(f'    if r{i} == HTTP_NO {{ w("N\\n"); }} else {{ wd(r{i}); w("\\n"); }}')
+    body.append("    syscall4(60, 0, 0, 0);")
+    body.append("}")
+    src = "\n".join(["module hdr_probe", "choose runtime", "use http", prelude,
+                     "fn _start() {"]) + "\n" + "\n".join(body) + "\n"
+    with tempfile.TemporaryDirectory(prefix="hdr-") as tds:
+        td = Path(tds)
+        probe = td / "hdr_probe.lomt"
+        probe.write_text(src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(probe)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=probe)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"头结束探针检查不过: {errs[:3]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+        raw = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(ll)[0]
+        exe = td / ("hdr_probe" + (".exe" if IS_WIN else ".elf"))
+        exe.write_bytes(raw)
+        exe.chmod(0o755)
+        out = subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", shell=False, timeout=120).stdout
+    got = {}
+    for line in out.splitlines():
+        if line.startswith("H|"):
+            _, i, v = line.split("|")
+            got[int(i)] = None if v == "N" else int(v)
+    assert len(got) == len(_TWIN_CORPUS), f"探针输出不全: {out!r}"
+    want = {i: _hdr_end_oracle(b) for i, b in enumerate(_TWIN_CORPUS)}
+    diff = [f"语料[{i}] 实现={got[i]!r} 参考={want[i]!r}"
+            for i in want if got[i] != want[i]]
+    assert not diff, "头结束与参考原语不一致:\n" + "\n".join(diff)
+    print(f"      http_hdr_end 在 {len(_TWIN_CORPUS)} 条共享语料上与 CPython bytes.find 一致")
 
 
 @test
@@ -175,6 +352,71 @@ def test_index_lists_the_fixture_store():
 
 
 @test
+def test_index_handles_module_references_in_the_shipped_store():
+    """随包 store 里 `host` 用**裸名字**引用 std 的模块 (`numfmt`/`out`/`mem`) ——
+    `lompi index` 必须认得出这两个包, 并且 `host` 真的依赖 `std`。
+
+    2026-10-09 实测的缺口: 名字边一律被当成**包边**, 而 `numfmt`/`out`/`mem` 是 std 的
+    **模块** —— 于是 index 报 `missing dependency in store: outfmt` (那串还叠了一个没补
+    NUL 的消息截断 bug)。这条**不经过 zip**: 端到端那条要 `loment/dist/` 里有归档才跑,
+    CI 从不摆, 于是整条在 CI 上跳过去。这里直接对仓内那棵 store 跑, 补上那个盲区。
+    """
+    rc, out = _run(["index", "store"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    assert rc == 0, f"index 退出 {rc}: {out[:300]}"
+    assert f"{len(STORE_MODULES)} package(s) in store" in out, out
+    for pkg in STORE_MODULES:
+        assert re.search(rf"^{pkg} \S+ [0-9a-f]{{16}}$", out, re.M), \
+            f"index 没报出 {pkg}: {out}"
+    # 模块引用必须真的落成一条包边 —— 不是被静默丢掉
+    rc2, out2 = _run(["tree", "store", "host"])
+    assert rc2 == 0, f"tree 退出 {rc2}: {out2[:300]}"
+    assert re.search(r"^\s+std@", out2, re.M), f"host 的依赖边里没有 std:\n{out2}"
+
+
+@test
+def test_obj_store_is_content_addressed():
+    """**粒度 B 的 store 那半边（`docs/212` §5 B）**：`lompi obj add/get` 按**内容**存取对象。
+
+    端机**不需要 clang** —— 拿到那串 sha256 就能取回字节，再 `loment build app.lomt --link it.o`。
+    判据四样，缺一不可：
+      * `add` 打出的十六进制**等于**那个文件的 sha256，且**两次一样**（幂等 == 内容寻址）；
+      * store 里出现 `obj-<hex>.o`，字节与输入**逐字节相同**；
+      * `get --out` 取回来的与输入**逐字节相同**；
+      * 一个不存在的地址**硬拒**（rc≠0 + 点名）—— 不静默写个空文件出来。
+
+    对象用 fixture 里的一个真文件（store 里存什么字节都行 —— 这一格测的是**寻址机制**，
+    不是对象本身）。写完**清掉**那个 `obj-…o`，免得后面的 `index` 判据看到多余成员。
+    """
+    import hashlib as _h
+
+    src_rel = "fixture/store/mathutil/0.1.0/mathutil.lomt"
+    blob = (SRC_DIR / src_rel).read_bytes()
+    want = _h.sha256(blob).hexdigest()
+    slot = SRC_DIR / "fixture/store" / f"obj-{want}.o"
+    outobj = SRC_DIR / "objroundtrip-tmp.o"
+    try:
+        rc, out = _run(["obj", "add", "fixture/store", src_rel])
+        if rc == -1:
+            print(f"      SKIP: {_skip}")
+            return
+        assert rc == 0 and want in out, f"add 失败: rc={rc} out={out!r}"
+        rc2, out2 = _run(["obj", "add", "fixture/store", src_rel])
+        assert rc2 == 0 and want in out2, f"第二次 add 失败或哈希不同: rc={rc2} out={out2!r}"
+        assert slot.exists() and slot.read_bytes() == blob, "store 里那份字节与输入不符"
+        rc3, out3 = _run(["obj", "get", "fixture/store", want, "--out", "objroundtrip-tmp.o"])
+        assert rc3 == 0 and outobj.read_bytes() == blob, f"get 回环不符: rc={rc3} {out3[:160]}"
+        rc4, out4 = _run(["obj", "get", "fixture/store", "deadbeef"])
+        assert rc4 != 0 and "no such object" in out4, f"缺地址没硬拒: rc={rc4} {out4[:160]}"
+    finally:
+        slot.unlink(missing_ok=True)
+        outobj.unlink(missing_ok=True)
+    print("      obj add/get: 内容寻址 + 逐字节回环 + 缺地址硬拒")
+
+
+@test
 def test_check_has_discriminating_power():
     """`lompi check` 必须**分得清好坏** —— 合法库退 0 说 OK，坏库退 1 说 BAD。
 
@@ -210,25 +452,825 @@ def test_show_reports_the_content_identity():
 
 
 @test
+def test_foreign_package_kind_is_checked_hashed_and_planned():
+    """A foreign package is recognised by `foreign.lomp`, its jar is in the
+    identity, and `show` says `kind: foreign` (docs/282/283; docs/222 §5).
+
+    This is the lompi-side half of the Java AOT path: without it `install`
+    would copy only the `.lomt` and the jar would silently disappear.
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lompi-foreign-") as t:
+        td = Path(t)
+        pkg = td / "store" / "mathlib" / "1.0.0"
+        pkg.mkdir(parents=True)
+        (pkg / "mathlib.lomt").write_text(
+            "module mathlib\n\npub fn f() -> i32 { return 1; }\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.lomp").write_text(
+            'module foreign\n\npub fn name() -> str { return "mathlib"; }\n'
+            'pub fn version() -> str { return "1.0.0"; }\n'
+            'pub fn kind() -> str { return "java"; }\n',
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.txt").write_text(
+            "# lompi foreign v1\nkind java\nartifact jar lib.bin\n",
+            encoding="utf-8", newline="\n")
+        # 真的是一只 zip：`plan` 会读它的中央目录做闭包级类名检查（#1055）。
+        import zipfile
+        with zipfile.ZipFile(pkg / "lib.bin", "w") as z:
+            z.writestr("com/example/Math.class", b"\xca\xfe\xba\xbe\x00\x00\x00\x34")
+
+        rc, out = _run(["check", str(pkg)])
+        assert rc == 0 and "foreign manifest" in out, out[:240]
+
+        rc, out = _run(["hash", str(pkg)])
+        assert rc == 0 and "files: 4" in out, out[:240]
+
+        rc, out = _run(["show", str(td / "store"), "mathlib"])
+        assert rc == 0 and "kind:    foreign" in out, out[:240]
+
+        rc, out = _run(["plan", str(td / "store"), "mathlib",
+                        "--into", str(td / "into")])
+        assert rc == 0 and "mathlib@1.0.0" in out, out[:240]
+        print("      foreign: check/hash/show/plan")
+
+
+def _jvm_pkg(store: Path, name: str, classes: list[str], dep: str | None) -> None:
+    """写一个 `kind java` 的外源包：入口 .lomt + foreign.lomp + foreign.txt + lib.jar。"""
+    import hashlib
+    import zipfile
+    pkg = store / name / "1.0.0"
+    pkg.mkdir(parents=True)
+    use = f"use {dep}\n" if dep else ""
+    (pkg / f"{name}.lomt").write_text(
+        f"module {name}\n\n{use}pub fn {name}_f() -> i32 {{ return 1; }}\n",
+        encoding="utf-8", newline="\n")
+    (pkg / "foreign.lomp").write_text(
+        f'module foreign\n\npub fn name() -> str {{ return "{name}"; }}\n'
+        f'pub fn version() -> str {{ return "1.0.0"; }}\n'
+        f'pub fn kind() -> str {{ return "java"; }}\n',
+        encoding="utf-8", newline="\n")
+    jar = pkg / "lib.jar"
+    with zipfile.ZipFile(jar, "w") as z:
+        for c in classes:
+            z.writestr(c, b"\xca\xfe\xba\xbe\x00\x00\x00\x34")
+    sha = hashlib.sha256(jar.read_bytes()).hexdigest()
+    (pkg / "foreign.txt").write_text(
+        "# lompi foreign v1\nkind java\n"
+        f"artifact jar lib.jar {sha}\n",
+        encoding="utf-8", newline="\n")
+
+
+def _identity(store: Path, name: str) -> str:
+    rc, out = _run(["show", str(store), name])
+    assert rc == 0, out[:240]
+    m = re.search(r"^\s*id:\s+([0-9a-f]{64})\s*$", out, re.M)
+    assert m, out[:240]
+    return m.group(1)
+
+
+@test
+def test_duplicate_class_rejected():
+    """#1055: JVM 只有一个平的类命名空间。
+
+    两个实例各带一份 `com/example/Shared.class` 时，构建期只能挑一份 —— 那正是
+    内容身份要防的静默合并，lompi 的"多版本共存"对 JVM 不成立。所以 plan/install
+    必须拒绝，并把**两个身份**都打出来（只说"重复"不够，用户要知道删哪一个）。
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lompi-jvm-") as t:
+        td = Path(t)
+        store = td / "store"
+        _jvm_pkg(store, "liba", ["com/example/Shared.class", "com/example/A.class"], None)
+        _jvm_pkg(store, "libb", ["com/example/Shared.class", "com/example/B.class"], "liba")
+
+        rc, out = _run(["plan", str(store), "libb", "--into", str(td / "into")])
+        assert rc != 0, out[:400]
+        assert "com/example/Shared.class" in out, out[:400]
+        ida, idb = _identity(store, "liba"), _identity(store, "libb")
+        assert ida in out and idb in out, f"两个身份没有都打出来: {out[:400]}"
+
+        # 对照组：类名不撞时同一条依赖链装得下去（检查不是"见到 jar 就拒"）。
+        _jvm_pkg(store, "libc", ["com/example/Only.class"], "liba")
+        rc, out = _run(["plan", str(store), "libc", "--into", str(td / "into")])
+        assert rc == 0 and "package instance(s) in the closure" in out, out[:400]
+        print("      jvm: duplicate class refused with both identities; disjoint jars pass")
+
+
+@test
+def test_a_published_java_package_passes_lompi_check():
+    """The publisher-side tool emits a `kind java` package lompi accepts.
+
+    This is the install half of the epic: the AOT compile happens where the jar
+    is published; the consumer's `lompi` only copies and verifies.
+    """
+    rc, out = _run(["version"])
+    if rc == -1:
+        print(f"      SKIP: {_skip}")
+        return
+    import loment_java_pkg
+    with tempfile.TemporaryDirectory(prefix="lompi-javapkg-") as t:
+        td = Path(t)
+        jar = ROOT / "tools" / "fixtures" / "java" / "shapelib.jar"
+        pkg = loment_java_pkg.build_package(jar, "shapelib", "1.0.0", td / "store")
+
+        rc, out = _run(["check", str(pkg)])
+        assert rc == 0 and "foreign manifest" in out, out[:400]
+
+        rc, out = _run(["plan", str(td / "store"), "shapelib",
+                        "--into", str(td / "deps")])
+        assert rc == 0 and "package instance(s)" in out, out[:400]
+
+        link = (pkg / "link.txt").read_text(encoding="utf-8")
+        sha = __import__("hashlib").sha256(
+            (pkg / "shapelib.ll").read_bytes()).hexdigest()
+        assert f"ir shapelib.ll {sha}" in link, link
+        assert "runtime jrt 0.1.0" in link, link
+        print("      java package: check + plan + link.txt")
+
+
+@test
 def test_version_command_and_the_shipped_version_agree():
     """`lompi version` 打的那个号，必须是我们说好要发的那个。
 
     "检测最新的"落在两条上：① 版本号从**源码真源** `lpi_cli.lomt` 里解出来（不是这里
-    另抄一份）；② 它与 `lompi version` 的实际输出一致。再拿 STABLE_VERSION 钉一次 ——
+    另抄一份）；② 它与 `lompi version` 的实际输出一致。再拿 LPI_VERSION 钉一次 ——
     改版本要过一次手动确认，不能悄悄漂。
     """
     src = (SRC_DIR / "lpi_cli.lomt").read_text(encoding="utf-8")
     m = re.search(r"lompi (\d+\.\d+\.\d+) - package manager", src)
     assert m, "在 lpi_cli.lomt 里找不到版本串（真源变了？）"
     found = m.group(1)
-    assert found == STABLE_VERSION, (
-        f"源码里的版本是 {found}，本判据钉的是 {STABLE_VERSION} —— "
-        f"要发新版就改 STABLE_VERSION 并重出包")
+    assert found == LPI_VERSION, (
+        f"源码里的版本是 {found}，本判据钉的是 {LPI_VERSION} —— "
+        f"要发新版就改 LPI_VERSION 并重出包")
     rc, out = _run(["version"])
     if rc == -1:
         print(f"      SKIP: {_skip}")
         return
-    assert rc == 0 and out.strip() == f"lompi {STABLE_VERSION}", out[:120]
+    assert rc == 0 and out.strip() == f"lompi {LPI_VERSION}", out[:120]
+
+
+# ---------------------------------------------------------------- 自己联网 (0.2.0)
+
+def _serve_registry(root: Path, index: str, files: dict[str, bytes]) -> tuple[object, int]:
+    """起一个**真的** HTTP 服务器（127.0.0.1，端口由内核分配）喂一份注册表。
+
+    为什么真的起服务器而不是打桩：这条判据要证的正是"lompi 自己把 socket 用起来"——
+    打桩等于把被测的那一段换掉。索引与文件都写在 root 下，服务器直接 serve 它。
+    """
+    import http.server
+    import socketserver
+    import threading
+
+    (root / "lompi-index.txt").write_text(index, encoding="utf-8", newline=chr(10))
+    for rel, data in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(root), **k)
+
+        def log_message(self, *a):            # 别把每个请求打到 stderr 上
+            pass
+
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, httpd.server_address[1]
+
+
+@test
+def test_fetch_pulls_the_registry_over_http_itself():
+    """**0.2.0 的正题**：`lompi fetch` 自己联网把注册表拉下来（`docs/236`）。
+
+    起一个真的 HTTP 服务器，喂一份索引 + 两个文件；lompi 必须 GET 索引、逐个 GET 文件、
+    **校验索引里写着的 sha256**、落到 `<root>/cache/<slug>/<name>/<version>/`。
+
+    边界也一起钉住：`https://` 与主机名**照旧打印计划**（TLS / 解析器不在工具链里），
+    这条判据不去要那两样东西 —— 要的是"明文 http + IPv4 字面量这条路真的通了"。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    exe = _build()
+    with tempfile.TemporaryDirectory(prefix="reg-") as td:
+        reg = Path(td)
+        # 两个文件（一个包的一对）
+        f1 = b"module mathutil\npub fn twice(x: u64) -> u64 { return x * 2; }\n"
+        f2 = b"name = mathutil\nversion = 0.1.0\n"
+        h1 = hashlib.sha256(f1).hexdigest()
+        h2 = hashlib.sha256(f2).hexdigest()
+        index = (f"# lompi registry index (test)\n"
+                 f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+                 f"mathutil 0.1.0 mathutil/0.1.0/pkg.lomp {h2}\n")
+        httpd, port = _serve_registry(reg, index, {
+            "mathutil/0.1.0/mathutil.lomt": f1,
+            "mathutil/0.1.0/pkg.lomp": f2,
+        })
+        try:
+            # 落盘那一半撞上 PE 的真边界：**没有 mkdir**（`sys_can_mkdir()` = false）。
+            # 所以判据分两步，而且**不猜 lompi 的 root 规则**（那是 `cfg_root` 的事）：
+            # 先跑一次，拿它自己打出来的 `mkdir -p <目录>` 提示照做，再跑一次。
+            url = f"http://127.0.0.1:{port}"
+            _, out0 = _run(["fetch", "--registry", url])
+            for line in out0.splitlines():
+                if line.startswith("lompi: make it first:"):
+                    Path(line.split("mkdir -p ", 1)[1].strip()).mkdir(parents=True, exist_ok=True)
+            rc, out = _run(["fetch", "--registry", url])
+            assert rc == 0, out[:300]
+            assert "fetched mathutil 0.1.0" in out, f"fetch 没去拉: {out[:400]!r}"
+            assert "sha256 ok" in out, f"没校验摘要: {out[:400]!r}"
+            # 落到哪儿**由 lompi 报**（root 由 argv[0] 推、规则在 `cfg_root`，判据不猜）
+            dest = None
+            for line in out.splitlines():
+                if line.startswith("lompi: registry fetched into "):
+                    dest = Path(line.split("into ", 1)[1].strip())
+            assert dest and dest.is_dir(), f"没报落点或不落盘: {out[:400]!r}"
+            got = sorted(dest.rglob("mathutil.lomt"))
+            assert got, f"没有落盘: {sorted(dest.rglob('*'))[:6]}"
+            assert got[0].read_bytes() == f1, got[0]
+            assert sorted(p.name for p in got[0].parent.iterdir()) == ["mathutil.lomt", "pkg.lomp"], \
+                sorted(p.name for p in got[0].parent.iterdir())
+            # ---- 摘要对不上时必须**拒** ----
+            bad_index = index.replace(h1, "0" * 64)
+            httpd.shutdown()
+            httpd2, port2 = _serve_registry(reg, bad_index, {
+                "mathutil/0.1.0/mathutil.lomt": f1,
+                "mathutil/0.1.0/pkg.lomp": f2,
+            })
+            try:
+                for p in dest.rglob("mathutil.lomt"):
+                    p.unlink()
+                _, out2 = _run(["fetch", "--registry", f"http://127.0.0.1:{port2}"])
+                assert "sha256 mismatch" in out2, f"没说清是摘要对不上: {out2[:300]!r}"
+                left = sorted(dest.rglob("mathutil.lomt"))
+                assert not left, f"摘要对不上却落盘了: {left}"
+            finally:
+                httpd2.shutdown()
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_fetch_prints_the_plan_for_https_and_hostnames():
+    """不让"能联网"这句话盖住边界：https 与主机名**照旧打印计划**，而且**说清理由**。"""
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["fetch", "--registry", "https://github.com/you/loment-libs"])
+    assert rc == 0 and "git clone --depth 1" in out, out[:300]
+    assert "TLS" in out, f"https 那条没说清是 TLS 缺: {out[:300]!r}"
+    rc2, out2 = _run(["fetch", "--registry", "http://libs.example.com/x"])
+    assert rc2 == 0 and "git clone --depth 1" in out2, out2[:300]
+    assert "resolver" in out2, f"主机名那条没说清是解析器缺: {out2[:300]!r}"
+
+
+@test
+def test_registry_index_fields_cannot_escape_the_cache():
+    """#981: 索引里的 `name` / `version` / `path` 是**不可信输入**。
+
+    注册表（或任何能回答那个明文 HTTP 请求的东西）不能靠 `../..`、盘符或保留名让
+    lompi 写到缓存之外、或替换掉工具链自带的包。每一条都必须**整份拒掉**并点名原因，
+    而不是跳过该行继续装别的。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    body = b"module ok\n"
+    h = hashlib.sha256(body).hexdigest()
+    cases = [
+        (f"../.. pwned pwned/lompi.txt {h}", "unsafe package name"),
+        (f"std 9.9.9 std/9.9.9/std.lomt {h}", "shadows the toolchain"),
+        (f"ok 1.0.0 ../../evil.lomt {h}", "unsafe path"),
+        (f"ok 1.0.0 C:/evil.lomt {h}", "unsafe path"),
+        (f"ok ../.. ok/1.0.0/ok.lomt {h}", "unsafe package name"),
+    ]
+    for line, want in cases:
+        with tempfile.TemporaryDirectory(prefix="badidx-") as td:
+            root = Path(td)
+            httpd, port = _serve_registry(root, "# malicious\n" + line + "\n", {
+                "pwned/lompi.txt": body,
+                "evil.lomt": body,
+                "std/9.9.9/std.lomt": body,
+                "ok/1.0.0/ok.lomt": body,
+            })
+            try:
+                rc, out = _run(["fetch", "--registry", f"http://127.0.0.1:{port}"])
+            finally:
+                httpd.shutdown()
+            assert rc != 0, f"{line!r} 被接受了: {out[:300]!r}"
+            assert want in out, f"{line!r} 没被点名 ({want}): {out[:300]!r}"
+
+
+@test
+def test_fetch_plan_is_shell_safe():
+    """#14: 打印出来的计划要能安全粘进 shell。
+
+    元字符与方案外 URL 直接拒；合法的值在计划里每个都用单引号包住，并用 `--` 结束选项
+    （否则 `--registry --upload-pack=...` 会被 git 当成选项）。缓存目录也不能由 URL 的
+    `..` 决定。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    for url in ("https://a.example/$(whoami).git",
+                "https://x.example/l.git; calc.exe",
+                "https://x.example/l.git|id",
+                "-oProxyCommand=x",
+                "ftp://h/x"):
+        rc, out = _run(["fetch", "--registry", url])
+        assert rc != 0, f"{url!r} 没被拒: {out[:300]!r}"
+        assert "unsafe or unsupported registry URL" in out, (url, out[:300])
+
+    rc, out = _run(["fetch", "--registry", "https://h/.."])
+    assert rc == 0, out[:300]
+    assert "git clone --depth 1 -- 'https://h/..'" in out, out[:400]
+    assert "reg-" in out, f"非法 slug 没退回固定形状: {out[:400]!r}"
+    assert "cache\\.." not in out and "cache/.." not in out, (
+        f"缓存目录被 URL 的 `..` 决定了: {out[:400]!r}")
+
+
+@test
+def test_package_identity_is_injective():
+    """#15: 文件集到身份必须是单射。
+
+    从前按 `名字 \\0 内容 \\0` 喂 sha，而**内容可以含 NUL** —— 两个文件
+    `{a: X, b: Y}` 与 `{a: "X\\0b\\0Y"}` 是同一串字节，两个不同的包拿到同一个身份。
+    这里就用 issue 里的那对构造：身份必须不同。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    aaa = b"module aaa\npub fn greet() -> u32 { return 1; }\n//\n"
+    zzz = b"module zzz\npub fn evil() -> u32 { return 666; }\n"
+    with tempfile.TemporaryDirectory(prefix="idA-") as ta, \
+         tempfile.TemporaryDirectory(prefix="idB-") as tb:
+        pa = Path(ta) / "victim" / "1.0.0"
+        pa.mkdir(parents=True)
+        (pa / "aaa.lomt").write_bytes(aaa)
+        (pa / "zzz.lomt").write_bytes(zzz)
+        pb = Path(tb) / "victim" / "1.0.0"
+        pb.mkdir(parents=True)
+        (pb / "aaa.lomt").write_bytes(aaa + b"\x00zzz.lomt\x00" + zzz)
+        rc1, out1 = _run(["hash", str(pa)])
+        rc2, out2 = _run(["hash", str(pb)])
+        assert rc1 == 0 and rc2 == 0, (out1, out2)
+        h1 = re.search(r"self:\s+([0-9a-f]{64})", out1)
+        h2 = re.search(r"self:\s+([0-9a-f]{64})", out2)
+        assert h1 and h2, (out1, out2)
+        assert h1.group(1) != h2.group(1), (
+            f"两个不同的文件集拿到同一个身份 {h1.group(1)} —— 身份不是单射 (#15)")
+        assert "files: 2" in out1 and "files: 1" in out2, (out1, out2)
+
+
+@test
+def test_reserved_package_names_are_refused():
+    """#980: 工具链自己的包名不能被项目本地或依赖闭包顶掉。
+
+    显式请求 `std` 要拒；一个普通包把 `std` 作为依赖拖进闭包也要拒 —— 后一条才是
+    dependency confusion 的实际路径。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["resolve", "fixture/store", "std"])
+    assert rc != 0 and "reserved" in out, out[:300]
+    rc2, out2 = _run(["resolve", "fixture/store", "host"])
+    assert rc2 != 0 and "reserved" in out2, out2[:300]
+
+    with tempfile.TemporaryDirectory(prefix="resv-") as td:
+        store = Path(td) / "store"
+        liba = store / "liba" / "1.0.0"
+        std = store / "std" / "1.0.0"
+        liba.mkdir(parents=True)
+        std.mkdir(parents=True)
+        (liba / "liba.lomt").write_text(
+            "module liba\nuse std\npub fn f() -> u32 { return 1; }\n",
+            encoding="utf-8", newline=chr(10))
+        (std / "std.lomt").write_text(
+            "module std\npub fn g() -> u32 { return 2; }\n",
+            encoding="utf-8", newline=chr(10))
+        rc3, out3 = _run(["resolve", str(store), "liba"])
+        assert rc3 != 0, f"闭包里的 std 没被拒: {out3[:400]!r}"
+        assert "toolchain-reserved" in out3 and "`std`" in out3, out3[:400]
+
+
+@test
+def test_lock_pin_is_checked_out_of_band():
+    """#17: 锁要有**通道之外**的锚。
+
+    `--from-lock` 默认只做一致性检查（锁与 store 来自同一个地方，等于自证）。
+    `--lock-sha256` 给一个从另一个通道拿到的摘要：对不上必须拒，对得上才继续。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lockpin-", dir=str(ROOT)) as td:
+        td = Path(td)
+        # exe 放**再下一层**: `cfg_root` 的兜底规则是「exe 目录的父目录」下 `.lompi`
+        # （见 `cfg_parent(exe_dir)`），所以这样根才落在 td 里，不写到仓根。
+        exe = td / "bin" / ("lompi.exe" if IS_WIN else "lompi")
+        exe.parent.mkdir()
+        shutil.copy2(_build(), exe)
+        exe.chmod(0o755)
+
+        def run(args: list[str]) -> tuple[int, str]:
+            r = subprocess.run([str(exe), *args], cwd=str(SRC_DIR), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=180)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        # 根落在 `<td>/.lompi`（见上面的两层布局）
+        store = td / ".lompi" / "store"
+        shutil.copytree(SRC_DIR / "fixture" / "store" / "mathutil", store / "mathutil")
+        rc, out = run(["resolve", str(store), "mathutil@0.1.0"])
+        assert rc == 0, out[:300]
+        lock = td / "lock.txt"
+        lock.write_text(out, encoding="utf-8", newline=chr(10))
+        good = hashlib.sha256(lock.read_bytes()).hexdigest()
+
+        rc_bad, out_bad = run(["install", "mathutil", "--from-lock", str(lock),
+                               "--lock-sha256", "0" * 64, "--into", str(td / "into")])
+        assert rc_bad != 0, f"摘要不符的锁被接受了: {out_bad[:300]!r}"
+        assert "does not match --lock-sha256" in out_bad, out_bad[:300]
+
+        rc_ok, out_ok = run(["install", "mathutil", "--from-lock", str(lock),
+                             "--lock-sha256", good, "--into", str(td / "into")])
+        assert rc_ok == 0, out_ok[:400]
+        assert "lock matches the pinned sha256" in out_ok, out_ok[:400]
+
+
+def _fetch_ready(url: str, extra: list[str] | None = None) -> tuple[int, str]:
+    """跑一次 `fetch`，照它自己打出来的 `mkdir -p` 提示把目录建好，再跑一次。
+
+    PE 上没有 `mkdir`（`sys_can_mkdir()` 恒假），而判据**不猜** lompi 的 root 规则 ——
+    落点一律由 lompi 自己报。这与 `test_fetch_pulls_the_registry_over_http_itself`
+    用的是同一条路，只是抽出来给下面几条复用。
+    """
+    args = ["fetch", "--registry", url, *(extra or [])]
+    _, out0 = _run(args)
+    for line in out0.splitlines():
+        if line.startswith("lompi: make it first:"):
+            Path(line.split("mkdir -p ", 1)[1].strip()).mkdir(parents=True, exist_ok=True)
+    return _run(args)
+
+
+def _cache_dest(out: str) -> Path | None:
+    for line in out.splitlines():
+        if line.startswith("lompi: registry fetched into "):
+            return Path(line.split("into ", 1)[1].strip())
+    return None
+
+
+@test
+def test_fetch_pins_the_index_hash_out_of_band():
+    """#377：`--registry-sha256` 是**带外**的信任根，且拿得到那个钉子。
+
+    三件事一起钉：
+      * 没给钉子时，fetch 的输出里**有**获取钉子的做法（不只是旗子的说明里提一句）；
+      * 对得上 → 照常下载；对不上 → **硬失败**（退出码非 0，不退回"打印计划"）；
+      * 形状不对（不是 64 个十六进制字符）→ 当场拒。大小写都收。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = (b"module mathutil\n"
+          b"\n"
+          b"pub fn twice(x: u64) -> u64 {\n"
+          b"    return x * 2;\n"
+          b"}\n")
+    h1 = hashlib.sha256(f1).hexdigest()
+    index = f"# registry (pin test)\nmathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+    with tempfile.TemporaryDirectory(prefix="pin-") as td:
+        reg = Path(td)
+        httpd, port = _serve_registry(reg, index,
+                                     {"mathutil/0.1.0/mathutil.lomt": f1})
+        try:
+            url = f"http://127.0.0.1:{port}"
+            rc, out = _fetch_ready(url)
+            assert rc == 0 and "sha256 ok" in out, out[:400]
+            assert "(not pinned; hashes arrived over the same channel)" in out, out[:400]
+            # 读到这句话的人要能当场知道怎么钉 —— 过程在 fetch 的输出里
+            assert "sha256sum" in out and "--registry-sha256" in out, out[:500]
+
+            pin = hashlib.sha256(index.encode("utf-8")).hexdigest()
+            rc, out = _fetch_ready(url, ["--registry-sha256", pin])
+            assert rc == 0 and "index matches the pinned sha256" in out, out[:400]
+            assert "sha256 ok" in out, f"钉住之后没有照常下载: {out[:400]}"
+
+            # 大小写都收（内部规整成小写再比）
+            rc, out = _fetch_ready(url, ["--registry-sha256", pin.upper()])
+            assert rc == 0 and "index matches the pinned sha256" in out, out[:400]
+
+            # 对不上：退出码非 0，而且**不许**退回打印计划
+            rc, out = _run(["fetch", "--registry", url, "--registry-sha256", "0" * 64])
+            assert rc != 0, f"钉子对不上却成功了: {out[:400]!r}"
+            assert "does not match --registry-sha256" in out, out[:400]
+            assert "# registry:" not in out, (
+                f"钉子对不上时退回了打印计划 —— 把拒绝装成了成功: {out[:400]!r}")
+
+            # 形状不对
+            rc, out = _run(["fetch", "--registry", url, "--registry-sha256", "abc"])
+            assert rc != 0 and "64 hex" in out, out[:300]
+            rc, out = _run(["fetch", "--registry", url, "--registry-sha256", "x" * 64])
+            assert rc != 0 and "64 hex" in out, out[:300]
+        finally:
+            httpd.shutdown()
+
+    # 帮助面也提到它 —— 旗子不是唯一知道它存在的地方
+    rc, out = _run(["help"])
+    assert rc == 0 and "--registry-sha256" in out and "docs/236" in out, out[:600]
+
+
+def _foreign_registry(root: Path, jar: bytes) -> tuple[bytes, bytes]:
+    """Write a one-package foreign registry under `root`; return (manifest, index)."""
+    import hashlib
+    (root / "pkg/1.0").mkdir(parents=True, exist_ok=True)
+    iface = (b"module mathlib\n\n"
+             b"pub fn mathlib_add(a0: i32, a1: i32) -> i32 {\n"
+             b"    return a0 + a1;\n"
+             b"}\n"
+             b"extern fn __jl_mathlib_add_(a0: i32, a1: i32) -> i32;\n")
+    lomp = b'module foreign\n\npub fn kind() -> str { return "java"; }\n'
+    manifest = (
+        "# lompi foreign v1\n"
+        "abi JL-A/1\n"
+        "backend aot\n"
+        "kind java\n"
+        f"artifact jar lib.jar {hashlib.sha256(jar).hexdigest()} {'0' * 64}\n"
+        f"artifact interface mathlib.lomt {hashlib.sha256(iface).hexdigest()}\n"
+        f"artifact manifest foreign.lomp {hashlib.sha256(lomp).hexdigest()}\n"
+    ).encode()
+    for name, data in (("lib.jar", jar), ("mathlib.lomt", iface),
+                       ("foreign.lomp", lomp), ("foreign.txt", manifest)):
+        (root / "pkg/1.0" / name).write_bytes(data)
+    index = (f"# lompi-foreign-index.txt\n"
+             f"mathlib 1.0 pkg/1.0/foreign.txt "
+             f"{hashlib.sha256(manifest).hexdigest()}\n").encode()
+    return manifest, index
+
+
+@test
+def test_fetch_follows_foreign_artifacts_and_streams_a_large_jar():
+    """#1056: the foreign index, its manifest, and a 1 MiB jar.
+
+    The jar is the point: `net_http_get` holds one response in a 256 KiB buffer, so
+    the old path cannot carry it. The streaming path writes the body to disk as it
+    arrives; the sha256 still has to match the manifest. The completion marker is
+    written only after both indexes and every artifact verified.
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    jar = bytes(((i * 37 + 11) & 0xFF) for i in range(1024 * 1024))
+    with tempfile.TemporaryDirectory(prefix="foreign-") as td:
+        reg = Path(td)
+        manifest, index = _foreign_registry(reg, jar)
+        httpd, port = _serve_registry(reg, "# no source packages\n", {
+            "pkg/1.0/lib.jar": jar,
+            "pkg/1.0/mathlib.lomt": (reg / "pkg/1.0/mathlib.lomt").read_bytes(),
+            "pkg/1.0/foreign.lomp": (reg / "pkg/1.0/foreign.lomp").read_bytes(),
+            "pkg/1.0/foreign.txt": manifest,
+            "lompi-foreign-index.txt": index,
+        })
+        try:
+            url = f"http://127.0.0.1:{port}"
+            rc, out = _run(["fetch", "--registry", url])
+            assert rc != 0 and "not pinned" in out, out[:500]
+            rc, out = _fetch_ready(url, ["--insecure"])
+            assert rc == 0, out[:600]
+            dest = _cache_dest(out)
+            assert dest is not None, out[:400]
+            pkgdir = dest / "mathlib" / "1.0"
+            assert (pkgdir / "lib.jar").read_bytes() == jar, "1 MiB jar 没逐字节落盘"
+            assert (pkgdir / "mathlib.lomt").exists(), "接口单元没落盘"
+            assert (pkgdir / "foreign.lomp").exists(), "清单标签没落盘"
+            assert (pkgdir / "foreign.txt").read_bytes() == manifest, "foreign.txt 没落盘"
+            assert (dest / "lompi-fetch-complete").read_text() == "lompi-fetch 1 complete\n"
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_foreign_artifacts_are_refused_without_a_pin_or_after_a_byte_changes():
+    """#1056: the pin is required, a changed byte is refused, and no half file stays."""
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    jar = bytes(((i * 11 + 3) & 0xFF) for i in range(4096))
+    with tempfile.TemporaryDirectory(prefix="foreign-pin-") as td:
+        reg = Path(td)
+        manifest, index = _foreign_registry(reg, jar)
+        httpd, port = _serve_registry(reg, "# no source packages\n", {
+            "pkg/1.0/lib.jar": jar,
+            "pkg/1.0/mathlib.lomt": (reg / "pkg/1.0/mathlib.lomt").read_bytes(),
+            "pkg/1.0/foreign.lomp": (reg / "pkg/1.0/foreign.lomp").read_bytes(),
+            "pkg/1.0/foreign.txt": manifest,
+            "lompi-foreign-index.txt": index,
+        })
+        try:
+            url = f"http://127.0.0.1:{port}"
+            pin = hashlib.sha256(index).hexdigest()
+            rc, out = _fetch_ready(url, ["--foreign-index-sha256", pin])
+            assert rc == 0, out[:500]
+            dest = _cache_dest(out)
+            assert dest is not None, out[:400]
+            assert (dest / "lompi-fetch-complete").read_text() == "lompi-fetch 1 complete\n"
+            # 一个字节就够：同一个索引钉子，jar 与清单里的哈希对不上
+            (reg / "pkg/1.0/lib.jar").write_bytes(jar[:100] + b"\x00" + jar[101:])
+            rc, out = _run(["fetch", "--registry", url, "--foreign-index-sha256", pin])
+            assert rc != 0, f"改了一个字节的 jar 却被接受: {out[:400]!r}"
+            assert "streaming download failed" in out or "mismatch" in out, out[:400]
+            assert (dest / "lompi-fetch-complete").read_bytes() == b"", "失败后标记不是 0 字节"
+            assert (dest / "mathlib/1.0/lib.jar").stat().st_size == 0, "半份 jar 留在了盘上"
+            # 消费方也不许拿这份缓存去装
+            rc, out = _run(["install", "mathlib", "--registry", url,
+                            "--into", str(reg / "deps")])
+            assert rc != 0 and "incomplete" in out, out[:400]
+            # `--insecure` 只对回环生效
+            rc, out = _run(["fetch", "--registry", "http://10.0.0.7", "--insecure"])
+            assert rc != 0 and "127.0.0.1" in out, out[:300]
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_lock_v2_pins_jar_ir_abi_and_compiler():
+    """#1056: a foreign package gets a `foreign` line with both hashes recomputed.
+
+    Changing the jar or the compiler must make `verify` red **and name the line**;
+    a source-only store keeps emitting v1, byte for byte.
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="lock2-") as td:
+        store = Path(td) / "store"
+        pkg = store / "mathlib" / "1.0"
+        pkg.mkdir(parents=True)
+        jar = b"J" * 4096
+        ir = b"; a tiny IR stand-in\n"
+        (pkg / "lib.jar").write_bytes(jar)
+        (pkg / "mathlib.ll").write_bytes(ir)
+        (pkg / "mathlib.lomt").write_text(
+            "module mathlib\n\npub fn small() -> i32 { return 1; }\n",
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.lomp").write_text(
+            'module foreign\n\npub fn kind() -> str { return "java"; }\n',
+            encoding="utf-8", newline="\n")
+        (pkg / "foreign.txt").write_text(
+            "# lompi foreign v1\nabi JL-A/1\nkind java\n"
+            f"artifact jar lib.jar {hashlib.sha256(jar).hexdigest()}\n",
+            encoding="utf-8", newline="\n")
+        link = ("# lompi link v1\ncompiler jl-0.1.5\n"
+                f"ir mathlib.ll {hashlib.sha256(ir).hexdigest()}\n")
+        (pkg / "link.txt").write_text(link, encoding="utf-8", newline="\n")
+
+        rc, out = _run(["resolve", str(store), "mathlib"])
+        assert rc == 0 and out.startswith("# lompi lock v2\n"), out[:400]
+        fline = [l for l in out.splitlines() if l.startswith("foreign ")]
+        assert len(fline) == 1, out[:400]
+        assert f"jar={hashlib.sha256(jar).hexdigest()}" in fline[0], fline[0]
+        assert f"ir={hashlib.sha256(ir).hexdigest()}" in fline[0], fline[0]
+        assert "abi=JL-A/1" in fline[0] and "compiler=jl-0.1.5" in fline[0], fline[0]
+        lock = Path(td) / "l.lock"
+        lock.write_text(out, encoding="utf-8", newline="\n")
+        rc, out = _run(["verify", str(store), "mathlib", str(lock)])
+        assert rc == 0, out[:400]
+
+        (pkg / "lib.jar").write_bytes(jar[:-1] + b"K")
+        rc, out = _run(["verify", str(store), "mathlib", str(lock)])
+        assert rc != 0 and "jar=" in out and "first differing line" in out, out[:600]
+        (pkg / "lib.jar").write_bytes(jar)
+
+        (pkg / "link.txt").write_text(link.replace("jl-0.1.5", "jl-0.1.6"),
+                                      encoding="utf-8", newline="\n")
+        rc, out = _run(["verify", str(store), "mathlib", str(lock)])
+        assert rc != 0 and "compiler=" in out and "first differing line" in out, out[:600]
+
+        # 源码包照旧 v1（外源行只在外源包上出现）
+        plain = store / "plain" / "0.1.0"
+        plain.mkdir(parents=True)
+        (plain / "plain.lomt").write_text(
+            "module plain\n\npub fn two() -> i32 { return 2; }\n",
+            encoding="utf-8", newline="\n")
+        rc, out = _run(["resolve", str(store), "plain"])
+        assert rc == 0 and out.startswith("# lompi lock v1\n"), out[:400]
+        assert "foreign " not in out, out[:400]
+
+
+@test
+def test_the_pin_procedure_is_documented():
+    """#377 的文档那一半：`docs/236` 要**明写**钉子从别处来，并给出可照做的例子。"""
+    txt = (ROOT / "docs" / "236-lompi-020-network.md").read_text(encoding="utf-8")
+    assert "--registry-sha256" in txt
+    assert "sha256sum" in txt, "文档没给获取钉子的办法"
+    assert "curl" in txt, "文档没给一个可照做的例子"
+    assert "带外" in txt, "文档没说清这个钉子要从另一条通道拿"
+
+
+@test
+def test_fetch_marks_a_complete_cache_only_when_it_is():
+    """#378：标记有**消费方**，而且一次失败会把旧标记作废。
+
+    语义（`docs/236` §7.2）：文件名只负责存在，**内容**才是状态 ——
+    `lompi-fetch 1 complete\\n` = 完成；0 字节 = 上一次没走完；不存在 = 不完整。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = (b"module mathutil\n"
+          b"\n"
+          b"pub fn twice(x: u64) -> u64 {\n"
+          b"    return x * 2;\n"
+          b"}\n")
+    h1 = hashlib.sha256(f1).hexdigest()
+    index = f"# registry (marker test)\nmathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+    with tempfile.TemporaryDirectory(prefix="mark-") as td:
+        reg = Path(td)
+        httpd, port = _serve_registry(reg, index,
+                                     {"mathutil/0.1.0/mathutil.lomt": f1})
+        try:
+            url = f"http://127.0.0.1:{port}"
+            rc, out = _fetch_ready(url)
+            assert rc == 0, out[:400]
+            dest = _cache_dest(out)
+            assert dest and dest.is_dir(), out[:400]
+            marker = dest / "lompi-fetch-complete"
+            assert marker.read_bytes() == b"lompi-fetch 1 complete\n", (
+                f"成功后标记内容不对: {marker.read_bytes()!r}")
+
+            # 消费方 1: install 从缓存取包 —— 完成标记在，放行
+            rc, out = _run(["install", "mathutil", "--registry", url])
+            assert rc == 0 and "(cached registry)" in out, out[:500]
+
+            # 消费方 2: 没有标记 = 不完整，install 拒绝
+            marker.unlink()
+            rc, out = _run(["install", "mathutil", "--registry", url])
+            assert rc != 0 and "incomplete" in out, out[:400]
+
+            # fetch 自己也认这个状态，并说出口（目录已经建好，一次就够）
+            rc, out = _run(["fetch", "--registry", url])
+            assert rc == 0 and "INCOMPLETE" in out, out[:400]
+            assert marker.read_bytes() == b"lompi-fetch 1 complete\n"
+
+            # 第二次取到一半失败：旧标记必须作废（0 字节），而不是继续声称完成
+            bad = index.replace(h1, "0" * 64)
+            (reg / "lompi-index.txt").write_text(bad, encoding="utf-8", newline=chr(10))
+            rc, out = _run(["fetch", "--registry", url])
+            assert "sha256 mismatch" in out, out[:400]
+            assert marker.exists(), "失败后标记被删掉了？PE 上没有 unlink，应当是截断"
+            assert marker.read_bytes() == b"", (
+                f"一次失败之后旧标记还在说'完成': {marker.read_bytes()!r}")
+            rc, out = _run(["install", "mathutil", "--registry", url])
+            assert rc != 0 and "incomplete" in out, out[:400]
+
+            # 再成功一次就恢复完成
+            (reg / "lompi-index.txt").write_text(index, encoding="utf-8", newline=chr(10))
+            rc, out = _fetch_ready(url)
+            assert rc == 0, out[:400]
+            assert marker.read_bytes() == b"lompi-fetch 1 complete\n"
+        finally:
+            httpd.shutdown()
+
+
+@test
+def test_paths_use_the_platform_separator():
+    """路径必须是**平台原生**形状（`docs/236` §6）：PE 上全 `\\`，POSIX 上全 `/`。
+
+    以前这里是**写死的 `\\`**（`"\\\\"` / `92 as u8` 散在十几处），于是 ELF 上报的落点是
+    `/tmp\\.lompi\\cache\\51217` —— POSIX 上反斜杠是普通字符，那**不是一条路径**，是
+    一个扁平的文件名。`fetch` 那条判据在 CI 上抓到它（本机 Linux 那份因为没 clang
+    一直跳过，所以藏了很久）。
+
+    这一条**两个方向都拦**：PE 上混进 `/`、POSIX 上混进 `\\`，都红 —— 于是"哪天探针
+    静默翻面"不会没人管。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    rc, out = _run(["config"])
+    assert rc == 0, out[:200]
+    line = next((x for x in out.splitlines() if x.startswith("store:")), None)
+    assert line, f"config 没打出 store 行: {out[:300]!r}"
+    sep, other = ("\\", "/") if IS_WIN else ("/", "\\")
+    assert sep in line, f"{'PE' if IS_WIN else 'POSIX'} 上分隔符不对: {line!r}"
+    assert other not in line, f"路径里混进了外来分隔符: {line!r}"
 
 
 @test
@@ -239,6 +1281,179 @@ def test_unknown_command_is_a_clean_error():
         return
     assert rc != 0, "未知命令不该退 0"
     assert "unknown command" in out, out[:200]
+
+
+@test
+def test_store_argument_is_optional():
+    """`<store>` 省略时走**全局 store** —— 也就是 `lompi config` 打的那一行。
+
+    和 pip 一样：`lompi show mathutil` 不该逼着人先知道库在哪。判据不是"它没报用法错"
+    —— 那太弱，一个永远退 1 的实现也能过 —— 而是**两条路给出同一份事实**：
+
+      * 把 fixture 摆到全局 store 的位置上，`lompi index`（不传）与
+        `lompi index <那个路径>` 的输出必须**逐字节相同**；
+      * `lompi show <名字>`（不传）与显式传拿到**同一个 64 位内容哈希**；
+      * `list` 是 `index` 的同义词（pip 的习惯动词）；
+      * 缺 store 时**点名报错**，不是静默退 1。
+
+    **沙箱**：exe 摆在 `<临时目录>/bin/`，`cfg_root` 的 fallback 规则就指到
+    `<临时目录>/bin/.lompi` —— 全程不碰用户真实的 store。**先问再动**：先跑一次
+    `lompi config`，目的地若在沙箱外就整体跳过（那说明这条判据会去动真东西）。
+    临时目录开在 `loment/dist/` 下（已 .gitignore）：那个前缀里没有 `\\AppData\\Local\\`
+    也没有 `\\Users\\`，于是 Windows 上命中 fallback 而不是用户的家目录。
+    """
+    import shutil as _sh
+
+    exe = _build()
+    if exe is None:
+        print(f"      SKIP: {_skip}")
+        return
+    dist = ROOT / "loment" / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    td = Path(tempfile.mkdtemp(dir=dist, prefix=".lompi-optstore-"))
+    try:
+        bin2 = td / "bin"
+        bin2.mkdir()
+        exe2 = bin2 / ("lompi.exe" if IS_WIN else "lompi")
+        _sh.copy2(exe, exe2)
+        exe2.chmod(0o755)
+
+        def run2(*args: str) -> tuple[int, str]:
+            r = subprocess.run([str(exe2), *args], cwd=str(bin2), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=180)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        probe = subprocess.run([str(exe2), "config"], cwd=str(bin2), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=120)
+        line = _store_line(probe.stdout or "")
+        assert line, f"lompi config 没给出 store 路径: {(probe.stdout or '')[:200]!r}"
+        dst = Path(line)
+        if not str(dst.resolve()).lower().startswith(str(td.resolve()).lower()):
+            print(f"         (跳过: 全局 store 落在 {dst}，在沙箱外 —— 不去动它)")
+            return
+
+        rc0, out0 = run2("index")
+        assert rc0 != 0 and "cannot read the store" in out0, \
+            f"全局 store 还不存在时应当**点名**报错: rc={rc0} {out0[:200]!r}"
+
+        dst.mkdir(parents=True, exist_ok=True)
+        _sh.copytree(SRC_DIR / "fixture" / "store", dst, dirs_exist_ok=True)
+
+        rc_a, out_a = run2("index")
+        rc_b, out_b = run2("index", str(dst))
+        assert rc_a == 0, f"不传 store 的 index 失败: rc={rc_a} {out_a[:200]!r}"
+        assert out_a == out_b, "两条路给出的不是同一份事实:\n 不传: " + out_a[:200] + "\n 显式: " + out_b[:200]
+        assert "5 package(s) in store" in out_a, out_a[:200]
+
+        rc_l, out_l = run2("list")
+        assert rc_l == 0 and out_l == out_a, f"list 不是 index 的同义词: {out_l[:200]!r}"
+
+        rc_s, out_s = run2("show", "mathutil")
+        rc_t, out_t = run2("show", str(dst), "mathutil")
+        assert rc_s == 0, f"不传 store 的 show 失败: rc={rc_s} {out_s[:200]!r}"
+        assert out_s == out_t, "show 两条路不一致"
+        m = re.search(r"^\s*id:\s+([0-9a-f]{64})\s*$", out_s, re.M)
+        assert m, f"show 没给出 64 位内容哈希: {out_s[:240]}"
+        print("      省略 <store> == 全局 store；list == index；缺 store 时点名报错")
+    finally:
+        _sh.rmtree(td, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 落盘计划的安全边界
+
+@test
+def test_install_plan_quotes_package_controlled_version():
+    """包元数据（版本）不能被原样插进计划里的**可执行命令**（#894）。
+
+    **Why**：`lompi` 在 PE 上建不了目录，于是把 `cp -r …` 打印出来让用户照抄。
+    版本号来自包自己（目录名 / `pkg.lomp` 的 `version()`），原先**不加引号**直接插进去
+    —— 一个 `1$(curl …|sh)` 的版本就能让这行计划在用户手里执行任意 shell。这是
+    xz / event-stream 的安装期 RCE 形状：不需要 lompi 自己执行任何东西，计划本身就是载荷。
+
+    **How to apply**：造一个版本号里带 `$(…)`、`;`、空格与单引号的包，跑 `lompi install`
+    看它打出的 `cp -r`。两个词都必须是**单引号包起来的一个 shell 词**（内部 `'` 写成
+    `'\''`）。删掉这两个词之后，整行里不剩任何 `$`、`;`、反引号。`--apply` 缺目录时
+    打出的 `mkdir -p` 同一条规矩。Linux 上再**真的把那一行交给 shell 跑一遍**，确认
+    没有载荷文件落地 —— 引号漏了的话 `touch` 会替我们发现。
+    """
+    import shutil as _sh
+
+    exe = _build()
+    if exe is None:
+        print(f"      SKIP: {_skip}")
+        return
+    dist = ROOT / "loment" / "dist"
+    dist.mkdir(parents=True, exist_ok=True)
+    td = Path(tempfile.mkdtemp(dir=dist, prefix=".lompi-shquote-"))
+    try:
+        bin2 = td / "bin"
+        bin2.mkdir()
+        exe2 = bin2 / ("lompi.exe" if IS_WIN else "lompi")
+        _sh.copy2(exe, exe2)
+        exe2.chmod(0o755)
+
+        def run(*args: str) -> tuple[int, str]:
+            r = subprocess.run([str(exe2), *args], cwd=str(bin2), capture_output=True,
+                               text=True, encoding="utf-8", errors="replace",
+                               shell=False, timeout=180)
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+        # 全局 store 在哪儿**由 lompi 自己说**（`cfg_root` 的规则会因平台/路径而变，
+        # 判据不猜；与 `test_store_argument_is_optional` 同一个办法）。
+        rc0, cfg = run("config")
+        assert rc0 == 0, f"lompi config 失败: {cfg[:300]!r}"
+        store_line = next((ln for ln in cfg.splitlines() if ln.startswith("store:")), None)
+        assert store_line, f"lompi config 没给出 store 行: {cfg[:400]!r}"
+        store = Path(store_line.split(":", 1)[1].strip())
+
+        ver = "1$(touch${IFS}pwned); echo 'x'"
+        pkg = store / "evil" / ver
+        pkg.mkdir(parents=True)
+        (pkg / "evil.lomt").write_text(
+            "module evil" + chr(10) + "pub fn f() -> u32 { return 1; }" + chr(10),
+            encoding="utf-8", newline=chr(10))
+        (pkg / "pkg.lomp").write_text(
+            "module pkg" + chr(10) + chr(10)
+            + 'pub fn name() -> str {' + chr(10)
+            + '    return "evil";' + chr(10) + "}" + chr(10)
+            + 'pub fn version() -> str {' + chr(10)
+            + '    return "' + ver + '";' + chr(10) + "}" + chr(10),
+            encoding="utf-8", newline=chr(10))
+
+        def q(s: str) -> str:
+            return "'" + s.replace("'", "'\\''") + "'"
+
+        dest = td / "dest"
+        dest.mkdir()
+        rc, out = run("install", "evil", "--into", str(dest))
+        assert rc == 0, f"install 没给出计划: rc={rc} {out[:400]!r}"
+        line = next((ln for ln in out.splitlines() if ln.startswith("cp -r ")), None)
+        assert line, f"计划里没有 cp -r 行: {out[:400]!r}"
+        src = str(pkg)
+        dst = str(dest / "evil")
+        assert q(src) in line, f"源路径不是一个安全的 shell 词: {line!r}"
+        assert q(dst) in line, f"目标路径不是一个安全的 shell 词: {line!r}"
+        rest = line.replace(q(src), "").replace(q(dst), "")
+        for ch in ("$", ";", "`", "\n"):
+            assert ch not in rest, f"引号之外还留着可执行的 {ch!r}: {line!r}"
+
+        # `--apply` 缺目标目录时打出的 mkdir 命令同一条规矩
+        rc2, out2 = run("install", "evil", "--into", str(dest), "--apply")
+        assert rc2 == 1, f"--apply 缺目录应当拒: rc={rc2} {out2[:300]!r}"
+        assert "mkdir -p " + q(dst) in out2, f"mkdir 提示没有安全引号: {out2[:400]!r}"
+
+        # 真的把计划里那一行交给 shell（仅 Linux）：引号漏了，载荷会落地。
+        if sys.platform.startswith("linux") and _sh.which("bash"):
+            subprocess.run(["bash", "-c", line], cwd=str(td), shell=False, timeout=60)
+            hits = [p for p in td.rglob("pwned")]
+            assert not hits, f"照抄计划执行后载荷落地了: {hits}"
+            print("      计划里的版本被单引号钉成一个词，shell 执行后没有载荷落地")
+        else:
+            print("      计划里的版本被单引号钉成一个词（本机不做 shell 执行）")
+    finally:
+        _sh.rmtree(td, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- 边界（这是用户定的）
@@ -319,9 +1534,37 @@ def test_install_scripts_stay_pure_ascii():
 
 #: 随包发的标准库：`std` 127 个模块 + `std.lomt` 门面 = 128 个 `.lomt`；`host` 7 个。
 #: 各带一份 `pkg.lomp`，所以整棵树是 137 个文件。用户说的"127 个库"就是 std 的模块数。
+#:
+#: **2026-10-11 起 std 是 133** —— LibL 加了 5 份（`string` `ctype` `stdlib` `stdio`
+#: `libl`，`docs/232`），整棵树随之 137 -> 142。用户说的"127 个库"指的是**原来**那一批；
+#: 这里钉的是**文件数**，所以这个数会跟着库长，不是常量意义上的"127"。
+#:
+#: **2026-10-13 起第三个包 `internet` 是 8**（`ip` `uri` `http` `dns` `sock` `tcp` `udp`
+#: + 门面，`docs/241`），整棵树随之 142 -> 151。
+#: **同日第四个包 `os` 是 6**（`sys` `time` `signal` `tty` `user` + 门面，`docs/242`），
+#: 整棵树随之 151 -> 158。
+#: **2026-10-14 起 `os` 是 7**（多一个 `thread`，`docs/245`），整棵树随之 158 -> 159。
+#: **2026-10-15 起 `host` 是 8**（多一个 `libl_host.lomt` —— LibL 的宿主脸，`docs/232` §5.1
+#: 与 `#401`），整棵树随之 159 -> 160。
+#: **2026-11-08 起 std 是 141** —— 补了 8 份：`pack` `uuid` `sha3` `blake2` `gzip`
+#: `tar` `jsonw` `regex`（`docs/316`），整棵树随之 160 -> 168。
+#: **2026-11-08 起多八个领域包**（`math`/`science`/`engineering`/`world`/`dev`/
+#: `lowlevel`/`system`/`baremetal`，`docs/317`），41 个 `.lomt` + 8 个 `pkg.lomp`，
+#: 整棵树 168 -> **217**。`std` 仍然是 141（领域库不进 std）。
+#: **2026-11-08 再补 `dev`**（`docs/320`）：10 个开发者工具模块，`dev` 5 -> 15，
+#: 整棵树 217 -> 227。
+#: **2026-11-08 补 `world`**（`docs/321`）：19 个现实世界模块，`world` 3 -> 22，
+#: 整棵树 227 -> 246。
+#: **2026-11-09 补 `lowlevel` / `system`**（`docs/322`）：各 8 个模块，
+#: 两个包 4 -> 12，整棵树 246 -> 262。
+#: **2026-11-09 补 `system` / `os` 到 40**（`docs/327`）：system +28、os +33，
+#: 两包 12 / 7 -> 40 / 40，整棵树 262 -> **323**。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 128, "host": 7}
-STORE_FILES = 137
+STORE_MODULES = {"std": 148, "host": 8, "internet": 11, "os": 44,
+                 "math": 9, "science": 6, "engineering": 4,
+                 "dev": 15, "world": 22, "lowlevel": 12, "system": 41, "baremetal": 6,
+                 "windows": 6}
+STORE_FILES = 345
 
 
 def _store_line(out: str) -> str:
@@ -346,15 +1589,112 @@ def test_package_carries_the_whole_store():
         got = [f for f in files if f.startswith(f"{pkg}/") and f.endswith(".lomt")]
         assert len(got) == n, f"{pkg} 有 {len(got)} 个 .lomt，应为 {n}"
         # 版本目录必须和 lompi 自己认的那个版本一致，否则装过去它看不见
-        assert f"{pkg}/{STABLE_VERSION}/pkg.lomp" in files, f"{pkg} 缺 {STABLE_VERSION}/pkg.lomp"
+        assert f"{pkg}/{STORE_VERSION}/pkg.lomp" in files, f"{pkg} 缺 {STORE_VERSION}/pkg.lomp"
     # 包里的路径（store 是 `<name>/<version>/`，别漏了版本那一层）
-    for rel in (f"share/lompi/store/std/{STABLE_VERSION}/std.lomt",
-                f"share/lompi/store/host/{STABLE_VERSION}/pkg.lomp"):
+    for rel in (f"share/lompi/store/std/{STORE_VERSION}/std.lomt",
+                f"share/lompi/store/host/{STORE_VERSION}/pkg.lomp"):
         assert rel in d.payload("linux", {}), f"{rel} 没进归档"
     # 源码直出：改了库里任何一个模块而不重打包，--check 要红
     fresh = d._fresh_sources("linux")
     missing = [f for f in files if f"share/lompi/store/{f}" not in fresh]
     assert not missing, f"这些 store 文件没被 _fresh_sources 盯住: {missing[:3]}"
+
+
+@test
+def test_the_store_index_is_current():
+    """`docs/store-index.md` 必须与 store 逐字节一致 —— 它是生成物（docs/328）。
+
+    **Why**：三百多个模块的索引手写必漂；生成物 + 逐字节判据是唯一不靠自觉的形状。
+    """
+    import loment_store_index
+    want = loment_store_index.render()
+    cur = (ROOT / "docs" / "store-index.md").read_text(encoding="utf-8")
+    assert cur == want, (
+        "docs/store-index.md 过期 —— 跑 python tools/loment_store_index.py")
+    print(f"      store 索引与 {len(want.splitlines())} 行生成物一致")
+
+
+@test
+def test_every_store_module_compiles_on_its_own():
+    """store 里**每个**模块各自都是合法的 L1 单元（编译到 IR 为止）。
+
+    **Why**：包里的模块只被探针 `use` 到的那几个才会进编译面 —— `docs/327` 一次加了
+    61 个模块，行为探针不可能逐个覆盖。一条全局判据兜住"至少是能编的"：语法、类型、
+    依赖解析、内建实参个数，任何一处错都在这里现形，而不是等到某个用户 `use` 它。
+    """
+    import lomentc
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    n = 0
+    for pkgdir in sorted(p for p in store.glob("*/*") if p.is_dir()):
+        for p in sorted(pkgdir.glob("*.lomt")):
+            m = lomentc.load(p)
+            deps = lomentc.resolve_deps(m, ROOT, p.parent, entry=p)
+            errs = lomentc.check(m, deps=deps)
+            n += 1
+            if errs:
+                bad.append(f"{p.relative_to(ROOT)}: {errs[:2]}")
+    assert not bad, "store 模块自己编不过：\n  " + "\n  ".join(bad)
+    print(f"      {n} 个 store 模块各自过检查（语法 + 类型 + 依赖 + 内建实参）")
+
+
+@test
+def test_every_builtin_package_carries_the_lomentitem_mark():
+    """每个随包发的 `pkg.lomp` 都必须带 `origin() == "LomentItem"`（docs/331）。
+
+    **Why**：编译器拿这个标记当闸 —— 没有它的包不进入内置库的解析面，社区包就不能
+    同名顶替标准库。标记是**声明**不是密码学签名；它的价值在于"少了就一定不对"，
+    而完整性仍由内容哈希与发行签名负责。
+    """
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    n = 0
+    for mf in sorted(store.glob("*/*/pkg.lomp")):
+        n += 1
+        origin = lomentc._manifest_origin(mf.read_text(encoding="utf-8"))
+        if origin != lomentc.LOMENT_ITEM:
+            bad.append(f"{mf.relative_to(ROOT)}: origin()={origin!r}")
+    assert n >= 12, f"store 里只有 {n} 个包清单，扫错目录了"
+    assert not bad, "标准库包缺 LomentItem 标记：\n  " + "\n  ".join(bad)
+    print(f"      {n} 个标准库包都带 LomentItem 标记")
+
+
+@test
+def test_every_package_manifest_matches_its_code():
+    """`pkg.lomp` 的 `choose()` / `requires()` 必须与包里的代码**逐条**对得上（docs/325）。
+
+    清单是包级前置条件：`choose()` 说"这个包依赖哪些核心档"，`requires()` 说"真代码
+    用了哪些构造"。两张表都会漂 —— 所以这条判据把**代码**当唯一真源，清单多写少写
+    都红。检查三件事：
+
+      1. `requires()` 与 `package_features` 的并集逐项相等（排序后比字符串）；
+      2. 有 `rt_sites`（会拖运行期）⇒ `choose()` 里有 `runtime`，反之没有；
+      3. 用了 `free` ⇒ `gc_manual`；用了 `extern fn` ⇒ `hosted`。
+    """
+    store = ROOT / "lompi" / "store"
+    bad: list[str] = []
+    for pkgdir in sorted(p for p in store.glob("*/*") if p.is_dir()):
+        mf = pkgdir / "pkg.lomp"
+        if not mf.is_file():
+            bad.append(f"{pkgdir}: 没有 pkg.lomp")
+            continue
+        _name, words, req = lomentc._manifest_fields(mf.read_text(encoding="utf-8"))
+        mods = [lomentc.load(p) for p in sorted(pkgdir.glob("*.lomt"))]
+        feats = sorted({f for m in mods for f in lomentc.package_features(m)})
+        got = req.split(",") if req else []
+        if got != feats:
+            bad.append(f"{pkgdir.name}: requires()={got} 代码={feats}")
+        elif req and req != ",".join(feats):
+            bad.append(f"{pkgdir.name}: requires() 未排序：{req} != {','.join(feats)}")
+        want_rt = any(m.rt_sites for m in mods)
+        if want_rt != ("runtime" in words):
+            bad.append(f"{pkgdir.name}: runtime 声明 {words} 与代码 rt_sites={want_rt} 不符")
+        if ("free" in feats) != ("gc_manual" in words):
+            bad.append(f"{pkgdir.name}: free 与 gc_manual 不匹配（choose={words}）")
+        if ("extern" in feats) != ("hosted" in words):
+            bad.append(f"{pkgdir.name}: extern 与 hosted 不匹配（choose={words}）")
+    assert not bad, "包清单与代码不一致：\n  " + "\n  ".join(bad)
+    print("      包清单与代码：12 个包的 choose()/requires() 逐条对得上")
 
 
 @test
@@ -541,6 +1881,11 @@ def _write_pkg(d: Path, name: str) -> None:
     d.mkdir(parents=True, exist_ok=True)
     (d / "area.lomt").write_bytes(PKG_AREA.encode())
     (d / f"{name}.lomt").write_bytes(PKG_ENTRY.format(n=name).encode())
+    # 这些夹具也用来摆"工具链自带的 store"，所以清单带 `LomentItem`（docs/331）。
+    (d / "pkg.lomp").write_text(
+        ("module pkg\n\npub fn name() -> str {\n    return \"" + name + "\";\n}\n\n"
+         "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n"),
+        encoding="utf-8")
 
 
 @test
@@ -610,6 +1955,11 @@ def test_selfhost_reaches_a_module_in_the_dev_checkout_store():
         pkg.mkdir(parents=True)
         (pkg / "area.lomt").write_bytes(PKG_AREA.encode())
         (pkg / "geom.lomt").write_bytes(PKG_ENTRY.format(n="geom").encode())
+        # 夹具模拟**工具链自带**的包：清单要带 `LomentItem`，否则解析闸会拒（docs/331）。
+        (pkg / "pkg.lomp").write_text(
+            "module pkg\n\npub fn name() -> str {\n    return \"geom\";\n}\n\n"
+            "pub fn origin() -> str {\n    return \"LomentItem\";\n}\n",
+            encoding="utf-8")
         hi = proj / "hi.lomt"
         hi.write_bytes(USE_AREA.encode())
         r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)
@@ -678,7 +2028,7 @@ def test_selfhost_refuses_a_file_over_the_use_limit():
         r = subprocess.run([str(s), str(hi)], cwd=str(proj), capture_output=True, timeout=300)
         err = r.stderr.decode("utf-8", "replace")
         assert r.returncode != 0, f"{n} 条 use 应当报错, 却过了"
-        assert "超过上限" in err, err[-300:]
+        assert "`use` lines in one file" in err, err[-300:]
 
 
 # ---------------------------------------------------------------- 与正本的一致性
@@ -697,16 +2047,7 @@ def test_dev_copy_and_repo_copy_do_not_silently_drift():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_lompi_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_lompi_test")
 
 
 if __name__ == "__main__":

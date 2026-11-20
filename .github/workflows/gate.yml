@@ -1,34 +1,61 @@
 # 静态门禁 —— **已经是必需检查**（`main` 的保护规则里 `ci.py --static-only` 挂着）
 #
-# 历史: 第一轮是**测量轮**（62 条 43 PASS / 19 FAIL，整轮 6m23s，artifact 里有原始日志）。
-# 那一轮不当门用是对的 —— 19 条红里 15 条是"本机全绿、runner 上红"的 Linux 可移植性问题，
-# 而基线必须**实测**，否则接上必需检查的第一天就是 19 条红的噪音。
-# **2026-09-24 复核时那个状态已经过去了**：基线收到 8 条，保护规则里已经挂上这个 job，
-# 所以这段头注释此前是错的（写着"还没设成必需检查"，而它当时已经是了）。改掉。
+# ## 它为什么不是"全绿才算过"（历史，别删）
 #
-# 三种用法:
-#   1) 自动: PR 与 push 到 main → 跑整道静态门禁（62 条）→ 红项进 job summary、
-#      原始日志进 artifact；
-#   2) 手动给 `suite`（模块名，如 `loment_tools_test`）→ 只跑那一个套件、打**全量
-#      输出**。为什么需要这条: `bash tools/ci.py:203` 每条只留**最后一行**，那不够
-#      定位病因（第一轮的 artifact 就是这么被它限制住的）；
-#   3) 手动给 `only`（逗号分隔的子串）→ 走 ci.py 只跑那几条，用来快速确认"修好了"。
+# 第一轮（2026-09-22 搬上 CI）是**测量轮**：62 条 43 PASS / 19 FAIL，整轮 6m23s，
+# artifact 里有原始日志。那一轮不当门用是对的 —— 19 条红里 15 条是"本机全绿、runner 上红"
+# 的 Linux 可移植性问题，而基线**必须实测**，否则接上必需检查的第一天就是 19 条红的噪音。
+# 2026-09-24 复核时那个状态已经过去了：基线收到 8 条，保护规则里已经挂上这个 job。
 #
-# 三条边界（都来自仓库自己的纪律）:
-#   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
-#     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
-#   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
-#
-# ## 它现在是**门**，判据是"不新增红"
-#
-# 全绿还不是现状（实测 10 条已知红），所以判据不是"全绿"而是**"不新增红"**：
-# 基线（`.github/gate-baseline.txt`，**实测**出来的那份清单）上的红不判失败，
-# **清单之外的**红判失败。这就是"必需检查"能挂上来而不变成噪音的原因。
-#
-# 两处细节:
+# 所以判据不是"全绿"而是**"不新增红"**：基线（`.github/gate-baseline.txt`，**实测**
+# 出来的那份清单）上的红不判失败，**清单之外的**红判失败。两处细节（各片与 `static` 里
+# 各有一半，别搬走）:
 #   * **新红先单跑一遍再判**：并行轮里的红有一部分只是撞上了别的套件在写同一棵树
 #     （`CONTRIBUTING.md` 记过）。单跑还是红才算数 —— 误报的门会被人忽略。
 #   * **基线只许变短**：哪一条修好了就在同一个 PR 里删掉它，否则 summary 会一直提醒。
+#
+# ## 它长成现在这样，是两轮实测的结果（docs/213）
+#
+# 第一轮（2026-10-09）：整道门禁 **20m10s**，而墙钟被**一条判据里的一步**钉死 ——
+# `loment_dist_test` 一条 954s，其中 3/4 花在"用 stage1 重编自举驱动"上，而那是
+# **同一件事的第二遍**（`loment_seed_test` 已经用便宜得多的方式付过账）。拿掉它之后
+# 按实测耗时切成 N 片：**片是并行 job，片内仍是 `-j 4`**。→ **5m15s**。
+#
+# 第二轮（2026-10-10）：剩下最重那一片的墙钟里，**装工具链占了 95s**（apt 55s +
+# LLVM 19 35s），而那是"同一份东西装 N 遍"。于是把工具链做成**镜像**
+# （`.github/ci/Dockerfile`，由 `ci-image.yml` 构建推送），各 job 只拉它，**一次 apt
+# 都不跑**。顺带把"apt 在镜像上抽风"的暴露面也一起消掉 —— 抽风那次发生在**构建**里，
+# 不占任何人的墙钟。
+#
+# 分片表**不在这个文件里**：`python tools/ci.py --shard-plan N` 打印它，而它是把
+# `STATIC_CHECKS` 全表切出来的**划分**（覆盖是构造性的，见 `ci.py:shards`）。
+# 手写一张名单在这里，新增判据就会静默落在所有片之外 —— 那条判据从此不跑，
+# 而门禁照样绿。这正是本仓反复踩过的那类洞。
+#
+# ## 四种用法
+#
+#   1) 自动: PR 与 push 到 main → 各片并行跑 → `static` 合起来汇总、对基线判失败；
+#   2) 手动给 `suite`（模块名，如 `loment_tools_test`）→ 只跑那一个套件、打**全量
+#      输出**。为什么需要这条: `tools/ci.py` 每条只留**最后一行**，那不够定位病因；
+#   3) 手动给 `only`（逗号分隔的子串）→ 走 ci.py 只跑那几条，用来快速确认"修好了"；
+#   4) 手动给 `diagnose_twin` → 跑写死的定向探针。
+#   2)~4) 都走 `static-manual` 那个 job（它**不**叫 `ci.py --static-only`）：它们是手工
+#   诊断，不该顶替 PR 上那道门，也不该被摊进分片（分片的前提是"跑全部"）。
+#
+# ## 五条边界（都来自仓库自己的纪律）
+#
+#   * **不新增 tools/*.py** —— `loment_release.GLOBS` 是显式清单，新增一个工具文件
+#     会让发布清单过期；所以汇总/比对逻辑写在 workflow 里，不落成脚本。
+#   * **不碰 lom/**、**不改任何判据** —— 把门禁搬上 CI 不该顺手改判据。
+#   * **`static` 那个 job 的名字不许改**：它**就是**保护规则里挂着的那个必需检查名。
+#     分片之后真正干活的是 `static-shard`（矩阵，名字带 `(K/N)` 后缀），
+#     所以那一名必须由 `static` 扛着 —— 名字一没，保护规则就永远等不到它，
+#     PR 会**全部**卡住（而不是松开）。
+#   * **镜像的 tag 在两处**：这里各 job 的 `container.image` 与 `ci-image.yml` 的 `TAG`。
+#     改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的**唯一**动作。
+#   * **容器里的包不许随手改**：名单的来路与两条纪律写在 `.github/ci/Dockerfile` 里
+#     （少一个包 = 一条假红；**不加** `rustc`/`dotnet`/`nvim`，因为那几条判据的 SKIP
+#     已经写进基线，加进来是改覆盖面而不是改进）。改完跑一遍门禁，看 `环境自述`。
 
 name: gate
 
@@ -54,21 +81,66 @@ on:
 permissions:
   contents: read
 
+#: 分几片。它**必须**与 `tools/ci.py shards()` 的分法一致 —— 下面矩阵里每条的 `total`
+#: 与 `--shard K/N` 的 N 都是它。写错了分片划分就变，并集不再是 `STATIC_CHECKS`，
+#: 而聚合那一步会**数**出来并失败（不是静默少跑几条）。
+env:
+  #: **2026-10-18 从 6 改成 10**（`#435`）：分片表的数字重新按 runner 实测换过之后,
+  #: 6 片里"均分"的那两片实际各背 ~1180s（`loment_elf_test` 一条就 245～617s, 而它
+  #: 连条目都没有）；10 片让六个均分片的预测和降到 ~394s, 与长尾（173.6 / 92.8 / 63.9）
+  #: 同量级。量的方法与原始数据见 `tools/ci.py:SHARD_COST` 与 `docs/213` §10。
+  GATE_SHARDS: "10"
+  #: **判定每一笔的镜像摘要**（`#890`）。`image:` 那一格不支持表达式，所以两个 job 里
+  #: 写的是同一个字面量；这里再记一份，聚合那一步把它写进 `env.txt` 与工件里 ——
+  #: 于是"哪个环境判的"有答案，而不是只有工作流文件里那一行。
+  #: 换镜像 = 改这三处（两处 `image:` + 这一行）**和** `ci-image.yml` 的 tag，同一个 PR。
+  CI_IMAGE_DIGEST: "sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53"
+  #: 这个摘要是从哪个 tag 解析出来的 —— 与 `ci-image.yml` 的 `TAG` 必须相等。
+  #: 摘要本身不可读，**人和判据都靠这一行**知道"换的是哪一版镜像"。
+  CI_IMAGE_TAG: "5"
+  #: **容器里的 git 要靠这一条才肯干活。** 工作区是 runner 的用户 checkout 的（UID 不是
+  #: 容器里的 root），git 于是拿 "dubious ownership" 拒绝 `ls-files` / `rev-parse` /
+  #: `check-attr` / `check-ignore` —— 而好几条判据正是靠这几个子命令的。2026-10-10 换上
+  #: 容器那次实测：`loment_eol` 报"不是 git 工作树"、`loment_src` 报"git ls-files 失败"、
+  #: `loment_publish` 把 git 的提示原文打了出来，连 `loment_seed_test` 的 gitattributes
+  #: 那条也一起红。
+  #:
+  #: 用 **git 自己的环境变量入口**注入（`GIT_CONFIG_COUNT` 那一族等价于 `git -c`），
+  #: 于是不必在每个 job 里各写一遍 `git config --add safe.directory`。
+  #:
+  #: 值取 `*` 而**不是** `${{ github.workspace }}`：那个 context 是**宿主**的路径
+  #: （`/home/runner/work/loment/loment`），而容器里看到的同一棵树在 `/__w/loment/loment`
+  #: —— git 自己的提示原文打的就是后者。路径写死就**静默打不中**，这一类"看着配上了、
+  #: 其实没配上"最费时间。CI 容器里只有我们自己这一棵树，`*` 不多放行任何东西。
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: "safe.directory"
+  GIT_CONFIG_VALUE_0: "*"
+
+#: **容器里 `run:` 的默认 shell 是 `sh`（dash），不是 runner 上的 bash。** 这不是小事：
+#: 2026-10-10 实测，`static-manual` 那条"单跑套件"里的 `read -ra parts <<< "..."` 在容器
+#: 里直接 `Syntax error: redirection unexpected`（`<<<` 是 bash 的 herestring）。各分片
+#: 那几条恰好都只用了 POSIX 写法所以没炸 —— 那是**运气**，不是设计。统一声明成 bash：
+#: 镜像里有 bash，而门禁里这些汇总/比对的脚本本来就是在 bash 下写的。
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # `lom/` 禁区 —— CONTRIBUTING「Do not change anything under `lom/`」那一节。
   #
   # **为什么要有这个 job**: 那一条把机制描述成"自动检测并关闭"，而 2026-09-22 查过 ——
-  # 仓里此前**没有任何东西**做这件事（`origin/main` 上只有这一个 workflow，`/rulesets`
-  # 返回空，branch protection 里没有路径规则也没有必需检查）。一条写在文档里、没有
-  # 实现的规矩，是最坏的一种：它让**外面**的贡献者以为会被拦下，实际不会。
-  # 这个 job 就是那句话可验证的那一半 —— **检测**。剩下的一半（关闭 PR、三次禁言）
-  # 需要仓库设置或一个 org 级 App，不是这个文件能单方面做到的，所以 CONTRIBUTING
-  # 的措辞也改成说实话。
+  # 仓里此前**没有任何东西**做这件事。一条写在文档里、没有实现的规矩，是最坏的一种：
+  # 它让**外面**的贡献者以为会被拦下，实际不会。这个 job 就是那句话可验证的那一半 ——
+  # **检测**。剩下的一半（关闭 PR、三次禁言）需要仓库设置或一个 org 级 App，
+  # 不是这个文件能单方面做到的，所以 CONTRIBUTING 的措辞也改成说实话。
   #
   # **为什么不 checkout**: 这个 job 骑在**别人的**补丁上跑，而它要的只是一串**文件名**。
   # 一个字节都不取进工作区，就没有"未审代码被执行"的面。也正因如此它**不需要**
   # `pull_request_target`（那个事件为了拿写权限会带来真实的注入风险）—— 只读 token
   # 就够读文件列表。
+  #
+  # **它为什么不进分片、也不进容器**：它一个字节都不从树里取，跑 5 秒，只要 `gh` 与
+  # `jq`（runner 上现成）。摊进分片只会让它跟着某一片排队。
   lom-door:
     name: lom/ 禁区
     runs-on: ubuntu-latest
@@ -91,13 +163,17 @@ jobs:
           err=$(mktemp)
           files=""
           rc=0
+          # **带 status 取文件名**（`added` / `modified` / `removed` / `renamed`）——
+          # 这个 job 拦的是"**改**契约"，而**新增一份**契约文件不是改：
+          # 既有那几份（`fuai` / `fuc` / `fujr`）一个字节都没动，对面那一半也就没被碰。
+          # 所以下面按 status 分流：非 `added` 的才拦，`added` 的只列出来（见 2026-10-11 那条）。
           if [ "$EVENT" = "pull_request" ]; then
-            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename' 2>"$err") || rc=$?
+            files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .status + "|" + .filename' 2>"$err") || rc=$?
           elif [ -n "${BEFORE:-}" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            files=$(gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+            files=$(gh api --paginate "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[] | .status + "|" + .filename' 2>"$err") || rc=$?
           else
             # 新分支的首次 push（`before` 是全零）—— 退回看这一个提交自己动了什么
-            files=$(gh api --paginate "repos/$REPO/commits/$AFTER" --jq '.files[].filename' 2>"$err") || rc=$?
+            files=$(gh api --paginate "repos/$REPO/commits/$AFTER" --jq '.files[] | .status + "|" + .filename' 2>"$err") || rc=$?
           fi
           # **列不出来就按失败算**（fail closed）。`gh` 拿不到文件列表时 `files` 是空串，
           # 下面的 `grep` 于是找不到 `lom/` 而**放行** —— 那是这个 job 最坏的失败形状:
@@ -107,17 +183,79 @@ jobs:
             cat "$err"
             exit 1
           fi
+          # **push 到 main 的那一跑要认出"这是走 PR 合进来的"。** 门在 PR 上已经拦过一次，
+          # 人也已经做过决定（admin 合就是那个决定的形状）—— 那一跑不该再红：否则**每一次
+          # 被认可**的 L0 改动都会在 main 上留一个红记号，而"门经常红"恰好教会所有人忽略它。
+          # **直接 push 到 main 的非合并提交照旧拦** —— 那条路绕过了 PR，没有人做过决定。
+          #
+          # 判据是"这个提交是不是合并提交"（parents >= 2）。取不到就按 1 算（保守：仍然拦）。
+          via_pr=0
+          if [ "$EVENT" != "pull_request" ] && [ -n "${AFTER:-}" ]; then
+            parents=$(gh api "repos/$REPO/commits/$AFTER" --jq '.parents | length' 2>/dev/null || echo 1)
+            case "${parents:-1}" in
+              ''|*[!0-9]*) parents=1 ;;
+            esac
+            if [ "$parents" -ge 2 ]; then
+              via_pr=1
+            fi
+          fi
+          # **`status` 那一列必须是三种之一**：API 换了形状（比如 status 没了）时要**红**，
+          # 而不是让所有行都落进"不是 added"里 —— 那会把新增也拦下（保守，但仍是不对的红），
+          # 或者更糟：反过来把改动当新增放行。所以先验形状。
+          if [ -n "$files" ]; then
+            shape=$(printf '%s\n' "$files" | grep -cv '|' || true)
+            if [ "$shape" != 0 ]; then
+              echo "::error::文件列表的形状变了（$shape 行没有 status 列）—— 门禁无法判定，按失败处理"
+              printf '%s\n' "$files" | head -5
+              exit 1
+            fi
+          fi
           n=$(printf '%s\n' "$files" | grep -c . || true)
-          bad=$(printf '%s\n' "$files" | grep -E '^lom/' || true)
+          bad=$(printf '%s\n' "$files" | grep '|lom/' | grep -v '^added|' | cut -d'|' -f2- || true)
+          newf=$(printf '%s\n' "$files" | grep '^added|lom/' | cut -d'|' -f2- || true)
           if [ -z "$bad" ]; then
-            echo "lom/ 禁区: 无改动（比对了 $n 个文件）"
+            if [ -n "$newf" ]; then
+              {
+                echo "## \`lom/\` 禁区：**新增**了 L0 文件（不拦）"
+                echo ""
+                echo "这个 job 拦的是**改动既有契约** —— 那几份的对面在另一个仓库，本仓单方面"
+                echo "看不出改坏没改坏。**新增**一份不是改：既有那几份一个字节都没动。"
+                echo "新增的那份仍要自己的判据（它一旦被谁依赖，改它就回到这条门下面）。"
+                echo ""
+                echo '```'
+                echo "$newf"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "lom/ 禁区: 无**改动**（比对了 $n 个文件，其中新增 ${newf:+$(printf '%s\n' "$newf" | grep -c .)} 个 lom/ 文件）"
+            exit 0
+          fi
+          if [ "$via_pr" = 1 ]; then
+            # 走 PR 合进来的：门在 PR 上已经拦过、决定也做过了（admin 合）。
+            # 这里只**记下来**，不判失败 —— 判失败等于让每一次认可的改动都在 main 上留红。
+            {
+              echo "## \`lom/\` 禁区：这次**改**了 L0 接口层（已走 PR 合进来，**不判失败**）"
+              echo ""
+              echo "这条改动在 PR 上被门拦过一次，人做过决定之后才合的（admin 合）。"
+              echo "main 这一跑只把它**记下来**；**直接 push 的非合并提交照旧拦**。"
+              echo ""
+              echo '```'
+              echo "$bad"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "$bad" | while read -r f; do
+              echo "::notice file=$f::改了 L0 接口层（走 PR 合进来 —— 门在 PR 上拦过，已决定）"
+            done
             exit 0
           fi
           {
-            echo "## \`lom/\` 禁区：这次改动碰了 L0 接口层"
+            echo "## \`lom/\` 禁区：这次**改**了 L0 接口层"
             echo ""
             echo "接口对面那一半在**另一个仓库**里，从本仓单方面看不出改坏没改坏 ——"
             echo "所以这里不评审，只拦下。想让接口变，去开 issue，那不是一个补丁。"
+            echo ""
+            echo "（**新增**一份 L0 文件不在这条门下面 —— 那几份既有契约一个字节都没动。"
+            echo "门拦的是下面这些 \`modified\`/\`removed\`/\`renamed\`。）"
             echo ""
             echo '```'
             echo "$bad"
@@ -126,55 +264,377 @@ jobs:
           echo "$bad" | while read -r f; do
             echo "::error file=$f::改了 L0 接口层（lom/ 禁区）—— 见 CONTRIBUTING.md"
           done
+          if [ -n "$newf" ]; then
+            # 同一笔里既有"改既有契约"又有"新增"时，把新增那条也说出来 ——
+            # 免得读者以为 red 的名单里那几行是"新增"。
+            echo "$newf" | while read -r f; do
+              echo "::notice file=$f::新增 L0 文件（不在这条门下面，等它被依赖了才需要）"
+            done
+          fi
           exit 1
 
-  static:
-    name: ci.py --static-only
+  # 独占那一条（`EXCLUSIVE_STATIC`）**先单独跑完**，其余分片 `needs:` 它。
+  #
+  # **为什么非单独一个 job 不可**（这是分片本身不会给你的保证）：独占的成员写**仓库里的
+  # 共享位置**（`lompi_sync` 会同步 `lompi/`），所以"不能与别的判据同时跑"—— 而摊到并行
+  # job 上之后，那句话里的"同时"**还包括别的 job**。`ci.py:shards` 把这一片排在片 1，
+  # 这里再用 `needs:` 把它与其余分片串起来，两件事缺一不可。
+  #
+  # **它的步骤与 `static-shard` 是同一套**（只差矩阵那几行），改一边要改两边。没有抽成
+  # composite action 是因为门禁自己的纪律："逻辑写在 workflow 里，不落成脚本"。两边走样
+  # 的后果由两道守卫兜住：聚合那步的"合成条数 == STATIC_CHECKS"，以及"任一片红就是红"。
+  static-exclusive:
+    name: 静态门禁（独占那一片）
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 60
+    if: ${{ github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    # **它故意不拉镜像。** 这一片（现在只有 `lompi_sync`）一条外部命令都不碰，而要命的是
+    # 它**串在其余五片前面**（`needs:`，独占那条保证要的）：拉镜像那 ~60s 会变成
+    # **整道门禁的前置等待**。2026-10-10 实测过一次：加了容器之后这一片 8s → 62s，
+    # 而它带来的净收益（各片把 95s 的 apt 换成 ~55s 的拉取）一共才四十来秒
+    # —— 于是总墙钟从 5m13s 变成 **5m38s**，白改。
+    #
+    # 所以这一片留在 runner 上：要的东西它本来就有（python3 + git），而 `git`
+    # 在 runner 上也不会有容器那套 "dubious ownership"。**它的成员必须保持
+    # "一条外部命令都不碰"** —— 哪天往 `EXCLUSIVE_STATIC` 里加一条要用工具链的，
+    # 它在这里会直接因为缺命令而红（那是能看见的，不是静默）。
     steps:
-      - uses: actions/checkout@v4
+      # **`fetch-depth: 0`（2026-10-16 起）**：`lom_audit` 的 M93/M95 要问一句
+      # "自手册/台账上次被写出以来，哪些路径动过" —— 那是它们**滞后容差**的那一半
+      # （容差为什么必须有，见 `.github/workflows/manifest.yml` 文件头那节）。
+      # `actions/checkout` 默认是 `fetch-depth: 1`，`git log` 就只看得到 HEAD，
+      # 那样问出来的答案是"什么都没动"⇒ 这两个判据会把每个 PR 都判红。
+      # 拿不到历史时它们**不静默放行**，会报一条指名要这个参数的账。
+      # 这个仓的 pack 是 ~32 MiB / 1400 多个提交，全取一次是秒级，换得起。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
 
-      # 装门禁要的外部命令。名单是实测出来的
-      # （`grep -rho 'which("...")' tools/*.py`）: clang 45 处，还有
-      # llvm-objdump/nm/ar、qemu-system-x86_64/qemu-aarch64、rustc、java、go、vim、node。
-      # 第一轮的环境自述证明**命令清单**已经够（只缺不需要的 nvim）—— 但**版本**不够:
-      # 见下面 LLVM 那一段。
-      - name: 装工具链
+      # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是**这一台**上缺了那个命令。
+      # 这一片跑在 **runner** 上（不拉镜像，见上面那段），所以这里列的就是 runner 自带的
+      # 那几件；其余分片的自述在它们各自的 job 里（列的是镜像里的，clang 那行会是 19）。
+      - name: 环境自述
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            qemu-system-x86 qemu-user \
-            golang-go default-jdk \
-            nodejs npm vim
-          # 仓里发出的 IR 用 `#dbg_declare` —— 那是 **LLVM 19** 起的调试记录语法。
-          # ubuntu-24.04 自带的 clang 是 **18**，于是在 `--debug` 那几条判据上报
-          # `error: expected instruction opcode`（`loment_p7_test` 的符号化器、
-          # `loment_tools_test` 的 m59 三条）。本机能过是因为本机 LLVM 是 22。
-          # 版本下限写在 CONTRIBUTING「Getting a toolchain」。
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 19
-          # 让不带版本号的名字指向 19（/usr/local/bin 在 PATH 里排在 /usr/bin 前面）。
-          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar; do
-            if [ -x "/usr/lib/llvm-19/bin/$t" ]; then
-              sudo ln -sf "/usr/lib/llvm-19/bin/$t" "/usr/local/bin/$t"
-            fi
+          echo "runner: $(uname -a)"
+          echo "python: $(python3 -V)"
+          echo "cpu: $(nproc)"
+          for t in python3 git gh sh make; do
+            printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
-          clang --version | head -1
-          llvm-objdump --version | head -1
 
-      # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是这个 runner 上没有那个命令。
+      - name: 跑这一片
+        run: |
+          python3 tools/ci.py --shard-plan "$GATE_SHARDS" | sed -n "1p"
+          python3 tools/ci.py --static-only --shard "1/$GATE_SHARDS" > gate.out 2>&1 || true
+          echo "--- 尾 30 行 ---"
+          tail -30 gate.out
+
+      - name: 汇总（这一片）
+        if: ${{ always() }}
+        run: |
+          set +e
+          pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
+          fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
+          echo "独占片: 绿 $pass / 红 $fail / 共 $((pass + fail))"
+          {
+            echo "## 静态门禁（独占那一片）—— 测量"
+            echo ""
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**"
+            echo '```'
+            grep ':: \[static\]' gate.out || echo "（无）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 判据预算（`#371`）—— 与各分片那一步同一个理由（那里有完整说明）：`ci.py` 在
+      # **每条判据都 PASS** 时也可能判失败，而那种失败不在 `:: [static] … FAIL` 里。
+      - name: 判据预算（#371）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if grep -q 'fujoci: 判据预算对不上' gate.out; then
+            {
+              echo "## 判据预算对不上（#371）"
+              echo ""
+              echo '```'
+              sed -n '/fujoci: 判据预算对不上/,$p' gate.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::判据预算对不上 —— 每一条失败行都带着可以直接粘进预算文件的行"
+            exit 1
+          fi
+          echo "判据预算: OK"
+
+      - name: 对照基线（这一片的新红，单跑确认）
+        if: ${{ always() }}
+        run: |
+          set +e
+          : > red.txt; : > base.txt; : > new_red.txt
+          : > confirmed.txt; : > flaked.txt
+          if [ ! -f .github/gate-baseline.txt ]; then
+            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
+            exit 1
+          fi
+          # `#769`: 基线按 **(套件, 判据)** 匹配。解析只在 `ci.py` 里做一份 ——
+          # 按列取套件名的那一版正是整条豁免的来源（不再按列 awk）。
+          # 解析失败要**判失败**（这里 `set +e`，静默的空文件会让门禁绿得看不出来）。
+          if ! python3 tools/ci.py --baseline-red gate.out > red.txt; then
+            echo "::error::红项解析失败（ci.py --baseline-red）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt; then
+            echo "::error::基线解析失败（ci.py --baseline-pairs）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-new gate.out .github/gate-baseline.txt > new_red.txt; then
+            echo "::error::新红解析失败（ci.py --baseline-new）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          cut -f1 new_red.txt | sort -u > new_red_suites.txt
+          while read -r name; do
+            [ -z "$name" ] && continue
+            echo "=== 新红复跑（单跑）: $name ==="
+            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
+            rc=$?
+            tail -4 "re_$name.log"
+            if [ $rc -eq 0 ]; then
+              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> flaked.txt
+            else
+              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> confirmed.txt
+            fi
+          done < new_red_suites.txt
+          if [ -s confirmed.txt ]; then
+            echo "::error::门禁（独占片）：新红 $(paste -sd ' ' confirmed.txt)"
+            exit 1
+          fi
+          echo "独占片: 没有新红"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: ${{ always() }}
+        with:
+          name: gate-log-1
+          path: |
+            gate.out
+            red.txt
+            base.txt
+            new_red.txt
+            confirmed.txt
+            flaked.txt
+            re_*.log
+          if-no-files-found: warn
+
+  # **干活的那一半**：每一片是一个独立 runner，片内仍是 `-j 4`。
+  #
+  # `fail-fast: false` 是**必须**的：一片红不该让别的片被砍掉 —— 那样看到的是
+  # "三片没跑"，而不是"这三片也红"。门禁红的时候最需要的就是**全部**红一起看见。
+  #
+  # `include:` 里那 9 行是 `python tools/ci.py --shard-plan 10` 的副本（片号、总数），
+  # **不含片 1** —— 那是上面那个 job，这里用 `needs:` 与它串行。
+  # **改分片形状要同时改 `ci.py` 和这里**。
+  #
+  # **10 这个数是量出来的（2026-10-18, `#435`）**：三次成功门禁 run 的 per-suite 耗时
+  # 中位数（`tools/ci.py:SHARD_COST`）。6 片时"均分"的那两片实际各背 ~1180s ——
+  # `loment_elf_test` 一条 245～617s, 而它**没有登记耗时**、按 8s 算, 于是 6/6 一片跑了
+  # 30 分钟。10 片让六个均分片的预测和都落在 ~394s, 与三条长尾（173.6 / 92.8 / 63.9）
+  # 同一量级; 再往上加片, 墙钟的下限变成 `loment_elf_test` 自己（~387s）, 收益归零。
+  static-shard:
+    name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # `always()`：独占那片红了**也要**把其余九片跑完。`needs` 的默认行为是"依赖失败就
+    # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"。独占那片与这里并行**不会**踩到
+    # 共享位置：它是**先跑完**的那一个。
+    if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    needs: [static-exclusive]
+    container:
+      # **路径里带着属主名**（`docs/255` §2）：库一换组织，这一行就得跟着换，而它**不是**
+      # 算出来的 —— `ci-image.yml` 那边是 `github.repository_owner` 转小写，两边靠人看着对齐。
+      # 顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**（包默认私有，而 fork 的
+      # PR 拿不到私有包 ⇒ 它们会死在"拉镜像"这一步）、**最后**才改这里。反了就是每一片都拉不到。
+      image: ghcr.io/loment-lang/loment-ci@sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 2, total: 10 }
+          - { shard: 3, total: 10 }
+          - { shard: 4, total: 10 }
+          - { shard: 5, total: 10 }
+          - { shard: 6, total: 10 }
+          - { shard: 7, total: 10 }
+          - { shard: 8, total: 10 }
+          - { shard: 9, total: 10 }
+          - { shard: 10, total: 10 }
+    steps:
+      # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
       - name: 环境自述
         run: |
           echo "runner: $(uname -a)"
           echo "python: $(python3 -V)"
           echo "cpu: $(nproc)"
           echo "clang: $(clang --version | head -1)"
-          echo "llvm-objdump: $(llvm-objdump --version | head -1)"
           for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
                    qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
-                   python3 git sh; do
+                   python3 git gh sh make; do
+            printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
+          done
+
+      # 这一片是哪些判据 —— **从 `ci.py` 打印**，不在这里列名字（理由见文件头）。
+      # 片内并行度 `-j` 用默认（min(8, nproc)）；片与片之间已经是并行的了，
+      # 再往上抬 `-j` 只会让同一台 4 vCPU 的 runner 自己跟自己抢。
+      - name: 跑这一片
+        run: |
+          python3 tools/ci.py --shard-plan "${{ matrix.total }}" | sed -n "${{ matrix.shard }}p"
+          python3 tools/ci.py --static-only --shard "${{ matrix.shard }}/${{ matrix.total }}" \
+            > gate.out 2>&1 || true
+          echo "--- 尾 30 行 ---"
+          tail -30 gate.out
+
+      - name: 汇总（这一片）
+        if: ${{ always() }}
+        run: |
+          set +e
+          pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
+          fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
+          echo "片 ${{ matrix.shard }}: 绿 $pass / 红 $fail / 共 $((pass + fail))"
+          {
+            echo "## 静态门禁 ${{ matrix.shard }}/${{ matrix.total }} —— 测量"
+            echo ""
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**"
+            echo ""
+            echo "### 红项"
+            echo '```'
+            grep ':: \[static\].*FAIL' gate.out || echo "（无）"
+            echo '```'
+            echo ""
+            echo "### 最慢的 8 条（这一片）"
+            echo '```'
+            grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 判据预算（`#371`）—— **必须单独认，否则它是个隐形的失败**。
+      #
+      # `ci.py` 在**每条判据都 PASS** 的情况下也可能判失败：只要有人漏登记了一条跳过、
+      # 或者动了地板。那种失败**不会**出现在 `:: [static] … FAIL` 里（没有任何一条套件
+      # 失败），而下面"对照基线"那一步只读那些 FAIL 行；只看退出码又分不清"预算对不上"
+      # 与"某条套件红"（后者要按"先单跑一遍"的规矩处理）。所以这里认那句原话。
+      #
+      # 落这一版时实测过一次：`gate-skips.txt` 空着、若少了这一步，预算不符的那几片
+      # 会**报绿**（每条套件都写着 PASS），而这一整版就是冲着"没跑不算通过"来的。
+      - name: 判据预算（#371）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if grep -q 'fujoci: 判据预算对不上' gate.out; then
+            {
+              echo "## 判据预算对不上（#371）"
+              echo ""
+              echo '```'
+              sed -n '/fujoci: 判据预算对不上/,$p' gate.out
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::判据预算对不上 —— 每一条失败行都带着可以直接粘进预算文件的行"
+            exit 1
+          fi
+          echo "判据预算: OK"
+
+      # 门那一半：**只对"基线之外的红"报红**，而且**先单跑一遍再判**。
+      #
+      # **单跑放在**这里**（而不是最后那个汇总 job）是有原因的**：单跑一次要**真的跑**
+      # 那条判据，也就需要这一片的环境。汇总 job 只用 runner 上的 shell 与 `cat`，
+      # 所以那里只汇总结果、不再动手跑。
+      - name: 对照基线（这一片的新红，单跑确认）
+        if: ${{ always() }}
+        run: |
+          set +e
+          : > red.txt; : > base.txt; : > new_red.txt
+          : > confirmed.txt; : > flaked.txt
+          if [ ! -f .github/gate-baseline.txt ]; then
+            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
+            exit 1
+          fi
+          # `#769`: 基线按 **(套件, 判据)** 匹配。解析只在 `ci.py` 里做一份 ——
+          # 按列取套件名的那一版正是整条豁免的来源（不再按列 awk）。
+          # 解析失败要**判失败**（这里 `set +e`，静默的空文件会让门禁绿得看不出来）。
+          if ! python3 tools/ci.py --baseline-red gate.out > red.txt; then
+            echo "::error::红项解析失败（ci.py --baseline-red）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt; then
+            echo "::error::基线解析失败（ci.py --baseline-pairs）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          if ! python3 tools/ci.py --baseline-new gate.out .github/gate-baseline.txt > new_red.txt; then
+            echo "::error::新红解析失败（ci.py --baseline-new）—— 门禁不猜，按失败处理"
+            exit 1
+          fi
+          cut -f1 new_red.txt | sort -u > new_red_suites.txt
+          while read -r name; do
+            [ -z "$name" ] && continue
+            echo "=== 新红复跑（单跑）: $name ==="
+            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
+            rc=$?
+            tail -4 "re_$name.log"
+            if [ $rc -eq 0 ]; then
+              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> flaked.txt
+            else
+              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
+              awk -F'\t' -v n="$name" '$1==n' new_red.txt >> confirmed.txt
+            fi
+          done < new_red_suites.txt
+          if [ -s confirmed.txt ]; then
+            echo "::error::门禁（片 ${{ matrix.shard }}）：新红 $(paste -sd ' ' confirmed.txt)"
+            exit 1
+          fi
+          echo "片 ${{ matrix.shard }}: 没有新红"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: ${{ always() }}
+        with:
+          name: gate-log-${{ matrix.shard }}
+          path: |
+            gate.out
+            red.txt
+            base.txt
+            new_red.txt
+            confirmed.txt
+            flaked.txt
+            re_*.log
+          if-no-files-found: warn
+
+  # 手动用法（`suite` / `only` / `diagnose_twin`）—— 与日常那条路分开。它**不能**叫
+  # `ci.py --static-only`：那一名是保护规则里挂着的必需检查，而手工跑的这次不是 PR 上
+  # 的门。名字分开之后，两条路谁也不挡谁。
+  static-manual:
+    name: 门禁（手动：单跑套件 / 只跑几条 / 定向探针）
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
+    container:
+      # 与 `static-shard` 同一条镜像，理由与那句"顺序是硬的"见上面。
+      image: ghcr.io/loment-lang/loment-ci@sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53
+    steps:
+      # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
+      - name: 环境自述
+        run: |
+          echo "runner: $(uname -a)"
+          echo "python: $(python3 -V)"
+          echo "cpu: $(nproc)"
+          echo "clang: $(clang --version | head -1)"
+          for t in clang clang++ lld ld.lld llvm-objdump llvm-nm llvm-ar rustc cargo \
+                   qemu-system-x86_64 qemu-aarch64 go java javac node npm vim nvim \
+                   python3 git gh sh make gdb; do
             printf '%-20s %s\n' "$t" "$(command -v "$t" || echo '—— 缺')"
           done
 
@@ -200,9 +660,21 @@ jobs:
             rm -f "$out"
           done
 
+      # 用法 3: 只跑几条（走 ci.py 的 `--only-static`）。打的是**那几条**的原样输出 ——
+      # 这条路的用处是"我刚修完，确认一下"。
+      - name: 只跑几条
+        if: ${{ github.event.inputs.only != '' }}
+        run: |
+          set +e
+          args=""
+          IFS=',' read -ra parts <<< "${{ github.event.inputs.only }}"
+          for p in "${parts[@]}"; do args="$args --only-static $p"; done
+          python3 tools/ci.py --static-only $args 2>&1 | tail -60
+
       # 用法 4: 定向探针 —— 三条套件里的自举孪生二进制在 runner 上段错误（rc=-11），
       # 而本机（WSL，也是 Linux）全绿。这类事猜不出来，只能在 runner 上直接看。
       # **写死的固定步骤**，不做"任意命令"输入（这是公开仓）。
+      # `gdb` 在镜像里（原来这一步会现装一次 —— 那也是"每次跑都装"的一种）。
       - name: 探针 —— 孪生二进制的段错误
         if: ${{ github.event.inputs.diagnose_twin == 'true' }}
         run: |
@@ -217,12 +689,11 @@ jobs:
           timeout 600 python3 tools/potato_test.py 2>&1 | tail -8
           echo
           echo "### 段错误地址（dmesg 那一行还带着出错指令的 ip）"
-          sudo dmesg 2>/dev/null | grep -iE "segfault|trap" | tail -4 \
-            || echo "（dmesg 拿不到：kernel.dmesg_restrict）"
+          dmesg 2>/dev/null | grep -iE "segfault|trap" | tail -4 \
+            || echo "（dmesg 拿不到：容器里没有内核环缓冲的读权限）"
           echo
           echo "### gdb 跟着子进程抓现场：出错指令 + 周围的指令 + 寄存器里的坏地址"
           echo "### （固定 ip 说明同一个代码点拿到坏参数；rdi/rsi 就是那个参数）"
-          sudo apt-get install -y -qq gdb
           timeout 900 gdb -batch -q \
             -ex "set follow-fork-mode child" \
             -ex "set detach-on-fork off" \
@@ -233,93 +704,139 @@ jobs:
             -ex "bt" \
             --args python3 tools/potato_test.py 2>&1 | tail -70
 
-      # 用法 1/3: 跑整道门禁（或只跑几条）。红项留给下一步汇总，不让它把 job 弄挂。
-      - name: 跑静态门禁
-        if: ${{ github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
-        run: |
-          if [ -n "${{ github.event.inputs.only }}" ]; then
-            args=""
-            IFS=',' read -ra parts <<< "${{ github.event.inputs.only }}"
-            for p in "${parts[@]}"; do args="$args --only-static $p"; done
-            python3 tools/ci.py --static-only $args > gate.out 2>&1 || true
-          else
-            python3 tools/ci.py --static-only > gate.out 2>&1 || true
-          fi
-          echo "--- 尾 40 行 ---"
-          tail -40 gate.out
+  # `static` —— **这个名字就是保护规则里挂着的必需检查**（见文件头第三条边界）。
+  # 它不跑任何判据（那是各分片的事），只做两件各分片单看不了的事：
+  #   1. **把 N 片的 `gate.out` 合成一份** —— 于是"基线该变短了"能对着**整张表**算。
+  #      各片单独算是错的：别的片跑到绿的那几条，在它眼里全都"不在我这一轮的红里"，
+  #      会被误报成"已经绿了"。
+  #   2. 一句话报出全貌（绿/红/新红/假红/过期基线）。
+  # **它不拉镜像**：它只用 runner 上的 `cat`/`grep`/`sort`/`python3` 数一遍条数，
+  # 拉一个 1GB 的镜像只为这个就是纯加墙钟。
+  # AI slop 的机械代理判据（`docs/319`）。**只报告，不阻断**：一个还没校准的判据
+  # 直接挡 PR，第一次误报就会被人关掉——之后等于不存在。校准路径写在 docs/319 §5。
+  slop:
+    name: slop report
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
 
-      - name: 汇总
-        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
+      - name: 机械代理判据（报告）
         run: |
+          set +e
+          python3 tools/loment_slop.py check --base "origin/${{ github.base_ref }}" --json > slop.json
+          python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open("slop.json", encoding="utf-8"))
+          except Exception as e:
+              print(f"::warning::slop 报告读不了：{e}")
+              raise SystemExit(0)
+          s = d["summary"]
+          print(f"slop: {s['findings']} finding(s) — high {s['high']}, "
+                f"medium {s['medium']}, low {s['low']}, info {s['info']}")
+          for f in d["findings"]:
+              where = f["file"] or "-"
+              if f.get("line"):
+                  where += f":{f['line']}"
+              print(f"[{f['severity']}] {f['kind']} {where} — {f['message']}")
+          PY
+
+  static:
+    name: ci.py --static-only
+    needs: [static-exclusive, static-shard]
+    if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          # **`#443`：`gate-log-[0-9]*`，不带 `gate-log-merged`。** `gate-log-merged`
+          # 是本 job 上一次 attempt 自己上传的**全量副本** —— `gh run rerun --failed`
+          # 之后它还在 artifact 列表里，宽通配符 `gate-log-*` 会把它和真正的分片一起
+          # 下进来，于是每条判据出现两遍（实测 174 = 2×87）。
+          #
+          # **为什么"每次只取最新的那一份 artifact"是对的**：`--failed` 重跑只重跑
+          # 失败的那几片，其余分片**必须**复用上一次 attempt 的产物 —— 按 attempt
+          # 死卡会把它们全部丢掉。`download-artifact` 对同名 artifact 取最新的一份
+          # （`?name=` 的语义），于是每一片恰好落到一个 `gate-log-<K>/` 目录里；
+          # 合成那边再按判据名去重兜底一次。
+          pattern: gate-log-[0-9]*
+          path: shards
+
+      # 合成是靠约定（各片都叫 `gate.out`，下载进 `shards/gate-log-<K>/`）。
+      # **`#443`**：不再 `cat gate-log-*` —— 那个通配符会连 `gate-log-merged`
+      # （聚合 job 上一次 attempt 上传的**全量副本**）一起算，于是一次
+      # `gh run rerun --failed` 就让每条判据出现两遍（实测 174 = 2×87）。
+      # 合成与"每条判据恰好一次"的判断都在 `ci.py --merge-shards` 里：只认
+      # `gate-log-<片号>`、按**判据名**取并集（后者覆盖前者），并要求并集**恰好**是
+      # `STATIC_CHECKS` —— 少一条是"有一片没跑完"，多一条是"有别的东西混进来"，
+      # 两种分开报（原先只说前者，把人指向一片其实跑完了的分片）。
+      - name: 合成一份 gate.out
+        run: |
+          set +e
+          python3 tools/ci.py --merge-shards shards > gate.out 2> merge.err
+          rc=$?
+          cat merge.err
+          if [ $rc -ne 0 ]; then
+            echo "::error::分片结果不齐 —— 有一片没跑完或没上传（见上面那几行）"
+            exit 1
+          fi
+
+      - name: 汇总（全貌）
+        run: |
+          set +e
           pass=$(grep -c ':: \[static\].*PASS' gate.out || true)
           fail=$(grep -c ':: \[static\].*FAIL' gate.out || true)
+          cat shards/gate-log-*/confirmed.txt 2>/dev/null | sed '/^$/d' | sort -u > confirmed.txt
+          cat shards/gate-log-*/flaked.txt 2>/dev/null | sed '/^$/d' | sort -u > flaked.txt
+          # `#769`: 逐条判据比较（解析只在 `ci.py` 里一份）。解析失败要判失败 ——
+          # 静默的空文件会让"没有新红"看起来像真的。
+          python3 tools/ci.py --baseline-red gate.out > red.txt \
+            || { echo "::error::红项解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt \
+            || { echo "::error::基线解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          python3 tools/ci.py --baseline-new gate.out .github/gate-baseline.txt > new_red.txt \
+            || { echo "::error::新红解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          python3 tools/ci.py --baseline-gone gate.out .github/gate-baseline.txt > gone.txt \
+            || { echo "::error::基线过期解析失败 —— 门禁不猜，按失败处理"; exit 1; }
+          n_red=$(wc -l < red.txt | tr -d ' ')
+          n_base=$(wc -l < base.txt | tr -d ' ')
+          n_bad=$(wc -l < confirmed.txt | tr -d ' ')
+          n_flake=$(wc -l < flaked.txt | tr -d ' ')
+          n_gone=$(wc -l < gone.txt | tr -d ' ')
           echo "绿 $pass / 红 $fail / 共 $((pass + fail))"
           {
-            echo "## 静态门禁 —— 测量"
+            echo "## 静态门禁 —— 全貌（各片合并）"
             echo ""
-            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**（工具链自述见日志）"
+            echo "绿 **$pass** · 红 **$fail** · 共 **$((pass + fail))**"
+            echo ""
+            echo "本轮红 **$n_red** · 基线 **$n_base** · 新红 **$n_bad** · 并行假红 $n_flake · 基线已过期 $n_gone"
             echo ""
             echo "### 红项"
             echo '```'
             grep ':: \[static\].*FAIL' gate.out || echo "（无）"
             echo '```'
             echo ""
-            echo "### 最慢的 8 条"
-            echo '```'
-            grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      # 真门那一半：对照基线，**只对新红报红**。
-      - name: 对照基线（只对新红报红）
-        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
-        run: |
-          set +e
-          if [ ! -f .github/gate-baseline.txt ]; then
-            echo "::error::基线文件 .github/gate-baseline.txt 不见了 —— 门禁不猜，直接判失败"
-            exit 1
-          fi
-          grep -E ':: \[static\].*FAIL' gate.out | awk '{print $3}' | sort -u > red.txt
-          grep -v '^[[:space:]]*#' .github/gate-baseline.txt | awk 'NF {print $1}' | sort -u > base.txt
-          comm -13 base.txt red.txt > new_red.txt
-          comm -23 base.txt red.txt > gone.txt
-          : > confirmed.txt
-          : > flaked.txt
-          while read -r name; do
-            [ -z "$name" ] && continue
-            echo "=== 新红复跑（单跑）: $name ==="
-            python3 tools/ci.py --static-only --only-static "$name" > "re_$name.log" 2>&1
-            rc=$?
-            tail -4 "re_$name.log"
-            if [ $rc -eq 0 ]; then
-              echo "  -> 单跑**绿**：判为并行假红（不计入判据）"
-              echo "$name" >> flaked.txt
-            else
-              echo "  -> 单跑**仍红**：这是这一笔引入的新红"
-              echo "$name" >> confirmed.txt
-            fi
-          done < new_red.txt
-          n_red=$(wc -l < red.txt | tr -d ' ')
-          n_base=$(wc -l < base.txt | tr -d ' ')
-          n_bad=$(wc -l < confirmed.txt | tr -d ' ')
-          n_flake=$(wc -l < flaked.txt | tr -d ' ')
-          n_gone=$(wc -l < gone.txt | tr -d ' ')
-          {
-            echo "## 对照基线（判据：不新增红）"
-            echo ""
-            echo "本轮红 **$n_red** · 基线 **$n_base** · 新红 **$n_bad** · 并行假红 $n_flake · 基线已过期 $n_gone"
-            echo ""
             if [ "$n_bad" -gt 0 ]; then
               echo "### 新红（这一笔引入的）"
               echo '```'
               cat confirmed.txt
               echo '```'
+              echo ""
             fi
             if [ "$n_flake" -gt 0 ]; then
               echo "### 并行假红（单跑绿 —— **不**判失败）"
               echo '```'
               cat flaked.txt
               echo '```'
+              echo ""
             fi
             if [ "$n_gone" -gt 0 ]; then
               echo "### 基线该变短了"
@@ -327,19 +844,160 @@ jobs:
               echo '```'
               cat gone.txt
               echo '```'
+              echo ""
             fi
+            echo "### 最慢的 8 条（各片合计）"
+            echo '```'
+            grep ':: \[static\]' gate.out | sort -k3 -rn | head -8
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$n_bad" -gt 0 ]; then
             echo "::error::门禁：新红 $n_bad 条 —— $(paste -sd ' ' confirmed.txt)"
             exit 1
           fi
-          echo "门禁：没有新红（基线里 $n_gone 条已过期，见 job summary）"
 
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.diagnose_twin != 'true' }}
+      # 判据预算的**另一半**棘轮（`#418`）—— 树内那两条（`ci.py:check_budget`）比的是
+      # **同一份提交里的两个数**：删一条判据、再把地板从 N 改成 N-1，两边一起说谎就绿了；
+      # 给一条既有判据加个环境门、再把那条豁免写进 `gate-skips.txt`，同样绿。
+      #
+      # 这里把两份预算与**对照面**（PR 取 **base SHA**，push 取 `event.before`）比：
+      # 地板只许**升**（对照面有的套件不许消失、数值不许降），跳过表只许**变短**。
+      # 与下面基线棘轮同一个形状（`comm -13` 只认"新增"），取不到对照面时同样 **fail
+      # closed** —— 一个取不到对照面的棘轮会静默失效，而它正是为此存在的。
+      #
+      # **为什么是 `base.sha` 而不是 `github.base_ref`**（2026-10-19 实测）：分支名会让
+      # 这一条去取**跑门禁那一刻**的 main，而 PR 的测试合并树是在**推送那一刻**按 main
+      # 建的。两者之间只要 main 抬过一次地板，这个 PR 就会被判"地板降了"—— 而它一个字节
+      # 都没动 `.github/gate-floors.txt`。本 PR 一小时内连撞两次（`#887` 的 18/5，`#884`
+      # 之后的 26→27），每次都要重新合 main 才能再跑一轮。`base.sha` 正是那棵合并树的
+      # 基点，棘轮判的本来就是"这一笔相对它的基点有没有松"。
+      - name: 判据预算只许收紧（#418）
+        if: ${{ always() }}
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          case "$base" in
+            ""|0000000000000000000000000000000000000000)
+              echo "::warning::拿不到对照面（新分支的首次 push）—— 这一条跳过，其余照常"
+              exit 0 ;;
+          esac
+          if ! git fetch --no-tags --depth=1 origin "$base" > fetch-budget.log 2>&1; then
+            echo "::error::取对照面失败（$base）—— 门禁不猜，按失败处理"
+            tail -20 fetch-budget.log
+            exit 1
+          fi
+          for f in gate-floors.txt gate-skips.txt; do
+            if ! git show "FETCH_HEAD:.github/$f" > "old-$f" 2> show-budget.log \
+               || [ ! -s "old-$f" ]; then
+              echo "::error::对照面（$base）里读不到 .github/$f —— 门禁不猜，按失败处理"
+              tail -20 show-budget.log
+              exit 1
+            fi
+          done
+          if ! python3 tools/ci.py --budget-vs old-gate-floors.txt old-gate-skips.txt; then
+            {
+              echo "## 判据预算比对照面**松了**（不许）"
+              echo ""
+              echo "地板只许升、跳过表只许变短。删判据再把地板改小、或者给既有判据加个"
+              echo "环境门再把豁免登记进来 —— 那两种改法在这里判失败。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      # 基线**只许变短**（文件头那条纪律）—— 此前它只靠人自觉。把一条新红登记进基线，
+      # 门禁从此对那条视而不见，而 summary 上那段"基线该变短了"是 **notice**、不判失败：
+      # 于是"加一条"这条路一直开着，正是本 PR 要堵的那类洞。
+      #
+      # **为什么不在分片里做**：那一片只看得到自己片内的红，比出来的"新增"是假的
+      # （别的片跑到绿的条目，在它眼里根本不在"我这一轮的红"里）。全表的对照面只有这里
+      # 够得着 —— 与"基线该变短了"必须在这儿算，是同一个理由。
+      #
+      # **对照面从哪儿来**：本地树里没有基线的前一版（`actions/checkout` 默认只取一个
+      # 提交），所以要**显式取一次**：PR 取 **base SHA**（与上面预算棘轮同一个理由 ——
+      # 分支名会取到跑门禁那一刻的 main，与合并树的基点错开），push 取 `event.before`。
+      # 取不到就**判失败**（fail closed）—— 与 `lom-door` 那条"列不出文件列表就按失败算"
+      # 同一套：一个取不到对照面的棘轮会**静默失效**，而它正是为此存在的。
+      - name: 基线只许变短
+        if: ${{ always() }}
+        run: |
+          set +e
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          case "$base" in
+            ""|0000000000000000000000000000000000000000)
+              echo "::warning::拿不到对照面（新分支的首次 push）—— 这一条跳过，其余照常"
+              exit 0 ;;
+          esac
+          if ! git fetch --no-tags --depth=1 origin "$base" > fetch.log 2>&1; then
+            echo "::error::取对照面失败（$base）—— 门禁不猜，按失败处理"
+            tail -20 fetch.log
+            exit 1
+          fi
+          if ! git show FETCH_HEAD:.github/gate-baseline.txt > old-baseline.txt 2> show.log \
+             || [ ! -s old-baseline.txt ]; then
+            echo "::error::对照面（$base）里读不到 .github/gate-baseline.txt —— 门禁不猜，按失败处理"
+            tail -20 show.log
+            exit 1
+          fi
+          # `#769`: 基线是 `套件 判据名`（旧格式的一列行读成 `套件 *`）。"只许变短"
+          # 也按逐条判据比：旧的一整条 `套件 *` 授权细化成几条具体判据（收紧），
+          # 但一条逐条豁免**不能**反向授权一条新的整条豁免（那是变粗）。
+          python3 tools/ci.py --baseline-pairs old-baseline.txt > old.txt
+          python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > new.txt
+          if ! python3 tools/ci.py --baseline-growth old.txt new.txt > added.txt; then
+            {
+              echo "## 基线**变长了**（不许）"
+              echo ""
+              echo "基线是**实测出来的已知红**，只许变短：哪一条修好了，就在**同一个 PR 里**"
+              echo "删掉它。往基线里**加**一条，等于把一条新红登记成合法 —— 门禁从此对那条"
+              echo "视而不见。"
+              echo ""
+              echo "该做的是把那条红修掉；修不动就先开 issue，别登记进基线。"
+              echo ""
+              echo '```'
+              cat added.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::基线多了 $(wc -l < added.txt | tr -d ' ') 条 —— $(paste -sd ' ' added.txt)"
+            exit 1
+          fi
+          echo "基线只许变短: OK"
+
+      # 分片那边红了，这一道必须**跟着红**。`needs` 的默认行为是"依赖失败就跳过"，
+      # 而跳过**不算失败** —— 保护规则会当成"还没报"而永远等下去。所以这里显式看结果。
+      - name: 分片有红就是红
+        if: ${{ needs.static-exclusive.result != 'success' || needs.static-shard.result != 'success' }}
+        run: |
+          echo "::error::独占片 = ${{ needs.static-exclusive.result }}，分片 = ${{ needs.static-shard.result }} —— 门禁不通过"
+          exit 1
+
+      # **判定这一笔的是哪个镜像**（`#890`）：写进工件，也写进 step summary。
+      # 没有这一行，"绿"就只连着工作流文件里那个可变 tag；有了它，绿连着一个摘要。
+      - name: 记下判定这一笔的镜像摘要
+        if: ${{ always() }}
+        run: |
+          {
+            echo "ci-image: ghcr.io/loment-lang/loment-ci@${CI_IMAGE_DIGEST}"
+            echo "run: ${GITHUB_RUN_ID}"
+            echo "sha: ${GITHUB_SHA}"
+            echo "ref: ${GITHUB_REF}"
+          } > env.txt
+          cat env.txt
+          { echo '### 门禁环境'; echo '```'; cat env.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: ${{ always() }}
         with:
-          name: gate-log
+          name: gate-log-merged
           path: |
+            env.txt
             gate.out
             red.txt
             base.txt
@@ -347,5 +1005,4 @@ jobs:
             confirmed.txt
             flaked.txt
             gone.txt
-            re_*.log
           if-no-files-found: warn

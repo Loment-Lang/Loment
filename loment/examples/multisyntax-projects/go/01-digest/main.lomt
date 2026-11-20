@@ -4,6 +4,7 @@
 // （`choose write grammar go`）。宿主薄，是因为这一门（以及其余五门）**调不到内建函数、
 // 也跨不了单元**：I/O 与 `_start` 是宿主的事（见 docs/188 §7.1 的 Stage A 子集）。
 module main
+choose runtime
 
 use "digest.lomt"
 

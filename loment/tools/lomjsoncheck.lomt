@@ -21,6 +21,7 @@
 // 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误；docs/189 §3）。
 
 module lomjsoncheck
+choose runtime
 
 use bytes
 use json

@@ -1,0 +1,235 @@
+// os/sysconf.lomt — 程序开机要问的那几个数: 页大小、CPU 数、时钟频率
+//
+// 为什么需要它: libc 的 `sysconf` 是个便利包装, 没有它就得自己回答"一页多大"、
+// "有几个 CPU"。这两个数被写死的程序在换机器时会**静默变慢或算错** (按页算缓冲区、
+// 按 CPU 数开线程)。这一层给的是**能核对的来源**: 常量落在文档过的值上, 动态的
+// 数从内核结构 (sysinfo) 或 sysfs 文本里读, 而不是猜。
+//
+// 三个来源, 三种可信度:
+//   * `sc_page_size` 返回 4096 —— x86-64 上这是内核编译期常量; **其它架构不一定**,
+//     真要跨架构就把 sysinfo/getauxval 接上;
+//   * `sc_cpu_count` 读 `struct sysinfo` 的 `procs` 字段 (偏移 80, u16);
+//   * `sc_parse_online` 解 `/sys/devices/system/cpu/online` 的 `0-7` / `0,2-3` 文本。
+//
+// 边界: 号是 x86-64 Linux 的; 自检只验纯逻辑 (名字表、常量值、文本解析)。
+//
+// 命名: 公开 sc_*, 内部 scq_。
+
+module sysconf
+
+/// 名字序号 (给 `sc_name` / `sc_value` 用)。
+pub const SC_PAGESIZE: u32 = 0;
+pub const SC_CLK_TCK: u32 = 1;
+pub const SC_OPEN_MAX: u32 = 2;
+pub const SC_NPROCESSORS_ONLN: u32 = 3;
+pub const SC_PHYS_PAGES: u32 = 4;
+
+/// x86-64 的页大小。其它架构要自己核。
+pub const SC_PAGE_BYTES: u64 = 4096;
+/// 内核时钟频率: 一个 tick 百分之一秒 (`times(2)` 与 `/proc/*/stat` 的单位)。
+pub const SC_TICKS_PER_SEC: u64 = 100;
+/// 常见软上限 (老系统 1024; 现代 systemd 默认 1024 起步, 可调到很大)。
+pub const SC_OPEN_MAX_VALUE: u64 = 1024;
+
+/// `struct sysinfo.procs` 的偏移 (见 system/sysinfo.lomt 的布局说明)。
+pub const SC_SYSINFO_PROCS_OFF: u32 = 80;
+
+fn scq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn scq_u16(p: ptr, o: u32) -> u32 {
+    let v: u32 = load8(p, o) as u32;
+    v = v | ((load8(p, o + 1) as u32) << 8);
+    return v;
+}
+
+/// 名字序号 -> `SC_*` 名字。未知返回 0 长度。
+pub fn sc_name(id: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "";
+    if id == SC_PAGESIZE { s = "SC_PAGESIZE"; }
+    else if id == SC_CLK_TCK { s = "SC_CLK_TCK"; }
+    else if id == SC_OPEN_MAX { s = "SC_OPEN_MAX"; }
+    else if id == SC_NPROCESSORS_ONLN { s = "SC_NPROCESSORS_ONLN"; }
+    else if id == SC_PHYS_PAGES { s = "SC_PHYS_PAGES"; }
+    return scq_put(out, cap, s);
+}
+
+/// 名字序号 -> 文档值。动态项 (CPU 数、物理页数) 返回 0: 它们要靠 `sc_cpu_count`
+/// 或 sysinfo 现取。
+pub fn sc_value(id: u32) -> u64 {
+    if id == SC_PAGESIZE {
+        return SC_PAGE_BYTES;
+    }
+    if id == SC_CLK_TCK {
+        return SC_TICKS_PER_SEC;
+    }
+    if id == SC_OPEN_MAX {
+        return SC_OPEN_MAX_VALUE;
+    }
+    return 0;
+}
+
+/// 一页的字节数。
+pub fn sc_page_size() -> u32 {
+    return 4096;
+}
+
+/// 把字节数向上取整到整页 —— 按页分配/对齐时天天要用。
+pub fn sc_page_align(n: u64) -> u64 {
+    if n == 0 {
+        return 0;
+    }
+    let p: u64 = 4096;
+    let r: u64 = n % p;
+    if r == 0 {
+        return n;
+    }
+    return n + (p - r);
+}
+
+/// CPU 个数 —— 从一个 `struct sysinfo` 缓冲里读 (`procs` 是 u16)。
+pub fn sc_cpu_count(info: ptr) -> u32 {
+    return scq_u16(info, SC_SYSINFO_PROCS_OFF);
+}
+
+fn scq_digit(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    return 16;
+}
+
+//: 扫描一个十进制数; 位置写回 pos_ptr (u32 的四字节小端)。
+fn scq_num(p: ptr, n: u32, pos: u32, val: ptr) -> u32 {
+    let i: u32 = pos;
+    let v: u32 = 0;
+    let running: u32 = 1;
+    while i < n && running == 1 {
+        let d: u32 = scq_digit(load8(p, i) as u32);
+        if d < 10 {
+            v = v * 10 + d;
+            i = i + 1;
+        } else {
+            running = 0;
+        }
+    }
+    store8(val, 0, v as u8);
+    store8(val, 1, (v >> 8) as u8);
+    store8(val, 2, (v >> 16) as u8);
+    store8(val, 3, (v >> 24) as u8);
+    return i;
+}
+
+fn scq_val(v: ptr) -> u32 {
+    let x: u32 = 0;
+    x = load8(v, 0) as u32;
+    x = x | ((load8(v, 1) as u32) << 8);
+    x = x | ((load8(v, 2) as u32) << 16);
+    x = x | ((load8(v, 3) as u32) << 24);
+    return x;
+}
+
+/// 解 `0-7` / `0,2-3` 这样的 CPU 列表, 返回 CPU 个数; 同时把个数写进 out (u32 小端)。
+pub fn sc_parse_online(p: ptr, n: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    let count: u32 = 0;
+    let tmp: ptr = alloc(4);
+    let running: u32 = 1;
+    while running == 1 {
+        if i >= n {
+            running = 0;
+        } else {
+            let c: u32 = load8(p, i) as u32;
+            if c == 10 || c == 32 {
+                i = i + 1;
+            } else if c == 44 {
+                i = i + 1;
+            } else {
+                i = scq_num(p, n, i, tmp);
+                let a: u32 = scq_val(tmp);
+                let b: u32 = a;
+                if i < n && load8(p, i) == 45 {
+                    i = scq_num(p, n, i + 1, tmp);
+                    let hi: u32 = scq_val(tmp);
+                    if hi >= a {
+                        b = hi;
+                    }
+                }
+                count = count + (b - a) + 1;
+            }
+        }
+    }
+    store8(out, 0, count as u8);
+    store8(out, 1, (count >> 8) as u8);
+    store8(out, 2, (count >> 16) as u8);
+    store8(out, 3, (count >> 24) as u8);
+    return count;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sysconf_names() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = sc_name(1, b, 32);
+    if n != 10 {
+        return false;
+    }
+    if load8(b, 0) != 83 || load8(b, 3) != 67 {
+        return false;
+    }
+    if sc_name(99, b, 32) != 0 {
+        return false;
+    }
+    if sc_value(0) != 4096 || sc_value(1) != 100 {
+        return false;
+    }
+    return true;
+}
+
+fn test_sysconf_align() -> bool {
+    if sc_page_align(0) != 0 {
+        return false;
+    }
+    if sc_page_align(1) != 4096 {
+        return false;
+    }
+    if sc_page_align(4096) != 4096 {
+        return false;
+    }
+    if sc_page_align(5000) != 8192 {
+        return false;
+    }
+    return true;
+}
+
+fn test_sysconf_online() -> bool {
+    let b: ptr = alloc(16);
+    let t: ptr = alloc(4);
+    store8(b, 0, 48 as u8);
+    store8(b, 1, 45 as u8);
+    store8(b, 2, 55 as u8);
+    if sc_parse_online(b, 3, t) != 8 {
+        return false;
+    }
+    store8(b, 0, 48 as u8);
+    store8(b, 1, 44 as u8);
+    store8(b, 2, 50 as u8);
+    store8(b, 3, 45 as u8);
+    store8(b, 4, 51 as u8);
+    if sc_parse_online(b, 5, t) != 3 {
+        return false;
+    }
+    if load8(t, 0) != 3 {
+        return false;
+    }
+    return true;
+}

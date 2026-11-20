@@ -8,12 +8,14 @@
 # 用法:
 #   python tools/loment_lsp.py            # 标准 LSP stdio 模式
 #   python tools/loment_lsp.py --demo F   # 自测: 打开 F 并打印诊断/补全/跳转
-# 退出码: 0 = OK / 2 = 用法错误。
+#   python tools/loment_lsp.py --check F  # 静态检查: `路径:行:列: E0NN 标题`
+# 退出码: 0 = OK / 1 = `--check` 有诊断 / 2 = 用法或读取错误。
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,10 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
+import potato_from  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
-            "capability", "guard", "excluded", "interrupt", "as"]
+            "capability", "guard", "tick", "quality", "discharge", "revoke", "sibling", "excluded",
+            "interrupt", "as", "register", "lgc"]
 TYPE_KEYWORDS = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "bool", "str",
                  "ptr", "()", "Option", "Result"]
 
@@ -42,32 +46,228 @@ def _parse(text: str):
     # 还会展开方言，这里不补的话，一份**编得过**的方言源在编辑器里会满屏假错 ——
     # 而"编得过但编辑器报错"比"两边都报错"更糟（同一处入口缺口，`docs/182` §1.9）。
     # 顺序与 `lomentc.load` 一致：先开关，再方言。
+    #
+    # **字符串插值同理**（`docs/341`）：编译器在 `load` 里把 `f"…"` 改写成
+    # `str_concat` 链；不补这一步，一份编得过的插值源在编辑器里报**假解析错**
+    # （实测 `6:12 期望 )，得到 'n={n}'`）。版次口径与 `load` 相同：生效版次
+    # 是 2026.3 才改；解析错的列号用改写表映射回用户那一行。
+    _cmap = None
+    import potato_from as _pf
+    _g, _gerr, _decl = _pf.read_grammar_decl(text)
+    _prof = _g if (not _gerr and _g in _pf.TUR_EDITIONS) else _pf.DEFAULT_EDITION
+    if _prof == "tur2026.3":
+        import loment_fstr
+        text, _cmap = loment_fstr.rewrite(text)
     tbl = lomentc.SwitchTable()
     tt = lomentc._apply_switches(lomc.lex(text), tbl)
-    mod = lomentc.Parser(loment_comefor.expand(tt, text)[0], text).parse()
+    # **命令声明也是同一处入口缺口**（`docs/223`，`docs/182` §1.9）：编译器在 `load` 里
+    # 从 token 流上读它（`command_label_from_tokens`），文件因此知道"我是一个命令"。
+    # 这里绕过 `load` 不补这一步的话，一份**编得过**的命令单元在编辑器里会被报成
+    # 「写了 `command_main` 却没有命令声明」—— 假错，而且正是 `docs/223` 要消灭的那种。
+    # **同一条流水线**：先开关、再方言 —— 扫的也是**展开之后**那份 token 流
+    # （`expand` 返回的是 token 表，`Parser` 与 `command_label_from_tokens` 吃的都是它）。
+    toks = loment_comefor.expand(tt, text)[0]
+    try:
+        mod = lomentc.Parser(toks, text).parse()
+    except lomc.LomError as _pe:
+        if _cmap is not None and _pe.line > 0:
+            raise lomc.LomError(_pe.line, _cmap.map(_pe.line, _pe.col), _pe.msg) from None
+        raise
     mod.switches = tbl
+    mod.command_line, mod.command, mod.command_bad = \
+        lomentc.command_label_from_tokens(toks)
     return mod
 
 
+#: 这个会话对外的列编码。**LSP 3.17 的默认是 utf-16**，而服务端内部的列是
+#: UTF-8 字节偏移（`#707`）—— 只有在客户端 `initialize` 里声明了 utf-8 时才直接说字节。
+#:
+#: **为什么必须有这一层**：`vscode-languageclient` 10.1.1 写死
+#: `general.positionEncodings = ['utf-16']` 并对别的编码**直接抛错**
+#: （`client.js:1106`）—— 服务端无条件回 utf-8 等于让每个 VS Code 连不上（`#1171`）。
+_POSITION_ENCODING = "utf-16"
+
+
+def _utf8_to_index(s: str, col: int) -> int:
+    """LSP 的 `character`（UTF-8 字节偏移）-> Python str 下标（码点）。
+
+    落在多字节字符中间时退到该字符之前（不劈开一个字符）。
+    """
+    if col <= 0:
+        return 0
+    return len(s.encode("utf-8")[:col].decode("utf-8", "ignore"))
+
+
+def _index_to_utf8(s: str, idx: int) -> int:
+    """Python str 下标（码点）-> UTF-8 字节偏移。"""
+    if idx <= 0:
+        return 0
+    return len(s[:idx].encode("utf-8"))
+
+
+def _index_to_utf16(s: str, idx: int) -> int:
+    """Python str 下标（码点）-> UTF-16 code unit 偏移（代理对算两格）。"""
+    if idx <= 0:
+        return 0
+    return len(s[:idx].encode("utf-16-le")) // 2
+
+
+def _utf16_to_index(s: str, col: int) -> int:
+    """UTF-16 code unit 偏移 -> Python str 下标。落在代理对中间时退到它之前。"""
+    if col <= 0:
+        return 0
+    units = 0
+    for i, ch in enumerate(s):
+        w = 2 if ord(ch) > 0xFFFF else 1
+        if units + w > col:
+            return i
+        units += w
+        if units == col:
+            return i + 1
+    return len(s)
+
+
+def _col_to_index(s: str, col: int) -> int:
+    """对外的 `character` -> 码点下标（按本会话协商的编码）。"""
+    if _POSITION_ENCODING == "utf-8":
+        return _utf8_to_index(s, col)
+    return _utf16_to_index(s, col)
+
+
+def _index_to_col(s: str, idx: int) -> int:
+    """码点下标 -> 对外的 `character`（按本会话协商的编码）。"""
+    if _POSITION_ENCODING == "utf-8":
+        return _index_to_utf8(s, idx)
+    return _index_to_utf16(s, idx)
+
+
+def _negotiate_position_encoding(params: dict) -> str:
+    """客户端声明了哪些编码（`general.positionEncodings`）-> 本会话用哪个。
+
+    LSP 3.17：服务端只能从客户端列的编码里挑；客户端没列 = 只支持 utf-16。本服务的
+    内部列是 UTF-8 字节偏移，所以只有客户端明确列了 `utf-8` 才用它 —— 否则回 utf-16
+    并在边界上换算。
+    """
+    caps = params.get("capabilities") or {}
+    general = caps.get("general") or {}
+    encs = general.get("positionEncodings")
+    if isinstance(encs, list) and "utf-8" in encs:
+        return "utf-8"
+    return "utf-16"
+
+
+def _line_span(text: str, line1: int) -> tuple[int, int]:
+    """那一行**第一个 token** 的跨界 `(起列, 止列)`（都 0 起）。**不是**"猜哪个符号错了"。
+
+    `#27`：这一层的 range 原先两端是常量 `0 → 200` —— 一条 14 字符的行与一条 300 字符的
+    行回来的是同一对数字，编辑器于是把**整行**画成波浪线，指不到出问题的那一格。
+
+    **能给到什么就给到什么**：参考实现的 `check()` 只报**行**（消息形如 `12: …`），列从来
+    没有算过（`#5` 记的就是这件事）—— 所以这一层**拿不到**真正的列。但拿不到不等于编一个：
+    这里退到"这一行的第一个 token"，那是词法器真算出来的位置，且**确定落在对的那一行**上。
+
+    **为什么不按消息里的符号名去行里找**：那是在猜，而"指到假的地方去"比"指得粗"更坏
+    （`lomc.LomError` 那段注释：编一个 `1:1:` 是撒谎）。猜错的代价由读者付，粗的代价只是
+    少一点信息。
+    """
+    lines = text.splitlines()
+    cur = lines[line1 - 1] if 0 <= line1 - 1 < len(lines) else ""
+    for t in lomc.lex(text):
+        if t.line == line1:
+            c0 = max(0, t.col - 1)
+            c1 = c0 + max(1, t.len)
+            # 词法器的列是**码点**（Python 字符串下标），对外按协商的编码换算（`#707`/`#1171`）。
+            return _index_to_col(cur, c0), _index_to_col(cur, c1)
+    return 0, 1
+
+
+def _foreign_grammar(text: str) -> tuple[str, str | None] | None:
+    """`#262`：文件头声明了 `choose write grammar <别名>` 时，`(规范名, 声明本身的错)`。
+
+    没有声明、或者声明的是**原生**语法（`loment` / `rust`，见 `potato_from.NATIVE_GRAMMARS`）
+    就返回 `None` —— 那种源该照常查。
+
+    **为什么要在查之前拦下来**：一份 `choose write grammar python` 的文件**编得过**（前门会把
+    它翻成 Loment），可语言服务拿 Loment 的规则去读它，报出来的是**一屏假错** —— 而"编得过
+    但编辑器报错"比"两边都报错"更糟：用户会去改一份本来就对的源。
+    """
+    lang, err, has = potato_from.read_grammar_decl(text)
+    if err:
+        return lang, err
+    if has and lang not in potato_from.NATIVE_GRAMMARS:
+        return lang, None
+    return None
+
+
 def _diagnostics(text: str, path: str) -> list[dict]:
+    # `#351`：`.nl` 是 natural 后缀（参考实现 `potato_from.EXT`）。这种文件里**没有**
+    # `choose write grammar` 那一行，所以按**后缀**认；与声明那一条走同一句话：
+    # 一条 Info、零假错。放在声明检查**之前**只对没有声明的文件生效 —— 有声明时下面
+    # 那条按声明走（声明写的是哪门就说是哪门）。
+    fg = _foreign_grammar(text)
+    if fg is None and str(path).lower().endswith(".nl"):
+        fg = ("natural", None)
+    if fg is not None:
+        lang, derr = fg
+        if derr:
+            return [{"range": {"start": {"line": 0, "character": 0},
+                               "end": {"line": 0, "character": 1}},
+                     "severity": 1, "source": "loment", "message": derr}]
+        # **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
+        # "为什么这里安静"，比编一堆错更有用 —— 静默会让人以为服务挂了。
+        return [{"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 1}},
+                 "severity": 3, "source": "loment",
+                 "message": f"这份源写的是 {lang} 语法（`choose write grammar {lang}`）——"
+                            f" 语言服务只查 Loment，所以这里不报诊断；要真诊断就 `loment build`。"}]
     try:
         mod = _parse(text)
         errs = lomentc.check(mod)
     except lomc.LomError as e:
-        return [{"range": {"start": {"line": max(0, e.line - 1), "character": 0},
-                           "end": {"line": max(0, e.line - 1), "character": 200}},
+        # **解析期**这一支有真列（`LomError` 带 `col`），所以给得比 `_line_span` 更准；
+        # `line <= 0` = 这一档指不出位置（见 `LomError` 的注释），那就别编。
+        ln = max(0, e.line - 1) if e.line > 0 else 0
+        lines = text.splitlines()
+        cur = lines[ln] if ln < len(lines) else ""
+        ci = max(0, e.col - 1) if e.line > 0 else 0
+        # `LomError.col` 是码点列；对外是 UTF-8 字节列（`#707`）。
+        c0 = _index_to_col(cur, ci)
+        c1 = _index_to_col(cur, ci + 1)
+        return [{"range": {"start": {"line": ln, "character": c0},
+                           "end": {"line": ln, "character": c1}},
                  "severity": 1, "source": "loment", "message": str(e)}]
     out = []
     for msg in errs:
-        line = 0
+        line1 = 0
         head = msg.split(":", 1)[0]
         if head.strip().isdigit():
-            line = max(0, int(head.strip()) - 1)
+            line1 = int(head.strip())
             msg = msg.split(":", 1)[1].strip()
-        out.append({"range": {"start": {"line": line, "character": 0},
-                              "end": {"line": line, "character": 200}},
+        c0, c1 = _line_span(text, line1) if line1 > 0 else (0, 1)
+        ln = max(0, line1 - 1)
+        out.append({"range": {"start": {"line": ln, "character": c0},
+                              "end": {"line": ln, "character": c1}},
                     "severity": 1, "source": "loment", "message": msg})
     return out
+
+
+def _name_span(text: str, line0: int, word: str) -> tuple[int, int]:
+    """声明那一行里 `word` 占哪几列。**行与名字都是已知的**，这里只是把它找出来。
+
+    `#27`：跳转原先回 `{line, character: 0} → {line, character: 200}`，编辑器只能把光标
+    扔到行首，而声明通常缩进着。这不是猜"哪个符号错了"（`_line_span` 那段说的那件事）——
+    名字是调用方传进来的、行是符号表里存的，两边都确定。
+    """
+    lines = text.splitlines()
+    if not (0 <= line0 < len(lines)):
+        return 0, 0
+    import re as _re
+    m = _re.search(rf"\b{_re.escape(word)}\b", lines[line0])
+    if not m:
+        return 0, 0
+    # `re` 给的是码点下标；对外按协商的编码换算（`#707`/`#1171`）。
+    return (_index_to_col(lines[line0], m.start()),
+            _index_to_col(lines[line0], m.end()))
 
 
 def _decls(text: str) -> dict[str, dict]:
@@ -89,17 +289,91 @@ def _decls(text: str) -> dict[str, dict]:
     return syms
 
 
+def _member_receiver(text: str, line: int, ch: int) -> str | None:
+    """光标前是 `recv.` 的话返回 `recv`（`#28`）。认 `p.` 与 `p.x` 的前半截。
+
+    `p[i].` / `a.b.` 暂不认 —— 返回 None，走通用补全。**宁可少给，不给错的**：补错一项
+    比少补一项更打扰人（`#27` 那条"指到假的地方去比指得粗更坏"是同一个判断）。
+    """
+    lines = text.splitlines()
+    if not (0 <= line < len(lines)):
+        return None
+    # `ch` 是客户端按协商编码给的列（`#707`/`#1171`），切片要码点下标。
+    prefix = lines[line][:_col_to_index(lines[line], ch)]
+    m = re.search(r"([A-Za-z_]\w*)\.[A-Za-z0-9_]*$", prefix)
+    if not m:
+        return None
+    start = m.start(1)
+    if start > 0 and (prefix[start - 1].isalnum() or prefix[start - 1] in "_."):
+        return None
+    return m.group(1)
+
+
+def _lets_of(node, out: list) -> None:
+    """把 `node` 底下所有 `Let` 收进 `out`（含块内的）。"""
+    if isinstance(node, lomentc.Let):
+        out.append(node)
+    elif isinstance(node, list):
+        for x in node:
+            _lets_of(x, out)
+    elif hasattr(node, "__dataclass_fields__"):
+        for k in node.__dataclass_fields__:
+            _lets_of(getattr(node, k, None), out)
+
+
+def _member_items(text: str, recv: str, line1: int) -> list[dict] | None:
+    """`recv` 在 `line1`（1 起）那一处是什么类型；是 `struct` 就回它的字段，否则 None。"""
+    try:
+        mod = _parse(text)
+    except Exception:  # noqa: BLE001  编辑中的语法错不影响补全
+        return None
+    f = None
+    for g in mod.funcs:
+        if g.line <= line1 and (f is None or g.line > f.line):
+            f = g
+    if f is None:
+        return None
+    ty = None
+    for p in f.params:
+        if p.name == recv:
+            ty = p.type
+    lets: list = []
+    _lets_of(f.body, lets)
+    for s in lets:
+        if s.name == recv and s.line < line1:
+            ty = s.type
+    if not ty:
+        return None
+    st = next((s for s in mod.structs if s.name == ty.strip()), None)
+    if st is None:
+        return None
+    return [{"label": fn, "kind": 5, "detail": ft} for fn, ft in st.fields]
+
+
 def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
     """纯函数式 LSP 处理: 输入一条消息, 输出若干条待发送消息。"""
+    global _POSITION_ENCODING
     method = msg.get("method", "")
     params = msg.get("params") or {}
     rid = msg.get("id")
     if method == "initialize":
+        # `completionProvider: {}` = "支持补全，但**没有触发字符**"。
+        #
+        # #28：原先登的是 `{"triggerCharacters": [".", ":"]}`，而补全**不看位置**
+        # （`p.` 后面回来的还是一屏关键字）——于是每敲一个点就弹一屏没用的东西，
+        # 读起来就是坏的。成员补全没实现之前，**不广告触发字符**才是诚实的那一半
+        # （issue 自己指的那条路）。手动 Ctrl+Space 照旧可用。
+        #
+        # 编码**按客户端声明的协商**（`#1171`）：无条件回 utf-8 会让
+        # `vscode-languageclient` 10.1.1 直接抛 `Unsupported position encoding`
+        # （它写死只支持 utf-16）。与 `loment/tools/lsp.lomt` 同一份规矩。
+        _POSITION_ENCODING = _negotiate_position_encoding(params)
         return [{"jsonrpc": "2.0", "id": rid, "result": {
-            "capabilities": {"textDocumentSync": 1,
+            "capabilities": {"positionEncoding": _POSITION_ENCODING,
+                             "textDocumentSync": 1,
                              "definitionProvider": True,
                              "documentFormattingProvider": True,
-                             "completionProvider": {"triggerCharacters": [".", ":"]}},
+                             "completionProvider": {}},
             "serverInfo": {"name": "loment-lsp", "version": "0.2"}}}]
     if method in ("textDocument/didOpen", "textDocument/didChange"):
         td = params.get("textDocument") or {}
@@ -109,8 +383,23 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
                 ((params.get("contentChanges") or [{}])[-1].get("text")))
         if text is not None:
             docs[uri] = text
+        pub = {"uri": uri, "diagnostics": _diagnostics(docs.get(uri, ""), uri)}
+        # `#53`：服务声明了 `textDocumentSync: 1`（客户端会发版本号），却把它丢了 ——
+        # 编辑器于是分不清一批诊断描述的是哪一版缓冲区（改完还留着旧波浪线）。
+        # 协议里 `version` 是**可选**的：没发就不编一个。
+        ver = td.get("version")
+        if isinstance(ver, int) and not isinstance(ver, bool):
+            pub["version"] = ver
         return [{"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
-                 "params": {"uri": uri, "diagnostics": _diagnostics(docs.get(uri, ""), uri)}}]
+                 "params": pub}]
+    if method == "textDocument/didSave":
+        # `#705`：didSave **不是编辑**。真实客户端不带正文；把它当 didChange 会把内存里的
+        # 文档存成空串。保存只是磁盘通知 —— 不改文档。
+        return []
+    if method == "textDocument/didClose":
+        # `#706`：关掉就释放（`loment/tools/lsp.lomt` 的表也这么清）。
+        docs.pop((params.get("textDocument") or {}).get("uri", ""), None)
+        return []
     if method == "textDocument/definition":
         uri = (params.get("textDocument") or {}).get("uri", "")
         pos = params.get("position") or {}
@@ -122,21 +411,35 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             import re
             # 光标可能落在词中间 (编辑器就是这样报的): 先向左扩到词首, 再取整词
             line = lines[ln]
-            ch = pos.get("character", 0)
+            # `character` 按协商的编码（`#707`/`#1171`），扩词要在码点下标上走。
+            ch = _col_to_index(line, pos.get("character", 0))
             start = min(max(ch, 0), len(line))
             while start > 0 and (line[start - 1].isalnum() or line[start - 1] == "_"):
                 start -= 1
             m = re.match(r"[A-Za-z_]\w*", line[start:])
             if m:
                 word = m.group(0)
-        sym = _decls(text).get(word)
+        try:
+            sym = _decls(text).get(word)
+        except lomc.LomError:  # 解析不了的源 (如 `choose write grammar`) -> null, 不炸服务
+            sym = None
         if not sym:
             return [{"jsonrpc": "2.0", "id": rid, "result": None}]
+        s0, s1 = _name_span(text, sym["line"], word)
         return [{"jsonrpc": "2.0", "id": rid, "result": {
-            "uri": uri, "range": {"start": {"line": sym["line"], "character": 0},
-                                  "end": {"line": sym["line"], "character": 200}}}}]
+            "uri": uri, "range": {"start": {"line": sym["line"], "character": s0},
+                                  "end": {"line": sym["line"], "character": s1}}}}]
     if method == "textDocument/completion":
         uri = (params.get("textDocument") or {}).get("uri", "")
+        # `#28`：`p.` 之后要给 `Point` 的字段，不是一屏关键字。
+        pos = params.get("position") or {}
+        recv = _member_receiver(docs.get(uri, ""), pos.get("line", 0),
+                                pos.get("character", 0))
+        if recv is not None:
+            got = _member_items(docs.get(uri, ""), recv, pos.get("line", 0) + 1)
+            if got is not None:
+                return [{"jsonrpc": "2.0", "id": rid,
+                         "result": {"isIncomplete": False, "items": got}}]
         items = [{"label": k, "kind": 14} for k in KEYWORDS]
         items += [{"label": t, "kind": 6} for t in TYPE_KEYWORDS]
         try:
@@ -173,6 +476,38 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
     return []
 
 
+def _check(path_str: str) -> int:
+    """`--check FILE` —— 与 Loment 版服务同一个 CLI 契约（编辑器任务与 CI 用）。
+
+    输出 `路径:行:列: E0NN 标题`，与 `package.json` 的 `problemMatcher`（`^(.+?):(\\d+):(\\d+): (E\\d{3}) (.+)$`）
+    逐字对齐；退出码 0 = 无诊断 / 1 = 有诊断 / 2 = 读取错误。
+
+    **为什么这条必须存在**：VS Code 扩展在**默认安装**（没配 `loment.serverCommand`）下把
+    「Loment: Check (current file)」直接交给 `python tools/loment_lsp.py --check <file>`。
+    这个脚本原先只认 `--demo`，于是命令面板里点下去得到 `unrecognized arguments: --check`
+    （rc=2）—— 只有把 `serverCommand` 指到 Loment 版服务才碰巧能用（`#713`）。
+
+    码用 `loment_diag.classify()` 分类（与 `loment diag` 同表），**不另编一套**；只报
+    severity 1 的诊断 —— severity 3 是"这份源是别的语法"这类说明，不是文件的错。
+    """
+    try:
+        text = Path(path_str).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"{path_str}: 读不了: {e}", file=sys.stderr)
+        return 2
+    import loment_diag  # noqa: PLC0415  只在 --check 这一支需要；stdio 服务不付这份导入
+    nerr = 0
+    for d in _diagnostics(text, path_str):
+        if d.get("severity") != 1:
+            continue
+        ln = d["range"]["start"]["line"] + 1
+        col = d["range"]["start"]["character"] + 1   # 对外是 1 起（词法器口径）
+        code, title, _hint = loment_diag.classify(d["message"])
+        print(f"{path_str}:{ln}:{col}: {code} {title}")
+        nerr += 1
+    return 1 if nerr else 0
+
+
 def _serve() -> int:
     docs: dict[str, str] = {}
     while True:
@@ -200,7 +535,11 @@ def _serve() -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="loment_lsp", description="Loment 语言服务")
     ap.add_argument("--demo", metavar="FILE", help="无编辑器自测")
+    # `#713`：扩展的默认「检查」命令跑的就是这一支（与 Loment 版 `lsp --check FILE` 同契约）。
+    ap.add_argument("--check", metavar="FILE", help="静态检查: `路径:行:列: E0NN 标题`")
     a = ap.parse_args(argv)
+    if a.check:
+        return _check(a.check)
     if not a.demo:
         return _serve()
     p = Path(a.demo).resolve()

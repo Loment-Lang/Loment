@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomdoc   # noqa: E402
 
@@ -43,11 +44,18 @@ def _clang() -> str | None:
     return fallback if Path(fallback).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -55,6 +63,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -102,7 +112,7 @@ def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:
               f"chmod +x {_T}{name}.bin && "
               f"cd {_wsl_path(ROOT)} && {_T}{name}.bin {entry.relative_to(ROOT).as_posix()} "
               f"> {_wsl_path(got)} 2> {_wsl_path(err)}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     out = got.read_text(encoding="utf-8") if got.exists() else ""
     etext = err.read_text(encoding="utf-8", errors="replace") if err.exists() else ""
@@ -137,6 +147,74 @@ def test_loment_lomdoc_matches_python():
         print(f"      {n} 个语料逐字节相同")
 
 
+@test
+def test_field_and_variant_docs_are_rendered():
+    """`///` 挂在**字段**与**变体**上时也要进文档（`#56`）。
+
+    原先只读顶层声明（struct / enum / const / fn），字段与变体的注释被静默丢掉 ——
+    作者写了、编译器收了、页面里没有。结构体加第三列"说明"，变体在那条列表项后面
+    用 ` — ` 接上；空注释不画分隔符。
+
+    判据跑的是**参考实现的命令行**（真行为）；孪生的同一段由
+    `test_loment_lomdoc_matches_python` / `test_loment_lomdoc_edge_cases` 逐字节对拍。
+    """
+    src = ("module docs2\n\n"
+           "/// A point in the plane.\n"
+           "pub struct Pt {\n"
+           "    /// Horizontal coordinate.\n"
+           "    x: u32,\n"
+           "    /// Vertical coordinate.\n"
+           "    y: u32,\n"
+           "}\n\n"
+           "/// Which shape this is.\n"
+           "pub enum Kind {\n"
+           "    /// A unit variant.\n"
+           "    Small,\n"
+           "    /// A variant carrying a width.\n"
+           "    Wide(u32),\n"
+           "}\n")
+    with tempfile.TemporaryDirectory(prefix="lomdoc-field-") as tds:
+        p = Path(tds) / "docs2.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"), str(p)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+    assert r.returncode == 0, r.stderr[-300:]
+    out = r.stdout
+    assert "| 字段 | 类型 | 说明 |" in out, out
+    assert "| `x` | `u32` | Horizontal coordinate. |" in out, out
+    assert "| `y` | `u32` | Vertical coordinate. |" in out, out
+    assert "- `Kind::Small` — A unit variant." in out, out
+    assert "- `Kind::Wide` (u32) — A variant carrying a width." in out, out
+    print("      struct 字段与 enum 变体的 /// 都进了页面")
+
+
+@test
+def test_stdout_and_out_are_byte_identical():
+    """`loment doc F > a` 与 `loment doc F --out b` 必须**逐字节相同**（`#506`）。
+
+    Windows 的文本模式把 `\\n` 翻成 `\\r\\n`，而 `--out` 明确写 LF —— 同一份输入两个
+    出口不一样，而"文档跨平台可比"正是这个模块存在的理由。**比字节，不比文本**：
+    两边都翻译过之后文本比较是一样的，那正是这条洞藏起来的地方。
+    """
+    f = ROOT / "loment" / "examples" / "native_trait.lomt"
+    assert f.exists(), f"缺语料 {f}"
+    with tempfile.TemporaryDirectory(prefix="lomdoc-crlf-") as td:
+        a = Path(td) / "a.md"
+        b = Path(td) / "b.md"
+        with open(a, "wb") as fh:
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"), str(f)],
+                               stdout=fh, stderr=subprocess.PIPE, shell=False)
+        assert r.returncode == 0, r.stderr[-300:]
+        r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"), str(f),
+                             "--out", str(b)], capture_output=True, shell=False)
+        assert r2.returncode == 0, r2.stderr[-300:]
+        ba, bb = a.read_bytes(), b.read_bytes()
+    assert ba == bb, f"两个出口不一致: stdout {len(ba)}B vs --out {len(bb)}B"
+    assert b"\r\n" not in ba, "stdout 里出现了 CRLF"
+    print(f"      `>` 与 `--out` 逐字节相同 ({len(ba)}B, 无 CRLF)")
+
+
 EDGE_CASE = '''module lomdoc_edge
 
 /// 能力域文档: 可撤销的写权限
@@ -156,13 +234,17 @@ const MASK: u32 = 0x10;
 
 /// 类型文档
 struct Pair {
+    /// First component.
     a: u32,
+    /// Second component.
     b: u32,
 }
 
 /// 枚举文档
 enum Color {
+    /// A plain color.
     Red,
+    /// An RGB color.
     Rgb(u32),
 }
 
@@ -190,12 +272,22 @@ fn max_of<T>(a: T, b: T) -> T {
 fn no_doc() {
     let x: u32 = 1;
 }
+
+/// 命令 (形态 A): 块那层壳对按深度走的读者是可见的, 块里的函数仍是顶层函数 (#399)
+register edgecmd {
+    /// 块里的那个函数
+    pub fn command_main(argv: ptr, argc: u32) -> u32 {
+        return argc;
+    }
+}
 '''
 
 
 @test
 def test_loment_lomdoc_edge_cases():
-    """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc。"""
+    """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc /
+    **结构体字段与枚举变体的 `///`**（`#56`） / register 块里的函数 (含它自己的 doc 行 ——
+    语料那份块里没有 `///`)。"""
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
@@ -221,20 +313,59 @@ def test_loment_lomdoc_edge_cases():
                     f"  got : {got[max(0,k-70):k+50]!r}")
     finally:
         probe.unlink(missing_ok=True)
-    print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc) 一致")
+    print("      边界用例 (excluded/hex/多行 doc/字段与变体 doc/双方法 trait/泛型/"
+          "空 doc/register 块) 一致")
+
+
+#: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。
+#: 声明那一行整个是"怎么读" —— 前门会把它抹成等长空白，于是**那一行上的函数
+#: 跟着消失**，单元变空，工具却退 0（`#144`）。
+FOREIGN = """choose write grammar c
+
+unsigned int add(unsigned int a, unsigned int b) {
+    return a + b;
+}
+"""
+
+
+@test
+def test_loment_lomdoc_refuses_foreign_grammar():
+    """**别的写法要拦住**（`#144`）—— 两个实现都拒，都是退 1、stdout 为空。
+
+    `lomdoc` 是**独立入口**（拿词法层直接读原文、不走前门），所以"这份源该怎么读"
+    这一层得它自己判 —— 参考实现的 `potato_from.refuse_foreign_grammar` 就是这一层，
+    孪生这边是新加的 `lomdoc.lomt::foreign_grammar`。不拦的后果实测过：文档里
+    **一个函数都没有**、模块名成了 `grammar`、退 0。
+
+    两边都跑：只钉孪生的话，参考实现哪天松掉就没人管了。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "lomdoc_foreign.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with probe.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(FOREIGN)
+        # 参考实现：命令行真跑一遍（`refuse_foreign_grammar` 在 main 里）
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomdoc.py"),
+                            str(probe)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, f"参考实现没拒 (rc={r.returncode}): {r.stdout[:200]}"
+        assert r.stdout == "", f"参考实现拒了却还往 stdout 写了东西: {r.stdout[:200]!r}"
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            got, note = _run(elf, td, probe, "foreign")
+            assert got == "", f"孪生拒了却还写了文档: {got[:200]!r} [{note}]"
+            assert "rc=1" in note, f"孪生没退 1: {note}"
+    finally:
+        probe.unlink(missing_ok=True)
+    print("      别的写法: 两个实现都拒 (rc=1, stdout 空)")
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_doc_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_doc_test")
 
 
 if __name__ == "__main__":

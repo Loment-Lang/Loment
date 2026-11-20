@@ -1,0 +1,17 @@
+// 参数台的示例文件：每个可改项都带说明。
+module demo_params
+
+choose no_std
+
+set choose verbose {
+    fn _v() {}
+}
+
+choose verbose
+
+const MAX_ITEMS: u32 = 64;      // 队列上限（示例）
+const TRACE_LEVEL: u32 = 1;
+
+fn main() {
+    let x: u32 = MAX_ITEMS;
+}

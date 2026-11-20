@@ -1,0 +1,17 @@
+{
+  "name": "Loment (CI 镜像)",
+  "image": "ghcr.io/loment-lang/loment-ci@sha256:3053138c2a1f1dc664ab98b60e41665a4a0ed66715847b4a448384e8a60e5c53",
+  "containerEnv": {
+    "PYTHONUTF8": "1",
+    "LOMENT_DEV_CONTAINER": "1"
+  },
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder} && python3 tools/loment_dev.py doctor",
+  "customizations": {
+    "vscode": {
+      "extensions": ["hooyan2022.loment"],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+module neg_lifetime_free
+choose runtime
+
+// `docs/299` §3.5：`free(p)` 时 `p` 仍被借 ⇒ 编译期 E041（借用的区域必须包在释放点之内）。
+fn f(p: ptr) -> u32 {
+    let r: &ptr = &p;
+    free(p);
+    return 0;
+}

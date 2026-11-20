@@ -1,0 +1,190 @@
+// os/wait.lomt — 子进程的收尸与状态字解码 (`wait4`)
+//
+// 为什么需要它: 起了一个进程, 迟早要问"它怎么结束的"。内核把答案塞进**一个 int**,
+// 而这个 int 是三种东西共用的位布局 —— 正常退出、被信号杀死、被暂停。直接 `== 0`
+// 判断会把"被 SIGKILL 杀死"当成"退出码 0"（低字节恰好是 0），这是收尸代码最经典
+// 的错。这一层把那个位布局拆成人能读的四个谓词加一段文本。
+//
+// 状态字 (Linux, 见 wait(2)):
+//   * 低 7 位 = 0            → 正常退出, 退出码在高 8 位 (`(s >> 8) & 0xff`);
+//   * 低 7 位 = 0x7f         → 被暂停 (`WIFSTOPPED`), 信号号在 bits 8..15;
+//   * 低 7 位 = 其它非 0     → 被信号终止, 信号号就是低 7 位;
+//   * 低字节 = 0x7f          → 暂停的另一种写法（与上面同一个判断的更宽形式）。
+//
+// 边界: 号是 x86-64 Linux 的。自检只验**纯逻辑**（位布局），系统调用那一半由
+// `tools/loment_os_test.py` 判（理由见 user.lomt 头）。
+//
+// 命名: 公开 wa_*, 内部 wq_*。自检 test_wait_*。
+
+module wait
+
+/// `wait4` 的旗标: 没有可收的子进程时立即返回 0。
+pub const WA_NOHANG: u32 = 1;
+/// 暂停的子进程也要报（否则 `wa_stopped` 永远等不到）。
+pub const WA_UNTRACED: u32 = 2;
+/// 恢复运行的子进程也要报。
+pub const WA_CONTINUED: u32 = 8;
+
+const WQ_SYS_WAIT4: u64 = 61;
+
+fn wq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn wq_put_u32(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let d: ptr = alloc(12);
+    let x: u32 = v;
+    let k: u32 = 0;
+    if x == 0 {
+        store8(d, 0, 48 as u8);
+        k = 1;
+    }
+    while x > 0 {
+        store8(d, k, ((x % 10) + 48) as u8);
+        x = x / 10;
+        k = k + 1;
+    }
+    let p: u32 = pos;
+    let r: u32 = k;
+    while r > 0 {
+        r = r - 1;
+        if p < cap {
+            store8(out, p, load8(d, r) as u8);
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+/// 正常退出（低 7 位全 0）。
+pub fn wa_exited(status: u32) -> bool {
+    return (status & 127) == 0;
+}
+
+/// 被信号终止（低 7 位既不是 0 也不是 0x7f）。
+pub fn wa_signaled(status: u32) -> bool {
+    let s: u32 = status & 127;
+    if s == 0 {
+        return false;
+    }
+    if s == 127 {
+        return false;
+    }
+    return true;
+}
+
+/// 被暂停（低字节 0x7f）。
+pub fn wa_stopped(status: u32) -> bool {
+    return (status & 255) == 127;
+}
+
+/// 退出码（高 8 位）。只在 `wa_exited` 为真时有意义。
+pub fn wa_exit_code(status: u32) -> u32 {
+    return (status >> 8) & 255;
+}
+
+/// 终止/暂停的信号号（低 7 位）。
+pub fn wa_term_signal(status: u32) -> u32 {
+    return status & 127;
+}
+
+/// 状态字 -> 文本：`exited 3` / `signaled 9` / `stopped 19` / `unknown`。
+pub fn wa_text(status: u32, out: ptr, cap: u32) -> u32 {
+    if wa_stopped(status) {
+        let p: u32 = wq_put(out, cap, 0, "stopped ");
+        return wq_put_u32(out, cap, p, (status >> 8) & 255);
+    }
+    if wa_exited(status) {
+        let p: u32 = wq_put(out, cap, 0, "exited ");
+        return wq_put_u32(out, cap, p, (status >> 8) & 255);
+    }
+    if wa_signaled(status) {
+        let p: u32 = wq_put(out, cap, 0, "signaled ");
+        return wq_put_u32(out, cap, p, status & 127);
+    }
+    return wq_put(out, cap, 0, "unknown");
+}
+
+/// 读一个状态字（调用方给的 4 字节）。
+pub fn wa_status_word(st: ptr) -> u32 {
+    let v: u32 = (load8(st, 0) as u32) | ((load8(st, 1) as u32) << 8)
+        | ((load8(st, 2) as u32) << 16) | ((load8(st, 3) as u32) << 24);
+    return v;
+}
+
+/// `wait4(pid, status, options, rusage)`。`pid = -1` 是任意子进程。
+pub fn wa_wait4(pid: i64, status: ptr, options: u32, rusage: ptr) -> i64 {
+    return syscall6(WQ_SYS_WAIT4, pid as u64, status as u64, options as u64,
+        rusage as u64, 0);
+}
+
+/// 阻塞等到 pid 结束，返回退出码；被信号杀死时返回 `-128 - 信号号`；失败返回 -1。
+/// 被 `EINTR` 打断（返回 -4）时重试，最多 64 次 —— 与 libc 的 `waitpid` 同一口径。
+pub fn wa_wait_exit(pid: i64) -> i64 {
+    let st: ptr = alloc(8);
+    let ru: ptr = alloc(144);
+    let r: i64 = wa_wait4(pid, st, 0, ru);
+    let tries: u32 = 0;
+    while r == -4 && tries < 64 {
+        r = wa_wait4(pid, st, 0, ru);
+        tries = tries + 1;
+    }
+    if r < 0 {
+        return -1;
+    }
+    let s: u32 = wa_status_word(st);
+    if wa_exited(s) {
+        return wa_exit_code(s) as i64;
+    }
+    if wa_signaled(s) {
+        return (0 - (wa_term_signal(s) as i64)) - 128;
+    }
+    return -1;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_wait_exited() -> bool {
+    let s: u32 = (3 << 8) as u32;
+    return wa_exited(s) && !wa_signaled(s) && !wa_stopped(s)
+        && wa_exit_code(s) == 3 && wa_term_signal(s) == 0;
+}
+
+fn test_wait_signaled() -> bool {
+    let s: u32 = 9;
+    return !wa_exited(s) && wa_signaled(s) && !wa_stopped(s)
+        && wa_term_signal(s) == 9 && wa_exit_code(s) == 0;
+}
+
+fn test_wait_stopped() -> bool {
+    let s: u32 = (19 << 8) as u32 | 127;
+    return wa_stopped(s) && !wa_exited(s) && !wa_signaled(s)
+        && wa_term_signal(s) == 127;
+}
+
+fn test_wait_text() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = wa_text((3 << 8) as u32, o, 32);
+    let want: str = "exited 3";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return wa_status_word(o) != 0;
+}

@@ -5,6 +5,7 @@
 // 形式对象: --emit-potato out.json  →  python tools/potato.py validate out.json
 
 module demo
+choose runtime
 
 // 复用 L0 布局单源 (Loment 是 .lom 的超集: 声明来自 L0, 行为来自本文件)
 use "lom/fujr.lom"

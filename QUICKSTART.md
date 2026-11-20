@@ -2,13 +2,16 @@
 
 Loment is a systems programming language: its own syntax is Rust-flavored, and it can also be
 written in C, C++, Java, C#, Go or Python; it emits native x86-64 executables (Linux ELF,
-Windows PE) with no runtime and no libc. The [README](README.md) says what it is; this page
-is only about getting a program to run.
+Windows PE). By default the artifact is **sealed** — no runtime, no libc, no undefined symbols —
+and `choose hosted` is the other path: an ELF product linked against the host's real libc and
+shared objects (the system loader does the dynamic binding; PE has no hosted path yet). The
+[README](README.md) says what it is; this page is
+only about getting a program to run.
 
 ## 0. Get it
 
 **0.1.4 is packaged** — download it from
-[Releases](https://github.com/FujoJTOP/loment/releases/tag/v0.1.4):
+[Releases](https://github.com/Loment-Lang/loment/releases/tag/v0.1.4):
 
 | Platform | File | How |
 |---|---|---|
@@ -21,10 +24,18 @@ You get the `loment` command, `lompi`, and the language server. Compiling and ru
 and the installer checks `SHA256SUMS` before it writes anything. Then jump to
 [§3](#3-with-loment-on-your-path).
 
+`SHA256SUMS` travels inside the archive, so it is not a trust anchor by itself. The installer
+prints the digest of `SHA256SUMS`; the release **body** publishes the same digest, and the
+release assets also carry `SHA256SUMS.asc`, `loment-signing.asc` and `FINGERPRINT`. Compare the
+printed digest with the release page (a different channel from the archive), or drop the
+signature assets next to the package — the installer verifies them when present. An installer
+that cannot find any SHA-256 tool refuses to install; `--no-verify` (Windows: `-NoVerify`) is
+the explicit opt-out for a bootstrap environment.
+
 **Or work from a checkout** — needed if you want to change the language itself:
 
 ```
-$ git clone https://github.com/FujoJTOP/loment.git
+$ git clone https://github.com/Loment-Lang/loment.git
 $ cd loment
 ```
 
@@ -35,16 +46,15 @@ $ cd loment
 ```rust
 module hello
 
-fn _start() {
-    let s: str = "hello from Loment\n";
-    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);
-    syscall4(60, 0, 0, 0);
+fn main() {
+    print("hello from Loment\n");
 }
 ```
 
-`_start` is the entry point, because there is no runtime to call one for you. There is no
-`printf` either: output goes through the `write` system call, whose arguments are the file
-descriptor, the string's pointer and its length. The second call is `exit`.
+`main` is the entry point: no arguments, no return type, and the linker's entry stub exits 0
+after it returns. `print` writes a string to stdout (one `write` syscall) — it adds no newline
+and does no formatting; the `\n` is in the string. The freestanding entry is still `_start`
+(kernel / no-libc code), and it wins when both exist.
 
 ## 2. Compile and run it
 
@@ -121,7 +131,7 @@ $ loment syntax            # syntax summary
 $ loment help              # all 38 commands
 ```
 
-The full guide is `.claude/skills/loment/SKILL.md`, and `loment skill --print` prints it.
+The full guide is the LomentSkill suite, starting at `.claude/skills/loment/SKILL.md`; `loment skill --print` prints that entry.
 It is written to be read start to finish before you write much code, and it is the same
 document that ships inside the package.
 
@@ -171,8 +181,16 @@ Rust (`#[no_mangle] pub extern "C"`) and Zig (`export fn`) work the same way.
 **This leg is Linux/ELF only today.** A Windows build with a foreign object is refused
 rather than producing something that does not link. Languages whose runtime is not a C
 library — Python, JavaScript, Java, Perl, Lua, Go — are reached through a subprocess
-instead (`loment/lib/proc.lomt`); that is Linux/ELF only as well. What is *not* supported:
-dynamic libraries and embedding a runtime. The honest ledger is `docs/173-loment-ffi.md`.
+instead (`loment/lib/proc.lomt`); that is Linux/ELF only as well.
+
+**Reaching a real system library** — the host's libc and `.so` shared objects — is what
+`choose hosted` opens, and the door opened on 2026-10-17: both release and development
+launchers pass `--allow-ports` to the linker, which links a real ELF shared object and emits
+`PT_INTERP`/`DT_NEEDED`/PLT/GOT for the system loader (`ld.so`) to map and bind. The remaining
+limits are: ELF only (no PE import path), one shared object per build on the self-hosted linker,
+function symbols only, and the host's `ld.so`/glibc must be present. Calling `loment-lomelf`
+directly means adding `--allow-ports` yourself. The honest ledger for where things stand today
+is `docs/173-loment-ffi.md`.
 
 ## 6. Write it in the syntax you already know
 
@@ -278,23 +296,35 @@ It is read from the project root (the directory you run `loment` in), falling ba
 beside the toolchain; anything it cannot parse counts as "no setting", so a broken file
 gives you English rather than an error (`docs/182` §14).
 
+One more number, and it is deliberately **not** the language's:
+
+```
+$ lomenterr version
+lomenterr 0.1.3
+```
+
+The reporter changes on its own schedule — its wording, its exits, and what it offers to
+suggest — so it carries a version of its own rather than riding on `loment version`. If you
+report a rendering bug, that number is what the fix will be checked against (`docs/182` §17).
+
 Compile-time only, today. Rendering a **trap** — a division by zero, a capability guard
 going out of range — from a copy of the reporter linked into your program is designed but
 not implemented; `docs/182-lomenterr-and-choose-switches.md` §10.4 says what it waits on.
 
-Two traps are worth knowing before your first real program, because neither is a compile
-error: a non-void function that falls off its end crashes at run time (the last statement
-must be a `return`), and every `match` arm body must be a block — `E::A => { return 0; }`,
-not `E::A => 0,`. `loment cheat` lists these first, in the order they bite.
+Two traps are worth knowing before your first real program. Every `match` arm body must be a
+block — `E::A => { return 0; }`, not `E::A => 0,` — and that one is not a compile error. A
+non-void function that can fall off its end used to be the same kind of trap; `check` refuses it
+now (E027), so every path must end in a `return`. `loment cheat` lists these first, in the order
+they bite.
 
 ## Where to go next
 
 | | |
 |---|---|
 | [README](README.md) | What the language is, and the repository layout. |
-| `.claude/skills/loment/SKILL.md` | The language guide. Read this one. |
+| `.claude/skills/loment/SKILL.md` | The suite entry. Read this one, then the topic skill you need. |
 | `docs/manual/` | The specifications, plus a page per example. |
-| `loment/examples/` | 32 example programs; `loment example NAME` prints one. |
+| `loment/examples/` | 34 example programs; `loment example NAME` prints one. |
 | `docs/158-loment-freeze.md` | What is frozen, and what changing it costs. |
-| [FujoJTOP/lompi](https://github.com/FujoJTOP/lompi) | The package manager. |
+| [Loment-Lang/lompi](https://github.com/Loment-Lang/lompi) | The package manager. |
 | [Discord](https://discord.gg/rGw7NRNU) | Where to ask, and where to say what broke. |

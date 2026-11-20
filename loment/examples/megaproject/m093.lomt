@@ -1,0 +1,81 @@
+choose write grammar python
+
+# m093.lomt —— 超大型项目的第 93 个模块（**Python 拼法**写的 Loment）。
+#
+# 10 个函数，名字一律带 `m093_` 前缀 —— **单元的发射符号是平的**（ABI），
+# 跨模块同名会被拒。生成器见 `tools/loment_megaproject_test.py`，判据钉着这份产物不漂。
+
+
+def m093_f0(x: int) -> int:
+    s = 0
+    for j in range(7):
+        s += x + j * 2
+    return s
+
+
+def m093_f1(x: int) -> int:
+    return m093_f0(x) * 2 // 8
+
+
+def m093_f2(x: int) -> int:
+    return ((x << 3) ^ (x >> 1)) & 1023
+
+
+def m093_f3(x: int) -> int:
+    if x > 100:
+        return x - 100
+    elif x > 10:
+        return x * 2
+    return x + 1
+
+
+def m093_f4(x: int) -> int:
+    if x <= 0:
+        return 0
+    return 1 + m093_f4(x - 1)
+
+
+def m093_f5(x: int) -> int:
+    t = 0
+    for a in range(3):
+        for b in range(3):
+            if a * b > 0:
+                t += a * b + x
+    return t
+
+
+def m093_f6(x: int) -> int:
+    c = x & 65535
+    n = 0
+    while n < 8:
+        if c & 1:
+            c = (c >> 1) ^ 0xB400
+        else:
+            c = c >> 1
+        n += 1
+    return c
+
+
+def m093_f7(x: int) -> int:
+    v = x & 255
+    s = v >> 1
+    while s != 0:
+        v = v ^ s
+        s = s >> 1
+    return v
+
+
+def m093_f8(x: int) -> int:
+    lo = x
+    hi = x
+    if 4 < lo:
+        lo = 4
+    if 4 > hi:
+        hi = 4
+    return hi - lo
+
+
+def m093_entry() -> int:
+    x = 2 + 4 + 7
+    return (m093_f1(x) + m093_f2(x) + m093_f3(x) + m093_f4(x % 7) + m093_f5(x)
+            + m093_f6(x) + m093_f7(x) + m093_f8(x) + 93) % 251

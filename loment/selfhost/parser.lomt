@@ -1,4 +1,5 @@
 module parser
+choose runtime
 
 // M80: Loment 版 parser —— 消费 M79 的 token 记录, 产出规范 AST dump。
 // 覆盖: module / fn 签名 + 函数体 (let/set/ret/if/while/guard/表达式语句)
@@ -102,6 +103,46 @@ fn put_num(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u32 {
 
 fn pack(i: u32, o: u32) -> u64 {
     return (i as u64) * 4294967296 + (o as u64);
+}
+
+/// 整数字面量 -> u64（`0x` / `0X` 前缀十六进制，否则十进制）。与参考实现 `_int_lit`
+/// 同一张表 —— `lgc` 的预算在那边是 `IntLit(value)`，dump 出的是**折好的数值**。
+fn lit_u64(src: ptr, t: ptr, i: u32) -> u64 {
+    let s: u32 = tok_start(t, i);
+    let n: u32 = tok_len(t, i);
+    let v: u64 = 0;
+    let k: u32 = 0;
+    if n >= 2 && load8(src, s) == 48 && (load8(src, s + 1) == 120 || load8(src, s + 1) == 88) {
+        k = 2;
+        while k < n {
+            v = v * (16 as u64) + hex_val(load8(src, s + k));
+            k = k + 1;
+        }
+        return v;
+    }
+    while k < n {
+        v = v * (10 as u64) + ((load8(src, s + k) - 48) as u64);
+        k = k + 1;
+    }
+    return v;
+}
+
+/// `lgc` 的时长单位 -> 纳秒倍数（`docs/309`，与参考实现 `LGC_UNITS` 同表；
+/// 裸数字按纳秒收）。
+fn lgc_mult(src: ptr, t: ptr, i: u32) -> u64 {
+    if tok_is(src, t, i, "us") {
+        return 1000 as u64;
+    }
+    if tok_is(src, t, i, "ms") {
+        return 1000000 as u64;
+    }
+    if tok_is(src, t, i, "s") {
+        return 1000000000 as u64;
+    }
+    if tok_is(src, t, i, "m") {
+        return 60000000000 as u64;
+    }
+    return 1 as u64;
 }
 
 /// 字符串字面量 -> `"原文重编码"`。与 tools/lomfmt.py 的 `_render` 同一口径:
@@ -356,6 +397,13 @@ fn parse_expr(src: ptr, t: ptr, i: u32, out: ptr, o: u32, minp: u32) -> u64 {
 }
 
 fn parse_unary(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // `*r` 解引用（`docs/299` §3.8）。**只在操作数开头**认它 —— 二元乘法由
+    // `parse_expr` 的优先级环处理，到不了这里。
+    if tok_is(src, t, i, "*") {
+        o = puts(out, o, "(un * ");
+        let r0: u64 = parse_unary(src, t, i + 1, out, o);
+        return pack(unpk_i(r0), puts(out, unpk_o(r0), ")"));
+    }
     if tok_is(src, t, i, "!") {
         o = puts(out, o, "(un ! ");
         let r: u64 = parse_unary(src, t, i + 1, out, o);
@@ -546,6 +594,53 @@ fn parse_stmts(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
 }
 
 fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // `lspe pass "reason" { … }`：**纯审计标注**。块里的语句照常检查、照常发射，
+    // 所以解析时直接把内层语句接进外层（语言没有块作用域）。理由的 E038 在
+    // checker 的 token 扫描里判 —— 这里负责把块拆平。
+    if tok_is(src, t, i, "lspe") && tok_is(src, t, i + 1, "pass")
+            && tok_kind(t, i + 2) == 2 && tok_is(src, t, i + 3, "{") {
+        let rp: u64 = parse_stmts(src, t, i + 4, out, o);
+        return pack(unpk_i(rp) + 1, unpk_o(rp));
+    }
+    // `lgc`（`docs/309`）：与参考实现同形 —— 窗口在 AST 里**摊平**成
+    //   `begin` + 体语句 + `close`
+    // 三个兄弟节点，dump 因此是 `(lgc start [预算])` 后面跟着体语句、最后 ` (lgc close)`。
+    // 预算在参考实现那边是**解析期折好的纳秒 IntLit**，所以这里也要折（`10ms` -> 10000000）。
+    if tok_is(src, t, i, "lgc") {
+        let act: u32 = i + 1;
+        if tok_is(src, t, act, "end") {
+            if tok_is(src, t, act + 1, "{") {
+                // `lgc end { … }`：短暂暂停窗口（`docs/309`），与 start 一样摊平。
+                o = puts(out, o, "(lgc off)");
+                let rb: u64 = parse_stmts(src, t, act + 2, out, o);
+                return pack(unpk_i(rb) + 1,
+                            puts(out, unpk_o(rb), " (lgc close)"));
+            }
+            return pack(act + 2, puts(out, o, "(lgc end)"));
+        }
+        o = puts(out, o, "(lgc start");
+        let k: u32 = act + 1;
+        if tok_is(src, t, k, "(") {
+            o = puts(out, o, " ");
+            let v: u64 = lit_u64(src, t, k + 1);
+            let mm: u64 = 1 as u64;
+            if tok_kind(t, k + 2) == 0 {
+                mm = lgc_mult(src, t, k + 2);
+            }
+            o = put_dec(out, o, v * mm);
+            k = k + 1;
+            while tok_kind(t, k) != 4 && !tok_is(src, t, k, ")") {
+                k = k + 1;
+            }
+            k = k + 1;                        // 跳过 `)`
+        }
+        o = puts(out, o, ")");
+        if tok_is(src, t, k, "{") {
+            let rb: u64 = parse_stmts(src, t, k + 1, out, o);
+            return pack(unpk_i(rb) + 1, puts(out, unpk_o(rb), " (lgc close)"));
+        }
+        return pack(k + 1, o);                // `lgc start;`
+    }
     if tok_is(src, t, i, "let") {
         o = puts(out, o, "(let ");
         i = i + 1;
@@ -744,6 +839,60 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
 /// `mut [X]` / `[X; N]` / `[X]` / `Name<A, B>`。原先只吃单个 token, 于是
 /// `mut [u32]`、`[u32; 4]` 被拆成"多个形参"、`Pair<u32>` 被截断 (实测 native_mut/native_slice)。
 fn put_type(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // 借用 `&T` / `&mut T` / `&a T`（`docs/299`）。与 `lomentc.type_name` 同口径：
+    // **切片借用规范化**（`&[T]` -> `[T]`、`&mut [T]` -> `mut [T]`），区域标记照写。
+    if tok_is(src, t, i, "&") {
+        let j: u32 = i + 1;
+        let mf: u32 = 0;
+        if tok_is(src, t, j, "mut") {
+            mf = 1;
+            j = j + 1;
+        }
+        let rg: u32 = 0;
+        if tok_kind(t, j) == 0 && (tok_kind(t, j + 1) == 0 || tok_is(src, t, j + 1, "[")) {
+            rg = 1;
+            j = j + 1;
+        }
+        // `[T]` 还是 `[T; N]`：找这个 `[` 的配对 `]`，深度 0 上有没有 `;`。
+        let sep: u32 = 0;
+        if tok_is(src, t, j, "[") {
+            let c: u32 = j + 1;
+            let d: u32 = 0;
+            let done: u32 = 0;
+            while tok_kind(t, c) != 4 && done == 0 {
+                if tok_is(src, t, c, "[") {
+                    d = d + 1;
+                } else if tok_is(src, t, c, "]") {
+                    if d == 0 {
+                        done = 1;
+                    } else {
+                        d = d - 1;
+                    }
+                } else if tok_is(src, t, c, ";") && d == 0 {
+                    sep = 1;
+                }
+                if done == 0 {
+                    c = c + 1;
+                }
+            }
+        }
+        if sep == 0 && tok_is(src, t, j, "[") {
+            // 切片借用 -> 规范化成切片本身
+            if mf == 1 {
+                o = puts(out, o, "mut ");
+            }
+            return put_type(src, t, j, out, o);
+        }
+        o = puts(out, o, "&");
+        if mf == 1 {
+            o = puts(out, o, "mut ");
+        }
+        if rg == 1 {
+            o = put_tok(out, o, src, t, j - 1);
+            o = puts(out, o, " ");
+        }
+        return put_type(src, t, j, out, o);
+    }
     if tok_is(src, t, i, "mut") && tok_is(src, t, i + 1, "[") {
         o = puts(out, o, "mut [");
         let r: u64 = put_type(src, t, i + 2, out, o);
@@ -884,6 +1033,14 @@ fn parse_impl_fn(src: ptr, t: ptr, i: u32, out: ptr, o: u32, ty: u32) -> u64 {
 pub fn parse(src: ptr, t: ptr, out: ptr) -> u32 {
     let i: u32 = 0;
     let o: u32 = 0;
+    // `choose write grammar …` 是**装载器抹掉的声明行**（`driver.strip_grammar_decl`）：
+    // 参考实现的 `lomentc.load` 先抹再解析，所以它的 dump 从 `module` 开始。这里也先
+    // 跳过那一行，两边的 dump 才对得上。
+    if tok_is(src, t, 0, "choose") {
+        while tok_kind(t, i) != 4 && !tok_is(src, t, i, "module") {
+            i = i + 1;
+        }
+    }
     o = puts(out, o, "(module ");
     i = i + 1;
     o = put_tok(out, o, src, t, i);

@@ -1,0 +1,131 @@
+// os/time.lomt — 时钟与睡眠: `clock_gettime` / `nanosleep`
+//
+// 为什么需要它: `std/clock.lomt` 做的是时间的**排版** (时间戳 -> ISO 文本, 秒数 -> `1h1m`)
+// 与时长算术 —— 它拿的是**已经拿到的时间戳**。而"现在几点"、"从启动到现在过了多久"、
+// "睡 200 毫秒"这三件事本身是系统调用, 这一层就是它们。两个模块合起来才是一条链:
+//   **os/time 拿数 -> std/clock 排版**。
+//
+// 两个钟别搞混 (这是最容易错的一处):
+//   * `TIME_REALTIME` 是**墙上时钟** —— 会被 NTP 校正、会被管理员改, 所以它**不是单调的**,
+//     量耗时会在跳表时得到负数。它是拿来**显示**的。
+//   * `TIME_MONOTONIC` 是**从某个未指定的起点起算**, 只会向前 —— 量耗时用它。
+//
+// 边界: 号是 x86-64 Linux 的。自检只验纯逻辑 (timespec 的读写) —— 理由见 user.lomt 头。
+//
+// 命名: 公开 time_*, 内部 timep_。
+
+module time
+
+/// 墙上时钟 (可跳变)。
+pub const TIME_REALTIME: u32 = 0;
+/// 单调时钟 —— **量耗时用这个**。
+pub const TIME_MONOTONIC: u32 = 1;
+/// 本进程的 CPU 时间。
+pub const TIME_PROCESS_CPUTIME: u32 = 2;
+/// 单调时钟, 未经 NTP 平滑。
+pub const TIME_MONOTONIC_RAW: u32 = 4;
+/// 从开机起算 (含睡眠)。
+pub const TIME_BOOTTIME: u32 = 7;
+
+/// 一个 timespec 的字节数 (秒 i64 + 纳秒 i64)。
+pub const TIME_TS_BYTES: u32 = 16;
+
+const TIMEP_SYS_NANOSLEEP: u64 = 35;
+const TIMEP_SYS_CLOCK_GETTIME: u64 = 228;
+
+fn timep_set(ts: ptr, sec: u64, nsec: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(ts, b, ((sec >> (8 * b)) & 255) as u8);
+        store8(ts, 8 + b, ((nsec >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return TIME_TS_BYTES;
+}
+
+/// 读一个 timespec 的秒。
+pub fn time_ts_sec(ts: ptr) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(ts, b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 读一个 timespec 的纳秒。
+pub fn time_ts_nsec(ts: ptr) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(ts, 8 + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// `clock_gettime(clock, ts)` —— ts 是调用方给的 16 字节。
+pub fn time_clock(clock: u32, ts: ptr) -> i64 {
+    return syscall4(TIMEP_SYS_CLOCK_GETTIME, clock as u64, ts as u64, 0);
+}
+
+/// 墙上时钟的纳秒值。
+pub fn time_now_ns(ts: ptr) -> u64 {
+    let r: i64 = time_clock(TIME_REALTIME, ts);
+    if r < 0 {
+        return 0;
+    }
+    return time_ts_sec(ts) * 1000000000 + time_ts_nsec(ts);
+}
+
+/// 单调时钟的纳秒值 —— 量耗时用它 (墙上时钟会跳)。
+pub fn time_mono_ns(ts: ptr) -> u64 {
+    let r: i64 = time_clock(TIME_MONOTONIC, ts);
+    if r < 0 {
+        return 0;
+    }
+    return time_ts_sec(ts) * 1000000000 + time_ts_nsec(ts);
+}
+
+/// 墙上时钟的秒 (整)。
+pub fn time_now_s(ts: ptr) -> u64 {
+    let r: i64 = time_clock(TIME_REALTIME, ts);
+    if r < 0 {
+        return 0;
+    }
+    return time_ts_sec(ts);
+}
+
+/// 睡 `ns` 纳秒。`req` 与 `rem` 是调用方给的两块 16 字节 (rem 收"被信号打断后还剩多少")。
+/// 被打断返回负数的 -4 (EINTR) —— 调用方自己决定要不要接着睡。
+pub fn time_sleep(ns: u64, req: ptr, rem: ptr) -> i64 {
+    timep_set(req, ns / 1000000000, ns % 1000000000);
+    return syscall4(TIMEP_SYS_NANOSLEEP, req as u64, rem as u64, 0);
+}
+
+/// 睡 `ms` 毫秒。
+pub fn time_sleep_ms(ms: u64, req: ptr, rem: ptr) -> i64 {
+    return time_sleep(ms * 1000000, req, rem);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_time_ts_roundtrip() -> bool {
+    let ts: ptr = alloc(16);
+    timep_set(ts, 1700000000, 123456789);
+    return time_ts_sec(ts) == 1700000000 && time_ts_nsec(ts) == 123456789;
+}
+
+fn test_time_ts_zero() -> bool {
+    let ts: ptr = alloc(16);
+    timep_set(ts, 0, 0);
+    return time_ts_sec(ts) == 0 && time_ts_nsec(ts) == 0 && load8(ts, 7) == 0;
+}
+
+fn test_time_ts_high_bits() -> bool {
+    // 秒是 64 位 —— 高 32 位不能丢 (x86-64 上 time_t 就是 i64)。
+    let ts: ptr = alloc(16);
+    timep_set(ts, 4294967297, 1);
+    return load8(ts, 4) == 1 && load8(ts, 0) == 1 && time_ts_sec(ts) == 4294967297;
+}

@@ -2,11 +2,16 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Loment",
   "scopeName": "source.loment",
-  "comment": "Loment L1 语法高亮 (原生语法是 Rust 风味, 见 docs/143)。模式保持 Oniguruma 与 JS RegExp 双向可编译 (vscode_ext_test 会逐个编译一遍)。scope 名一律用标准 TextMate 前缀 —— 自造的根名主题不会着色。",
+  "comment": "Loment L1 语法高亮 (原生语法是 Rust 风味, 见 docs/143)。模式保持 Oniguruma 与 JS RegExp 双向可编译 (vscode_ext_test 会逐个编译一遍)。scope 名一律用标准 TextMate 前缀 —— 自造的根名主题不会着色。`#grammar-decl` 这一格是**对外的**: 七门外门表层语法的语法文件用 `source.loment#grammar-decl` 把它 include 进去 (editors/vscode/syntaxes/loment-<lang>.tmLanguage.json), 改名字要一并改那七处。",
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#numbers" },
+    { "include": "#grammar-decl" },
+    { "include": "#lspe-pass" },
+    { "include": "#switches" },
+    { "include": "#extlang" },
+    { "include": "#register" },
     { "include": "#capability" },
     { "include": "#struct-block" },
     { "include": "#enum-block" },
@@ -50,6 +55,98 @@
       "patterns": [
         { "name": "constant.numeric.hex.loment", "match": "\\b0[xX][0-9a-fA-F]+\\b" },
         { "name": "constant.numeric.decimal.loment", "match": "\\b[0-9]+\\b" }
+      ]
+    },
+    "grammar-decl": {
+      "comment": "`choose write grammar <别名>` (docs/188) —— 文件头、`module` 之前那一行。别名可以是 c / cpp / java / csharp / go / python / rust / loment / natural, 高亮不分辨取值 (出厂锁在编译器那边, 列在这里会漂)。**这一格被七门外门语法文件 include**, 所以它只放这一条规则、不放依赖别处的 include。",
+      "patterns": [
+        {
+          "name": "meta.declaration.grammar.loment",
+          "match": "^[ \\t]*(choose)[ \\t]+(write)[ \\t]+(grammar)(?=[ \\t;]|$)(?:[ \\t]+([^\\s;]+))?",
+          "captures": {
+            "1": { "name": "keyword.other.choose.loment" },
+            "2": { "name": "keyword.other.choose.loment" },
+            "3": { "name": "keyword.other.grammar.loment" },
+            "4": { "name": "support.constant.grammar.loment" }
+          }
+        }
+      ]
+    },
+    "lspe-pass": {
+      "comment": "LSPE 的词法旁路 (docs/262 §5.16 / #786): `lspe pass \"reason\" { … }`。`lspe` / `pass` 都不是保留字, 所以按**成对形状**认 —— 与编译器同一条判据 (tools/lomentc.py 的 `parse_stmt`)。理由串本身交给 `#strings`。",
+      "patterns": [
+        {
+          "match": "\\b(lspe)([ \\t]+)(pass)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.lspe.loment" },
+            "3": { "name": "keyword.control.lspe.loment" }
+          }
+        }
+      ]
+    },
+    "switches": {
+      "comment": "开关与核心维 (docs/182 / docs/175 §3.4)。`set` / `choose` / `addin` **都不是保留字** (参考实现接受关键字做标识符), 所以按**形状**认、不按词认 —— 与编译器同一条判据 (tools/lomentc.py `_reject_nested_switch_decls` 的注释)。",
+      "patterns": [
+        {
+          "name": "meta.declaration.switch.loment",
+          "match": "\\b(set)[ \\t]+(choose)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.set.loment" },
+            "2": { "name": "keyword.other.choose.loment" },
+            "3": { "name": "entity.name.constant.switch.loment" }
+          }
+        },
+        {
+          "name": "meta.declaration.core.loment",
+          "match": "\\b(choose)[ \\t]+(std|no_std|gc_manual|gc_auto|gc_auto_alpha|runtime|no_runtime|fp|no_fp)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.choose.loment" },
+            "2": { "name": "constant.language.core.loment" }
+          }
+        },
+        {
+          "name": "meta.declaration.switch.loment",
+          "match": "\\b(choose)[ \\t]+(close[ \\t]+)?(?!(?:write|grammar)\\b)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.choose.loment" },
+            "2": { "name": "keyword.other.close.loment" },
+            "3": { "name": "entity.name.constant.switch.loment" }
+          }
+        },
+        {
+          "name": "meta.declaration.addin.loment",
+          "match": "\\b(addin)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.addin.loment" },
+            "2": { "name": "entity.name.namespace.loment" }
+          }
+        }
+      ]
+    },
+    "extlang": {
+      "comment": "外部语言声明 (docs/185 §3): `command c` / `foruse py` 只收集语言名, 让词法器对不带 `let` 的外部块消歧。",
+      "patterns": [
+        {
+          "name": "meta.declaration.extlang.loment",
+          "match": "\\b(command|foruse)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.extlang.loment" },
+            "2": { "name": "support.constant.extlang.loment" }
+          }
+        }
+      ]
+    },
+    "register": {
+      "comment": "`register <名> { … }` (docs/223 §2 形态 A)。",
+      "patterns": [
+        {
+          "name": "meta.declaration.register.loment",
+          "match": "\\b(register)[ \\t]+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.register.loment" },
+            "2": { "name": "entity.name.type.loment" }
+          }
+        }
       ]
     },
     "capability": {
@@ -193,10 +290,11 @@
       ]
     },
     "builtins": {
+      "comment": "内建函数表 == tools/lomentc.py 的 `BUILTINS` (loment/lib/mem.lomt 另行给出 mem_* 那份)。`load16/load32/store16/store32` 曾经列在这里, 但它们**不是**内建 —— 是 `loment/examples/bytes.lomt` 里的普通函数, 2026-10-12 摘掉 (摘之前它们会把用户函数染成内建色)。",
       "patterns": [
         {
           "name": "support.function.builtin.loment",
-          "match": "\\b(alloc|free|load8|load16|load32|store8|store16|store32|str_len|str_eq|str_concat|str_byte|str_ptr|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|inb|outb)\\b(?=\\s*\\()"
+          "match": "\\b(alloc|free|load8|store8|str_len|str_eq|str_concat|str_byte|str_ptr|print|print_num|slice_len|ptr_add|ptr_sub|atomic_add|get_bits|set_bits|panic|syscall4|syscall6|syscall7|thread_spawn|inb|outb)\\b(?=\\s*\\()"
         }
       ]
     },
@@ -213,10 +311,11 @@
       ]
     },
     "types": {
+      "comment": "类型表 == tools/lomentc.py 的 `TYPES`。`usize` / `isize` 曾经列在这里, 但它们**不是** L1 类型 (`loment/tools/lomc.lomt` 里的 `usize` 全在字符串字面量里、是发出去的 Rust), 实测 `-> usize` 报 '返回类型 usize 未声明', 2026-10-12 摘掉。",
       "patterns": [
         {
           "name": "storage.type.primitive.loment",
-          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|bool|str|ptr|usize|isize)\\b"
+          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|bool|str|ptr)\\b"
         },
         { "name": "storage.type.unit.loment", "match": "\\(\\)" }
       ]
@@ -225,7 +324,7 @@
       "patterns": [
         {
           "name": "keyword.control.loment",
-          "match": "\\b(if|else|while|for|in|match|return|as|break|continue)\\b"
+          "match": "\\b(if|else|elif|while|for|in|match|return|as|break|continue|defer|def|lgc)\\b"
         }
       ]
     },
@@ -248,7 +347,7 @@
       "patterns": [
         {
           "name": "storage.type.declaration.loment",
-          "match": "\\b(use|let|const|where)\\b"
+          "match": "\\b(use|let|const|where|def)\\b"
         }
       ]
     },
@@ -273,6 +372,8 @@
         { "name": "keyword.operator.range.loment", "match": "\\.\\." },
         { "name": "keyword.operator.try.loment", "match": "\\?" },
         { "name": "keyword.operator.logical.loment", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.fallback.loment", "match": "\\b(orelse|catch)\\b" },
+        { "name": "keyword.operator.word.loment", "match": "\\b(and|or|not)\\b" },
         { "name": "keyword.operator.comparison.loment", "match": "==|!=|<=|>=|<|>" },
         { "name": "keyword.operator.assignment.loment", "match": "=" },
         { "name": "keyword.operator.arithmetic.loment", "match": "[+\\-*/%]" },

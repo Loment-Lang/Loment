@@ -1,0 +1,126 @@
+// internet/sock.lomt — socket 的最小一层: 常量、地址结构、开关、关闭、超时
+//
+// 为什么需要它: 工具链里**没有**任何 socket 封装 —— `lompi/lpi_cli.lomt` 里那份联网
+// 代码是应用层的, 为了一件事写了一遍。本模块是那一层原语: 建/关/关半边/设超时,
+// 加一个 sockaddr_in 的按字节构造 (`tcp` / `udp` 都用它)。
+//
+// 那两条会咬人的运行时事实 (都实测过, 写在 SKILL.md 6.2):
+//   * **SIGPIPE 没被忽略**: 对端挂断后第二次写会**直接杀掉进程** (退出码 13)。所以
+//     `tcp` 那一层的发送一律走 `send`(44) + `MSG_NOSIGNAL`, 不走 `write`。
+//   * **accept 回来的 socket 上阻塞读会永久阻塞**: 一个连上却不发东西的客户端能把整个
+//     服务拖死。所以这里给 `sock_set_recv_timeout` —— SO_RCVTIMEO(20) + timeval。
+//
+// 边界 (刻意划的, 不是没做完):
+//   * 只抽"一个 fd 上的动作"。**连接/收发在 tcp / udp 那两层**, 地址文本在 ip 那一层。
+//   * 不做非阻塞/epoll 复用 (号在, 没包) —— 需要就自己发 `syscall4/6/7`。
+//   * 自检**只验纯逻辑**: 带系统调用的函数在 Windows 上跑不了 (自检走 Loment->Rust,
+//     而那里的 syscall 是 Linux 的 `asm!("syscall")`)。真实行为由 `loment_internet_test`
+//     走原生路径验。
+//
+// 命名: 公开 sock_*, 内部 sockp_*。自检 test_sock_*。
+
+module sock
+
+/// addr 家族。
+pub const SOCK_AF_INET: u64 = 2;
+pub const SOCK_AF_INET6: u64 = 10;
+/// socket 类型。
+pub const SOCK_STREAM: u64 = 1;
+pub const SOCK_DGRAM: u64 = 2;
+/// setsockopt 的层。
+pub const SOCK_SOL: u64 = 1;
+pub const SOCK_SO_REUSEADDR: u64 = 2;
+pub const SOCK_SO_RCVTIMEO: u64 = 20;
+pub const SOCK_SO_SNDTIMEO: u64 = 21;
+/// `send` 的旗标: 别为已挂断的对端发 SIGPIPE。
+pub const SOCK_MSG_NOSIGNAL: u64 = 16384;
+/// shutdown 的 how。
+pub const SOCK_SHUT_RDWR: u64 = 2;
+/// 失败 (-1)。
+pub const SOCK_ERR: i64 = -1;
+/// 可重试: 非阻塞/超时 (-11 EAGAIN) 与被信号打断 (-4 EINTR)。
+pub const SOCK_EAGAIN: i64 = -11;
+pub const SOCK_EINTR: i64 = -4;
+
+const SOCKP_SYS_CLOSE: u64 = 3;
+const SOCKP_SYS_SOCKET: u64 = 41;
+const SOCKP_SYS_SHUTDOWN: u64 = 48;
+const SOCKP_SYS_SETSOCKOPT: u64 = 54;
+
+/// 填一个 `sockaddr_in` (16 字节): family、端口(**网络序**, 高字节在前)、
+/// 地址 4 字节(网络序, 由 `ip_ip_v4_parse` 那种大端值直接拆)、其余补零。
+/// `ip` 是**主机序的大端值** (a<<24|b<<16|c<<8|d) —— 与 `ip.lomt::ip_v4_parse` 同一个表示。
+pub fn sock_addr_in(sa: ptr, ip: u32, port: u32) -> u32 {
+    store8(sa, 0, SOCK_AF_INET as u8);
+    store8(sa, 1, 0 as u8);
+    store8(sa, 2, ((port >> 8) & 255) as u8);
+    store8(sa, 3, (port & 255) as u8);
+    store8(sa, 4, ((ip >> 24) & 255) as u8);
+    store8(sa, 5, ((ip >> 16) & 255) as u8);
+    store8(sa, 6, ((ip >> 8) & 255) as u8);
+    store8(sa, 7, (ip & 255) as u8);
+    let i: u32 = 8;
+    while i < 16 {
+        store8(sa, i, 0 as u8);
+        i = i + 1;
+    }
+    return 16;
+}
+
+/// 建一个 socket; 失败返回负数。
+pub fn sock_new(domain: u64, kind: u64) -> i64 {
+    return syscall4(SOCKP_SYS_SOCKET, domain, kind, 0);
+}
+
+pub fn sock_close(fd: i64) -> i64 {
+    return syscall4(SOCKP_SYS_CLOSE, fd as u64, 0, 0);
+}
+
+pub fn sock_shutdown(fd: i64, how: u64) -> i64 {
+    return syscall4(SOCKP_SYS_SHUTDOWN, fd as u64, how, 0);
+}
+
+/// 设接收超时。`tv` 是调用方给的 16 字节 (两个 64 位: 秒 / 微秒)。
+/// 摆好之后 `recv` 到点会返回 -11 (EAGAIN) 而不是永久阻塞。
+pub fn sock_set_recv_timeout(fd: i64, tv: ptr, ms: u64) -> i64 {
+    let sec: u64 = ms / 1000;
+    let usec: u64 = (ms % 1000) * 1000;
+    let i: u32 = 0;
+    while i < 8 {
+        store8(tv, i, ((sec >> (8 * i)) & 255) as u8);
+        store8(tv, 8 + i, ((usec >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return syscall6(SOCKP_SYS_SETSOCKOPT, fd as u64, SOCK_SOL, SOCK_SO_RCVTIMEO,
+                    tv as u64, 16);
+}
+
+/// SO_REUSEADDR —— 服务端重启时不被 TIME_WAIT 挡住。
+pub fn sock_reuseaddr(fd: i64, on: ptr) -> i64 {
+    store8(on, 0, 1 as u8);
+    store8(on, 1, 0 as u8);
+    store8(on, 2, 0 as u8);
+    store8(on, 3, 0 as u8);
+    return syscall6(SOCKP_SYS_SETSOCKOPT, fd as u64, SOCK_SOL, SOCK_SO_REUSEADDR,
+                    on as u64, 4);
+}
+
+/// 这个返回值是"再试一次"吗 (-11 / -4)。
+pub fn sock_retry(r: i64) -> bool {
+    return r == SOCK_EAGAIN || r == SOCK_EINTR;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sock_addr_layout() -> bool {
+    let sa: ptr = alloc(16);
+    let n: u32 = sock_addr_in(sa, 16909060, 8080);
+    return n == 16 && load8(sa, 0) == 2 && load8(sa, 1) == 0
+        && load8(sa, 2) == 31 && load8(sa, 3) == 144          // 8080 = 0x1F90
+        && load8(sa, 4) == 1 && load8(sa, 5) == 2 && load8(sa, 6) == 3
+        && load8(sa, 7) == 4 && load8(sa, 8) == 0 && load8(sa, 15) == 0;
+}
+
+fn test_sock_retry() -> bool {
+    return sock_retry(-11) && sock_retry(-4) && !sock_retry(-1) && !sock_retry(0);
+}

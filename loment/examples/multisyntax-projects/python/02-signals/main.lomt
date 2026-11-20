@@ -1,0 +1,16 @@
+// main.lomt —— 这个项目的**宿主**：原生 Loment 语法，负责调模块、决定退出码。
+//
+// 计算主体在 `signals.lomt` 里，那是**用 Python 拼法写的 Loment**
+// （首行 `choose write grammar python`）。宿主薄，是因为这一门（Stage A 子集）
+// **调不到内建函数**（`alloc` / `syscall4` / `str_*` 一律被拒）、**也不能跨单元调用** ——
+// I/O 与 `_start` 只能是宿主的事（见 `loment/examples/multisyntax-projects/README.md`）。
+module main
+
+choose runtime
+
+use "signals.lomt"
+
+fn _start() {
+    // `entry()` 把二十多个定点/位运算算法的结果折成一个数 —— 任一算法错了，这个退出码都会变。
+    syscall4(60, entry() as u64, 0, 0);
+}

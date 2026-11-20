@@ -1,0 +1,18 @@
+// `for x in a`（LLS §11.6）：元素是**拷贝** —— 改 `x` 不写回数组 ⇒ 297，随后 a[0] 仍是 1。
+choose write grammar tur2026.2
+
+module forin
+choose runtime
+
+fn main() {
+    let a: [u32; 3] = [1, 2, 3];
+    let s: u32 = 0;
+    for x in a {
+        x = 99;
+        s = s + x;
+    }
+    print_num(s as i64);
+    print(" ");
+    print_num(a[0] as i64);
+    print("\n");
+}

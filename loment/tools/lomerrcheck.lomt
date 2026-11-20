@@ -19,6 +19,7 @@
 // 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0; 且**不能 `return`**）。
 
 module lomerrcheck
+choose runtime
 
 use bytes
 use proc

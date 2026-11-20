@@ -119,9 +119,22 @@ clang -nostdlib -static        -> ELF     (无 libc, _start 即入口)
   `D:\...` 路径转成 `/mnt/d/...`（`wslpath`）。
 - **PATH**：Windows 走用户级 `Path`（`HKCU`，不需要管理员）；Linux 只打印该加哪一行，
   **不替用户改 shell 配置**（`--no-path` 关掉提示）。
+- **PATH 上有更靠前的同名命令**：安装器只**追加**、不重排别人的 PATH，所以一个更早装下的
+  `lompi` / `loment` 会**静默**盖过这一份 —— 敲 `lompi` 拿到的是旧那份，而**装完不会有一句话
+  提到**（2026-10-12 的报障：`lompi` 一直是 0.1.0）。装完会**点名**它的路径；**不删**它 ——
+  那不是这个安装器的东西。判据两半：静态形状（跨平台，门禁跑得到）+ Windows 上放个诱饵真跑。
 - **文件类型**：Windows 上注册 `.lomt`/`.lom`（ProgID `Loment.Source` / `Loment.L0`，
   HKCU only），与 `tools/loment_filetype.py` 同一套键；`-NoFileType` 可关。
 - **冒烟测试**：装完立刻 `loment version` + 编一个示例，失败就报错退出（不是"复制完就完事"）。
+- **双击 = 窗口，带参数 = 命令行**（2026-10-12 用户报"双击 setup.exe 毫无反应"之后加的）：
+  `install.cmd` 无参数时交给 `welcome.ps1` —— 渐入圆角标 + `Welcome to Loment` → 选装到哪 →
+  进度（把 `install.ps1` 的输出流式显示）→ **完成回执（绿勾 + 版本 + 手动 Close）**。
+  它**不重写安装逻辑**，只驱动 `install.ps1`：一份逻辑两张脸。带**任何**参数时走原来的命令行，
+  所以 CI、`-DryRun`、`-Uninstall` 与所有判据的行为一个字节没变。
+  * 实测那条报障：包解开了、脚本真跑了、东西真装上了 —— 只是**那条路上没有一个看得见的
+    窗口**，于是"装好了"与"什么都没发生"长得一样（还留下卡在 `pause` 的僵尸 `cmd`）。
+  * 判据两半：静态（跨平台：包里得有 `welcome.ps1`/`loment-logo.png`、两张脸的形状、
+    窗口不重写校验）+ Windows 上真开一遍（`-AutoRun` 到沙箱前缀 + `-ShotDone` 自画完成页）。
 - **卸载**：`sh install.sh --uninstall` / `powershell -File install.ps1 -Uninstall`
   （后者同时清 PATH 与文件类型键）。
 - **幂等**：重复安装成功且不改语义（判据里有）。

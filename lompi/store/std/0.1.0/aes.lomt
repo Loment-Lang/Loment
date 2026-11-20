@@ -1,0 +1,823 @@
+// std/aes.lomt — AES 分组密码 + CTR + GCM (FIPS-197 / NIST SP 800-38A / 800-38D)
+//
+// 为什么标准库要有它: 已有的哈希 (sha256/sha512/sha3/blake2) 解决"完整性",
+// 但"保密 + 完整性"要的是 AEAD —— TLS、加密文件、密封配置都站在 AES-GCM 或
+// ChaCha20-Poly1305 上。这一份是前者的地基, 后者在 `chacha20` / `poly1305` /
+// `aead` 里。
+//
+// S-box 怎么来的: **运行时算**, 不手抄 256 项。GF(2^8) 的乘法逆元 (0 的逆元规定为 0)
+// 再套仿射变换, 就是 FIPS-197 的 S-box; 逆表在同一个循环里填。手抄一张 256 项的
+// 十六进制表必错一项, 而错一项的表现是"所有向量都挂, 却不告诉你是哪个字节"。
+//
+// 布局:
+//   * 状态是调用方的 **16 字节**缓冲, 列主序 (state[r][c] = buf[r + 4c]),
+//     正好等于 AES 分组在字节流里的顺序, 不做任何换位;
+//   * 轮密钥 (round key schedule) 是 **240 字节**上限 (AES-256 需要 4*15*4) ——
+//     `AES_RK_BYTES`; AES-128 只用前 176 字节;
+//   * `aes_ctr` / `aes_gcm_*` 的 `sc` 是调用方给的暂存区, 至少
+//     `aes_gcm_scratch()` 字节 (320), 里面放轮密钥 + H + J0 + 校验和 + 临时块。
+//
+// GCM 的形状 (SP 800-38D 的记号):
+//   H = E_K(0^128), J0 由 IV 决定 (12 字节 IV 就是 IV||0^31||1, 其它长度走 GHASH),
+//   密文 = CTR 从 inc32(J0) 起, 标签 = E_K(J0) XOR GHASH(AAD || C || 长度块)。
+//   GHASH 的 128 位乘法是**逐位**的 (128 次), 慢但短; 要快再换 PCLMUL 版本。
+//
+// 不做的: 别的分组长度 (AES 只有 128 位分组), XTS/CCM/OCB, 侧信道加固的查表防护。
+// 命名: 公开 aes_*, 内部 as_*。自检 test_aes_*。
+
+module aes
+
+use "mem.lomt"
+
+pub const AES_BLOCK: u32 = 16;
+pub const AES_KEY128: u32 = 16;
+pub const AES_KEY256: u32 = 32;
+/// 轮密钥缓冲的最坏情况大小 (AES-256: 15 组 × 16 字节)。
+pub const AES_RK_BYTES: u32 = 240;
+/// `aes_ctr` 的暂存区下限 (轮密钥)。
+pub const AES_CTR_SCRATCH: u32 = 240;
+
+fn as_hexv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55;
+    }
+    return 0;
+}
+
+fn as_hexch(v: u32) -> u32 {
+    if v < 10 {
+        return 48 + v;
+    }
+    return 87 + v;
+}
+
+/// 十六进制文本 -> 字节 (自检用)。
+fn as_from_hex(s: str, out: ptr) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = as_hexv(str_byte(s, 2 * i));
+        let lo: u32 = as_hexv(str_byte(s, 2 * i + 1));
+        store8(out, i, ((hi << 4) | lo) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 字节 -> 小写十六进制文本 (自检用)。
+fn as_to_hex(p: ptr, n: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let v: u32 = load8(p, i);
+        store8(out, 2 * i, as_hexch((v >> 4) & 15) as u8);
+        store8(out, 2 * i + 1, as_hexch(v & 15) as u8);
+        i = i + 1;
+    }
+    return 2 * n;
+}
+
+fn as_rotl8(v: u32, n: u32) -> u32 {
+    return ((v << n) | (v >> (8 - n))) & 255;
+}
+
+fn as_xtime(v: u32) -> u32 {
+    let r: u32 = (v << 1) & 255;
+    if (v & 128) != 0 {
+        r = r ^ 27;
+    }
+    return r;
+}
+
+fn as_gf_mul(a: u32, b: u32) -> u32 {
+    let x: u32 = a & 255;
+    let y: u32 = b & 255;
+    let z: u32 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        if (y & 1) != 0 {
+            z = z ^ x;
+        }
+        x = as_xtime(x);
+        y = y >> 1;
+        i = i + 1;
+    }
+    return z & 255;
+}
+
+fn as_gf_pow(a: u32, e: u32) -> u32 {
+    let r: u32 = 1;
+    let base: u32 = a & 255;
+    let k: u32 = e;
+    while k > 0 {
+        if (k & 1) != 0 {
+            r = as_gf_mul(r, base);
+        }
+        base = as_gf_mul(base, base);
+        k = k >> 1;
+    }
+    return r;
+}
+
+/// 填 S-box 与逆 S-box (各 256 字节)。0 的逆元规定为 0。
+fn as_sbox(s: ptr, inv: ptr) {
+    let i: u32 = 0;
+    while i < 256 {
+        let x: u32 = as_gf_pow(i, 254);
+        if i == 0 {
+            x = 0;
+        }
+        let v: u32 = x ^ as_rotl8(x, 1) ^ as_rotl8(x, 2)
+            ^ as_rotl8(x, 3) ^ as_rotl8(x, 4) ^ 99;
+        store8(s, i, (v & 255) as u8);
+        store8(inv, v & 255, i as u8);
+        i = i + 1;
+    }
+}
+
+fn as_wget(rk: ptr, i: u32) -> u32 {
+    let b0: u32 = load8(rk, 4 * i);
+    let b1: u32 = load8(rk, 4 * i + 1);
+    let b2: u32 = load8(rk, 4 * i + 2);
+    let b3: u32 = load8(rk, 4 * i + 3);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+fn as_wput(rk: ptr, i: u32, v: u32) {
+    store8(rk, 4 * i, ((v >> 24) & 255) as u8);
+    store8(rk, 4 * i + 1, ((v >> 16) & 255) as u8);
+    store8(rk, 4 * i + 2, ((v >> 8) & 255) as u8);
+    store8(rk, 4 * i + 3, (v & 255) as u8);
+}
+
+fn as_subword(w: u32, s: ptr) -> u32 {
+    let b0: u32 = load8(s, (w >> 24) & 255);
+    let b1: u32 = load8(s, (w >> 16) & 255);
+    let b2: u32 = load8(s, (w >> 8) & 255);
+    let b3: u32 = load8(s, w & 255);
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+}
+
+fn as_rotword(w: u32) -> u32 {
+    return ((w << 8) | (w >> 24)) & 4294967295;
+}
+
+/// 轮数: 128 位 -> 10, 256 位 -> 14, 其它 -> 0。
+pub fn aes_rounds(keylen: u32) -> u32 {
+    if keylen == AES_KEY128 {
+        return 10;
+    }
+    if keylen == AES_KEY256 {
+        return 14;
+    }
+    return 0;
+}
+
+/// 密钥扩展。把 4*(rounds+1) 个字按大端写进 `rk` (至少 `AES_RK_BYTES`)，返回轮数。
+pub fn aes_expand(key: ptr, keylen: u32, rk: ptr) -> u32 {
+    let rounds: u32 = aes_rounds(keylen);
+    if rounds == 0 {
+        return 0;
+    }
+    let nk: u32 = keylen / 4;
+    let total: u32 = 4 * (rounds + 1);
+    let s: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(s, inv);
+    let i: u32 = 0;
+    while i < nk {
+        let b0: u32 = load8(key, 4 * i);
+        let b1: u32 = load8(key, 4 * i + 1);
+        let b2: u32 = load8(key, 4 * i + 2);
+        let b3: u32 = load8(key, 4 * i + 3);
+        as_wput(rk, i, (b0 << 24) | (b1 << 16) | (b2 << 8) | b3);
+        i = i + 1;
+    }
+    let rcon: u32 = 1;
+    let j: u32 = nk;
+    while j < total {
+        let t: u32 = as_wget(rk, j - 1);
+        if (j % nk) == 0 {
+            let rw: u32 = as_subword(as_rotword(t), s);
+            t = rw ^ (rcon << 24);
+            rcon = as_xtime(rcon);
+        } else if nk > 6 && (j % nk) == 4 {
+            t = as_subword(t, s);
+        }
+        as_wput(rk, j, as_wget(rk, j - nk) ^ t);
+        j = j + 1;
+    }
+    return rounds;
+}
+
+fn as_addrk(st: ptr, rk: ptr, rnd: u32) {
+    let i: u32 = 0;
+    while i < 16 {
+        let v: u32 = load8(st, i) ^ load8(rk, rnd * 16 + i);
+        store8(st, i, v as u8);
+        i = i + 1;
+    }
+}
+
+fn as_sub(st: ptr, s: ptr) {
+    let i: u32 = 0;
+    while i < 16 {
+        store8(st, i, load8(s, load8(st, i)) as u8);
+        i = i + 1;
+    }
+}
+
+fn as_invsub(st: ptr, inv: ptr) {
+    let i: u32 = 0;
+    while i < 16 {
+        store8(st, i, load8(inv, load8(st, i)) as u8);
+        i = i + 1;
+    }
+}
+
+fn as_shift(st: ptr) {
+    let t: ptr = alloc(16);
+    let c: u32 = 0;
+    while c < 4 {
+        let r: u32 = 0;
+        while r < 4 {
+            let src: u32 = r + 4 * ((c + r) % 4);
+            store8(t, r + 4 * c, load8(st, src) as u8);
+            r = r + 1;
+        }
+        c = c + 1;
+    }
+    mem_copy(st, 0, t, 0, 16);
+}
+
+fn as_invshift(st: ptr) {
+    let t: ptr = alloc(16);
+    let c: u32 = 0;
+    while c < 4 {
+        let r: u32 = 0;
+        while r < 4 {
+            let src: u32 = r + 4 * ((c + 4 - r) % 4);
+            store8(t, r + 4 * c, load8(st, src) as u8);
+            r = r + 1;
+        }
+        c = c + 1;
+    }
+    mem_copy(st, 0, t, 0, 16);
+}
+
+fn as_mix(st: ptr) {
+    let c: u32 = 0;
+    while c < 4 {
+        let a0: u32 = load8(st, 4 * c);
+        let a1: u32 = load8(st, 4 * c + 1);
+        let a2: u32 = load8(st, 4 * c + 2);
+        let a3: u32 = load8(st, 4 * c + 3);
+        let b0: u32 = as_xtime(a0) ^ (as_xtime(a1) ^ a1) ^ a2 ^ a3;
+        let b1: u32 = a0 ^ as_xtime(a1) ^ (as_xtime(a2) ^ a2) ^ a3;
+        let b2: u32 = a0 ^ a1 ^ as_xtime(a2) ^ (as_xtime(a3) ^ a3);
+        let b3: u32 = (as_xtime(a0) ^ a0) ^ a1 ^ a2 ^ as_xtime(a3);
+        store8(st, 4 * c, (b0 & 255) as u8);
+        store8(st, 4 * c + 1, (b1 & 255) as u8);
+        store8(st, 4 * c + 2, (b2 & 255) as u8);
+        store8(st, 4 * c + 3, (b3 & 255) as u8);
+        c = c + 1;
+    }
+}
+
+fn as_invmix(st: ptr) {
+    let c: u32 = 0;
+    while c < 4 {
+        let a0: u32 = load8(st, 4 * c);
+        let a1: u32 = load8(st, 4 * c + 1);
+        let a2: u32 = load8(st, 4 * c + 2);
+        let a3: u32 = load8(st, 4 * c + 3);
+        let b0: u32 = as_gf_mul(a0, 14) ^ as_gf_mul(a1, 11) ^ as_gf_mul(a2, 13) ^ as_gf_mul(a3, 9);
+        let b1: u32 = as_gf_mul(a0, 9) ^ as_gf_mul(a1, 14) ^ as_gf_mul(a2, 11) ^ as_gf_mul(a3, 13);
+        let b2: u32 = as_gf_mul(a0, 13) ^ as_gf_mul(a1, 9) ^ as_gf_mul(a2, 14) ^ as_gf_mul(a3, 11);
+        let b3: u32 = as_gf_mul(a0, 11) ^ as_gf_mul(a1, 13) ^ as_gf_mul(a2, 9) ^ as_gf_mul(a3, 14);
+        store8(st, 4 * c, (b0 & 255) as u8);
+        store8(st, 4 * c + 1, (b1 & 255) as u8);
+        store8(st, 4 * c + 2, (b2 & 255) as u8);
+        store8(st, 4 * c + 3, (b3 & 255) as u8);
+        c = c + 1;
+    }
+}
+
+fn as_enc_block(rk: ptr, rounds: u32, st: ptr, s: ptr) {
+    as_addrk(st, rk, 0);
+    let r: u32 = 1;
+    while r < rounds {
+        as_sub(st, s);
+        as_shift(st);
+        as_mix(st);
+        as_addrk(st, rk, r);
+        r = r + 1;
+    }
+    as_sub(st, s);
+    as_shift(st);
+    as_addrk(st, rk, rounds);
+}
+
+fn as_dec_block(rk: ptr, rounds: u32, st: ptr, inv: ptr) {
+    as_addrk(st, rk, rounds);
+    let r: u32 = rounds;
+    while r > 1 {
+        r = r - 1;
+        as_invshift(st);
+        as_invsub(st, inv);
+        as_addrk(st, rk, r);
+        as_invmix(st);
+    }
+    as_invshift(st);
+    as_invsub(st, inv);
+    as_addrk(st, rk, 0);
+}
+
+/// 加密一个 16 字节分组。
+pub fn aes_encrypt(rk: ptr, rounds: u32, inp: ptr, out: ptr) -> u32 {
+    let st: ptr = alloc(16);
+    let s: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(s, inv);
+    mem_copy(st, 0, inp, 0, 16);
+    as_enc_block(rk, rounds, st, s);
+    mem_copy(out, 0, st, 0, 16);
+    return 16;
+}
+
+/// 解密一个 16 字节分组。
+pub fn aes_decrypt(rk: ptr, rounds: u32, inp: ptr, out: ptr) -> u32 {
+    let st: ptr = alloc(16);
+    let s: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(s, inv);
+    mem_copy(st, 0, inp, 0, 16);
+    as_dec_block(rk, rounds, st, inv);
+    mem_copy(out, 0, st, 0, 16);
+    return 16;
+}
+
+fn as_inc128(cb: ptr) {
+    let i: u32 = 16;
+    let done: u32 = 0;
+    while i > 0 && done == 0 {
+        i = i - 1;
+        let v: u32 = (load8(cb, i) + 1) & 255;
+        store8(cb, i, v as u8);
+        if v != 0 {
+            done = 1;
+        }
+    }
+}
+
+fn as_inc32(cb: ptr) {
+    let i: u32 = 4;
+    let done: u32 = 0;
+    while i > 0 && done == 0 {
+        i = i - 1;
+        let v: u32 = (load8(cb, 12 + i) + 1) & 255;
+        store8(cb, 12 + i, v as u8);
+        if v != 0 {
+            done = 1;
+        }
+    }
+}
+
+/// CTR 模式 (整块 128 位计数器, 大端)。`sc` 至少 `AES_CTR_SCRATCH` 字节。
+/// `src` 与 `out` 可以相同 (就地加密)。返回写入的字节数, 密钥长度不对返回 0。
+pub fn aes_ctr(key: ptr, keylen: u32, iv: ptr, src: ptr, n: u32, out: ptr, sc: ptr) -> u32 {
+    let rounds: u32 = aes_rounds(keylen);
+    if rounds == 0 {
+        return 0;
+    }
+    aes_expand(key, keylen, sc);
+    let s: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(s, inv);
+    let cb: ptr = alloc(16);
+    let st: ptr = alloc(16);
+    mem_copy(cb, 0, iv, 0, 16);
+    let i: u32 = 0;
+    while i < n {
+        mem_copy(st, 0, cb, 0, 16);
+        as_enc_block(sc, rounds, st, s);
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > 16 {
+            m = 16;
+        }
+        let j: u32 = 0;
+        while j < m {
+            store8(out, i + j, (load8(src, i + j) ^ load8(st, j)) as u8);
+            j = j + 1;
+        }
+        as_inc128(cb);
+        i = i + m;
+    }
+    return n;
+}
+
+/// GHASH 需要的 128 位乘法: `z = x * y` (GF(2^128), 约化多项式 0xE1 || 0^{120})。
+fn as_gmul(x: ptr, y: ptr, z: ptr) {
+    let v: ptr = alloc(16);
+    mem_copy(v, 0, y, 0, 16);
+    let i: u32 = 0;
+    while i < 16 {
+        store8(z, i, 0 as u8);
+        i = i + 1;
+    }
+    let k: u32 = 0;
+    while k < 128 {
+        let byte: u32 = load8(x, k / 8);
+        let bit: u32 = (byte >> (7 - (k % 8))) & 1;
+        if bit == 1 {
+            let j: u32 = 0;
+            while j < 16 {
+                store8(z, j, (load8(z, j) ^ load8(v, j)) as u8);
+                j = j + 1;
+            }
+        }
+        let carry: u32 = 0;
+        let q: u32 = 0;
+        while q < 16 {
+            let cur: u32 = load8(v, q);
+            store8(v, q, ((cur >> 1) | (carry << 7)) as u8);
+            carry = cur & 1;
+            q = q + 1;
+        }
+        if carry == 1 {
+            store8(v, 0, (load8(v, 0) ^ 225) as u8);
+        }
+        k = k + 1;
+    }
+}
+
+fn as_xor16(d: ptr, s: ptr) {
+    let i: u32 = 0;
+    while i < 16 {
+        store8(d, i, (load8(d, i) ^ load8(s, i)) as u8);
+        i = i + 1;
+    }
+}
+
+/// GHASH 的一步: X = (X XOR 块) * H。
+fn as_ghash_step(x: ptr, h: ptr, blk: ptr) {
+    as_xor16(x, blk);
+    let t: ptr = alloc(16);
+    as_gmul(x, h, t);
+    mem_copy(x, 0, t, 0, 16);
+}
+
+fn as_zero16(p: ptr) {
+    let i: u32 = 0;
+    while i < 16 {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+}
+
+fn as_store_u64_be(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (56 - 8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+/// GHASH over AAD || C, 末尾接长度块 [len(AAD)]_64 || [len(C)]_64 (比特数)。
+fn as_ghash(h: ptr, aad: ptr, aadn: u32, ct: ptr, cn: u32, out: ptr) {
+    let x: ptr = alloc(16);
+    let blk: ptr = alloc(16);
+    as_zero16(x);
+    let i: u32 = 0;
+    while i < aadn {
+        let take: u32 = aadn - i;
+        let m: u32 = take;
+        if m > 16 {
+            m = 16;
+        }
+        as_zero16(blk);
+        let j: u32 = 0;
+        while j < m {
+            store8(blk, j, load8(aad, i + j) as u8);
+            j = j + 1;
+        }
+        as_ghash_step(x, h, blk);
+        i = i + m;
+    }
+    let k: u32 = 0;
+    while k < cn {
+        let take2: u32 = cn - k;
+        let m2: u32 = take2;
+        if m2 > 16 {
+            m2 = 16;
+        }
+        as_zero16(blk);
+        let j2: u32 = 0;
+        while j2 < m2 {
+            store8(blk, j2, load8(ct, k + j2) as u8);
+            j2 = j2 + 1;
+        }
+        as_ghash_step(x, h, blk);
+        k = k + m2;
+    }
+    as_zero16(blk);
+    as_store_u64_be(blk, 0, (aadn as u64) * 8);
+    as_store_u64_be(blk, 8, (cn as u64) * 8);
+    as_ghash_step(x, h, blk);
+    mem_copy(out, 0, x, 0, 16);
+}
+
+/// J0: 12 字节 IV 直接拼; 其它长度按 SP 800-38D 走 GHASH(IV || 0^s || [len(IV)]_64)。
+fn as_j0(h: ptr, iv: ptr, ivn: u32, j0: ptr) {
+    if ivn == 12 {
+        mem_copy(j0, 0, iv, 0, 12);
+        store8(j0, 12, 0 as u8);
+        store8(j0, 13, 0 as u8);
+        store8(j0, 14, 0 as u8);
+        store8(j0, 15, 1 as u8);
+        return;
+    }
+    let x: ptr = alloc(16);
+    let blk: ptr = alloc(16);
+    as_zero16(x);
+    let i: u32 = 0;
+    while i < ivn {
+        let take: u32 = ivn - i;
+        let m: u32 = take;
+        if m > 16 {
+            m = 16;
+        }
+        as_zero16(blk);
+        let j: u32 = 0;
+        while j < m {
+            store8(blk, j, load8(iv, i + j) as u8);
+            j = j + 1;
+        }
+        as_ghash_step(x, h, blk);
+        i = i + m;
+    }
+    as_zero16(blk);
+    as_store_u64_be(blk, 8, (ivn as u64) * 8);
+    as_ghash_step(x, h, blk);
+    mem_copy(j0, 0, x, 0, 16);
+}
+
+/// `aes_gcm_seal` / `aes_gcm_open` 的暂存区大小: 轮密钥 240 字节 (其余临时块在函数内取)。
+pub fn aes_gcm_scratch(n: u32) -> u32 {
+    return 240;
+}
+
+/// 一个 GCM 实例的公共准备: 轮密钥、H、J0。返回轮数, 0 表示参数不合法。
+fn as_gcm_setup(key: ptr, keylen: u32, iv: ptr, ivn: u32, sc: ptr, h: ptr, j0: ptr, blk: ptr) -> u32 {
+    let rounds: u32 = aes_rounds(keylen);
+    if rounds == 0 {
+        return 0;
+    }
+    if ivn == 0 {
+        return 0;
+    }
+    aes_expand(key, keylen, sc);
+    let sbox: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(sbox, inv);
+    as_zero16(blk);
+    as_enc_block(sc, rounds, blk, sbox);
+    mem_copy(h, 0, blk, 0, 16);
+    as_j0(h, iv, ivn, j0);
+    return rounds;
+}
+
+/// GCM 加密 (seal)。返回 0 成功; 2 = 密钥长度或 IV 不合法。
+pub fn aes_gcm_seal(key: ptr, keylen: u32, iv: ptr, ivn: u32, aad: ptr, aadn: u32,
+                    msg: ptr, n: u32, ct: ptr, tag: ptr, sc: ptr) -> u32 {
+    let h: ptr = alloc(16);
+    let j0: ptr = alloc(16);
+    let s: ptr = alloc(16);
+    let blk: ptr = alloc(16);
+    let rounds: u32 = as_gcm_setup(key, keylen, iv, ivn, sc, h, j0, blk);
+    if rounds == 0 {
+        return 2;
+    }
+    let sbox: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(sbox, inv);
+    let cb: ptr = alloc(16);
+    let st: ptr = alloc(16);
+    mem_copy(cb, 0, j0, 0, 16);
+    let i: u32 = 0;
+    while i < n {
+        as_inc32(cb);
+        mem_copy(st, 0, cb, 0, 16);
+        as_enc_block(sc, rounds, st, sbox);
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > 16 {
+            m = 16;
+        }
+        let j: u32 = 0;
+        while j < m {
+            store8(ct, i + j, (load8(msg, i + j) ^ load8(st, j)) as u8);
+            j = j + 1;
+        }
+        i = i + m;
+    }
+    as_ghash(h, aad, aadn, ct, n, s);
+    mem_copy(st, 0, j0, 0, 16);
+    as_enc_block(sc, rounds, st, sbox);
+    let k: u32 = 0;
+    while k < 16 {
+        store8(tag, k, (load8(st, k) ^ load8(s, k)) as u8);
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// GCM 解密 (open)。返回 0 = 标签正确 (明文已写进 `out`);
+/// 1 = 标签不符 (明文内容不可信, 调用方必须丢弃); 2 = 参数不合法。
+pub fn aes_gcm_open(key: ptr, keylen: u32, iv: ptr, ivn: u32, aad: ptr, aadn: u32,
+                    ct: ptr, n: u32, out: ptr, tag: ptr, sc: ptr) -> u32 {
+    let h: ptr = alloc(16);
+    let j0: ptr = alloc(16);
+    let s: ptr = alloc(16);
+    let blk: ptr = alloc(16);
+    let rounds: u32 = as_gcm_setup(key, keylen, iv, ivn, sc, h, j0, blk);
+    if rounds == 0 {
+        return 2;
+    }
+    as_ghash(h, aad, aadn, ct, n, s);
+    let sbox: ptr = alloc(256);
+    let inv: ptr = alloc(256);
+    as_sbox(sbox, inv);
+    let st: ptr = alloc(16);
+    mem_copy(st, 0, j0, 0, 16);
+    as_enc_block(sc, rounds, st, sbox);
+    let diff: u32 = 0;
+    let k: u32 = 0;
+    while k < 16 {
+        diff = diff | ((load8(st, k) ^ load8(s, k)) ^ load8(tag, k));
+        k = k + 1;
+    }
+    let cb: ptr = alloc(16);
+    let ks: ptr = alloc(16);
+    mem_copy(cb, 0, j0, 0, 16);
+    let i: u32 = 0;
+    while i < n {
+        as_inc32(cb);
+        mem_copy(ks, 0, cb, 0, 16);
+        as_enc_block(sc, rounds, ks, sbox);
+        let take: u32 = n - i;
+        let m: u32 = take;
+        if m > 16 {
+            m = 16;
+        }
+        let j: u32 = 0;
+        while j < m {
+            store8(out, i + j, (load8(ct, i + j) ^ load8(ks, j)) as u8);
+            j = j + 1;
+        }
+        i = i + m;
+    }
+    if diff == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// 四个向量都是公开文档里的 (FIPS-197 附录 C、SP 800-38A F.5.1、SP 800-38D 的
+// 全零向量), 不是自己算完再抄回来的。
+
+fn test_aes_fips197_128() -> bool {
+    // key 000102030405060708090a0b0c0d0e0f
+    // pt  00112233445566778899aabbccddeeff
+    // ct  69c4e0d86a7b0430d8cdb78070b4c55a
+    let key: ptr = alloc(16);
+    let pt: ptr = alloc(16);
+    let rk: ptr = alloc(AES_RK_BYTES);
+    let out: ptr = alloc(16);
+    let hex: ptr = alloc(40);
+    as_from_hex("000102030405060708090a0b0c0d0e0f", key);
+    as_from_hex("00112233445566778899aabbccddeeff", pt);
+    let r: u32 = aes_expand(key, 16, rk);
+    if r != 10 {
+        return false;
+    }
+    aes_encrypt(rk, r, pt, out);
+    as_to_hex(out, 16, hex);
+    let want: str = "69c4e0d86a7b0430d8cdb78070b4c55a";
+    return mem_eq(hex, 0, str_ptr(want), 0, 32);
+}
+
+fn test_aes_fips197_256() -> bool {
+    // key 000102...1f, pt 001122...ff, ct 8ea2b7ca516745bfeafc49904b496089
+    // 再加一次解密往返 —— 逆 S-box / 逆 MixColumns 错了这一半会露。
+    let key: ptr = alloc(32);
+    let pt: ptr = alloc(16);
+    let rk: ptr = alloc(AES_RK_BYTES);
+    let ct: ptr = alloc(16);
+    let back: ptr = alloc(16);
+    let hex: ptr = alloc(40);
+    as_from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", key);
+    as_from_hex("00112233445566778899aabbccddeeff", pt);
+    let r: u32 = aes_expand(key, 32, rk);
+    if r != 14 {
+        return false;
+    }
+    aes_encrypt(rk, r, pt, ct);
+    as_to_hex(ct, 16, hex);
+    let want: str = "8ea2b7ca516745bfeafc49904b496089";
+    if !mem_eq(hex, 0, str_ptr(want), 0, 32) {
+        return false;
+    }
+    aes_decrypt(rk, r, ct, back);
+    return mem_eq(back, 0, pt, 0, 16);
+}
+
+fn test_aes_ctr_sp800_38a() -> bool {
+    // SP 800-38A F.5.1: key 2b7e...f3c, 初始计数块 f0f1...feff,
+    // 明文 6bc1bee22e409f96e93d7e117393172a -> 密文 874d6191b620e3261bef6864990db6ce
+    let key: ptr = alloc(16);
+    let iv: ptr = alloc(16);
+    let pt: ptr = alloc(16);
+    let ct: ptr = alloc(16);
+    let sc: ptr = alloc(AES_CTR_SCRATCH);
+    let hex: ptr = alloc(40);
+    as_from_hex("2b7e151628aed2a6abf7158809cf4f3c", key);
+    as_from_hex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff", iv);
+    as_from_hex("6bc1bee22e409f96e93d7e117393172a", pt);
+    let n: u32 = aes_ctr(key, 16, iv, pt, 16, ct, sc);
+    if n != 16 {
+        return false;
+    }
+    as_to_hex(ct, 16, hex);
+    let want: str = "874d6191b620e3261bef6864990db6ce";
+    return mem_eq(hex, 0, str_ptr(want), 0, 32);
+}
+
+fn test_aes_gcm_sp800_38d() -> bool {
+    // 全零密钥 / 12 字节零 IV:
+    //   空明文、空 AAD -> 标签 58e2fccefa7e3061367f1d57a4e7455a
+    //   一个零块        -> 密文 0388dace60b6a392f328c2b971b2fe78,
+    //                      标签 ab6e47d42cec13bdf53a67b21257bddf
+    let key: ptr = alloc(16);
+    let iv: ptr = alloc(12);
+    let msg: ptr = alloc(16);
+    let ct: ptr = alloc(16);
+    let tag: ptr = alloc(16);
+    let sc: ptr = alloc(240);
+    let hex: ptr = alloc(40);
+    let i: u32 = 0;
+    while i < 16 {
+        store8(key, i, 0 as u8);
+        store8(msg, i, 0 as u8);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 12 {
+        store8(iv, i, 0 as u8);
+        i = i + 1;
+    }
+    let aad: ptr = alloc(1);
+    let r0: u32 = aes_gcm_seal(key, 16, iv, 12, aad, 0, msg, 0, ct, tag, sc);
+    if r0 != 0 {
+        return false;
+    }
+    as_to_hex(tag, 16, hex);
+    let want0: str = "58e2fccefa7e3061367f1d57a4e7455a";
+    if !mem_eq(hex, 0, str_ptr(want0), 0, 32) {
+        return false;
+    }
+    let r1: u32 = aes_gcm_seal(key, 16, iv, 12, aad, 0, msg, 16, ct, tag, sc);
+    if r1 != 0 {
+        return false;
+    }
+    as_to_hex(ct, 16, hex);
+    let wantc: str = "0388dace60b6a392f328c2b971b2fe78";
+    if !mem_eq(hex, 0, str_ptr(wantc), 0, 32) {
+        return false;
+    }
+    as_to_hex(tag, 16, hex);
+    let wantt: str = "ab6e47d42cec13bdf53a67b21257bddf";
+    if !mem_eq(hex, 0, str_ptr(wantt), 0, 32) {
+        return false;
+    }
+    // 解密回原文, 且改一位标签必须被拒。
+    let back: ptr = alloc(16);
+    let r2: u32 = aes_gcm_open(key, 16, iv, 12, aad, 0, ct, 16, back, tag, sc);
+    if r2 != 0 {
+        return false;
+    }
+    if !mem_eq(back, 0, msg, 0, 16) {
+        return false;
+    }
+    store8(tag, 0, (load8(tag, 0) ^ 1) as u8);
+    let r3: u32 = aes_gcm_open(key, 16, iv, 12, aad, 0, ct, 16, back, tag, sc);
+    return r3 == 1;
+}

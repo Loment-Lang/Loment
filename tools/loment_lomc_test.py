@@ -29,6 +29,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomc     # noqa: E402
 
@@ -39,7 +40,9 @@ _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomc.lomt"
-LOMS = ["lom/fuai.lom", "lom/fuc.lom", "lom/fujr.lom"]
+# `lom/net.lom` 从它在的那天起就得进这份清单 —— 它是**同一种东西**（L0 单一真源）。
+# 少一份的症状很安静: 自举 lomc 读不了它, 而 Python 那份读得了。
+LOMS = ["lom/fuai.lom", "lom/fuc.lom", "lom/fujr.lom", "lom/net.lom"]
 TARGETS = ["rust", "c", "python", "json"]
 # 目标后缀 (与 lomc.py 的调用约定一致, 供 --check 的默认对账路径用)
 EXT = {"rust": "rs", "c": "h", "python": "py", "json": "json"}
@@ -59,11 +62,18 @@ def _clang() -> str | None:
     return fallback if Path(fallback).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -71,6 +81,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -115,7 +127,7 @@ def _run(elf: Path, td: Path, args: list[str], name: str) -> tuple[int, str, str
     script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
               f"cd {_wsl_path(ROOT)} && {binn} {quoted} "
               f"> {_wsl_path(outp)} 2> {_wsl_path(errp)}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     out = outp.read_text(encoding="utf-8") if outp.exists() else ""
     etext = errp.read_text(encoding="utf-8", errors="replace") if errp.exists() else ""
@@ -304,16 +316,7 @@ def test_lomc_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_lomc_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_lomc_test")
 
 
 if __name__ == "__main__":

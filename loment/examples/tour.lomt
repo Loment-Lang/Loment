@@ -11,6 +11,7 @@
 //   python tools/lomelf.py t.ll --target pe -o t.exe && ./t.exe
 
 module tour
+choose runtime
 
 const LIMIT: u32 = 3;
 

@@ -1,0 +1,7 @@
+module neg_lifetime_refparam
+
+// `docs/299` §3.2：返回借用，但签名里**没有引用形参** ⇒ 区域算不出来（E041）。
+// 同一条 `return &x` 另外还是悬垂（E012）—— 两码同时出，与参考实现同口径。
+fn f(x: u32) -> &u32 {
+    return &x;
+}

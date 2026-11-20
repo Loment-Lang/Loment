@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -425,12 +426,19 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     import shutil
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -438,6 +446,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -492,7 +502,7 @@ def test_lomc_check_matches_loment_twin():
         binn = f"{_T}lomccheck.bin"
         script = (f"cp {_wsl_path(chk_elf)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(_WORK)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                            capture_output=True, text=True, timeout=300, shell=False)
         got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
     assert r.stdout.strip() == "0", f"孪生该退 0（14 项全过）: rc={r.stdout!r}\n{got[:300]}"
@@ -523,24 +533,41 @@ def test_lomc_twin_selfhost_compiles():
         binn = f"{_T}lomccheck_s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomccheck.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomccheck.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
     print(f"      种子自举链编译 lomccheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
-def main() -> int:
-    failed = []
-    for name, fn in TESTS:
+@test
+def test_string_escapes_are_six_and_the_rest_is_an_error():
+    """`#33` / `#36`：字符串转义认 `n t r 0 \\\\ "` 这六个，**表外是 E019**。
+
+    原先表里没有 `r` 与 `0`，两者都走"未知转义取原字符"那条兜底 —— 于是 `"\\r"` 静默变成
+    **字母 r**（用户写回车得到一个 r），`"\\x41"` 静默变成三个字符 `x41`。而仓库自己在用
+    `"\\0"`（`loment/lib/proc.lomt` 的 `"/bin/sh\\0"`），一直靠同一条静默兜底在跑。
+
+    判据两头都量：**认的那几个值对不对**（不是"不报错"，是**字节**），以及**表外真的拒**。
+    """
+    def val(raw: str) -> str:
+        return [t for t in lomc.lex(raw) if t.kind == "string"][0].val
+
+    assert val('"a\\rb"') == "a\rb", repr(val('"a\\rb"'))
+    assert val('"a\\0b"') == "a\x00b", repr(val('"a\\0b"'))
+    assert val('"a\\tb"') == "a\tb" and val('"a\\nb"') == "a\nb"
+    assert val('"a\\\\b"') == "a\\b" and val('"a\\"b"') == 'a"b'
+    for bad in ('"\\q"', '"\\x41"', '"\\u0041"'):
         try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nlomc_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+            lomc.lex(bad)
+        except lomc.LomError as e:
+            assert "未知转义" in str(e), (bad, e)
+        else:
+            raise AssertionError(f"{bad} 没有被拒 —— 又是静默取原字符")
+
+
+def main() -> int:
+    return loment_suite.run(TESTS, "lomc_test")
 
 
 if __name__ == "__main__":

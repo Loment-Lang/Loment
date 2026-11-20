@@ -1,0 +1,22 @@
+// 字符串内建（LLS §18.1）：str_len / str_byte / str_eq / str_concat。
+choose write grammar tur2026.2
+
+module strs
+choose runtime
+
+fn main() {
+    let a: str = "abc";
+    let b: str = "abc";
+    let c: str = "ab";
+    let d: str = "cd";
+    print_num(str_len(a) as i64);
+    print(" ");
+    print_num(str_byte(a, 1) as i64);
+    print(" ");
+    if str_eq(a, b) {
+        print("eq");
+    }
+    print(" ");
+    print(str_concat(c, d));
+    print("\n");
+}

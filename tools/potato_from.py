@@ -109,18 +109,30 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     # 2026-09-18 做 Go 那一门时撞到 —— 原先是 `sub(" ", src)`，整份文件的下标全错。
     body = _C_COMMENT.sub(_blank_keep_off, src)
     known: set[str] = set()
+    consumed: list[tuple[int, int]] = []
+    for m in re.finditer(r"(?ms)^[ 	]*import[ 	]*\((.*?)^[ 	]*\)", body):
+        consumed.append((m.start(), m.end()))
     for m in _GO_STRUCT.finditer(body):
+        consumed.append((m.start(), m.end()))
         sname, inner = m.group(1), m.group(2)
         fields = []
-        for line in inner.splitlines():
-            line = line.strip()
+        base_line = src[:m.start(2)].count("\n") + 1
+        for off, raw_line in enumerate(inner.splitlines()):
+            line = raw_line.strip()
             if not line or line.startswith("//"):
                 continue
+            ln = base_line + off
             parts = line.split()
             if len(parts) < 2 or parts[0].startswith("//"):
+                rep.skip("field", sname,
+                         f"第 {ln} 行: Go struct {sname} 里这一条不是 `名字 类型` —— "
+                         f"原文：{line[:60]!r}")
                 continue
             fname = parts[0]
             if not IDENT_RE.match(fname):
+                rep.skip("field", sname,
+                         f"第 {ln} 行: Go struct {sname} 的字段名非法 —— "
+                         f"原文：{line[:60]!r}")
                 continue
             t = _go_type(" ".join(parts[1:]), mode, known)
             if t is None:
@@ -139,6 +151,12 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         # **`//export` 是源码显式宣称的 C ABI，留**；没写的那种原来记 `"go"`，
         # 那是"因为这是个 Go 文件"的**推断** —— 按 `docs/188` §3 删掉（详见 `from_java`）。
         abi = "c" if fn in exported else None
+        close = _block_end(body, m.end() - 1)
+        if close < 0:
+            rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+            consumed.append((m.start(), m.end()))
+            continue
+        consumed.append((m.start(), close + 1))
         if ret.startswith("("):
             rep.skip("fn", fn, "多返回值 —— Potato 是单返回")
             continue
@@ -185,15 +203,18 @@ def from_go(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         # `_GO_FN` 的尾巴就是那个 `{`，所以 `close` 由它往下配平；切开的是**原文**
         # （注释与格式都在），靠的是上面那句"抹注释保长度"。
         if abi is None:
-            close = _block_end(body, m.end() - 1)
-            if close < 0:
-                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
-                continue
             raw = src[m.start():close + 1]
             ent["body"] = raw.strip()
             ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
+    for ln, txt in _c_leftover_lines(body, consumed):
+        if _SHELL_LINE.match(txt):
+            continue
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Go 这一门只认 "
+                 f"`package` / `import` / `func` / `type … struct`；"
+                 f"顶层 `var` / `const` / 散落的调用都在子集外。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
@@ -231,6 +252,16 @@ _JAVA_CONST = re.compile(r"^[ \t]*(?:(?:public|private|protected)[ \t]+)?static[
 _JAVA_ENUM = re.compile(r"(?:^|\n)[ \t]*(?:public[ \t]+)?(?:final[ \t]+|static[ \t]+)*"
                         r"enum[ \t]+([A-Za-z_]\w*)[^{;]*\{")
 _STR_LIT = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+
+
+def _mask_str(m: "re.Match[str]") -> str:
+    """把一段字符串字面量的**内容**换成等长空白，两个引号留着。
+
+    为的是**数花括号**时 `"{"` / `"}"` / `";"` 不算数；长度不变，所以按下标回
+    原文切正文仍然对得上（正文里要的是**原文和它的字面量**，见 `_from_class_lang`）。
+    """
+    t = m.group()
+    return '"' + " " * (len(t) - 2) + '"'
 
 
 def _block_end(text: str, open_idx: int) -> int:
@@ -287,6 +318,12 @@ def _class_members(body: str) -> list[tuple[str, str, int]]:
         elif depth == 0:
             cur.append(c)
         i += 1
+    # A class body can end without `;` or a closing block. That tail used to be
+    # discarded here, so `system out println(...)` vanished before the member
+    # loop ever saw it. Keep it as a member; the loop will reject it loudly.
+    tail = "".join(cur)
+    if tail.strip():
+        out.append((tail, begin))
     return [(" ".join(m.split()), m, off) for m, off in out]
 
 
@@ -326,6 +363,13 @@ class ClassLang:
         self.method = method
 
 
+#: 这一族的**壳行**：`namespace X` / `using …;` / `package …;` / `import …;`，
+#: 以及只剩一对花括号的行。它们都是**结构**，不是"谁也不认识的内容" ——
+#: 类体已经由 `class` / `enum` 两条正则认下来了，没人认那几行壳是正常的。
+_SHELL_LINE = re.compile(r"^\s*(?:namespace|using|package|import)(?:[^A-Za-z0-9_]|$)"
+                           r"|^\s*[{}]\s*$")
+
+
 def _from_class_lang(src: str, name: str, mode: str,
                      lang: ClassLang) -> tuple[dict, Report]:
     """**"函数住在 `class X { … }` 里"这一族**的共用引擎：Java 与 C#。
@@ -349,9 +393,16 @@ def _from_class_lang(src: str, name: str, mode: str,
     # 方法正文的**行号**要拿剥离后的下标回原文里数（`functions[i].body_line`），
     # 而一段多行注释被 `sub(" ", …)` 压成一个空格时行号会**整体上移** ——
     # 报出来的行号就又指到别处了，正是这条修复本身要消灭的那种错。
-    # （`_STR_LIT` 那一层改的是行**内**的长度，不动换行，所以行号不受它影响。）
-    body = _C_COMMENT.sub(_blank_keep_off, _STR_LIT.sub('""', src))
+    # **字符串也要保长度**：`_STR_LIT.sub('""', …)` 会把 `"abc"` 压成 `""`，
+    # 于是后面按下标回原文切出来的正文整体前移 —— 而且**字面量的内容真的没了**，
+    # 翻出来的 `print("hello")` 变成 `print("")`（2026-11-09 实测）。抹成等长的空白、
+    # 两个引号留着：数花括号时 `"{"` 不再是花括号，取正文时按同一组下标回 `src` 切。
+    body = _C_COMMENT.sub(_blank_keep_off, _STR_LIT.sub(_mask_str, src))
     known: set[str] = set()
+    #: 两条正则**认下来**的字符范围。扫完之后剩下的非空白内容就是"谁也不认识"的残渣，
+    #: 末尾由 `_c_leftover_lines` 报出来（`#121` / `#75` —— C 那一门在 2026-10-20 的
+    #: 批次 1 就补上了，Java / C# 这一族当时漏了）。
+    consumed: list[tuple[int, int]] = []
     # ---- Java 的 `enum Name { A, B, C }` —— **不是 class**, 所以上面那圈抓不到它。
     # 原先 Java 的枚举**静默消失** (与 C 那边同一个口子)。
     # 变体可以带构造实参 (`B(1)`) 与体 (`C { … }`), 这里只取**名字**: Potato 的 enums
@@ -363,6 +414,7 @@ def _from_class_lang(src: str, name: str, mode: str,
         if end < 0:
             rep.skip("type", ename, "枚举体配平不了 (花括号不配对)")
             continue
+        consumed.append((m.start(), end + 1))
         inner = body[open_idx + 1:end]
         vs, lossy = [], False
         for raw in inner.split(","):
@@ -397,6 +449,7 @@ def _from_class_lang(src: str, name: str, mode: str,
         if end < 0:
             rep.skip("type", cname, "类体配平不了 (花括号不配对)")
             continue
+        consumed.append((m.start(), end + 1))
         inner = body[open_idx + 1:end]
         fields, consts, methods = [], [], []
         for mem, mem_raw, mem_off in _class_members(inner):
@@ -417,6 +470,15 @@ def _from_class_lang(src: str, name: str, mode: str,
                 mf = lang.field.match(mem)
                 if mf and IDENT_RE.match(mf.group(2)):
                     fields.append((mf.group(1), mf.group(2)))
+                    continue
+            # **类里这一条谁也不认识**（`#75`）：不是常量、不是字段、也不是方法 ——
+            # 原先它**静默消失**（方法头写坏成 `static int bad( { … }`、嵌套类、
+            # 静态初始化块、带注解的方法…）。整份单元少一块内容，而 `check` 判 OK。
+            lead = len(mem_raw) - len(mem_raw.lstrip())
+            line = src[:open_idx + 1 + mem_off + lead].count("\n") + 1
+            rep.skip("member", (mem.split() or ["?"])[0][:24],
+                     f"第 {line} 行: 类 {cname} 里这一条不是常量 / 字段 / 方法 —— "
+                     f"这一门只认那三种；原文：{mem[:60]!r}")
         # ---- 常量 (类里先取, 因为它们的类型也会进 known 的判断)
         for ty, cn, val in consts:
             if cn in {c["name"] for c in doc["consts"]}:
@@ -439,7 +501,11 @@ def _from_class_lang(src: str, name: str, mode: str,
             doc["types"].append({"name": cname, "fields": flds})
             known.add(cname)
             rep.ok += 1
-        else:
+        elif fields:
+            # **只有"本来有字段、一个都没映上"才算丢。** 一个**没有字段**的类不是丢东西 ——
+            # 它只是方法的命名空间，Java / C# 里到处都是这种壳。原先无条件报，
+            # 于是每一份 Java / C# 语料都带一条假的 `skip`（`无可用字段`），
+            # 而那正好挡住了"转写期的 skip 要报给用户"那一道（见 `front_door`）。
             rep.skip("type", cname, "无可用字段")
         # ---- 方法 -> 函数 (abi=java)
         for rty, mname, params, mem_raw, mem_off in methods:
@@ -477,13 +543,38 @@ def _from_class_lang(src: str, name: str, mode: str,
             # 存**整段方法原文** —— 见 `_java_members` 的注解。
             ent: dict = {"name": mname, "params": ps, "ret": rt}
             if mem_raw.strip():
-                ent["body"] = mem_raw.strip()
+                # **正文回原文切，不拿 `mem_raw`**：`body` 里字符串的内容是抹掉的
+                # （为了数花括号），拿它当正文会让 `print("hello")` 变成 `print("")`。
+                # 抹法是**等长**的，所以下标在 `src` 上同样成立（见上面的注解）。
+                _b0 = open_idx + 1 + mem_off
+                # **领头那段空白（含被抹空的注释）要一起跳过**，正文与行号两边对齐：
+                # 正文从 `_b0 + lead` 起，行号也是那一行。只跳正文不跳行号的话，
+                # 体内行号会整体往后错（一条跨行注释能错出三四行，实测 `#1519` 那一批）。
+                _lead = len(mem_raw) - len(mem_raw.lstrip())
+                ent["body"] = src[_b0 + _lead:_b0 + len(mem_raw)].strip()
                 # `mem_off` 是**在 `inner` 里**的下标，`inner` 从 `body` 的
                 # `open_idx + 1` 开始；而 `body` 是等长抹出来的 ⇒ 它的下标就是
                 # 原文的下标（见上面那句"抹注释要保长度"）。
-                ent["body_line"] = _body_at(src, open_idx + 1 + mem_off, mem_raw)
+                ent["body_line"] = _body_line(src, _b0 + _lead)
             doc["functions"].append(ent)
             rep.ok += 1
+    # ---- **谁也不认识的顶层行**（`#121` / `#75`）：类 / 枚举两条正则认下来的范围之外
+    # 的非空白内容 —— `use "x.lomt"` / `use bytes`（那是 Loment 语法，这一门没有对应
+    # 构造）、散在类外的声明、写坏的顶层形状。原先它们**既不进产物也不进 `skipped`**：
+    # 整份单元少一块内容，而 `check` 判 OK。
+    for ln, txt in _c_leftover_lines(body, consumed):
+        # **壳行不算"谁也不认识的内容"**：`namespace D` / `using System;` / `package …;`
+        # / 只剩花括号的行 —— 它们都是**结构**，`class` / `enum` 那两条正则已经把类体认
+        # 下来了（见 `_class_members`），壳没有人认是**正常**的。
+        # 不排掉的话，一份平常的 C# 文件（`using` + `namespace` + 两层壳的花括号）会因为
+        # 这几行被**整份拒掉** —— 而 `loment/cstrans/*.cs` 三份语料全是这个形状。
+        # `using` 那一条与翻译器的 `_CS_SHELLS` 同一口径（那里也把它当壳）。
+        if _SHELL_LINE.match(txt):
+            continue
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— {lang.grammar} 这一门只认 "
+                 f"`class` / `enum`（以及类里的常量 / 字段 / 方法）；`use`、散在类外的"
+                 f"声明、顶层函数都在子集外（`docs/188` §4）。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
@@ -922,11 +1013,78 @@ def _py_const(name: str, value, ann, mode: str) -> tuple[dict | None, str]:
     return {"name": name, "type": "i64", "value": v}, ""
 
 
+def _synthesize_start(src: str, tree, top: list, doc: dict, rep: Report) -> None:
+    """脚本式写法：顶层可执行语句 -> 入口 `_start` 的正文（**只有 python 这一门**）。
+
+    用户 2026-11-10 的裁定：这份便利只给 `choose write grammar python`，原生 Loment
+    与别的表层语法**一行不动** —— 别的门根本不走 `from_python`，所以这条规则天生
+    只落在这一门里。
+
+    做法：把模块里**不属于这些语句**的行抹成空行（保持行数，行号不动），剩下的
+    那一段就是正文。于是 `def` / `class` / 常量声明被抹掉的只是它们占的那几行，
+    夹在中间的语句仍在原位 —— `body_line` 直接指第一句，报错的行号不用再换算。
+
+    与 `def _start` 同时出现时**拒**：那是两套入口，选哪一个都是替用户做主。
+    """
+    if any(f["name"] == "_start" for f in doc["functions"]):
+        rep.skip("decl", "_start",
+                 f"第 {top[0].lineno} 行: 顶层语句与 `def _start` 只能二选一"
+                 f"（脚本式写法不自己写入口；要写入口就把顶层那几行搬进去）")
+        return
+    first = top[0].lineno
+    if first <= 1:
+        rep.skip("decl", "_start",
+                 f"第 {first} 行: 脚本式写法的第一条语句要留一行给入口头 —— "
+                 f"在文件头写 `choose write grammar python`（那一行会被抹成空白），"
+                 f"或在它前面留一行空行")
+        return
+    keep: set[int] = set()
+    for st in top:
+        for ln in range(st.lineno, (st.end_lineno or st.lineno) + 1):
+            keep.add(ln)
+    lines = src.splitlines()
+    last = top[-1].end_lineno or top[-1].lineno
+    # 入口头放在**第一条语句上面那一行**（那一行按构造不是语句，可能是被抹空的
+    # `def`、空行，或 `choose write grammar` 那一行），于是语句的行号**一行都不挪**。
+    out = []
+    for ln in range(first - 1, last + 1):
+        if ln == first - 1:
+            out.append("def _start() -> None:")
+        elif ln in keep:
+            out.append("    " + lines[ln - 1])
+        else:
+            out.append("")
+    ent = {"name": "_start", "params": [], "ret": "()",
+           "body": "\n".join(out), "body_line": first - 1}
+    # 按**行号**插进表里：`lomt_from._join_bodies` 是"按给定顺序垫空行"的，
+    # 顺序错了后面每一段的行号都会漂。
+    at = len(doc["functions"])
+    for i, f in enumerate(doc["functions"]):
+        if (f.get("body_line") or 0) > first - 1:
+            at = i
+            break
+    doc["functions"].insert(at, ent)
+    rep.ok += 1
+
+
 def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "python", mode)
     doc = _blank(_ident(Path(name).stem), "python")
-    tree = ast.parse(src)
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        # **这一门自己就有"读不通"这一档**（`pytrans.PyError`），可这条路原先让它
+        # **裸着冒出去** —— 命令行上收到的是一段 Python 的 traceback，不是编译器的话
+        # （`#76`；另外五门在这件事上都是干净的拒：`[ERR] <文件>: … 第 N 行: …`）。
+        # 换一个只改了**消息**的 `SyntaxError` 重抛，由 `front_errors("python")` 接住、
+        # 翻成 `NotRepresentable` —— 与"翻不出来"走同一条出口。
+        where = f"第 {e.lineno} 行" if e.lineno else "文件头附近"
+        raise SyntaxError(f"{where}: 这份 Python 解析不过 —— {e.msg}") from None
     known: set[str] = set()
+    #: 顶层的**可执行语句**。Python 写法允许脚本式写法 —— 它们合成入口 `_start`
+    #: 的正文（`_synthesize_start`）。**只有这一门这么收**：原生 Loment 与别的
+    #: 表层语法根本不走这个函数。
+    top: list = []
 
     def _put_const(cname: str, cval, cann) -> None:
         c, why = _py_const(cname, cval, cann, mode)
@@ -937,6 +1095,11 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
             rep.skip("const", cname, why)
 
     for node in tree.body:
+        # Module docstrings (and bare string expressions) are metadata / no-ops.
+        # They are not executable state, so dropping them changes nothing.
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            continue
         if isinstance(node, ast.ClassDef):
             fields = []
             for st in node.body:
@@ -946,6 +1109,16 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
                         rep.skip_field(node.name, st.target.id, "无可用类型映射")
                         continue
                     fields.append({"name": st.target.id, "type": t})
+                    continue
+                if isinstance(st, ast.Pass):
+                    continue
+                if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant) \
+                        and isinstance(st.value.value, str):
+                    continue
+                seg = ast.get_source_segment(src, st) or ""
+                rep.skip("member", (seg.split() or ["?"])[0][:24],
+                         f"第 {st.lineno} 行: 类 {node.name} 里这一条不是带注解的字段 —— "
+                         f"Python 写法只把类当作结构体；方法 / 类级语句不在子集里")
             if not fields:
                 rep.skip("type", node.name, "无注解字段")
                 continue
@@ -996,6 +1169,13 @@ def from_python(src: str, name: str, mode: str = "strict") -> tuple[dict, Report
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) \
                 and node.target.id.isupper():
             _put_const(node.target.id, node.value, node.annotation)
+        else:
+            # 顶层**可执行语句**：Python 写法的单元允许脚本式写法，它们合成入口
+            # `_start` 的正文（见下面那段）。这**只对 python 这一门**成立 ——
+            # 原生 Loment 与别的表层语法一行不动，`top` 在别处根本不收集。
+            top.append(node)
+    if top:
+        _synthesize_start(src, tree, top, doc, rep)
     return _finish(doc, rep)
 
 
@@ -1013,9 +1193,17 @@ _C_ENUM = re.compile(r"\benum\s+([A-Za-z_]\w*)\s*\{([^}]*)\}", re.S)
 #: 这种**一行写完的结构体**只抽得到第一个字段 (整个 `int a; int b;` 是一行, `.+?` 只吃一段),
 #: 而第二个字段**静默消失**。一行写 struct 在 C 里很常见 (2026-09-17 加多语法判据时撞到)。
 _C_FIELD = re.compile(r"([^;{}]+?)\s+([A-Za-z_]\w*)\s*(\[\s*\d+\s*\])?\s*;")
-_C_FN = re.compile(r"^[ \t]*(?:static\s+|inline\s+|const\s+)*"
-                   r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]",
-                   re.M)
+#: 函数**定义或声明**（`类型 名字(...)` 后面跟 `{` 或 `;`）。
+#:
+#: **不锚行首** —— 原先锚了 `^[ \t]*`（配 `re.M`），于是**同一行上的第二个函数永远匹配不到**：
+#: `int f(){ … } int g(){ … }` 里 `g` 整个消失，而且 `skipped` 也是空的（不是"跳过了"，
+#: 是**压根没看见**）。C 完全允许这么写。与 `_C_FIELD` 是同一处毛病（那一处已经改过）。
+#:
+#: 行首锚**本来是为了别匹配到函数体里的调用** —— 那一层改由 `_from_c` 按"已认下的函数体
+#: 范围"挡（那里的 `claimed`）：那条更准，因为 `Foo bar(1);` 这类写法在 C++ 里就是**变量
+#: 声明**，与函数定义同形，只靠关键字表挡不住。
+_C_FN = re.compile(r"(?:static\s+|inline\s+|const\s+)*"
+                   r"([A-Za-z_][\w \t\*]*?)\s+([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*[;{]")
 _C_KEYWORDS = {"if", "while", "for", "switch", "return", "sizeof", "do", "else"}
 
 
@@ -1089,6 +1277,47 @@ CPP_TYPES = dict(C_TYPES, **{
 })
 
 
+def _past_semi(body: str, i: int) -> int:
+    """从 `i` 起吃掉同一行上的空白与一个可选的 `;`，返回新末尾（给"认下这一条"用）。
+
+    `struct P { … }` / `enum E { … }` 那两条正则到 `}` 就停了，**尾随的 `;` 不在匹配里**
+    —— 不补这一下，那个分号会被当成"谁也不认识的顶层内容"报出来。
+    """
+    j = i
+    while j < len(body) and body[j] in " \t":
+        j += 1
+    return j + 1 if j < len(body) and body[j] == ";" else i
+
+
+def _c_leftover_lines(body: str, consumed: list[tuple[int, int]]) -> list[tuple[int, str]]:
+    """顶层**没有任何规则认下来**的非空白内容 -> `[(行号, 那一行的原文), …]`（一行一条）。
+
+    `docs/186` §4 把"全局变量 / 聚合类型 / 预处理指令"逐条列进**点名拒绝**那一栏，
+    而 `_from_c` 只有三条正则（`_C_STRUCT` / `_C_ENUM` / `_C_FN`）扫顶层 ——
+    扫不到的既不进产物、也不进 `skipped`。单元于是带着**半份内容**被发出去，
+    而 `check` 判 `[OK]`。这一条把残渣找出来（`docs/167`："不静默丢"）。
+
+    输入是**只抹了注释**的那一份（`_from_c` 里的 `nocomment`），不是扫描用的 `body` ——
+    后者连 `#` 行也抹掉了，而 `#include` / `#define` **正是要报的东西**。
+    两份逐字节等长（抹的是等长空白），所以 `consumed` 的下标在两边通用。
+    """
+    used = bytearray(len(body))
+    for a, b in consumed:
+        for i in range(max(a, 0), min(b, len(used))):
+            used[i] = 1
+    out: list[tuple[int, str]] = []
+    seen: set[int] = set()
+    for m in re.finditer(r"[^\s]", body):
+        if used[m.start()]:
+            continue
+        ln = body.count("\n", 0, m.start()) + 1
+        if ln in seen:
+            continue
+        seen.add(ln)
+        out.append((ln, body.splitlines()[ln - 1].strip()))
+    return out
+
+
 def _from_c(src: str, name: str, mode: str, grammar: str,
             types: dict) -> tuple[dict, Report]:
     """**C 系那一门**（C / C++）的共用引擎：函数、结构体、枚举、常量四种声明。
@@ -1099,14 +1328,31 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
     rep = Report(name, grammar, mode)
     doc = _blank(_ident(Path(name).stem), grammar)
     body = _C_COMMENT.sub(_blank_keep_off, src)
+    #: **只抹了注释**的那一份。残渣检测要它：扫描用的 `body` 连 `#` 行也抹掉了
+    #: （下一行），而 `#include` / `#define` 正是 `docs/186` §4 列进"点名拒绝"那一栏的
+    #: 东西 —— 抹掉之后谁也看不见它们。
+    nocomment = body
     body = re.sub(r"^[ \t]*#.*$", _blank_keep_off, body, flags=re.M)
     known: set[str] = set()
+    #: 三条正则**认下来**的字符范围。扫完之后剩下的非空白内容就是"谁也不认识"的残渣，
+    #: 由 `_c_leftover_lines` 报出来（见那一处的注解）。
+    consumed: list[tuple[int, int]] = []
     for m in _C_STRUCT.finditer(body):
+        consumed.append((m.start(), _past_semi(body, m.end())))
         sname, inner = m.group(1), m.group(2)
         fields = []
+        used = bytearray(len(inner))
         for fm in _C_FIELD.finditer(inner):
+            used[fm.start():fm.end()] = b"\x01" * (fm.end() - fm.start())
             ft, fn, arr = fm.group(1), fm.group(2), fm.group(3)
             if fn in ("if", "while", "for", "return"):
+                continue
+            if not ft.strip():
+                lead = len(fm.group(0)) - len(fm.group(0).lstrip())
+                ln = src[:m.start(2) + fm.start() + lead].count("\n") + 1
+                rep.skip("field", sname,
+                         f"第 {ln} 行: struct {sname} 里这一条不是字段 —— "
+                         f"原文：{fm.group(0).strip()[:60]!r}")
                 continue
             t = _c_type(ft, mode, known, types)
             if arr and t:
@@ -1115,6 +1361,21 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
                 rep.skip_field(sname, fn, f"字段类型 {ft!r} 无映射")
                 continue
             fields.append({"name": fn, "type": t})
+        inner_start = m.start(2)
+        seen_lines: set[int] = set()
+        for ch in re.finditer(r"[^\s]", inner):
+            if used[ch.start()]:
+                continue
+            ln = src[:inner_start + ch.start()].count("\n") + 1
+            if ln in seen_lines:
+                continue
+            seen_lines.add(ln)
+            txt = src.splitlines()[ln - 1].strip()
+            if not txt.strip(" ;\t"):
+                continue
+            rep.skip("field", sname,
+                     f"第 {ln} 行: struct {sname} 里这一条不是字段 —— "
+                     f"原文：{txt[:60]!r}")
         if not fields:
             rep.skip("type", sname, "无可用字段")
             continue
@@ -1126,6 +1387,7 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
     # 判据是"有没有任何一个变体带显式值": 有 -> 全按 C 语义算出值、发芽成 consts;
     # 没有 -> 就是一个普通枚举, 进 `enums`。
     for m in _C_ENUM.finditer(body):
+        consumed.append((m.start(), _past_semi(body, m.end())))
         ename, inner = m.group(1), m.group(2)
         members, cur, next_v = [], None, 0
         for raw in inner.split(","):
@@ -1159,10 +1421,28 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
                     continue
                 doc["consts"].append({"name": vn, "type": "i32", "value": vv})
         rep.ok += 1
+    #: 已认下的函数体延伸到哪（右花括号之后的**第一个位置**）。`_C_FN` 不锚行首了，
+    #: 所以体里那些与定义同形的写法要靠它挡 —— 见那条正则上面的注解。
+    claimed = -1
     for m in _C_FN.finditer(body):
+        if m.start() < claimed:
+            continue                # 落在上一个函数的**体内**：那是调用/声明，不是定义
         rt, fn, params = m.group(1), m.group(2), m.group(3)
         if fn in _C_KEYWORDS or rt.strip().split()[-1] in _C_KEYWORDS:
             continue
+        # 是**定义**就把整段范围先认下来 —— 哪怕它随后因为返回类型无映射被跳过：
+        # 不然它**体内**的写法会被接着当成函数。
+        is_def = m.end() > 0 and body[m.end() - 1] == "{"
+        close = _block_end(body, m.end() - 1) if is_def else -1
+        if is_def and close < 0:
+            rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
+            consumed.append((m.start(), m.end()))
+            continue
+        if is_def:
+            claimed = close + 1
+            consumed.append((m.start(), close + 1))
+        else:
+            consumed.append((m.start(), m.end()))
         if "..." in params:
             rep.skip("fn", fn, "变参")
             continue
@@ -1202,16 +1482,41 @@ def _from_c(src: str, name: str, mode: str, grammar: str,
         # **映射后的** Loment 类型名（`i32`），从 `i32` 反推回 C 的拼法是另一张表，
         # 而原文本来就在手边。另一个理由更要紧 —— **原文是保真的**：`unsigned` 与
         # `unsigned int` 在 Potato 里都是 `u32`，回推必然丢掉用户写的那个拼法。
-        if m.end() > 0 and body[m.end() - 1] == "{":
-            close = _block_end(body, m.end() - 1)
-            if close < 0:
-                rep.skip("fn", fn, "花括号不配平（原文到这里就断了）")
-                continue
+        if is_def:
             raw = src[m.start():close + 1]
             ent["body"] = raw.strip()
             ent["body_line"] = _body_at(src, m.start(), raw)
         doc["functions"].append(ent)
         rep.ok += 1
+    # ---- **前向声明并进它的定义**。
+    #
+    # C 里 `int g(int);` 后面跟 `int g(int x) { … }` 是**最常规**的写法（互相递归的两
+    # 个函数只能这么写），对象里于是一个名字有**两条**记录：一条有正文、一条没有。
+    # 不并的话 `lomt_from` 报"**函数 g 重复**" —— 一个**假的重复**：用户只写了一份定义。
+    # 两条**都有正文**的才是真重复，那种照旧留给下游报。
+    _by_name: dict[str, list[dict]] = {}
+    for ent in doc["functions"]:
+        _by_name.setdefault(ent["name"], []).append(ent)
+    _merged: list[dict] = []
+    for _ents in _by_name.values():
+        _with = [x for x in _ents if "body" in x]
+        # **至多一条有正文时才并**（有正文的那条留下；一条都没有就留第一条声明）。
+        # 这样三种形状各得其所：
+        #   声明 + 定义     -> 并成一条（真定义）
+        #   两条都只是声明  -> 并成一条（下游说"只有声明没有定义"，那是对的）
+        #   **两条都有正文** -> 不并（那是**真重复**，一并就把一份写重复了的源
+        #                        悄悄收下了 —— 那比报错坏）
+        if len(_ents) > 1 and len(_with) <= 1:
+            _merged.append(_with[0] if _with else _ents[0])
+            continue
+        _merged.extend(_ents)
+    doc["functions"] = _merged
+    # ---- 残渣：顶层还有"谁也不认识"的东西 -> **报出来**，别让半份单元悄悄发出去
+    for ln, txt in _c_leftover_lines(nocomment, consumed):
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Stage A 只认函数 / `struct` / "
+                 f"`enum`；`typedef`、全局量、`union`、预处理指令都在子集外"
+                 f"（`docs/186` §4）。原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
@@ -1315,9 +1620,11 @@ def _rs_type(t: str, mode: str, known: set[str]) -> str | None:
 def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
     rep = Report(name, "rust", mode)
     doc = _blank(_ident(Path(name).stem), "rust")
-    body = re.sub(r"//[^\n]*", "", src)
+    body = re.sub(r"//[^\n]*", _blank_keep_off, src)
     known: set[str] = set()
+    consumed: list[tuple[int, int]] = []
     for m in _RS_STRUCT.finditer(body):
+        consumed.append((m.start(), m.end()))
         sname, inner = m.group(1), m.group(2)
         fields = []
         for line in inner.split(","):
@@ -1347,6 +1654,7 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         known.add(sname)
         rep.ok += 1
     for m in _RS_ENUM.finditer(body):
+        consumed.append((m.start(), m.end()))
         ename, inner = m.group(1), m.group(2)
         if "(" in inner or "{" in inner:
             rep.skip("type", ename, "带载荷变体")
@@ -1359,6 +1667,7 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         known.add(ename)
         rep.ok += 1
     for m in _RS_CONST.finditer(body):
+        consumed.append((m.start(), m.end()))
         c, why = _rs_const(m.group(1), m.group(2), m.group(3), mode, known)
         if c:
             doc["consts"].append(c)
@@ -1366,6 +1675,8 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
         else:
             rep.skip("const", m.group(1), why)
     for m in _RS_FN.finditer(body):
+        close = _block_end(body, m.end() - 1)
+        consumed.append((m.start(), close + 1 if close >= 0 else m.end()))
         abi_g, fn, generics, params, ret = (m.group(1), m.group(2), m.group(3),
                                             m.group(4), m.group(5))
         #: 只有 `extern "C"` 才是 C ABI —— **不能拿普通 `pub fn` 当 FFI 声明**:
@@ -1409,6 +1720,13 @@ def from_rust(src: str, name: str, mode: str = "strict") -> tuple[dict, Report]:
             ent["abi"] = abi
         doc["functions"].append(ent)
         rep.ok += 1
+    for ln, txt in _c_leftover_lines(body, consumed):
+        if _SHELL_LINE.match(txt) or re.match(r"^\s*(?:use|mod)\b", txt):
+            continue
+        rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                 f"第 {ln} 行: 顶层这一条没有对应的规则 —— Rust 这一门只抽接口"
+                 f"（`struct` / `enum` / `const` / `fn`）；散落的语句在子集外。"
+                 f"原文：{txt[:60]}")
     return _finish(doc, rep)
 
 
@@ -1539,6 +1857,11 @@ def front_errors(lang: str) -> tuple:
     if lang == "natural":
         import nltrans  # noqa: PLC0415
         return (nltrans.NaturalError, nltrans.Unsupported)
+    if lang == "python":
+        # `ast.parse` 的语法错。**必须在这里接住**：这条路上 Python 的解析器是我们
+        # 自己调的，它抛的异常与另外五门那几种（`Unsupported` / `CError` …）不同族 ——
+        # 不接就是"用户看到一段 Python traceback"（`#76`）。
+        return (SyntaxError,)
     return ()
 
 
@@ -1574,6 +1897,17 @@ EXT = {".py": "python", ".c": "c", ".h": "c", ".rs": "rust", ".go": "go",
 # 源侧宽松（`py` / `python` 都收）、对象侧只许一个拼法，否则同一份源出两串字节。
 GRAMMAR_ALIASES: dict[str, str] = {
     "loment": "loment",
+    # Tur 的版次是**两级名**（`docs/296` §1.1）：`tur<年份>.<序号>`。规范名永不改义；
+    # `tur` / `tur1` / `tur2` 是**源侧**拼法 —— `tur` 是 Tur 1 的历史名，永久指向
+    # `tur2026.1`；`tur1` / `tur2` 是 2026 年的短名，`loment fmt` 写盘时展开成全名。
+    # 跨年后短名不再接受（换成对应全名报错），绝不复用到新族 —— 否则老文件会被重新解释。
+    "tur": "tur2026.1",
+    "tur1": "tur2026.1",
+    "tur2": "tur2026.2",
+    "tur3": "tur2026.3",
+    "tur2026.1": "tur2026.1",
+    "tur2026.2": "tur2026.2",
+    "tur2026.3": "tur2026.3",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1591,18 +1925,105 @@ GRAMMAR_ALIASES: dict[str, str] = {
 
 #: **读法就是原生语法的那几个规范名。**
 #:
-#: `loment` 是显然的那一个。**`rust` 也在这里** —— 用户 2026-09-22 的裁定：
-#: **「rust 语法是 Loment 基础语法，不需要翻译」**。本语言的原生拼法本来就是 Rust 风味
-#: （`CLAUDE.md` 那条"不发明语法、规避 LLM 零语料"买到的就是它），所以
-#: `choose write grammar rust` 说的是"**按基础语法读这份 Loment**"，
-#: 而不是"把一份外国 Rust 模块抽成接口"。
+#: `loment` 是基础语法；**`tur` 是本语言自己的正式语法名**（2026-11-03 用户定）——
+#: 它是从 Rust **直接修改**出来的：共享 Rust 的拼法与类型语法，但有自己的入口
+#: （`fn main`）、内建（`print`）和扩展构造（`capability` / `guard` / `choose`）。
+#: 两者都**不经过任何翻译器**：抹掉声明那一行就交给原生 lexer/parser。
 #:
-#: **一处刻意的不对称，要说清**（`docs/188` §2 那条分工）：**后缀** `.rs` 与
-#: **`--lang rust`** 照旧走 `from_rust`（`docs/179` 抽接口那条路 —— `kernel/src/*.rs`
-#: 与 `lompotc --rust` 那条孪生判据都靠它）。两者不冲突：**后缀说"这是哪个语言的文件"，
-#: 声明说"这份 Loment 用哪种写法"**。于是 `.lomt` 里写 `grammar rust` 是原生读法，
-#: 而一份 `.rs` 仍然是"Rust 的文件，抽它的接口"。
-NATIVE_GRAMMARS = ("loment", "rust")
+#: **`rust` 不在这里**（2026-11-03 用户定："rust 和其他几种语法一样"）。它退回成
+#: 一门**表层语法**：`choose write grammar rust` 与 `.rs` 后缀走同一条 `from_rust`
+#: 路径（`docs/179` 抽接口那条路）。于是 "`grammar rust` 是严格 Rust 子集" 这件事
+#: **由读法本身保证** —— 我们给 Tur 加的修改不会漏到它那一面去。
+#: Tur 的版次（`docs/296` §1.1）是两级名：`tur<年份>.<序号>`。原生读法的**规范名**就是
+#: 这两个；`tur` / `tur1` / `tur2` 在 `GRAMMAR_ALIASES` 里落到它们。版次只加不改 ——
+#: `tur2026.1` / `tur2026.2` 的语法与语义永久冻结，新特性只进新的规范名。
+TUR_EDITIONS = ("tur2026.1", "tur2026.2", "tur2026.3")
+NATIVE_GRAMMARS = ("loment",) + TUR_EDITIONS
+
+#: **已封版的版次**（2026-11-05）：这两个版次的语法与语义不再变化。新特性只能开
+#: `tur2026.3`（2026 年内）或 `tur2027.1`（跨年），**不是**改这里已有的名字。
+#: `TUR_EDITIONS` 是"当前认识的全部版次"，`FROZEN_EDITIONS` 是"其中已封死的"；
+#: 开新版次时前者增长，后者保持不变。判据在 `loment_grammar_test`。
+FROZEN_EDITIONS: tuple[str, ...] = ("tur2026.1", "tur2026.2")
+
+#: **`tur2026.2` 封版时的完整特性面**（`docs/305`）。它是**棘轮**：加一条 = 开新版次，
+#: 不是往这一版里塞。期望的 SHA-256 **不在本文件**，而是作为独立字面量钉在
+#: `loment_grammar_test.py:FROZEN_TUR2026_2_SHA256`（与出厂锁同一套写法）——
+#: 改这里必须同时改那里，那一步就是"承认改了封版面"的显式动作。
+TUR2026_2_FEATURES: tuple[str, ...] = (
+    "def", "elif", "and", "or", "not",
+    "for-in", "break", "continue", "bare-return",
+    "orelse", "catch", "print_num", "defer",
+)
+
+#: **默认版次 = 最新的那一版**（2026-11-06 用户裁定）。
+#:
+#: 旧口径是"没声明 = Tur 1，永远不变"。它把最保守的读法给了**新写的代码**，而 Tur 1
+#: 缺掉的正是今天要用的那批构造（`def` / `for x in xs` / `break` / `orelse` / `defer` /
+#: `lgc` …）—— 于是每一份新文件都得先背一行声明。
+#:
+#: 新口径：**没声明 = 当前最新版次**（`TUR_EDITIONS[-1]`）。要钉旧读法仍然随时可钉：
+#: `choose write grammar tur2026.1`（或 `tur1`）。`tur` / `tur1` 是**显式**的历史拼法，
+#: 不跟默认走；`loment` 是语言名，跟默认走。
+#:
+#: **代价与对策**：新版次只加不改，但"加"的拼法如果本该是旧版里的合法标识符
+#: （`break` / `continue` / `defer` / `print_num` / `lgc`），同一份旧源就会**静默改义**。
+#: 对策不是把默认退回去，而是 `EDITION_COLLISIONS` + 前门那一闸：无声明单元里
+#: **声明**了这些名字就拒编译，要求改名或显式钉版次 —— 宁可响亮地拒，不做安静的改义。
+DEFAULT_EDITION: str = TUR_EDITIONS[-1]
+
+#: **新版次里"从拼法变成语法"的那些词**（按引入它们的版次分组）。
+#:
+#: 这些词在更早的版次里是**合法标识符**，所以"新版次接受它们当关键字"会让一份旧源
+#: 在默认读法下改变含义。最小的一例是 `let break = 1; while c { break; }`：旧版里
+#: `break;` 是一条空表达式语句，新版里它退出循环。前门据此拒掉"无声明单元里声明了
+#: 这些名字"的源（`edition_collision_hits`），**用**它们不触发 —— 循环里的 `break;`
+#: 正是新版次想要的写法。
+#:
+#: **加新构造时要更新这里**：新语法若用了旧版次里能当标识符的拼法，就把词加进对应
+#: 版次那一行；判据 `test_every_open_edition_declares_its_collision_set` 钉着这条。
+EDITION_COLLISIONS: dict[str, tuple[str, ...]] = {
+    "tur2026.2": ("break", "continue", "defer", "print_num"),
+    "tur2026.3": ("lgc",),
+}
+
+
+def collision_names_through(edition: str) -> tuple[str, ...]:
+    """到 `edition` 为止（含）所有"新版拼法"的名字 —— 无声明单元要躲开的那一批。"""
+    names: list[str] = []
+    for ed in TUR_EDITIONS:
+        names.extend(EDITION_COLLISIONS.get(ed, ()))
+        if ed == edition:
+            break
+    return tuple(dict.fromkeys(names))
+
+
+#: 这些词后面紧跟的那个标识符是一次**名字声明**。
+_DECL_WORDS = frozenset(("let", "const", "fn", "for"))
+
+
+def edition_collision_hits(toks, names) -> list:
+    """无声明单元里**声明**了新版次关键字的位置（`(line, col, name)`）。
+
+    **只看声明位置**：`let` / `const` / `fn` / `for` 后面的那个名字，以及 `(` / `,`
+    之后紧跟 `:` 的参数名（字段名也落这一格 —— 宁可多拒一次，不做安静的改义）。
+    **用**这些名字不触发：`break;` 在循环里正是新版次要的写法。
+    """
+    want = frozenset(names)
+    hits: list = []
+    n = len(toks)
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val not in want:
+            continue
+        prev = toks[i - 1] if i else None
+        if prev is not None and prev.kind == "ident" and prev.val in _DECL_WORDS:
+            hits.append((t.line, t.col, t.val))
+            continue
+        if (prev is not None and prev.kind == "punct" and prev.val in ("(", ",")
+                and i + 1 < n and toks[i + 1].kind == "punct"
+                and toks[i + 1].val == ":"):
+            hits.append((t.line, t.col, t.val))
+    return hits
 
 #: **声明的词序**：`choose write grammar <别名>`。
 #:
@@ -1636,11 +2057,20 @@ _GRAMMAR_HEAD = r"[ \t]+".join(GRAMMAR_DECL_WORDS)
 #: 退回嗅探。**两边对同一份源说不同的话** —— 正是这条线要防的那类分歧。
 #: 现在两边同一条规矩：非空白非 `;` 的字符接在 `grammar` 后面 ⇒ **根本没有声明头**。
 _GRAMMAR_TAIL = r"(?=[ \t;]|$)"
-_GRAMMAR_ANY = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
+#: 行首那一格 —— **允许一个 UTF-8 BOM**。
+#:
+#: Windows 的编辑器（记事本、"另存为 UTF-8"、PowerShell 的 `>`）默认会写 BOM，
+#: 而原先那四条正则都是 `^[ \t]*`：BOM 不是空白，`choose` 就不在"行首"了 ⇒
+#: **声明整个找不到**。于是文件落到"缺声明 = 原生 Loment"那一条，整份 C 被当 Loment 编，
+#: 报出来的是 `1:1 非法字符 '﻿'` —— 用户完全看不出"是你那行声明没生效"。
+#: 而在本仓的平台上带 BOM 是常态（`docs/188` §2 又把"读法"整个压在那一行上）。
+#: 抹白是**等长**的，所以 BOM 会被换成空白、行号与偏移都不动。
+_GRAMMAR_LEAD = r"^(?:\ufeff)?[ \t]*"
+_GRAMMAR_ANY = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
 #: 别名**必须空白分隔**：`choose write grammar;python` 里的 `;python` **不是**别名
 #: （那是"头写了、别名没写"⇒ 报"后面要写语法名"）。别名本体到空白或 `;` 为止 ——
 #: 所以 `c#` 里的 `#` 是别名的一部分，不是注释头。
-_GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
+_GRAMMAR_DECL = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+([^\s;]+)",
                            re.M)
 #: **整行**（含别名，到行尾）—— 抹的时候要抹干净，只抹前三个词会留下 `python` 那一截。
 #:
@@ -1649,7 +2079,7 @@ _GRAMMAR_DECL = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \t]+
 #: （拼错一个字母）会匹配到 `choose write grammar` 这个**前缀**、把前 20 个字符抹成空白、
 #: 留下 `s python`。而 `read_grammar_decl` 那边有边界检查、**不认为**这是声明、**不报错**，
 #: 一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句指不到点子的语法错。
-_GRAMMAR_LINE = re.compile(r"^[ \t]*" + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
+_GRAMMAR_LINE = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
@@ -1663,6 +2093,147 @@ def strip_grammar_decl(src: str) -> str:
     行号仍然指回这份文件里的那一行。
     """
     return _GRAMMAR_LINE.sub(_blank_keep_off, src)
+
+
+def _strip_tur_mut(src: str) -> str:
+    """`grammar tur` 的**表层改写**：把 Rust 的 `mut` 声明标记映射掉（`#77`）。
+
+    Tur 与 Rust 在"本地变量怎么声明"上没有交集：
+
+        Rust                      Tur
+        let mut v: T = e;        let v: T = e;      （本地变量本来就可变）
+        fn f(mut a: T)           fn f(a: T)
+
+    于是 `grammar tur`（**原生读法**，见 `NATIVE_GRAMMARS`）里**每一个有状态循环都
+    写不出来**：写 `let mut` 解析不过（`期望 :，得到 'v'`），去掉 `mut` 又不是原汁
+    原味的 Rust 拼法。这一门与另外几门的区别只是"它不经过翻译器"，而这件事本来
+    就是**拼法**、不是语义 —— 所以在**前门**做一次等长改写。
+
+    **只抹两种位置**，别的 `mut` 一个字节都不动：
+
+    * `let mut NAME` —— 变量绑定的可变标记；
+    * `( mut NAME :` / `, mut NAME :` —— 形参的可变标记。
+
+    `mut` 在本语言里**还有别的意思**：`mut [T]`（可变切片类型）与 `&mut`（可变借用）。
+    一刀切会把那两处也抹掉，直接改坏程序。判据用**词法器的 token**而不是正则 ——
+    字符串/注释里的 `mut` 不算 token，正则会在那里误伤。
+
+    改写是**等长**的（换成空格、保留换行）：行号、列号、偏移都不动，于是后续诊断仍
+    指回用户写的那一行。词法失败（源本身就读不通）时原样返回 —— 让编译器报它自己的
+    语法错，而不是在这里吞掉。
+    """
+    import lomc  # noqa: PLC0415  (只有 tur 这一支要用它)
+    try:
+        toks = lomc.lex(src)
+    except Exception:                                                # noqa: BLE001
+        return src
+    kill: list = []
+    for i, t in enumerate(toks):
+        if t.kind != "ident" or t.val != "mut":
+            continue
+        prev = toks[i - 1] if i > 0 else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        if prev is not None and prev.kind == "ident" and prev.val == "let":
+            kill.append(t)                       # `let mut NAME`
+            continue
+        if (prev is not None and prev.kind == "punct" and prev.val in ("(", ",")
+                and nxt is not None and nxt.kind == "ident"):
+            after = toks[i + 2] if i + 2 < len(toks) else None
+            if after is not None and after.kind == "punct" and after.val == ":":
+                kill.append(t)                   # `fn f(mut NAME: T)`
+    if not kill:
+        return src
+    chars = list(src)
+    for t in kill:
+        for k in range(t.off, min(t.off + t.len, len(chars))):
+            if chars[k] not in "\r\n":
+                chars[k] = " "
+    return "".join(chars)
+
+
+#: 不可能**结束**一个表达式的词。`and` / `or` 的左操作数如果落在这里，那它就是标识符
+#: （`return and` 之类），不是算子。
+_NOT_EXPR_END = frozenset((
+    "return", "if", "else", "while", "for", "in", "match", "let", "const", "fn",
+    "pub", "use", "as", "mut", "and", "or", "not", "def", "elif", "guard",
+    "capability", "excluded", "revocable", "struct", "enum", "trait", "impl",
+    "extern", "break", "continue",
+))
+
+
+def _tur2_sugar(src: str) -> str:
+    """Tur 2 的**纯糖**（`docs/296` §2.1）：`def` / `and` / `or` / `not` / `elif`。
+
+    全部是**等长**改写（`def`→`fn `、`and`→`&& `、`or`→`||`、`not`→`!  `、
+    `elif`→`else`），所以行号、列号、token 偏移一个都不动。`elif` 只改词：缺的那个
+    `if` 由解析器在 `profile` 为 Tur 2 时补上（`Parser._if_chain`）。
+
+    **只在算子/构造位置改写**（`docs/296` §1 规则 4）：这些词在名字位置仍是标识符。
+    判位置用词法 token 而不是正则 —— 字符串与注释里的同名文本不是 token。
+    `def` 只认顶层（本语言没有嵌套函数声明）。
+    """
+    import lomc  # noqa: PLC0415  (只有 Tur 2 这一支要用它)
+    try:
+        toks = lomc.lex(src)
+    except Exception:                                                # noqa: BLE001
+        return src
+
+    def _end(t) -> bool:
+        if t is None:
+            return False
+        if t.kind in ("number", "string"):
+            return True
+        if t.kind == "ident":
+            return t.val not in _NOT_EXPR_END
+        return t.kind == "punct" and t.val in (")", "]")
+
+    def _start(t) -> bool:
+        if t is None:
+            return False
+        if t.kind in ("ident", "number", "string"):
+            return True
+        return t.kind == "punct" and t.val in ("(", "!", "-")
+
+    repl = {"def": "fn ", "and": "&& ", "or": "||", "not": "!  ", "elif": "else"}
+    edits: list[tuple[int, str]] = []
+    depth = 0
+    for i, t in enumerate(toks):
+        if t.kind == "punct":
+            if t.val == "{":
+                depth += 1
+            elif t.val == "}":
+                depth -= 1
+            continue
+        if t.kind != "ident" or t.val not in repl:
+            continue
+        prev = toks[i - 1] if i > 0 else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        after = toks[i + 2] if i + 2 < len(toks) else None
+        ok = False
+        if t.val == "def":
+            ok = (depth == 0 and nxt is not None and nxt.kind == "ident"
+                  and after is not None and after.kind == "punct" and after.val == "(")
+        elif t.val == "elif":
+            ok = (prev is not None and prev.kind == "punct" and prev.val == "}"
+                  and _start(nxt))
+        elif t.val in ("and", "or"):
+            ok = (_end(prev) and not (prev is not None and prev.kind == "punct"
+                                      and prev.val == ".")
+                  and _start(nxt))
+        else:  # not
+            ok = (_start(nxt)
+                  and not (prev is not None and prev.kind == "punct"
+                           and prev.val == ".")
+                  and not _end(prev))
+        if ok:
+            edits.append((t.off, repl[t.val]))
+    if not edits:
+        return src
+    chars = list(src)
+    for off, word in edits:
+        for k, ch in enumerate(word):
+            chars[off + k] = ch
+    return "".join(chars)
 
 
 def find_decl(src: str) -> tuple[bool, str | None, int]:
@@ -1686,6 +2257,53 @@ def find_decl(src: str) -> tuple[bool, str | None, int]:
     return True, (m.group(1) if m else None), line
 
 
+def _grammar_attempt(src: str) -> tuple[int, str] | None:
+    """找一行"**像是想写声明、但没写对**"的 -> `(行号, 那一行的原文)`；没有就是 `None`。
+
+    判据：**`module` 之前**有一行，头一个词是 `choose` / `write` / `grammar` 里的任意一个，
+    但**后面还有别的词**（`choose write grammar` 那条严格头没匹配上，`find_decl` 已经确认了）。
+
+    为什么限定在 `module` 之前：声明必须在那儿（`docs/188` §1）。这一条让规则**很窄** ——
+    那三个词在合法源里只出现在声明本身里。实测（本仓 171 份 `.lomt` / `.lom`）：
+    `module` 之前以它们开头、又不是严格声明的行 **一条都没有**。
+
+    为什么不用更宽的"行首是那三个词的任意子集"（`docs/198` §2 的初稿）：那样
+    `choose gc_auto` 这类**开关**会中招，而它是合法的 Loment。
+    """
+    mod = _MODULE_LINE.search(src)
+    head = src[:mod.start()] if mod is not None else src
+    for i, l in enumerate(head.splitlines(), 1):
+        t = l.split()
+        if len(t) >= 2 and t[0] in GRAMMAR_DECL_WORDS and not _GRAMMAR_ANY.match(l.lstrip()):
+            return i, l.strip()
+    return None
+
+
+def refuse_foreign_grammar(src: str, tool: str) -> None:
+    """**"读 L1 源的入口"不许去动用别的表层语法写的源** —— `docs/182` §1.9 那条轴。
+
+    `lomfmt` / `lomdoc` 是**独立入口**：它们拿 `lomc.lex` 直接读原文，**不走前门**。
+    而一份 `.lomt` 里可以装六种写法的任何一种。对 C 那门后果很重：
+
+        choose write grammar c unsigned int f(unsigned int x) {   ← 声明与函数头揉成一行
+
+    而**声明那一行整个是"怎么读"**：前门按它定读法、再把它抹成等长空白 ⇒
+    **那一行上的函数跟着一起消失**，单元变成空的，而全程**退 0**；
+    `lomfmt --write` 是**原地写回**，用户那份源就这么被改坏了。
+
+    所以这里**认出非原生写法就拒** —— 与 `loment check` 对同一份文件的处置一致。
+    `tur` 是**原生**（`NATIVE_GRAMMARS`，2026-11-03 的裁定），照旧放行。
+
+    **放在这里、不是各入口各写一份**：这是一条**规则**，抄两份必然漂。
+    """
+    lang, _err, declared = read_grammar_decl(src)
+    if declared and lang not in NATIVE_GRAMMARS:
+        raise ValueError(
+            f"这是用 {lang} 写法写的 Loment（文件头有 `choose write grammar`）—— "
+            f"{tool} 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`"
+            f"（`docs/211` / `docs/182` §1.9）。")
+
+
 def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """**文件头预扫**：`choose write grammar <别名>` -> `(规范名, 报错, 有没有声明)`。
 
@@ -1697,6 +2315,21 @@ def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
     """
     found, alias, line = find_decl(src)
     if not found:
+        # **"想写、但没写对"也要报**（`docs/188` §1 那四种之外的一种，`docs/198` §2 报过）。
+        # 关键词写错 / 词序不对时原先**一声不响**：文件落到"缺 = Loment"那一条，
+        # 用户拿到的是正文里某处的语法错（`未知顶层关键字 'def'` 之类）—— **指的不是那一行**。
+        # §2 那句"兜底从**猜**变**拒绝**"正是为它写的；现在它既没猜也没拒，
+        # 是**换了一个猜法**（当成 Loment）。
+        guess = _grammar_attempt(src)
+        if guess is not None:
+            ln, txt = guess
+            return "loment", (
+                f"第 {ln} 行: 这一行像是想写 `choose write grammar <语法名>`，"
+                f"但词序或拼写对不上（实得：{txt!r}）。正确写法是 "
+                f"`choose write grammar <名字>` —— 写在 `module` 之前、只写一次，"
+                f"名字取出厂锁的那张表（`docs/188` §1）。"
+                f"（若你本意是**开关** `choose <名字>`，那不是这一条：开关要写在 "
+                f"`module` **之后**。）"), False
         return "loment", None, False
     first = _GRAMMAR_ANY.search(src)
     assert first is not None
@@ -1730,13 +2363,20 @@ class FrontUnit:
     调用方据此可以说清"这些行号指的是哪一份"（`docs/179` §6.5 那类"把人引向错方向"）。
     """
 
-    __slots__ = ("grammar", "source", "translated", "path")
+    __slots__ = ("grammar", "source", "translated", "path", "profile", "spelling")
 
-    def __init__(self, grammar: str, source: str, translated: bool, path: Path):
+    def __init__(self, grammar: str, source: str, translated: bool, path: Path,
+                 profile: str = DEFAULT_EDITION, spelling: str = ""):
         self.grammar = grammar
         self.source = source
         self.translated = translated
         self.path = path
+        #: 源里**写下的那个拼法**（小写；空 = 没写）。编译期提示要把它展开成规范名。
+        self.spelling = spelling
+        #: **版次**（`docs/296` §1.1）：规范名；**缺省 = 最新那一版**
+        #: （`DEFAULT_EDITION`，见它的注）。它只影响"哪些拼法被当语法读"，
+        #: 不影响 `grammar`（抹掉声明后都是本语言）。
+        self.profile = profile
 
 
 #: **Loment 自己的源文件后缀**。这些后缀说的是"这是一份 **Loment 的源文件**"，
@@ -1764,14 +2404,74 @@ class FrontDoorRefused(ValueError):
     """
 
 
+#: 一行**核心模式声明**：`choose <核心词>`（可选分号）。`choose write grammar …` 不匹配
+#: —— 它的第二个词是 `write`，不是核心词。
+_CORE_CHOOSE_RE = re.compile(r"^[ \t]*choose[ \t]+([A-Za-z_]\w*)[ \t]*;?[ \t]*$")
+
+
+def _take_core_choose(src: str) -> tuple[str, list[str]]:
+    """把**核心模式声明**（`choose runtime` / `choose gc_auto` / `choose no_std`）**摘出来**。
+
+    返回 `(抹掉它们之后的源, 摘出来的那些行)`。
+
+    **为什么是前门的活**（2026-10-09）：按 `docs/188` §0，一份用 Python/C 写法写的单元
+    **仍然是一个 Loment 程序** —— 拼法是那一门的，**语义是 Loment 的**。核心 `choose`
+    说的是"这个程序要什么"（`docs/182` §1.3 的"核心语法硬写法"），它是**源的一部分**，
+    而各家翻译器不认识它：C 那一门把它算成"子集外的一条"直接拒（实测），
+    别的门当自己那门语法吃掉（实测：`m.chooses` 空着）。
+
+    **抹成等长空白**（与 `strip_grammar_decl` 同一手法）：行号不动，翻译器报的错还指在
+    原来的行上。
+
+    与 `strip_grammar_decl` 方向相反、理由同一条：`choose write grammar` 说的是
+    "**怎么读这份文件**"（属于前端，所以抹掉不留），核心 `choose` 说的是
+    "**这份程序要什么**"（属于源，所以抹掉之后要**带回来**）。
+    """
+    kept: list[str] = []
+    core: list[str] = []
+    for line in src.split("\n"):
+        m = _CORE_CHOOSE_RE.match(line.rstrip("\r"))
+        if m and m.group(1) in potato.CORE_WORDS:
+            core.append(f"choose {m.group(1)}")
+            kept.append(" " * len(line))
+        else:
+            kept.append(line)
+    return "\n".join(kept), core
+
+
+def _inject_core_choose(text: str, core: list[str]) -> str:
+    """把摘出来的核心声明**接在译文第一行 `module` 之后**。
+
+    **不能接在最前面**：`parse()` 的第一步是 `expect("module")`（文件必须以 `module`
+    开头），`choose` 行只能出现在它之后。
+
+    **译文自己已经写过的那几条要跳过**（2026-10-10）：`lomt_from.emit_lomt` 在 `impl=True`
+    时会**自己**给实体单元发一行 `choose runtime`（`docs/227`）。重复注入的后果不是"多一行
+    废话"，是**这一维写了两次** —— 那是 E022，而 `loment/lib/lumtui_math.lomt` 那份
+    python 写法的模块当场就红（实测）。
+    """
+    if not core:
+        return text
+    core = [c for c in core
+            if not re.search(rf"^[ \t]*{re.escape(c)}[ \t]*$", text, re.M)]
+    if not core:
+        return text
+    nl = "\r\n" if "\r\n" in text else "\n"
+    lines = text.split(nl)
+    for i, l in enumerate(lines):
+        if l.startswith("module "):
+            return nl.join(lines[:i + 1] + core + lines[i + 1:])
+    return text
+
+
 def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUnit:
     """**Loment 的前门**：一份源 -> 该交给编译器的 **Loment 源码**（`docs/188` §1、§7.2）。
 
     按 `resolve_lang` 的次序（**声明 > 后缀 > 内容**）定读法，然后分两条路：
 
-    * **原生拼法（`loment` / `rust`，含没写声明）** —— 它就是 Loment。把声明那一行
-      **抹成等长空白**再交出去。`rust` 在这一支里是因为**它是基础语法的一种拼法**，
-      不需要翻译器 —— 见 `NATIVE_GRAMMARS` 的注解（用户 2026-09-22 的裁定）。
+    * **原生拼法（`loment` / `tur`，含没写声明）** —— 它就是本语言。把声明那一行
+      **抹成等长空白**再交出去。`tur` 在这一支里是因为**它是本语言自己的正式语法**，
+      不需要翻译器 —— 见 `NATIVE_GRAMMARS` 的注解（用户 2026-11-03 的裁定）。
     * **别的写法** —— 那份源按 `docs/188` §0 **仍然是 Loment**，只是拼法不同。所以走
       `potato_from` + `lomt_from --impl` **翻成 Loment 源码**再交出去。
       **全程在本进程里算，不拉起 python / java / …** —— 那是用户定的死要求
@@ -1813,15 +2513,43 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     **编译器要求显式，前端工具可以先猜**。
     """
     src = path.read_text(encoding="utf-8", errors="replace")
+    # **UTF-8 BOM 不是源的一部分**（`#482`）：Windows 的记事本、PowerShell 的 `>`
+    # 都会写它。留着它，词法器在 1:1 报一句"非法字符 '﻿'"，把真正的错盖掉。
+    # 只去**一个**、只在**文件头** —— 这正是 BOM 的定义；行号不受影响，第 1 行的列
+    # 号少一格，而那一格本来就没显示。
+    if src.startswith("﻿"):
+        src = src[1:]
     if lang == "auto" and path.suffix in LOMENT_EXT:
         # Loment 的源文件：**只信声明**（缺 = Loment），**不嗅探** —— 见上面那一段
         g, err, declared = read_grammar_decl(src)
         if err:
             raise FrontDoorRefused(err)
         if not declared or g in NATIVE_GRAMMARS:
-            # `rust` 与 `loment` 都落这一支：**它就是基础语法**（见 `NATIVE_GRAMMARS`
+            # `loment` 与 `tur` 都落这一支：**它就是本语言**（见 `NATIVE_GRAMMARS`
             # 的注解）—— 不经过任何翻译器，抹掉声明那一行原样交出去。
-            return FrontUnit("loment", strip_grammar_decl(src), False, path)
+            #
+            # **`tur` 还要把 `mut` 映射掉**（`#77`）：这一门是**原生读法**，语法就是
+            # 本语言的语法 —— 而两种语言恰好在"本地变量怎么声明"上写不到一起去
+            # （Rust `let mut v: T` / `fn f(mut a: T)`，本语言 `let v: T` / `fn f(a: T)`，
+            # 本地变量本来就可变）。不映射的话**每一个有状态循环都写不出来**。
+            # 这是一次**表层拼法**的改写，与另外几门翻译器做的事同类；行号与偏移
+            # 一字不动（见 `_strip_tur_mut`）。
+            body = strip_grammar_decl(src)
+            if g in TUR_EDITIONS:
+                body = _strip_tur_mut(body)
+            # 纯糖按**生效版次**算，不按拼法算：`loment` / 没声明现在都落到默认
+            # （最新版），它们也必须有 `def` / `and` / `or` / `not` / `elif`。
+            _prof = g if g in TUR_EDITIONS else DEFAULT_EDITION
+            if _prof in ("tur2026.2", "tur2026.3"):
+                # Tur 2 的纯糖（`docs/296` §2.1）：等长改写，行/列/偏移不动。
+                # Tur 2026.3 继承它（版次是累积的）。
+                body = _tur2_sugar(body)
+            # 版次记**规范名**（`tur2026.1` / `tur2026.2` / `tur2026.3`）。
+            # **`loment` 与没声明都跟默认走**（`DEFAULT_EDITION`）—— 把旧读法写死在
+            # 默认上，等于让每一份新文件先背一行声明；见 `DEFAULT_EDITION` 的注。
+            _word = (find_decl(src)[1] or "").strip().lower() if declared else ""
+            return FrontUnit("loment", body, False, path,
+                             profile=_prof, spelling=_word)
         lang, why = g, "文件头声明 `choose write grammar`"
     else:
         lang, why = resolve_lang(path, lang)
@@ -1837,16 +2565,37 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
     # **别的写法**：翻成 Loment。`lomt_from` 按需 import —— 它会把各门翻译器拉进来，
     # 而这条路不是每个调用方都走得到（与 `lomt_from` 自己那条注解同一个道理）。
     import lomt_from  # noqa: PLC0415
-    _key = (str(path), lang, mode)
+    #: **内容也进键**（`#1518`）。原先只有 `(路径, 语言, 模式)`，前提是"一次编译里
+    #: 文件不会变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对
+    #: **同一个进程里反复改同一个路径**的调用方不成立：Playground 每次运行都写
+    #: `playground.lomt`，于是先跑一个能过的程序、再把源改成坏的，拿回来的仍是
+    #: 上一份译文 —— 屏幕上那 42 是**上一次的运行结果**，跟眼前的源码没关系。
+    #: 键里带内容就没有这个分叉：同一份源仍然命中（预扫那趟照样省），换了源必然重翻。
+    _key = (str(path), lang, mode, hash(src))
     _hit = _FRONT_MEMO.get(_key)
     if _hit is not None:
         return _hit
+    if len(_FRONT_MEMO) > 64:
+        _FRONT_MEMO.clear()          # 长命进程（LSP / Playground）里别无限涨
+    # **核心声明先摘出来**（`_take_core_choose`）：翻译器不认识那几行，交给它就是
+    # "子集外的一条"（C 门直接拒）或者被当成本门语法吃掉（别的门）。摘出来之后接回译文。
+    _body, _core = _take_core_choose(strip_grammar_decl(src))
     try:
-        doc, _rep = LANGS[lang](strip_grammar_decl(src), path.name, mode)
+        doc, rep = LANGS[lang](_body, path.name, mode)
     except front_errors(lang) as e:
         # 写法读不通 —— 与"翻不出来"一样响亮地拒，**不给一份少算一步的单元**
         # （见 `front_errors` 的注解）。
         raise lomt_from.NotRepresentable(f"{path}: 这份源读不通 —— {e}")
+    # **转写那一步丢的东西也要报**。`emit_lomt` 的 `skipped` 只管"发不出来"；
+    # 转写期丢的是**根本没进对象**的东西（顶层 `typedef` / 全局量 / `union` /
+    # 预处理指令 / K&R 函数 …）。这一条原先把报告整个丢掉（`_rep`），于是这些东西
+    # **在编译器这条路上一个字都不说** —— 而 `lomt_from.py` 那条路会打 `[skip]`。
+    # 同一条纪律：全有或全无，丢了就拒（`docs/167`"不静默丢"）。
+    if rep.skipped:
+        raise lomt_from.NotRepresentable(
+            f"{path}: 用 {lang} 写法写的单元里有 {len(rep.skipped)} 处转写不了"
+            f"（前 3 处：{[(x['name'], x['why']) for x in rep.skipped[:3]]}）—— "
+            f"那一门整份是全有或全无，丢了的部分不会悄悄跳过，这里直接拒")
     text, skipped = lomt_from.emit_lomt(doc, impl=True)
     if skipped:
         # **子集外的东西发不出来** —— 必须响亮，不能给一份"少算一步却照样能编"的单元。
@@ -1856,6 +2605,9 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             f"{path}: 用 {lang} 写法写的单元里有 {len(skipped)} 处发不出来"
             f"（前 3 处：{skipped[:3]}）—— 那一门整份是全有或全无，"
             f"翻不出来的部分不会悄悄丢掉，这里直接拒")
+    # **核心声明跟着译文一起交出去**（见 `_core_choose_lines`）。放在最后一步、只对
+    # "翻了的那一支"做 —— 原生拼法那一支原样交出去，那些行本来就在源里。
+    text = _inject_core_choose(text, _core)
     _out = FrontUnit(lang, text, True, path)
     _FRONT_MEMO[_key] = _out
     return _out

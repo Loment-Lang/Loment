@@ -1,0 +1,170 @@
+{
+  "potato": "v13",
+  "unit": "lumtui_demo",
+  "language": "loment",
+  "grammar": "loment",
+  "mode": "std",
+  "gc": "gc_manual",
+  "runtime": "runtime",
+  "port": "sealed",
+  "vm": "no_vm",
+  "switches": [],
+  "dialects": [],
+  "bodies": [],
+  "imports": [
+    "lumtui",
+    "lumtui_doc",
+    "lumtui_layout",
+    "lumtui_font",
+    "lumtui_paint",
+    "num"
+  ],
+  "capabilities": [],
+  "functions": [
+    {
+      "name": "wr",
+      "params": [
+        {
+          "name": "fd",
+          "type": "u64"
+        },
+        {
+          "name": "p",
+          "type": "ptr"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "i64"
+    },
+    {
+      "name": "wstr",
+      "params": [
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "say",
+      "params": [
+        {
+          "name": "sc",
+          "type": "ptr"
+        },
+        {
+          "name": "tag",
+          "type": "str"
+        },
+        {
+          "name": "v",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "ramp",
+      "params": [
+        {
+          "name": "l",
+          "type": "u32"
+        }
+      ],
+      "ret": "str"
+    },
+    {
+      "name": "dump",
+      "params": [
+        {
+          "name": "fb",
+          "type": "ptr"
+        },
+        {
+          "name": "w",
+          "type": "u32"
+        },
+        {
+          "name": "h",
+          "type": "u32"
+        }
+      ],
+      "ret": "()"
+    },
+    {
+      "name": "build",
+      "params": [
+        {
+          "name": "d",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "_start",
+      "params": [],
+      "ret": "()"
+    }
+  ],
+  "layouts": [],
+  "consts": [
+    {
+      "name": "W",
+      "type": "u32",
+      "value": 96
+    },
+    {
+      "name": "H",
+      "type": "u32",
+      "value": 36
+    }
+  ],
+  "enums": [],
+  "types": [],
+  "traits": [],
+  "impls": [],
+  "generics": [
+    {
+      "kind": "type",
+      "name": "Option",
+      "params": [
+        "T"
+      ]
+    },
+    {
+      "kind": "type",
+      "name": "Result",
+      "params": [
+        "T",
+        "E"
+      ]
+    }
+  ],
+  "instances": [],
+  "guards": 0,
+  "boundary": {
+    "extern_declared": 0,
+    "extern_calls": 0,
+    "syscalls": 2,
+    "ptr_transforms": 5,
+    "total_sites": 7
+  },
+  "gc_ladder": {
+    "l0": 0,
+    "l1": 0,
+    "l2": 0,
+    "l3": 8,
+    "total_sites": 8
+  },
+  "surfaces": {
+    "file": 1,
+    "proc": 1,
+    "total_sites": 2
+  },
+  "excluded": []
+}

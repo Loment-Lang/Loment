@@ -1,0 +1,5 @@
+module helper
+
+pub fn h() -> u32 {
+    return 2;
+}

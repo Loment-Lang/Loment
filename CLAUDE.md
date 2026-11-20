@@ -2,6 +2,36 @@
 
 > 工作区级指令。ZCode 读 `<repo>/AGENTS.md`，Claude Code / DSH 也认同名文件。
 > 只写"从代码本身看不出来"的约定；判据与进度在 `docs/`。
+>
+> **动手之前先 `git fetch origin`** —— 你面前这棵树**会静默落后**，权威状态在 `origin`
+> （第一节；懒得记就跑 `python tools/loment_state.py`）。
+
+## 权威状态在 `origin`，不在你面前这棵本地树
+
+**背景**：**本仓的检出静默落后是常态，而且落后得很多。** 2026-09-25 实测：本地 `main`
+比 `origin/main` 落后 **181 个提交**，树里连 `.github/` 都不存在（它对 main 是 tracked）。
+同形状的另一次代价更贵：0.1.4 **早已发布、公告都发了**，而有人读着本地树还在说"等
+0.1.4"；一笔早已由别的会话合进主线的成品，被当成"还没人做"又收了一遍。
+
+代价不在"少几行代码"，在于**基于旧树下结论**：版本、发布与否、tag、CI、某个文件在不在、
+某条约定落没落地 —— 这些一旦读错，后面的判断全歪，而且**旧树不会报错**。还有一次是 PR：
+基点老，一开出来就带着一片"看着像回归、其实是基点太老"的红。
+
+**做法**：
+
+1. **开工第一条命令是 `git fetch origin`**，并看一眼 `git log --oneline -1 origin/main` 的日期。
+2. **判断任何"项目状态"都读 `origin/main`，不读工作树**。不必 checkout，直接读远端引用：
+   `git show origin/main:<路径>`、`git log origin/main`。
+3. **开分支 / rebase 一律以 `origin/main` 为基点**，不要以本地 `main` 为基点。
+4. **对外文案**（README / 公告 / PR 描述）里的版本与"已发布"表态，必须核 `origin` 的 tag。
+5. 懒人版：`python tools/loment_state.py` —— 上面这几件一次打出来（默认先 fetch）。
+
+**边界**（别做过头）：
+
+- 这条只约束**读状态**，不约束**写** —— 改东西照旧在工作树里，而 `fetch` **不会**更新检出。
+- **落后是常态，不是故障**：发现自己落后时先 `git log` / `git diff` 看清是谁的，别惊慌回退。
+- 反过来，"树老"**不是**本机红项的免罪牌：归因仍要落到具体那一笔（自己的 / 别人的在制品 /
+  本机固有红项）。两条不能互相顶替。
 
 ## `kernel/` 与 `sdk/fuai-spec/` 在本仓是 **vendored 只读副本**，不是活的
 
@@ -55,6 +85,21 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 **真正的编辑器支持**在 `editors/vscode/`（TextMate 语法 + LSP 补全/跳转/诊断/格式化 +
 6 个命令）。要**改** Loment 就用 VS Code；ZCode/Claude 的内置查看器只看不改。
 
+## 对外文字用英文：**我们自己开的** PR 与 issue
+
+**背景**：本仓是对外的，而**读 PR / issue 的人在仓外**。issue 一直是英文（`CONTRIBUTING.md`
+的 bug 模板就是四条英文小标题），PR 正文却一度漂成中文 —— 2026-10-09 用户定：两者都要
+英文。这与"聊天里用中文汇报"是**两个面**，不冲突：一个的读者在仓外，一个的读者是你。
+
+**约定**：
+
+1. `gh pr create` / `gh issue create` 的 `--title` 与 `--body` **都写英文**。AI 产出的照旧
+   在正文首行点名工具（仓里还没有 `ai-generated` 标签）。
+2. **commit message 不在此列** —— 仓里的提交消息一直是中文，照旧。
+3. **在别人 PR / issue 上的评论跟对方的语言走**。这条只管**我们自己开的**那些 ——
+   别推广成"所有 GitHub 文字都必须英文"。
+4. 已有的不合规件**只改手上这一条**，不回头扫历史。
+
 ## L0 接口面有"冻结阈值"：`lom/*.lom` 是跨线契约，不是内部实现
 
 **背景**：Loment 自身仍在开发，**实现层的高 churn 是预期的、也是允许的** ——
@@ -72,6 +117,10 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 
 1. **改 `lom/*.lom` 视为"对外契约变更"**：要单独一次提交，commit message 写清"谁依赖它、
    变了什么、下游要不要动"；不要在重构编译器时顺手改它。
+   **新增一份 `.lom` 不是"改"**（2026-10-11 起，与 `lom/ 禁区` 那道门的判定一致）：
+   既有的那几份的对面在另一个仓库，新增不动它们一个字节。代价是新增的那份**要自带判据**
+   —— `lom/net.lom` 是样板（单源 + 四处对账 + 自证会红，见 `docs/229`）。
+   它一旦被谁依赖，改它就回到上面这条下面。
 2. **新增/删除原语 = 契约升版**：内核侧有针对枚举计数的断言
    （如 `lomc_test` 的 `Opcode` 变体数），改动必然触发下游假失败 ——
    预期如此，属于**该看见的信号**，不要靠"把断言放宽"消掉。
@@ -104,13 +153,17 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
 
 **装好 Loment 工具链之后**（`loment version` 能跑），写或改 `.lomt` 之前先读指南：
 
-- 有本仓库时：**`.claude/skills/loment/SKILL.md`**
-- 只有安装包时：**`<前缀>/share/loment/skill/SKILL.md`**（同一份）
+- 有本仓库时：**`.claude/skills/loment/SKILL.md`**（套件入口；专题在同级
+  `.claude/skills/loment-*/SKILL.md`）
+- 只有安装包时：**`<前缀>/share/loment/skill/SKILL.md`**（入口）与
+  `<前缀>/share/loment/skill/loment-*.md`（专题）
 
-内建函数表、语法要点、E1–E17 错误码、以及包内命令 `ir/check/build/run/fmt/doc/lsp`
-全在里面，**自足**，不依赖本仓库其它文件。
+内建函数表、语法要点、E001–E038 错误码、以及包内命令 `ir/check/build/run/fmt/doc/lsp`
+全在套件里，**自足**，不依赖本仓库其它文件。
 
-**正本只有一份**（就是那个文件）—— 别处都只是指针或同字节拷贝。复制出第二份必然漂。
+**每个 skill 只有一份正本**（`.claude/skills/<name>/SKILL.md`）—— 别处都只是指针或同字节拷贝。
+成员清单只登记一处：`tools/loment_dist.py` 的 `SKILL_SUITE`；加一个 skill 要同时过安装器、
+发布清单与 `loment_dist_test`。
 
 **它不是 Claude 专用的**：`.claude/skills/` 只是 Claude Code 的自动发现路径，
 其它 agent（ZCode / Codex / Cursor …）按各自约定读不到它，所以安装器会把**指针**

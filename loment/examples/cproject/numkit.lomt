@@ -12,6 +12,7 @@
  */
 
 choose write grammar c
+choose runtime
 
 int gcd(int a, int b) {
     while (b != 0) {

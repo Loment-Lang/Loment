@@ -1,0 +1,314 @@
+choose write grammar python
+
+# signals.lomt —— 用 **Python 的拼法**写的 Loment 模块（`choose write grammar python`）。
+#
+# 后缀 `.lomt` 说的是"这是 Loment 的文件"，首行那句话说的是"用 Python 的拼法读它"。
+# 语义仍然是 Loment 的：**表层语法只决定拼法与形状，不决定语义**（docs/188 §0）。
+#
+# 这一份是**定点信号流水线**：把一串由 LFSR 生成的样本，经过饱和加、定点乘、
+# 一阶平滑、3 抽头滤波、CRC-16 校验，最后折算成一个数交给宿主。
+# 与 `01-numtheory`（纯数论）刻意**不重叠** —— 那一门盯整除结构，这一门盯
+# **位模式、状态机、定点算术**。
+#
+# ## 为什么全篇只用非负操作数
+#
+#   Python  `-7 // 2 == -4`   `-7 % 2 == 1`    （**向下取整**）
+#   Loment  `-7 /  2 == -3`   `-7 %  2 == -1`   （**向零截断**）
+#
+# 两边在负号上**不一样**（`loment/pytrans/intdiv.py`）。所以每一个 `/`、`//`、`%`
+# 的两个操作数都保证非负 —— 非负时两种取整是同一件事，**CPython 才能当对照组**。
+# 同理，所有中间值都刻意留在 i64 之内很远的地方（这一门 `int` 映 i64，会回绕）。
+
+#: 定点标度：1.0 记作 SCALE。（全大写 = 模块常量，函数体里当名字用。）
+SCALE = 256
+
+#: 分级阈值。改这里不影响调用方。
+WARN = 400
+ALARM = 800
+
+#: 越过分隔。
+CEILING = 4096
+
+#: LFSR / CRC 用的位常数。
+POLY16 = 0xB400
+SEED = 0xACE1
+MASK16 = 0xFFFF
+
+#: [1 2 1] 抽头的权重和。
+TAPS = 4
+
+
+def clamp(v: int, lo: int, hi: int) -> int:
+    """把 v 夹到 [lo, hi]。两条提前 return。"""
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+
+def sat_add(a: int, b: int, hi: int) -> int:
+    """饱和加：超过 hi 就停在 hi。"""
+    s = a + b
+    if s > hi:
+        return hi
+    return s
+
+
+def sat_sub(a: int, b: int) -> int:
+    """饱和减：低于 0 就停在 0（这一门没有无符号，0 是地板）。"""
+    if a < b:
+        return 0
+    return a - b
+
+
+def min3(a: int, b: int, c: int) -> int:
+    """三数最小。两个独立 if，顺序敏感。"""
+    m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    return m
+
+
+def max3(a: int, b: int, c: int) -> int:
+    """三数最大。与 `min3` 同骨架、反向。"""
+    m = a
+    if b > m:
+        m = b
+    if c > m:
+        m = c
+    return m
+
+
+def median3(a: int, b: int, c: int) -> int:
+    """三数中位：**跨函数调用** `min3` / `max3`，再用和减掉两端。"""
+    lo = min3(a, b, c)
+    hi = max3(a, b, c)
+    return a + b + c - lo - hi
+
+
+def abs_diff(a: int, b: int) -> int:
+    """差的绝对值，不借 `abs`（内建不在这一门的子集里）。"""
+    if a > b:
+        return a - b
+    return b - a
+
+
+def sx_mul(a: int, b: int) -> int:
+    """定点乘：`a * b / SCALE`。参数非负 ⇒ 除法两边一致。"""
+    return a * b // SCALE
+
+
+def sx_div(a: int, b: int) -> int:
+    """定点除：`a * SCALE / b`。"""
+    return a * SCALE // b
+
+
+def lerp(a: int, b: int, w: int) -> int:
+    """线性插值 `a + (b - a) * w / SCALE`。调用方保证 `b >= a`、`0 <= w <= SCALE`。
+
+    `b >= a` 是**这条纪律的一部分**：否则 `b - a` 为负，而负号上两边取整不同。
+    """
+    return a + (b - a) * w // SCALE
+
+
+def ema(prev: int, sample: int, alpha: int) -> int:
+    """一阶平滑：`sample * alpha + prev * (SCALE - alpha)`，再整除 SCALE。
+
+    `0 <= alpha <= SCALE` ⇒ 两个权重都非负。
+    """
+    return (sample * alpha + prev * (SCALE - alpha)) // SCALE
+
+
+def wrap16(v: int) -> int:
+    """截到低 16 位。"""
+    return v & MASK16
+
+
+def lfsr_step(state: int) -> int:
+    """16 位 Galois LFSR 一步：最低位为 1 时反馈 POLY16，否则纯右移。
+
+    `if` / `else` 两条提前 return，是这一门里最典型的"状态机一步"。
+    """
+    s = state & MASK16
+    if s & 1:
+        return (s >> 1) ^ POLY16
+    return s >> 1
+
+
+def lfsr_advance(state: int, n: int) -> int:
+    """把 LFSR 推 n 步。`while` + 跨函数调用。"""
+    s = state
+    i = 0
+    while i < n:
+        s = lfsr_step(s)
+        i += 1
+    return s
+
+
+def gray_enc(x: int) -> int:
+    """二进制转格雷码：`x ^ (x >> 1)`，纯表达式。"""
+    return x ^ (x >> 1)
+
+
+def gray_dec(x: int) -> int:
+    """格雷码转二进制：反复异或右移，直到移位结果为 0。"""
+    v = x
+    s = x >> 1
+    while s != 0:
+        v = v ^ s
+        s = s >> 1
+    return v
+
+
+def bit_length(v: int) -> int:
+    """v 的二进制位数（v = 0 给 0）。变量右移 + 累加。"""
+    n = v
+    c = 0
+    while n > 0:
+        n = n >> 1
+        c += 1
+    return c
+
+
+def crc16_step(crc: int, byte: int) -> int:
+    """CRC-16/CCITT 的**逐位**写法：8 轮移位/异或，每轮按最高位决定要不要异或多项式。
+
+    多项式 0x1021 与掩码 MASK16 都走常量表，不写字面量。
+    """
+    c = crc ^ ((byte & 255) << 8)
+    i = 0
+    while i < 8:
+        if c & 0x8000:
+            c = ((c << 1) ^ 0x1021) & MASK16
+        else:
+            c = (c << 1) & MASK16
+        i += 1
+    return c
+
+
+def crc16_stream(n: int) -> int:
+    """喂 n 个由 LFSR 生成的字节，返回 CRC。**状态与累加器同时推进**。"""
+    c = 0xFFFF
+    s = SEED
+    i = 0
+    while i < n:
+        b = s & 255
+        c = crc16_step(c, b)
+        s = lfsr_step(s)
+        i += 1
+    return c
+
+
+def convolve3(a: int, b: int, c: int) -> int:
+    """[1 2 1] 抽头滤波：`(a + 2b + c) / TAPS`，和一定被 TAPS 整除。"""
+    return (a + 2 * b + c) // TAPS
+
+
+def classify(v: int) -> int:
+    """阈值分级：0 正常 / 1 警告 / 2 告警 / 3 越界。**elif 链**。"""
+    if v >= CEILING:
+        return 3
+    elif v >= ALARM:
+        return 2
+    elif v >= WARN:
+        return 1
+    return 0
+
+
+def window_energy(n: int) -> int:
+    """前 n 个 LFSR 样本的平方和（定点缩放）。`while` 里累加。"""
+    s = SEED
+    total = 0
+    i = 0
+    while i < n:
+        w = s & 255
+        total += sx_mul(w, w)
+        s = lfsr_step(s)
+        i += 1
+    return total
+
+
+def smooth_stream(n: int, alpha: int) -> int:
+    """把 LFSR 生成的 n 个样本做一阶平滑，返回最后一次的值。
+
+    初值固定 128（半量程），所以结果只由输入序列与 alpha 决定。
+    """
+    s = SEED
+    p = 128
+    i = 0
+    while i < n:
+        v = s & 255
+        p = ema(p, v, alpha)
+        s = lfsr_step(s)
+        i += 1
+    return p
+
+
+def pack_pair(hi: int, lo: int) -> int:
+    """把两个字节拼成一个 16 位字：高字节 + 低字节。"""
+    return (hi << 8) | (lo & 255)
+
+
+def unpack_hi(w: int) -> int:
+    """取高字节。"""
+    return (w >> 8) & 255
+
+
+def unpack_lo(w: int) -> int:
+    """取低字节。"""
+    return w & 255
+
+
+def sum_squares(n: int) -> int:
+    """1² + 2² + … + n²。`for i in range(1, n + 1)` 降级成 `while`。"""
+    t = 0
+    for i in range(1, n + 1):
+        t += i * i
+    return t
+
+
+def nested_trace(n: int) -> int:
+    """**嵌套 for**：3x3 邻域里 `i * j` 的最大值。"""
+    best = 0
+    for i in range(n):
+        for j in range(n):
+            if i * j > best:
+                best = i * j
+    return best
+
+
+def entry() -> int:
+    """宿主调的入口：把上面每个函数的结果折成一个数。
+
+    **每一步都参与**最后的取余 —— 任一算法错了，退出码都会变。
+    """
+    a = clamp(300, 100, 200)                    # 200
+    b = sat_add(150, 100, 200)                  # 200
+    c = sat_sub(9, 4)                           # 5
+    d = median3(7, 3, 5)                        # 5
+    e = abs_diff(3, 9)                          # 6
+    f = sx_mul(128, 128)                        # 64
+    g = sx_div(100, 4)                          # 6400 -> % 100 = 0
+    h = lerp(100, 200, 128)                     # 150
+    i = ema(100, 200, 64)                       # 125
+    j = wrap16(0x1FFFF)                         # 65535 -> % 100 = 35
+    k = gray_enc(5)                             # 7
+    l = gray_dec(gray_enc(42))                  # 42
+    m = bit_length(255)                         # 8
+    n = crc16_stream(8)                         # % 100
+    o = convolve3(10, 20, 30)                   # 20
+    p = classify(500) * 10 + classify(1000)     # 12
+    q = window_energy(8)                        # % 100
+    r = smooth_stream(8, 64)                    # 0..255
+    s = pack_pair(3, 200)                       # 968 -> % 100 = 68
+    t = unpack_hi(pack_pair(3, 200))            # 3
+    u = unpack_lo(pack_pair(3, 200))            # 200 -> % 100 = 0
+    v = sum_squares(6)                          # 91
+    w = nested_trace(4)                         # 9
+    total = (a + b + c + d + e + f + g % 100 + h + i + j % 100 + k + l
+             + m + n % 100 + o + p + q % 100 + r % 100 + s % 100
+             + t + u % 100 + v + w)
+    return total % 256

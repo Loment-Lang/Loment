@@ -1,0 +1,238 @@
+// std/geometry.lomt — 2D/3D 向量与几何判定（double）
+//
+// 为什么不是 `matrix` 的一部分: `matrix` 是**整数矩阵**（i64），适合精确的网格/图像
+// 坐标；几何的旋转、归一化、交点几乎都在实数上。两个模块的值类型不同，硬合并会让
+// 一半函数在另一半的语义上撒谎。
+//
+// 表示: 2D 点/向量是 16 字节（x,y 各 8），3D 是 24 字节（x,y,z）。全部按 double 位。
+//
+// 判定的边界（如实写）:
+//   * `gm_seg_intersect` 只认**真交**（两条线段内部相交）；端点相触、共线重叠返回 0。
+//   * `gm_point_in_poly` 用射线法；点落在边上时结果**未定义**（浮点比较无法可靠判定）。
+//
+// 命名: 公开 gm_*, 内部 gm_*。自检 test_geometry_*。
+
+module geometry
+
+use f64
+use f64conv
+use mathf
+
+fn gm_x(p: ptr) -> u64 { return mem_load64(p, 0); }
+fn gm_y(p: ptr) -> u64 { return mem_load64(p, 8); }
+fn gm_z(p: ptr) -> u64 { return mem_load64(p, 16); }
+
+pub fn gm_set2(r: ptr, x: u64, y: u64) {
+    mem_store64(r, 0, x);
+    mem_store64(r, 8, y);
+}
+
+pub fn gm_set3(r: ptr, x: u64, y: u64, z: u64) {
+    mem_store64(r, 0, x);
+    mem_store64(r, 8, y);
+    mem_store64(r, 16, z);
+}
+
+pub fn gm_v2_add(r: ptr, a: ptr, b: ptr) {
+    gm_set2(r, f64_add(gm_x(a), gm_x(b)), f64_add(gm_y(a), gm_y(b)));
+}
+
+pub fn gm_v2_sub(r: ptr, a: ptr, b: ptr) {
+    gm_set2(r, f64_sub(gm_x(a), gm_x(b)), f64_sub(gm_y(a), gm_y(b)));
+}
+
+pub fn gm_v2_dot(a: ptr, b: ptr) -> u64 {
+    return f64_add(f64_mul(gm_x(a), gm_x(b)), f64_mul(gm_y(a), gm_y(b)));
+}
+
+/// 2D 叉积（标量，z 分量）。
+pub fn gm_v2_cross(a: ptr, b: ptr) -> u64 {
+    return f64_sub(f64_mul(gm_x(a), gm_y(b)), f64_mul(gm_y(a), gm_x(b)));
+}
+
+pub fn gm_v2_len(a: ptr) -> u64 {
+    return mathf_sqrt(gm_v2_dot(a, a));
+}
+
+pub fn gm_v2_dist(a: ptr, b: ptr) -> u64 {
+    let d: ptr = alloc(16);
+    gm_v2_sub(d, a, b);
+    let r: u64 = gm_v2_len(d);
+    return r;
+}
+
+pub fn gm_v2_norm(r: ptr, a: ptr) {
+    let l: u64 = gm_v2_len(a);
+    if f64_eq(l, F64_POS_ZERO) {
+        gm_set2(r, F64_POS_ZERO, F64_POS_ZERO);
+        return;
+    }
+    gm_set2(r, f64_div(gm_x(a), l), f64_div(gm_y(a), l));
+}
+
+pub fn gm_v3_add(r: ptr, a: ptr, b: ptr) {
+    gm_set3(r, f64_add(gm_x(a), gm_x(b)), f64_add(gm_y(a), gm_y(b)),
+            f64_add(gm_z(a), gm_z(b)));
+}
+
+pub fn gm_v3_sub(r: ptr, a: ptr, b: ptr) {
+    gm_set3(r, f64_sub(gm_x(a), gm_x(b)), f64_sub(gm_y(a), gm_y(b)),
+            f64_sub(gm_z(a), gm_z(b)));
+}
+
+pub fn gm_v3_dot(a: ptr, b: ptr) -> u64 {
+    return f64_add(f64_add(f64_mul(gm_x(a), gm_x(b)), f64_mul(gm_y(a), gm_y(b))),
+                   f64_mul(gm_z(a), gm_z(b)));
+}
+
+pub fn gm_v3_cross(r: ptr, a: ptr, b: ptr) {
+    let x: u64 = f64_sub(f64_mul(gm_y(a), gm_z(b)), f64_mul(gm_z(a), gm_y(b)));
+    let y: u64 = f64_sub(f64_mul(gm_z(a), gm_x(b)), f64_mul(gm_x(a), gm_z(b)));
+    let z: u64 = f64_sub(f64_mul(gm_x(a), gm_y(b)), f64_mul(gm_y(a), gm_x(b)));
+    gm_set3(r, x, y, z);
+}
+
+pub fn gm_v3_len(a: ptr) -> u64 {
+    return mathf_sqrt(gm_v3_dot(a, a));
+}
+
+pub fn gm_v3_norm(r: ptr, a: ptr) {
+    let l: u64 = gm_v3_len(a);
+    if f64_eq(l, F64_POS_ZERO) {
+        gm_set3(r, F64_POS_ZERO, F64_POS_ZERO, F64_POS_ZERO);
+        return;
+    }
+    gm_set3(r, f64_div(gm_x(a), l), f64_div(gm_y(a), l), f64_div(gm_z(a), l));
+}
+
+/// 三角形面积（2D，取叉积的绝对值的一半）。
+pub fn gm_tri_area(a: ptr, b: ptr, c: ptr) -> u64 {
+    let u: ptr = alloc(16);
+    let v: ptr = alloc(16);
+    gm_v2_sub(u, b, a);
+    gm_v2_sub(v, c, a);
+    let cr: u64 = gm_v2_cross(u, v);
+    return f64_mul(F64_HALF, f64_abs(cr));
+}
+
+fn gm_orient(a: ptr, b: ptr, c: ptr) -> u64 {
+    let u: ptr = alloc(16);
+    let v: ptr = alloc(16);
+    gm_v2_sub(u, b, a);
+    gm_v2_sub(v, c, a);
+    return gm_v2_cross(u, v);
+}
+
+/// 两条线段的**真交**。相交返回 1 并把交点写进 `out`（16 字节）；否则返回 0。
+pub fn gm_seg_intersect(a: ptr, b: ptr, c: ptr, d: ptr, out: ptr) -> u32 {
+    let o1: u64 = gm_orient(a, b, c);
+    let o2: u64 = gm_orient(a, b, d);
+    let o3: u64 = gm_orient(c, d, a);
+    let o4: u64 = gm_orient(c, d, b);
+    let s1: u32 = 0;
+    if f64_lt(o1, F64_POS_ZERO) { s1 = 1; }
+    let s2: u32 = 0;
+    if f64_lt(o2, F64_POS_ZERO) { s2 = 1; }
+    let s3: u32 = 0;
+    if f64_lt(o3, F64_POS_ZERO) { s3 = 1; }
+    let s4: u32 = 0;
+    if f64_lt(o4, F64_POS_ZERO) { s4 = 1; }
+    if s1 == s2 || s3 == s4 {
+        return 0;
+    }
+    // t = cross(c-a, d-c) / cross(b-a, d-c)
+    let ab: ptr = alloc(16);
+    let cd: ptr = alloc(16);
+    let ca: ptr = alloc(16);
+    gm_v2_sub(ab, b, a);
+    gm_v2_sub(cd, d, c);
+    gm_v2_sub(ca, c, a);
+    let den: u64 = gm_v2_cross(ab, cd);
+    if f64_eq(den, F64_POS_ZERO) {
+        return 0;
+    }
+    let t: u64 = f64_div(gm_v2_cross(ca, cd), den);
+    gm_set2(out, f64_add(gm_x(a), f64_mul(t, gm_x(ab))),
+            f64_add(gm_y(a), f64_mul(t, gm_y(ab))));
+    return 1;
+}
+
+/// 点是否在多边形内（射线法）。`pts` 是 n 个 2D 点。
+pub fn gm_point_in_poly(p: ptr, pts: ptr, n: u32) -> bool {
+    if n < 3 {
+        return false;
+    }
+    let inside: u32 = 0;
+    let j: u32 = n - 1;
+    let i: u32 = 0;
+    while i < n {
+        let xi: u64 = gm_x(ptr_add(pts, i * 16));
+        let yi: u64 = gm_y(ptr_add(pts, i * 16));
+        let xj: u64 = gm_x(ptr_add(pts, j * 16));
+        let yj: u64 = gm_y(ptr_add(pts, j * 16));
+        let px: u64 = gm_x(p);
+        let py: u64 = gm_y(p);
+        let gti: u32 = 0;
+        if f64_gt(yi, py) { gti = 1; }
+        let gtj: u32 = 0;
+        if f64_gt(yj, py) { gtj = 1; }
+        if gti != gtj {
+            let xint: u64 = f64_add(f64_div(f64_mul(f64_sub(xj, xi), f64_sub(py, yi)),
+                                            f64_sub(yj, yi)), xi);
+            if f64_lt(px, xint) {
+                inside = 1 - inside;
+            }
+        }
+        j = i;
+        i = i + 1;
+    }
+    return inside != 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_geometry_vec() -> bool {
+    let a: ptr = alloc(24);
+    let b: ptr = alloc(24);
+    let r: ptr = alloc(24);
+    gm_set3(a, F64_ONE, F64_TWO, F64_THREE);
+    gm_set3(b, 0x4010000000000000, 0x4014000000000000, 0x4018000000000000); // 4,5,6
+    if !f64_eq(gm_v3_dot(a, b), 0x4040000000000000) { // 32
+        return false;
+    }
+    gm_v3_cross(r, a, b);
+    // (2*6-3*5, 3*4-1*6, 1*5-2*4) = (-3, 6, -3)
+    return f64_eq(mem_load64(r, 0), f64conv_from_i64(0 as i64 - 3))
+        && f64_eq(mem_load64(r, 8), 0x4018000000000000)
+        && f64_eq(mem_load64(r, 16), f64conv_from_i64(0 as i64 - 3));
+}
+
+fn test_geometry_intersect() -> bool {
+    let a: ptr = alloc(16);
+    let b: ptr = alloc(16);
+    let c: ptr = alloc(16);
+    let d: ptr = alloc(16);
+    let o: ptr = alloc(16);
+    gm_set2(a, F64_POS_ZERO, F64_POS_ZERO);
+    gm_set2(b, F64_TWO, F64_TWO);
+    gm_set2(c, F64_POS_ZERO, F64_TWO);
+    gm_set2(d, F64_TWO, F64_POS_ZERO);
+    if gm_seg_intersect(a, b, c, d, o) != 1 {
+        return false;
+    }
+    return f64_eq(gm_x(o), F64_ONE) && f64_eq(gm_y(o), F64_ONE);
+}
+
+fn test_geometry_poly() -> bool {
+    // 正方形 (0,0)-(2,0)-(2,2)-(0,2)
+    let pts: ptr = alloc(64);
+    gm_set2(pts, F64_POS_ZERO, F64_POS_ZERO);
+    gm_set2(ptr_add(pts, 16), F64_TWO, F64_POS_ZERO);
+    gm_set2(ptr_add(pts, 32), F64_TWO, F64_TWO);
+    gm_set2(ptr_add(pts, 48), F64_POS_ZERO, F64_TWO);
+    let inside: ptr = alloc(16);
+    let outside: ptr = alloc(16);
+    gm_set2(inside, F64_ONE, F64_ONE);
+    gm_set2(outside, F64_THREE, F64_ONE);
+    return gm_point_in_poly(inside, pts, 4) && !gm_point_in_poly(outside, pts, 4);
+}

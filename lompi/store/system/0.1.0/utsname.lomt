@@ -1,0 +1,199 @@
+// system/utsname.lomt — `uname(2)` 的六个字段
+//
+// 为什么系统工具需要它: "我跑在什么内核上 / 这台机器叫什么 / 体系结构是哪个"
+// 是 `uname` 一条系统调用回答的三件事，而它填的是一个**六段定长 65 字节**的结构体
+// （`utsname`）。把 65 当成 64、把域名字段当成第 6 段之后还有 padding、或者按
+// 字符串长度去算段偏移 —— 三个都错，且错法不同: 第一个切掉结尾、第二个读出
+// 相邻字段的残渣、第三个在小端机器上对、换一份实现就错。
+//
+// 结构体（x86-64 Linux）: 六段各 65 字节，依次
+//   sysname(0) | nodename(65) | release(130) | version(195) | machine(260) |
+//   domainname(325) —— 共 390 字节，每段都是一个 NUL 结尾的 C 串。
+//
+// 不做: sethostname/uname 之外的设置接口、把 `release` 解析成版本三元组
+// （那是另一个模块的事）、跨平台字段（这是 Linux 的 `struct utsname`）。
+//
+// 命名: 公开 un_*, 内部 unq_*。自检 test_utsname_*。
+
+module utsname
+
+/// 每段的字节数 —— 65，不是 64。
+pub const UN_FIELD_LEN: u32 = 65;
+pub const UN_SYSNAME: u32 = 0;
+pub const UN_NODENAME: u32 = 1;
+pub const UN_RELEASE: u32 = 2;
+pub const UN_VERSION: u32 = 3;
+pub const UN_MACHINE: u32 = 4;
+pub const UN_DOMAINNAME: u32 = 5;
+/// 六段合起来交给内核的最小字节数。
+pub const UN_BYTES: u32 = 390;
+pub const UN_SYS_UNAME: u64 = 63;
+
+fn unq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// `uname(buf)` —— buf 至少 `UN_BYTES` 字节。成功返回 0。
+pub fn un_uname(buf: ptr) -> i64 {
+    return syscall4(UN_SYS_UNAME, buf as u64, 0, 0);
+}
+
+/// 把第 `which` 段（`UN_SYSNAME` …）拷进 `out`，返回它的长度（不含 NUL）。
+/// 段内没有 NUL（满 65 字节）时按 65 字节算。`which` 越界返回 0。
+pub fn un_field(buf: ptr, which: u32, out: ptr, cap: u32) -> u32 {
+    if which > UN_DOMAINNAME {
+        return 0;
+    }
+    let base: u32 = UN_FIELD_LEN * which;
+    let n: u32 = 0;
+    let done: u32 = 0;
+    while n < UN_FIELD_LEN && done == 0 {
+        let c: u32 = load8(buf, base + n);
+        if c == 0 {
+            done = 1;
+        } else {
+            if n < cap {
+                store8(out, n, c as u8);
+            }
+            n = n + 1;
+        }
+    }
+    return n;
+}
+
+fn unq_add(out: ptr, cap: u32, pos0: u32, src: ptr, n: u32) -> u32 {
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < n {
+        if pos < cap {
+            store8(out, pos, load8(src, i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+/// 内核名（`Linux`）。
+pub fn un_sysname(buf: ptr, out: ptr, cap: u32) -> u32 {
+    return un_field(buf, UN_SYSNAME, out, cap);
+}
+
+/// 主机名。
+pub fn un_nodename(buf: ptr, out: ptr, cap: u32) -> u32 {
+    return un_field(buf, UN_NODENAME, out, cap);
+}
+
+/// 内核版本串（`6.8.0-45-generic`）。
+pub fn un_release(buf: ptr, out: ptr, cap: u32) -> u32 {
+    return un_field(buf, UN_RELEASE, out, cap);
+}
+
+/// 构建串（带编译时间与编译器的长串）。
+pub fn un_version(buf: ptr, out: ptr, cap: u32) -> u32 {
+    return un_field(buf, UN_VERSION, out, cap);
+}
+
+/// 体系结构（`x86_64`、`aarch64`）。
+pub fn un_machine(buf: ptr, out: ptr, cap: u32) -> u32 {
+    return un_field(buf, UN_MACHINE, out, cap);
+}
+
+/// NIS 域名（多数机器是 `(none)`）。
+pub fn un_domainname(buf: ptr, out: ptr, cap: u32) -> u32 {
+    return un_field(buf, UN_DOMAINNAME, out, cap);
+}
+
+/// 拼一个 `"Linux 6.8.0 x86_64"` —— 日志头里最常见的三元组。
+pub fn un_kernel_tuple(buf: ptr, out: ptr, cap: u32) -> u32 {
+    let tmp: ptr = alloc(80);
+    let pos: u32 = 0;
+    let n1: u32 = un_field(buf, UN_SYSNAME, tmp, 80);
+    pos = unq_add(out, cap, pos, tmp, n1);
+    if n1 > 0 {
+        pos = unq_put(out, cap, pos, " ");
+    }
+    let n2: u32 = un_field(buf, UN_RELEASE, tmp, 80);
+    pos = unq_add(out, cap, pos, tmp, n2);
+    if n2 > 0 {
+        pos = unq_put(out, cap, pos, " ");
+    }
+    let n3: u32 = un_field(buf, UN_MACHINE, tmp, 80);
+    return unq_add(out, cap, pos, tmp, n3);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn unq_lit(buf: ptr, off: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(buf, off + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(buf, off + n, 0 as u8);
+    return off + n + 1;
+}
+
+fn unq_fake(buf: ptr) -> u32 {
+    store8(buf, 0, 0 as u8);
+    unq_lit(buf, UN_FIELD_LEN * UN_SYSNAME, "Linux");
+    unq_lit(buf, UN_FIELD_LEN * UN_NODENAME, "box1");
+    unq_lit(buf, UN_FIELD_LEN * UN_RELEASE, "6.8.0");
+    unq_lit(buf, UN_FIELD_LEN * UN_VERSION, "#1 SMP");
+    unq_lit(buf, UN_FIELD_LEN * UN_MACHINE, "x86_64");
+    unq_lit(buf, UN_FIELD_LEN * UN_DOMAINNAME, "(none)");
+    return UN_BYTES;
+}
+
+fn test_utsname_fields() -> bool {
+    let b: ptr = alloc(400);
+    unq_fake(b);
+    let o: ptr = alloc(80);
+    let n: u32 = un_sysname(b, o, 80);
+    if n != 5 {
+        return false;
+    }
+    return load8(o, 0) == 76 && load8(o, 4) == 120;
+}
+
+fn test_utsname_offsets_are_65() -> bool {
+    let b: ptr = alloc(400);
+    unq_fake(b);
+    let o: ptr = alloc(80);
+    let n: u32 = un_release(b, o, 80);
+    if n != 5 {
+        return false;
+    }
+    // "6.8.0"
+    return load8(o, 0) == 54 && load8(o, 1) == 46 && load8(o, 4) == 48;
+}
+
+fn test_utsname_tuple() -> bool {
+    let b: ptr = alloc(400);
+    unq_fake(b);
+    let o: ptr = alloc(64);
+    let n: u32 = un_kernel_tuple(b, o, 64);
+    let w: str = "Linux 6.8.0 x86_64";
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

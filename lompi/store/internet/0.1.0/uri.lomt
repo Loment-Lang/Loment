@@ -1,0 +1,675 @@
+// internet/uri.lomt — URI 拆解 (RFC 3986 §3) 与相对引用解析 (§5)
+//
+// 为什么需要它: std/url.lomt 只做百分号编解码与查询串取值 —— 它**不拆结构**。而"这条
+// 链接指向哪儿"要的是 scheme / authority / path / query / fragment 那一套, 以及
+// **相对引用解析** (`../g` 是相对于哪儿的绝对地址)。§5 那套 transform + merge +
+// remove_dot_segments 是最容易写错的一段: 错一处得到的是"另一个合法地址", 不会报错。
+//
+// 与 std/url.lomt 的分工 (不是重复): 那是**字符层** (编码/解码), 这是**结构层** (拆解/
+// 解析)。名字不同也是硬要求 —— `resolve_name` 在包内模块层遇到两处同名会直接报错,
+// 而 std 已经占了 `url`, 所以这一份叫 `uri`。
+//
+// 边界 (刻意划的, 不是没做完):
+//   * 纯逻辑: 不发系统调用。**零分配** —— 解析结果写进调用方给的 56 字节记录,
+//     解析出来的字符串**不拷贝**, 记录里存的是原缓冲上的**绝对偏移**。
+//   * 不认 IDN/IRI (非 ASCII 主机名要先 Punycode 成 ASCII, 那是另一件事)。
+//   * 不规范化 (不做百分号归一、不动大小写) —— 只按 RFC 的结构规则拆与拼。
+//   * 本文件不 `use` 任何模块 (理由见 ip.lomt 头)。
+//
+// 记录布局 (14 个 u32, 小端; 长度 `URI_NO` = 该分量缺席):
+//   0 scheme_off   1 scheme_len
+//   2 user_off     3 user_len
+//   4 host_off     5 host_len     (IPv6 字面量**不含**方括号)
+//   6 port         (URI_NO = 缺席; 长度 0 = 有 `?` 但为空)
+//   7 path_off     8 path_len     (path 恒在场, 可以长度为 0)
+//   9 query_off   10 query_len
+//  11 frag_off    12 frag_len
+//  13 flags        bit0 = has_authority, bit1 = host 是 IPv6 字面量
+//
+// 命名: 公开 uri_*, 内部 urip_*。自检 test_uri_*。
+// 对照物: CPython 的 `urllib.parse` (`urlsplit` / `urljoin`)。
+
+module uri
+
+/// 缺席 / 失败。
+pub const URI_NO: u32 = 4294967295;
+/// 记录字节数 (14 个 u32)。
+pub const URI_REC: u32 = 56;
+/// flags bit0。
+pub const URI_F_AUTH: u32 = 1;
+/// flags bit1。
+pub const URI_F_V6: u32 = 2;
+
+// ---------------------------------------------------------------- 记录读写
+
+fn urip_get(rec: ptr, i: u32) -> u32 {
+    let o: u32 = i * 4;
+    return load8(rec, o) | (load8(rec, o + 1) << 8) | (load8(rec, o + 2) << 16)
+         | (load8(rec, o + 3) << 24);
+}
+
+fn urip_set(rec: ptr, i: u32, v: u32) {
+    let o: u32 = i * 4;
+    store8(rec, o, v as u8);
+    store8(rec, o + 1, (v >> 8) as u8);
+    store8(rec, o + 2, (v >> 16) as u8);
+    store8(rec, o + 3, (v >> 24) as u8);
+}
+
+/// 分量编码: 0 scheme, 1 user, 2 host, 3 path, 4 query, 5 fragment。
+/// 在场返回 1 并把偏移 / 长度写进 out_off / out_len (各 4 字节); 缺席返回 0。
+pub fn uri_part(rec: ptr, which: u32, out_off: ptr, out_len: ptr) -> u32 {
+    // 分量只有 0..5。越界的 `which` 会算出记录外的槽位 —— `which = 6` 时 `lo = 13`、
+    // `lo + 1 = 14`, 而记录只有 14 个槽 (0..13), 于是读回相邻内存当长度。
+    if which > 5 {
+        return 0;
+    }
+    // 槽位不是简单的 `2*which` —— 记录里 `6` 那一格被 port 占着, 所以 path 之后各分量
+    // 往后**挪一格** (scheme/user/host 是 0/2/4, path/query/fragment 是 7/9/11)。
+    let lo: u32 = 2 * which;
+    if which > 2 {
+        lo = 2 * which + 1;
+    }
+    let off: u32 = urip_get(rec, lo);
+    let len: u32 = urip_get(rec, lo + 1);
+    urip_set(out_off, 0, off);
+    urip_set(out_len, 0, len);
+    if len == URI_NO {
+        return 0;
+    }
+    return 1;
+}
+
+/// 端口; 缺席返回 URI_NO。
+pub fn uri_port(rec: ptr) -> u32 {
+    return urip_get(rec, 6);
+}
+
+/// 有 `//authority` 吗。
+pub fn uri_has_authority(rec: ptr) -> bool {
+    return (urip_get(rec, 13) & URI_F_AUTH) == URI_F_AUTH;
+}
+
+// ---------------------------------------------------------------- 小工具
+
+fn urip_putc(out: ptr, w: u32, c: u32) -> u32 {
+    store8(out, w, c as u8);
+    return w + 1;
+}
+
+fn urip_copy(out: ptr, w: u32, src: ptr, so: u32, sn: u32) -> u32 {
+    let i: u32 = 0;
+    while i < sn {
+        store8(out, w + i, load8(src, so + i) as u8);
+        i = i + 1;
+    }
+    return w + sn;
+}
+
+/// buf[off+r ..] 是否以字面量 s 开头 (且不越过 lim)。
+fn urip_starts(buf: ptr, off: u32, r: u32, lim: u32, s: str) -> bool {
+    let k: u32 = str_len(s);
+    if r + k > lim {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < k {
+        if load8(buf, off + r + i) != str_byte(s, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 输出里的最后一个 `/` 的位置 (去掉最后一段与它前面的 `/`); 没有 `/` 就清空。
+fn urip_pop(buf: ptr, off: u32, w: u32) -> u32 {
+    let last: u32 = URI_NO;
+    let i: u32 = 0;
+    while i < w {
+        if load8(buf, off + i) == 47 {
+            last = i;
+        }
+        i = i + 1;
+    }
+    if last == URI_NO {
+        return 0;
+    }
+    return last;
+}
+
+/// 写十进制; 返回写的字符数。
+fn urip_dec(out: ptr, o: u32, v: u32) -> u32 {
+    let n: u32 = 1;
+    let t: u32 = v;
+    while t >= 10 {
+        t = t / 10;
+        n = n + 1;
+    }
+    let x: u32 = v;
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + (n - 1 - i), (48 + x % 10) as u8);
+        x = x / 10;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 区域里最后一个 `/` 的相对位置; 没有返回 URI_NO。
+fn urip_last_slash(d: ptr, o: u32, n: u32) -> u32 {
+    let last: u32 = URI_NO;
+    let i: u32 = 0;
+    while i < n {
+        if load8(d, o + i) == 47 {
+            last = i;
+        }
+        i = i + 1;
+    }
+    return last;
+}
+
+// ---------------------------------------------------------------- 拆解
+
+fn urip_scheme_ok(d: ptr, o: u32, n: u32) -> bool {
+    if n == 0 {
+        return false;
+    }
+    let c: u32 = load8(d, o);
+    if !((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+        return false;
+    }
+    let i: u32 = 1;
+    while i < n {
+        let x: u32 = load8(d, o + i);
+        let ok: bool = (x >= 65 && x <= 90) || (x >= 97 && x <= 122)
+                    || (x >= 48 && x <= 57) || x == 43 || x == 45 || x == 46;
+        if !ok {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 拆解 `d[o, o+n)` 写进 rec (URI_REC 字节)。成功返回 1, 非法返回 0。
+pub fn uri_parse(d: ptr, o: u32, n: u32, rec: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 14 {
+        urip_set(rec, i, 0);
+        i = i + 1;
+    }
+    urip_set(rec, 1, URI_NO);
+    urip_set(rec, 3, URI_NO);
+    urip_set(rec, 5, URI_NO);
+    urip_set(rec, 6, URI_NO);
+    urip_set(rec, 7, o);
+    urip_set(rec, 9, URI_NO);
+    urip_set(rec, 10, URI_NO);
+    urip_set(rec, 11, URI_NO);
+    urip_set(rec, 12, URI_NO);
+    // scheme: 第一个 ':' 之前, 且它之前不能出现 '/', '?', '#'
+    let colon: u32 = URI_NO;
+    let k: u32 = 0;
+    while k < n {
+        let c: u32 = load8(d, o + k);
+        if c == 58 {
+            colon = k;
+            k = n;
+        } else if c == 47 || c == 63 || c == 35 {
+            k = n;
+        } else {
+            k = k + 1;
+        }
+    }
+    let p: u32 = 0;
+    let has_scheme: u32 = 0;
+    if colon != URI_NO && urip_scheme_ok(d, o, colon) {
+        urip_set(rec, 0, o);
+        urip_set(rec, 1, colon);
+        p = colon + 1;
+        has_scheme = 1;
+    }
+    // authority
+    let after: u32 = p;
+    if p + 1 < n && load8(d, o + p) == 47 && load8(d, o + p + 1) == 47 {
+        let a0: u32 = p + 2;
+        let a1: u32 = a0;
+        while a1 < n && load8(d, o + a1) != 47 && load8(d, o + a1) != 63
+                && load8(d, o + a1) != 35 {
+            a1 = a1 + 1;
+        }
+        let at: u32 = URI_NO;
+        let t: u32 = a0;
+        while t < a1 {
+            if load8(d, o + t) == 64 {
+                at = t;
+            }
+            t = t + 1;
+        }
+        urip_set(rec, 13, URI_F_AUTH);
+        let h0: u32 = a0;
+        if at != URI_NO {
+            urip_set(rec, 2, a0);
+            urip_set(rec, 3, at - a0);
+            h0 = at + 1;
+        }
+        let h1: u32 = h0;
+        if h0 < a1 && load8(d, o + h0) == 91 {
+            let c2: u32 = h0;
+            while c2 < a1 && load8(d, o + c2) != 93 {
+                c2 = c2 + 1;
+            }
+            if c2 >= a1 {
+                return 0;
+            }
+            urip_set(rec, 4, h0 + 1);
+            urip_set(rec, 5, c2 - h0 - 1);
+            urip_set(rec, 13, URI_F_AUTH | URI_F_V6);
+            h1 = c2 + 1;
+            // `]` 之后只允许 `:port` 或直接结束。原来不查，于是 `http://[::1]junk/x`
+            // 把 `junk` 静默吃掉、还报成功 —— 两个程序会对同一条 URI 有不同看法 (#680)。
+            if h1 < a1 && load8(d, o + h1) != 58 {
+                return 0;
+            }
+        } else {
+            let c3: u32 = h0;
+            while c3 < a1 && load8(d, o + c3) != 58 {
+                // 方括号只属于 IP-literal；非括号分支里出现 `[`/`]` 不是 reg-name 的字符
+                // (`http://a[b]/` 被 CPython 拒, `#680`)。
+                let hb: u32 = load8(d, o + c3);
+                if hb == 91 || hb == 93 {
+                    return 0;
+                }
+                c3 = c3 + 1;
+            }
+            urip_set(rec, 4, h0);
+            urip_set(rec, 5, c3 - h0);
+            h1 = c3;
+        }
+        if h1 < a1 && load8(d, o + h1) == 58 {
+            // RFC 3986 `port = *DIGIT`：**语法上没有范围**（#687）。65535 的界属于
+            // 拨号那一侧；这里只要求"全是数字"。装不进 u32 时按缺席处理（URI_NO）——
+            // 记录是 u32，回绕是更坏的一种答案。
+            let ps: u32 = h1 + 1;
+            let pv: u32 = 0;
+            let over: u32 = 0;
+            let q: u32 = ps;
+            while q < a1 {
+                let c4: u32 = load8(d, o + q);
+                if c4 < 48 || c4 > 57 {
+                    return 0;
+                }
+                if over == 0 {
+                    let dv: u32 = c4 - 48;
+                    if pv > 429496729 || (pv == 429496729 && dv > 5) {
+                        over = 1;
+                    } else {
+                        pv = pv * 10 + dv;
+                    }
+                }
+                q = q + 1;
+            }
+            if q > ps && over == 0 {
+                urip_set(rec, 6, pv);
+            }
+        }
+        after = a1;
+    }
+    // path / query / fragment
+    let e: u32 = after;
+    while e < n && load8(d, o + e) != 63 && load8(d, o + e) != 35 {
+        e = e + 1;
+    }
+    urip_set(rec, 7, after);
+    urip_set(rec, 8, e - after);
+    if e < n && load8(d, o + e) == 63 {
+        let q0: u32 = e + 1;
+        let q1: u32 = q0;
+        while q1 < n && load8(d, o + q1) != 35 {
+            q1 = q1 + 1;
+        }
+        urip_set(rec, 9, q0);
+        urip_set(rec, 10, q1 - q0);
+        e = q1;
+    }
+    if e < n && load8(d, o + e) == 35 {
+        urip_set(rec, 11, e + 1);
+        urip_set(rec, 12, n - e - 1);
+    }
+    has_scheme = has_scheme + 0;
+    return 1;
+}
+
+// ---------------------------------------------------------------- 去点段
+
+/// 按 RFC 3986 §5.2.4 就地压掉 `.` / `..` 段。源与目标同一块缓冲的 buf[off, off+n):
+/// 输出恒不长于输入, 且读游标始终不小于写游标, 所以就地安全。返回压缩后的长度。
+pub fn uri_remove_dot(buf: ptr, off: u32, n: u32) -> u32 {
+    let r: u32 = 0;
+    let w: u32 = 0;
+    let lim: u32 = n;
+    while r < lim {
+        if urip_starts(buf, off, r, lim, "../") {
+            r = r + 3;
+        } else if urip_starts(buf, off, r, lim, "./") {
+            r = r + 2;
+        } else if urip_starts(buf, off, r, lim, "/./") {
+            r = r + 2;
+        } else if urip_starts(buf, off, r, lim, "/.") && r + 2 == lim {
+            lim = r + 1;
+        } else if urip_starts(buf, off, r, lim, "/../") {
+            r = r + 3;
+            w = urip_pop(buf, off, w);
+        } else if urip_starts(buf, off, r, lim, "/..") && r + 3 == lim {
+            lim = r + 1;
+            w = urip_pop(buf, off, w);
+        } else if urip_starts(buf, off, r, lim, ".") && r + 1 == lim {
+            r = r + 1;
+        } else if urip_starts(buf, off, r, lim, "..") && r + 2 == lim {
+            r = r + 2;
+        } else {
+            if load8(buf, off + r) == 47 {
+                store8(buf, off + w, 47 as u8);
+                w = w + 1;
+                r = r + 1;
+            }
+            while r < lim && load8(buf, off + r) != 47 {
+                store8(buf, off + w, load8(buf, off + r) as u8);
+                w = w + 1;
+                r = r + 1;
+            }
+        }
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 相对引用解析
+
+/// RFC 3986 §5.2.2: 把引用 (原文本 `rd`, 记录 `rrec`) 相对基准 (原文本 `bd`, 记录
+/// `brec`) 解析成绝对 URI, 写进 out (上限 cap); 返回写的字节数, 放不下或非法返回 URI_NO。
+///
+/// 用法是**两步**: 两边都先 `uri_parse` 成记录, 再调这里。记录里是各自原缓冲上的
+/// 绝对偏移, 所以 `bd`/`brec` 与 `rd`/`rrec` 必须配对。
+pub fn uri_resolve(bd: ptr, brec: ptr, rd: ptr, rrec: ptr, out: ptr, cap: u32) -> u32 {
+    let rs_len: u32 = urip_get(rrec, 1);
+    let r_auth: u32 = urip_get(rrec, 13) & URI_F_AUTH;
+    let r_path_off: u32 = urip_get(rrec, 7);
+    let r_path_len: u32 = urip_get(rrec, 8);
+    let r_q_len: u32 = urip_get(rrec, 10);
+    let has_rscheme: u32 = 0;
+    if rs_len != URI_NO {
+        has_rscheme = 1;
+    }
+    // 目标分量 (只有 query 与 path 要挑来源; scheme/authority 由下面的分支决定)
+    let t_q_len: u32 = URI_NO;
+    let t_auth: u32 = 0;
+    if has_rscheme == 1 || r_auth != 0 {
+        t_q_len = r_q_len;
+        if r_auth != 0 {
+            t_auth = URI_F_AUTH;
+        }
+    } else if r_path_len == 0 {
+        t_auth = urip_get(brec, 13) & URI_F_AUTH;
+        if r_q_len == URI_NO {
+            t_q_len = urip_get(brec, 10);
+        } else {
+            t_q_len = r_q_len;
+        }
+    } else {
+        t_auth = urip_get(brec, 13) & URI_F_AUTH;
+        t_q_len = r_q_len;
+    }
+    let w: u32 = 0;
+    // scheme ":"
+    if has_rscheme == 1 || urip_get(brec, 1) != URI_NO {
+        let s_src: ptr = bd;
+        let s_off: u32 = urip_get(brec, 0);
+        let s_len: u32 = urip_get(brec, 1);
+        if has_rscheme == 1 {
+            s_src = rd;
+            s_off = urip_get(rrec, 0);
+            s_len = urip_get(rrec, 1);
+        }
+        if w + s_len + 1 > cap {
+            return URI_NO;
+        }
+        w = urip_copy(out, w, s_src, s_off, s_len);
+        w = urip_putc(out, w, 58);
+    }
+    // "//" + authority
+    if t_auth != 0 {
+        let a_src: ptr = bd;
+        let a_rec: ptr = brec;
+        if has_rscheme == 1 || r_auth != 0 {
+            a_src = rd;
+            a_rec = rrec;
+        }
+        let a0: u32 = urip_get(a_rec, 2);
+        let al: u32 = urip_get(a_rec, 3);
+        let h0: u32 = urip_get(a_rec, 4);
+        let hl: u32 = urip_get(a_rec, 5);
+        let pt: u32 = urip_get(a_rec, 6);
+        let v6: u32 = urip_get(a_rec, 13) & URI_F_V6;
+        if w + 2 > cap {
+            return URI_NO;
+        }
+        w = urip_putc(out, w, 47);
+        w = urip_putc(out, w, 47);
+        if al != URI_NO {
+            if w + al + 1 > cap {
+                return URI_NO;
+            }
+            w = urip_copy(out, w, a_src, a0, al);
+            w = urip_putc(out, w, 64);
+        }
+        if hl != URI_NO {
+            if w + hl + 2 > cap {
+                return URI_NO;
+            }
+            if v6 != 0 {
+                w = urip_putc(out, w, 91);
+                w = urip_copy(out, w, a_src, h0, hl);
+                w = urip_putc(out, w, 93);
+            } else {
+                w = urip_copy(out, w, a_src, h0, hl);
+            }
+        }
+        if pt != URI_NO {
+            if w + 1 + 5 > cap {
+                return URI_NO;
+            }
+            w = urip_putc(out, w, 58);
+            w = w + urip_dec(out, w, pt);
+        }
+    }
+    // path
+    let pstart: u32 = w;
+    if has_rscheme == 1 || r_auth != 0 {
+        if w + r_path_len > cap {
+            return URI_NO;
+        }
+        w = urip_copy(out, w, rd, r_path_off, r_path_len);
+    } else if r_path_len == 0 {
+        let b_off: u32 = urip_get(brec, 7);
+        let b_len: u32 = urip_get(brec, 8);
+        if w + b_len > cap {
+            return URI_NO;
+        }
+        w = urip_copy(out, w, bd, b_off, b_len);
+    } else if load8(rd, r_path_off) == 47 {
+        if w + r_path_len > cap {
+            return URI_NO;
+        }
+        w = urip_copy(out, w, rd, r_path_off, r_path_len);
+    } else {
+        // merge (§5.2.3)
+        let b_off: u32 = urip_get(brec, 7);
+        let b_len: u32 = urip_get(brec, 8);
+        let need: u32 = 0;
+        if t_auth != 0 && b_len == 0 {
+            need = 1;
+        } else {
+            let cut: u32 = urip_last_slash(bd, b_off, b_len);
+            if cut != URI_NO {
+                need = cut + 1;
+            }
+        }
+        if w + need + r_path_len > cap {
+            return URI_NO;
+        }
+        if t_auth != 0 && b_len == 0 {
+            w = urip_putc(out, w, 47);
+        } else {
+            let cut2: u32 = urip_last_slash(bd, b_off, b_len);
+            let take: u32 = 0;
+            if cut2 != URI_NO {
+                take = cut2 + 1;
+            }
+            w = urip_copy(out, w, bd, b_off, take);
+        }
+        w = urip_copy(out, w, rd, r_path_off, r_path_len);
+    }
+    let plen: u32 = uri_remove_dot(out, pstart, w - pstart);
+    w = pstart + plen;
+    // query
+    if t_q_len != URI_NO {
+        let q_src: ptr = rd;
+        let q_rec: ptr = rrec;
+        if r_q_len == URI_NO {
+            q_src = bd;
+            q_rec = brec;
+        }
+        if w + 1 + t_q_len > cap {
+            return URI_NO;
+        }
+        w = urip_putc(out, w, 63);
+        w = urip_copy(out, w, q_src, urip_get(q_rec, 9), t_q_len);
+    }
+    // fragment (恒取 ref 的)
+    let f_len: u32 = urip_get(rrec, 12);
+    if f_len != URI_NO {
+        if w + 1 + f_len > cap {
+            return URI_NO;
+        }
+        w = urip_putc(out, w, 35);
+        w = urip_copy(out, w, rd, urip_get(rrec, 11), f_len);
+    }
+    return w;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn urip_lit(out: ptr, o: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(out, o + i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn urip_is(out: ptr, n: u32, s: str) -> bool {
+    if n != str_len(s) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(out, i) != str_byte(s, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_uri_split_basic() -> bool {
+    let s: ptr = alloc(64);
+    let rec: ptr = alloc(URI_REC);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = urip_lit(s, 0, "http://user@host:8080/a/b?q=1#f");
+    let ok: u32 = uri_parse(s, 0, n, rec);
+    let has_s: u32 = uri_part(rec, 0, oo, ol);
+    let sl: u32 = urip_get(ol, 0);
+    let has_u: u32 = uri_part(rec, 1, oo, ol);
+    let ul: u32 = urip_get(ol, 0);
+    let has_h: u32 = uri_part(rec, 2, oo, ol);
+    let hl: u32 = urip_get(ol, 0);
+    let has_q: u32 = uri_part(rec, 4, oo, ol);
+    let has_f: u32 = uri_part(rec, 5, oo, ol);
+    return ok == 1 && has_s == 1 && sl == 4 && has_u == 1 && ul == 4
+        && has_h == 1 && hl == 4 && uri_port(rec) == 8080
+        && has_q == 1 && has_f == 1 && uri_has_authority(rec);
+}
+
+fn test_uri_relative_has_no_scheme() -> bool {
+    let s: ptr = alloc(64);
+    let rec: ptr = alloc(URI_REC);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = urip_lit(s, 0, "g");
+    let ok: u32 = uri_parse(s, 0, n, rec);
+    return ok == 1 && uri_part(rec, 0, oo, ol) == 0 && uri_part(rec, 4, oo, ol) == 0;
+}
+
+fn test_uri_v6_host() -> bool {
+    let s: ptr = alloc(64);
+    let rec: ptr = alloc(URI_REC);
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let n: u32 = urip_lit(s, 0, "http://[::1]:80/x");
+    let ok: u32 = uri_parse(s, 0, n, rec);
+    uri_part(rec, 2, oo, ol);
+    return ok == 1 && urip_get(ol, 0) == 3 && uri_port(rec) == 80;
+}
+
+fn test_uri_resolve_parent() -> bool {
+    let b: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    let out: ptr = alloc(128);
+    let brec: ptr = alloc(URI_REC);
+    let rrec: ptr = alloc(URI_REC);
+    let bn: u32 = urip_lit(b, 0, "http://a/b/c/d;p?q");
+    let rn: u32 = urip_lit(r, 0, "../g");
+    uri_parse(b, 0, bn, brec);
+    uri_parse(r, 0, rn, rrec);
+    let m: u32 = uri_resolve(b, brec, r, rrec, out, 128);
+    return urip_is(out, m, "http://a/b/g");
+}
+
+fn test_uri_resolve_abs_path() -> bool {
+    let b: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    let out: ptr = alloc(128);
+    let brec: ptr = alloc(URI_REC);
+    let rrec: ptr = alloc(URI_REC);
+    let bn: u32 = urip_lit(b, 0, "http://a/b/c/d;p?q");
+    let rn: u32 = urip_lit(r, 0, "/x/y");
+    uri_parse(b, 0, bn, brec);
+    uri_parse(r, 0, rn, rrec);
+    let m: u32 = uri_resolve(b, brec, r, rrec, out, 128);
+    return urip_is(out, m, "http://a/x/y");
+}
+
+fn test_uri_resolve_keeps_base_query() -> bool {
+    let b: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    let out: ptr = alloc(128);
+    let brec: ptr = alloc(URI_REC);
+    let rrec: ptr = alloc(URI_REC);
+    let bn: u32 = urip_lit(b, 0, "http://a/b/c/d;p?q");
+    let rn: u32 = urip_lit(r, 0, "");
+    uri_parse(b, 0, bn, brec);
+    uri_parse(r, 0, rn, rrec);
+    let m: u32 = uri_resolve(b, brec, r, rrec, out, 128);
+    return urip_is(out, m, "http://a/b/c/d;p?q");
+}
+
+fn test_uri_remove_dot_only() -> bool {
+    let b: ptr = alloc(32);
+    let n: u32 = urip_lit(b, 0, "/a/b/../c/./d");
+    let m: u32 = uri_remove_dot(b, 0, n);
+    return urip_is(b, m, "/a/c/d");
+}

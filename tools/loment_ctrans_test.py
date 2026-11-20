@@ -43,6 +43,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import cpptrans    # noqa: E402  (共享核的四门之一, 见 test_bitwise_not_is_loud_*)
 import cstrans     # noqa: E402
 import ctrans      # noqa: E402
@@ -55,6 +56,13 @@ import potato_from  # noqa: E402
 import trans_core  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 EX = ROOT / "loment" / "ctrans"
 
 #: sample.c 的期望退出码：gcd(48,18)=6、classify(0)=0、score(100)=73
@@ -84,7 +92,17 @@ def _coerce_expected() -> int:
         b -= 1
     xorv = a ^ b          # b 已经是 0 了
     shifted = (a << 2) | (b >> 1)
-    return (x + y + z + w + xorv + shifted) % 256
+    # `cmp_chain(1, 2, 3)` —— 投影**当左操作数**那一格（照 C 语义另写一遍）：
+    #   (1 < 2) = 1 ⇒ p = (1 < 3) = 1、q = (1 <= 3) = 1、r = (1 << 1) = 2
+    #                 s = (0 >> 1) = 0（对照：`>` / `>>` 那侧不带括号也是对的）
+    #   ⇒ 1*8 + 1*4 + 2*2 + 0 = 16
+    ca, cb, cc = 1, 2, 3
+    chain = (int(ca < cb) < cc) * 8 + (int(ca < cb) <= cc) * 4 \
+        + ((int(ca < cb)) << 1) * 2 + ((int(ca > cb)) >> 1)
+    # **有符号那一面**（照 C 语义手推，不抄 C 的结果）：
+    #   `(0 - 1) < 0` 是**真**（1）—— 有符号比较；无符号的话 `-1` 是个大正数，为假
+    sc = int((0 - 1) < 0)
+    return (x + y + z + w + xorv + shifted + chain + sc * 4) % 256
 
 
 def _scoping_expected() -> int:
@@ -179,6 +197,55 @@ def _numeric_expected() -> int:
     return total % 256
 
 
+def _widths_expected() -> int:
+    """`loment/ctrans/widths.c` 的独立算法（照 C 的**宽度规则**手推，不抄 C 的输出）。
+
+    这一份专门混用几种整数宽度，所以推的时候必须**把每一档显式掩码**，对上的才是
+    C 的规则而不是"照着译文反推"：
+
+      * `u32` 是 32 位无符号 —— `(-1)` 收进来是 `4294967295`
+      * `int` 收下一个 `u32` / `i64` 是**按 32 位截断再当有符号看**
+      * `long` 的加宽是**符号扩展**（所以 `-1` 还是 `-1`）
+
+    两侧一起错的典型症状是"译文与 clang 都答同一个数"，所以每一个子结论各推一遍、
+    最后按 main 里的位权凑起来（与 `_coerce_expected` 同一个手法）。
+    """
+    def u32(v: int) -> int:
+        return v & 0xFFFFFFFF
+
+    def i32(v: int) -> int:
+        v &= 0xFFFFFFFF
+        return v - 2 ** 32 if v >= 2 ** 31 else v
+
+    mixed_cmp = int(u32(-1) > 0)                      # `(unsigned)a > b`，a = -1
+    mixed_add = int(u32(u32(-1) + 1) == 0)            # `-1 + 1u` 在 32 位回绕成 0
+    long_cmp = int((1 + 2147483647) > 0)              # 加法与比较都在 64 位
+    narrow_ret = int(i32(u32(-1)) == -1)              # 实参转 u32、返回值转 i32
+    widen_arg = int(u32(-1) > 100)                    # 收进来的 -1 是 4294967295
+    sink_ok = int(i32(-1) == -1) + int(i32(5) == 5)   # i64 -> i32、u32 -> i32
+    return (mixed_cmp * 1 + mixed_add * 2 + long_cmp * 4
+            + narrow_ret * 8 + widen_arg * 16 + sink_ok * 32) % 256
+
+
+def _blockscope_expected() -> int:
+    """`loment/ctrans/blockscope.c` 的独立算法（照 C 的**块作用域**手推）。
+
+    这一份的四段各自对应本语言**没有**块作用域这件事的一条后果（见 `Emitter.block`）：
+
+      * `if_shadow(1)` / `while_shadow()` —— 体里那句赋值改的是**体里那个** x，
+        出了块就没了，函数层那个还是初值 1；
+      * `for_shadow()` —— 三轮各加 **9**（体里那个 `i = 9`），步进改的是循环变量；
+      * `redecl_ok(1)` —— 函数层那句 `int y = 2` **后来居上**（两处作用域不同，
+        在 C 里合法）⇒ 2。
+    """
+    if_shadow = 1
+    for_shadow = 9 * 3
+    while_shadow = 1
+    redecl_ok = 2
+    return (if_shadow * 1 + int(for_shadow == 27) * 2
+            + while_shadow * 4 + redecl_ok * 8) % 256
+
+
 #: 语料表：`(文件名, 期望退出码)`。两边都真编真跑，各自的数还要与这里对一次 ——
 #: 否则"翻译器与 clang 一起错成同一副样子"会被当成通过。
 CORPUS = [
@@ -186,6 +253,8 @@ CORPUS = [
     ("coerce.c", _coerce_expected()),
     ("scoping.c", _scoping_expected()),
     ("numeric.c", _numeric_expected()),
+    ("widths.c", _widths_expected()),
+    ("blockscope.c", _blockscope_expected()),
 ]
 
 TESTS: list = []
@@ -205,23 +274,35 @@ def _clang() -> str | None:
 
 
 def _wsl() -> bool:
+    """能不能跑 Linux ELF：**Linux 上原生跑**，Windows 上经 WSL（`#371` / `#382`）。
+
+    原先只问 `shutil.which("wsl")` —— Linux runner 上没有那个二进制，于是这一族判据
+    在 CI 上**一条都不跑**，只留下一条"跳过而没登记"的预算红。Linux 上两条腿本来就
+    在（clang 在镜像里，ELF 直接执行），所以那里直接回 `True`。
+    """
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
 
 
 def _wsl_path(p: Path) -> str:
+    # Linux（CI 的 runner）上 `_WSLCMD` 是空的，路径就是它本身 —— 不要再套 `/mnt/<盘>`，
+    # 那会把 `/tmp/x` 变成 `/mnt//tmp/x`（`#382` 之后判据在 Linux 上原生跑）。
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
 def _run(exe: Path) -> int:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     return int(r.stdout.strip() or -1)
 
@@ -303,6 +384,225 @@ def test_translation_runs_same_as_clang():
             assert l_rc == c_rc, (
                 f"{name}: **翻译出来的 Loment 与 clang 编的 C 结果不同**: {l_rc} != {c_rc}")
             print(f"      {name}: clang -> {c_rc}，翻译成 Loment -> {l_rc}（相等）")
+
+
+#: 每条都是某个 issue 的**最小复现**（`#120` / `#123` / `#125` / `#131` / `#133`）。
+#: 两边真编真跑再与一个**推出来的**退出码对一次 —— 只比"两边相等"的话，
+#: 翻译器与 clang 一起错成同一副样子也会被放过去。
+_ISSUE_REPROS = [
+    # #120：块里那个 x 出了块就没了（C 给 1；不保块作用域时给 2）
+    ("120-if", "int f(int c) { int x = 1; if (c) { int x = 2; } return x; }\n"
+               "int main() { return f(1); }\n", 1),
+    ("120-while", "int f() { int x = 1; int i = 0; while (i < 1) {"
+                  " int x = 5; i = i + 1; } return x; }\n"
+                  "int main() { return f(); }\n", 1),
+    # #123：`int` 与 `unsigned` 见面时按 C 的寻常算术转换提升（`-1` 变 4294967295）
+    ("123-cmp", "int main() { int a = -1; unsigned b = 0;"
+                " if (a > b) { return 7; } return 8; }\n", 7),
+    ("123-arith", "int main() { int a = -1; unsigned b = 0;"
+                  " if (a + b > 100) return 7; return 8; }\n", 7),
+    # #125：返回位置的隐式整型转换（u32 -> i32）
+    ("125-ret", "int f(unsigned int v) { return v; }\n"
+                "int main() { return f(7); }\n", 7),
+    # #131：负字面量 / 减法 / 移位 / -2^31 的比较都是**有符号**的
+    ("131-lit", "int main(void) { return (-1 < 0); }\n", 1),
+    ("131-sub", "int main(void) { return ((0 - 1) < 0); }\n", 1),
+    ("131-shift", "int main(void) { return ((1 << 31) < 0); }\n", 1),
+    ("131-min", "int main(void) { return ((-2147483648) < 0); }\n", 1),
+    # #133：`int` + `long` 的加法与**随后的比较**都提升到 64 位
+    ("133-long", "int main(void) { int x = 1; long y = 2147483647;"
+                 " return (x + y > 0); }\n", 1),
+]
+
+
+#: `#356` 的差分判据用的两只入口：**同一个 C 函数**，两边各写一个"打印一个字节 +
+#: 退出码"的入口，于是 stdout 字节与退出码都能逐字节比。字节 = 32 + (v & 63)，
+#: 避开 `_run` 那条"stdout 就是退出码"的解析。
+_C_ENTRY_IO = """
+static void _loment_exit(long code) {
+    __asm__ volatile("syscall" : : "a"(60L), "D"(code) : "rcx", "r11", "memory");
+}
+static void _loment_put(long v) {
+    char b = (char)(32 + (v & 63));
+    __asm__ volatile("syscall" : : "a"(1L), "D"(1L), "S"(&b), "d"(1L)
+                     : "rcx", "r11", "memory");
+}
+void _start(void) {
+    long v = main();
+    _loment_put(v);
+    _loment_exit(v & 255);
+}
+"""
+
+_L_ENTRY_IO = """
+fn _start() {
+    let v: i32 = main();
+    let buf: ptr = alloc(1);
+    store8(buf, 0, (32 + ((v as u32) % 64)) as u8);
+    syscall4(1, 1, buf as u64, 1);
+    syscall4(60, ((v as u32) % 256) as u64, 0, 0);
+}
+"""
+
+
+def _build_c_io(td: Path, src: str) -> Path:
+    (td / "c_io.c").write_text(src + _C_ENTRY_IO, encoding="utf-8", newline="\n")
+    exe = td / "c_io.bin"
+    r = subprocess.run(
+        [_clang(), "--target=x86_64-unknown-linux-gnu", "-O1",
+         "-ffreestanding", "-nostdlib", "-fno-stack-protector",
+         "-o", str(exe), str(td / "c_io.c")],
+        capture_output=True, text=True, shell=False)
+    assert r.returncode == 0, f"C 编译失败: {r.stderr[-400:]}"
+    return exe
+
+
+def _build_loment_io(td: Path, doc: dict) -> Path:
+    text, _skipped = lomt_from.emit_lomt(doc, impl=True)
+    # 译文自己可能已经写了 `choose runtime`（用到分配时前端会加）；没有就补一行 ——
+    # 入口那只 `alloc(1)` 需要它，而**同一维写两次**会被拒（这一步正是判据的一部分）。
+    if "choose runtime" not in text:
+        head, sep, rest = text.partition("\n")
+        text = head + "\n\nchoose runtime\n" + (sep + rest if sep else "")
+    p = td / "l_io.lomt"
+    p.write_text(text + _L_ENTRY_IO, encoding="utf-8", newline="\n")
+    mod = lomentc.load(p)
+    deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"译文检查不过: {errs[:3]}"
+    blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+    exe = td / "l_io.bin"
+    exe.write_bytes(blob)
+    return exe
+
+
+def _run_io(exe: Path) -> tuple[int, bytes]:
+    """跑一次，返回 (退出码, stdout 字节)。stdout 是**原始字节** —— 判据比的正是它。"""
+    r = subprocess.run(
+        [*_WSLCMD, "bash", "-lc",
+         f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n \";$?\""],
+        capture_output=True, timeout=300, shell=False)
+    out = r.stdout
+    payload, _, rc = out.rpartition(b";")
+    return int(rc.strip() or -1), payload
+
+
+@test
+def test_c_differential_harness_compares_stdout_and_exit_code():
+    """**同一份 `.c`：`cc` 与翻译器各跑一遍，stdout 字节 + 退出码都要逐字节相同**（`#356`）。
+
+    这是 C 面缺的那条判据：原先逐条 repro 只比**退出码**（`_run`），所以"数算对了、
+    但写出去的字节不对"这一类看不见。这里给两边各配一只 **打印一个字节**的入口
+    （`_C_ENTRY_IO` / `_L_ENTRY_IO`），于是同一条缺陷形状在两条链上都必须给出同一串
+    字节 —— 包括 `#120` 块作用域、`#123` 混用有无符号、`#125` 整数转换、`#131` 负字面量
+    比较、`#133` int/long 的求值次序。
+
+    没有 clang/WSL 时跳过（CI 的 Linux runner 上两条腿都在）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        for label, src, want in _ISSUE_REPROS:
+            td = Path(t) / label.replace("-", "_")
+            td.mkdir()
+            doc, rep = potato_from.from_c(src, label + ".c", "strict")
+            assert not rep.skipped, (label, rep.skipped[:3])
+            c_rc, c_out = _run_io(_build_c_io(td, src))
+            l_rc, l_out = _run_io(_build_loment_io(td, doc))
+            assert (l_rc, l_out) == (c_rc, c_out), (
+                f"{label}: cc=({c_rc}, {c_out!r}) 译文=({l_rc}, {l_out!r}) —— "
+                f"stdout 或退出码不同（记录值是 {want}）")
+            print(f"      {label}: stdout={c_out!r} rc={c_rc}（两条链逐字节相同）")
+
+
+@test
+def test_issue_repros_run_like_clang():
+    """`#120` / `#123` / `#125` / `#131` / `#133` 的最小复现，**两边跑出来的数一样**。
+
+    这几条在 `widths.c` / `blockscope.c` 两份语料里已有覆盖，但语料写的是"一个面"；
+    这里逐条放的是**issue 正文里那段最小程序** —— 将来谁把某条修回去，失败信息里能
+    直接看到 issue 号，而不是"某份 60 行的语料差了一个数"。
+
+    `#132`（超 32 位字面量）不在这里：它现在的答案是**拒**，由
+    `test_comparison_operands_are_pinned_to_a_signed_width` 钉住。
+    `#121`（`use` 被静默丢）在 `loment_multisyntax_test` 里（转写期就报出来）。
+    """
+    # 期望值 `want` 是 clang 那边**记录下来的**（开发时逐条跑出来的）。这条判据要在
+    # CI 上跑（新增跳过是禁区，`#418`）：那里没有 clang，所以只跑译文那一侧，与记录值比。
+    # 有 clang 时再多一比 —— C 侧现在仍然是这个数。
+    have_clang = _clang() is not None and _wsl()
+    with tempfile.TemporaryDirectory() as t:
+        for label, src, want in _ISSUE_REPROS:
+            td = Path(t) / label.replace("-", "_")
+            td.mkdir()
+            doc, rep = potato_from.from_c(src, label + ".c", "strict")
+            assert not rep.skipped, (label, rep.skipped[:3])
+            l_rc = _run(_build_loment(td, doc))
+            assert l_rc == want, f"{label}: 译文算出来 {l_rc}，clang 记录的是 {want}"
+            if have_clang:
+                c_rc = _run(_build_c(td, src))
+                assert c_rc == want, f"{label}: clang 那边现在也不对: {c_rc} != {want}"
+            print(f"      {label}: 翻译成 Loment -> {l_rc}（期望 {want}）")
+
+
+@test
+def test_shadowing_declaration_reads_the_outer_name_in_its_initializer():
+    """**遮蔽 + 初值引用被遮蔽的那个名**（`#234`）。
+
+    块里 `int x = x + 100;` 要发成 `let x__1: i32 = (x + 100);` —— 右边那个 `x`
+    是**外层**那个。原先先 `decl_bind` 再发初值，右边也跟着改成 `x__1`，于是产物是
+    `let x__1: i32 = (x__1 + 100);`：一条**自引用**声明，check 报"使用未声明的变量
+    x__1"（用户从没写过这个名字）。
+
+    C 在这里严格说是未定义行为（新 `x` 的作用域从声明符之后就开始了），但本语言连
+    "读一个正在声明的名字"都写不出来；外层有同名时读外层是**确定且保义**的选择
+    （`#234` 的期望），外层没有那个名字就照旧响亮报"用了没声明过的"。
+
+    `for (int x = x + 1; …)` 是同一处的第二个入口（循环变量也改名外提）。
+    """
+    src_if = ("int entry() { int x = 10; if (x > 0) { int x = x + 100;"
+              " if (x > 100) { x = 7; } } return x; }\n")
+    out = ctrans.translate(src_if)
+    assert "let x__1: i32 = (x + 100);" in out, out
+    assert "x__1 + 100" not in out, f"初值读到了刚改名的那个（自引用）:\n{out}"
+    assert "if (x__1 > (100 as i32)) {" in out, out
+
+    src_for = ("int f() { int x = 5; for (int x = x + 1; x < 7; x = x + 1) { }"
+               " return x; }\n")
+    out_for = ctrans.translate(src_for)
+    assert "let x__1: i32 = (x + 1);" in out_for, out_for
+    # 步进那一行**本来就该**写改名后的 `x__1`（那是循环变量），所以只看 `let` 那行
+    assert "let x__1: i32 = (x__1 + 1);" not in out_for, (
+        f"for 初值读到了刚改名的那个（自引用）:\n{out_for}")
+
+    # 外层**没有**那个名字：照旧响亮拒（不能拿一个不存在的初值去编）
+    try:
+        ctrans.translate("int f() { int x = x + 1; return x; }\n")
+    except trans_core.Unsupported as e:
+        assert "没声明过" in str(e), e
+    else:
+        raise AssertionError("自引用初值（外层没有同名）没被拒")
+
+    # 产物要**真编得过**，并且跑出来与 C 一样（那个 if 程序 C 给 10）
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        with_main = src_if + "int main() { return entry(); }\n"
+        doc, _rep = potato_from.from_c(with_main, "nest.c", "strict")
+        if _clang() and _wsl():
+            c_rc = _run(_build_c(td, with_main))
+            l_rc = _run(_build_loment(td, doc))
+            assert c_rc == 10, f"clang 那边就不对: {c_rc} != 10"
+            assert l_rc == c_rc, f"译文与 clang 不同: {l_rc} != {c_rc}"
+            print(f"      遮蔽 + 自引用初值：clang -> {c_rc}，翻译 -> {l_rc}（相等）")
+        else:
+            text, _ = lomt_from.emit_lomt(doc, impl=True)
+            p = td / "nest.lomt"
+            p.write_text(text + _L_ENTRY, encoding="utf-8", newline="\n")
+            mod = lomentc.load(p)
+            deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+            assert not lomentc.check(mod, deps=deps), "翻译出来的 Loment 检查不过"
+            print("      遮蔽 + 自引用初值：产物可检查（无 clang/WSL，未跑数值）")
 
 
 @test
@@ -389,11 +689,188 @@ def test_out_of_subset_is_loud():
     except lomt_from.NotRepresentable as e:
         msg = str(e)
         assert "switch" in msg, f"报的话里要指出是 `switch`，实得: {msg}"
-        # 一份文件里往往十几个函数，只说"子集外"用户不知道该去改哪一个
-        assert "带正文的" in msg or "1 个" in msg, f"要说得清范围: {msg}"
+        # **点名到函数** —— 这条判据的 docstring 一直写着"报得出是哪个函数"，
+        # `docs/186` §4 也是这么承诺的（"一份文件里往往十几个函数，只说'子集外'
+        # 用户不知道该去改哪一个"）。而断言原先只查"说得清范围"
+        # （`带正文的` / `1 个`）—— 那句话把承诺**弱化**掉了：
+        # "4 个带正文的函数里有子集外的写法"说得清范围、却**一个函数名都没有**，
+        # 而且那个数是**所有**带正文的函数，不是"有几个出问题"。
+        assert "with_switch" in msg, f"要点名到出问题的那个函数（docs/186 §4）: {msg}"
         print(f"      子集外报得出: {msg[:90]}…")
         return
     raise AssertionError("`switch` 在子集之外，却一个字都没报 —— 这正是要消灭的静默")
+
+
+@test
+def test_comparison_operands_are_pinned_to_a_signed_width():
+    """**比较的操作数要钉住宽度** —— 否则 C 的有符号比较在这边按**无符号**做。
+
+    本语言里**没标注宽度的整数字面量是不确定的**。实测（原生 Loment，不经 C 前端）：
+
+        pub fn main() -> i32 { return ((-1) < 0) as i32; }
+        ->  %t2 = icmp ult i32 %t1, 0        ← **无符号**
+        变量形态（`let a: i32 = 0 - 1; a < 0`）才是 `icmp slt`
+
+    于是 C 的 `-1 < 0`（真）翻过来是**假**。给比较的操作数带上 `as`，表达式就有了
+    确定的类型：`((0 as i32) - (1 as i32)) < a` -> `icmp slt` ✓。
+
+    **超 i32 的字面量只能拒**（不再静默截断，也不再往 `i64` 上钉）—— C 里那两个
+    常量是 `long`，可这一门**没有更宽的字面量写法**：没标注宽度的整数字面量在
+    **解析那一层**就被截断（实测 `8589934591` 读出来是 `4294967295`），事后 `as i64`
+    也救不回来。于是 `0x1FFFFFFFF == 0xFFFFFFFF` 会从**假**变**真**。测得出来、
+    救不回来 —— 那就只剩拒。
+
+    **别处不许钉**：赋值 / 返回 / 实参的宽度由**接收方**决定（`u8` / `u64` …），
+    而翻译器不跟宽度（`docs/188` §7.1.1）—— 一律钉成 `i32` 会当场弄坏
+    `u8 probe() { return 255; }` 那种（实测 C# 那门的 `Byte.cs` 语料就是这么红的）。
+    所以这一条**两面都钉**：比较里必须有 `as`，而**返回字面量那种不许加**。
+    """
+    # ① 比较的操作数被钉住（文本）② 编出来是**有符号**比较（IR）
+    for label, src, want_txt in (
+            ("负数比较", "int f(int a) { return ((0 - 1) < a); }\n", "(0 as i32) - (1 as i32)"),
+            ("字面量对字面量", "int f() { return (0 - 1) < 0; }\n", "(0 as i32) - (1 as i32)"),
+            # `#131` 那张表最后一行：正的 2147483648 不在 i32 里，**取负之后**在 ——
+            # 先把负号并进常量再发，否则 `_lit32` 会拿那个正字面量误拒。
+            ("最小负数", "int f(int a) { return ((-2147483648) < a); }\n",
+             "(-2147483648 as i32)"),
+    ):
+        out = ctrans.translate(src)
+        assert want_txt in out, f"{label}: 没钉住宽度:\n{out}"
+    # ④ 超 i32 的字面量：拒（比较里、以及任何位置 —— 截断发生在解析层，救不回来）
+    for label, src in (
+            ("比较里的宽字面量", "int f() { return (0x1FFFFFFFF == 0xFFFFFFFF); }\n"),
+            ("赋值里的宽字面量", "int f() { int x = 8589934591; return x; }\n"),
+    ):
+        try:
+            ctrans.translate(src)
+        except trans_core.Unsupported as e:
+            assert "超出 32 位" in str(e), f"{label}: 拒的理由不对: {e}"
+        else:
+            raise AssertionError(f"{label}: 超 i32 的字面量没被拒")
+    # ③ 别处**不许**钉：返回一个字面量
+    out = ctrans.translate("int f() { return 7; }\n")
+    assert "return 7;" in out, f"返回位置被钉了（那会弄坏 u8/u64 那种接收方）:\n{out}"
+    out = ctrans.translate("unsigned int f() { unsigned int x = 255; return x; }\n")
+    assert "as i32" not in out, f"u32 那条路被钉了:\n{out}"
+    print("      比较的操作数钉住宽度（负数 -> 有符号）；超 i32 的字面量拒；返回/赋值不钉")
+
+
+
+
+
+@test
+def test_renames_cover_the_declaration_and_the_use_sites():
+    """改名有两条规矩，各对应一处"发出去的东西自己过不了"：
+
+    * **函数名也要过 `safe()`**。原先变量名、形参名都过了，**只有函数名漏在外面** ——
+      `int command(void) { … }` 于是发出 `pub fn command(…)`，而 `command` 是本语言的
+      **语句关键字**，产物死在词法上，报出来还带着**生成单元**的行号。
+      头改了就还得改**调用点**（两处一起改，不然名字对不上）。
+    * **改完不许撞用户自己的名字**。`safe()` 是**无状态纯函数**，只知道"这个词是不是
+      保留字"：`int let = 1; int let_c = 2;` 里 `let` 被改成 `let_c`，与用户那个真叫
+      `let_c` 的撞上 —— 发出去是两条并排的 `let let_c`，本语言照收、第一条成死代码。
+
+    两条都**真编一遍**（`lomentc.load`）：词法/语法不过就在这里炸。
+    """
+    safe_cmd = ctrans.C.safe("command")
+    out = ctrans.translate("int command(void) { return 41; }\n"
+                           "int main(void) { return command(); }\n")
+    assert f"pub fn {safe_cmd}(" in out, out
+    assert f"{safe_cmd}()" in out, f"调用点没跟着改:\n{out}"
+    assert "pub fn command(" not in out, out
+
+    out2 = ctrans.translate("int main(void) { int let = 1; int let_c = 2;"
+                            " return let + let_c; }\n")
+    decl = re.findall(r"let (\w+): i32 =", out2)
+    assert len(decl) == 2 and decl[0] != decl[1], f"两条声明撞名了:\n{out2}"
+    assert f"{decl[0]} + {decl[1]}" in out2, f"读的时候没跟着改:\n{out2}"
+
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for i, body in enumerate((out, out2)):
+            p = td / f"u{i}.lomt"
+            p.write_text("module u\n\n" + body + "\n", encoding="utf-8", newline="\n")
+            lomentc.load(p)          # 词法/语法不过会在这里抛
+    print("      函数名与调用点一起改名；改完的两条声明名字不同，且产物真编得过")
+
+
+@test
+def test_true_and_false_are_ordinary_names_in_c():
+    """C 里 `true` / `false` **不是字面量**：那是 `<stdbool.h>` 的宏，而这一门不收
+    `#include`，所以 `int true = 5;` 是合法的普通变量（C99/C11）。
+
+    原先按字面量认，于是**声明处被改名、引用处没改**：
+
+        let true_c: i32 = 5;      ← 声明改了名（`true` 撞 Loment 保留字）
+        return (true) as i32;     ← 引用仍是**布尔字面量**
+
+    一个名字在一个函数里**两个身份**，产物编得过、退 0，而数是错的。特别阴的是
+    `int true = 5; return true;` 恰好给 1 —— 与"它真是字面量"的行为**无法区分**，
+    得换个初值才显形。
+
+    **别的门必须不变**：Java / C# / Go / C++ 里这两个是关键字，写 `int true = 5;`
+    本身就非法 —— 它们的字面量识别照旧（`Dialect.bool_literals` 默认就是 True）。
+    """
+    out = ctrans.translate("int main(void) { int true = 5; return true; }\n")
+    assert out.count("true_c") == 2, f"声明处与引用处要同名:\n{out}"
+    out2 = ctrans.translate("int main(void) { int false = 5; return false; }\n")
+    assert out2.count("false_c") == 2, out2
+    # 别的门：字面量照旧
+    others = [
+        ("jtrans", jtrans, "public class T {\n    public static int f() {\n"
+                           "        boolean b = true;\n        return 1;\n    }\n}\n"),
+        ("cstrans", cstrans, "class T {\n    static int F() {\n"
+                             "        bool b = false;\n        return 1;\n    }\n}\n"),
+        ("cpptrans", cpptrans, "int f() {\n    bool b = true;\n    return 1;\n}\n"),
+    ]
+    for nm, mod, src in others:
+        got = mod.translate(src)
+        assert "true" in got or "false" in got, f"{nm} 的布尔字面量丢了:\n{got}"
+    print("      C 里 `true`/`false` 是普通名字；Java/C#/C++ 里仍是字面量")
+
+
+@test
+def test_local_static_is_refused_not_dropped():
+    """函数内的 `static` **响亮拒绝**，不是"收下并丢掉"。
+
+    `docs/186` §6.3 给"丢掉 `static`"写的理由是**内部链接**（"这里翻的是整个单元的
+    全部函数，没有第二个翻译单元能再定义同名函数"）。那条理由对**函数级** `static` 成立，
+    对**函数内** `static` **不成立** —— 那里 `static` 说的是**静态存储期**（值跨调用保留）。
+
+    实测：`int bump() { static int c = 0; c = c + 1; return c; }` 把 `static` 丢掉之后，
+    `bump() * 10 + bump()` 给 **11**，而 clang 给 **12** —— 产物编得过、跑得动、数不对，
+    而且**没有任何一处出声**。
+
+    这一条同时钉住"别顺手拒多了"：函数级 `static`、局部 `const`、局部 `inline`、
+    形参 `const` 都要**照旧收下**（那几处在各自的位置上确实没有可分辨的差别）。
+    """
+    try:
+        ctrans.translate("int bump() { static int c = 0; c = c + 1; return c; }\n")
+    except trans_core.Unsupported as e:
+        assert "存储期" in str(e), str(e)
+    else:
+        raise AssertionError("函数内的 `static` 被静默丢掉了")
+    for still_ok in ("static int f() { return 7; }\n",           # 函数级：内部链接
+                     "int f() { const int c = 7; return c; }\n",  # 局部 const：保义
+                     "int f() { inline int c = 7; return c; }\n",
+                     "int f(const int a) { return a; }\n"):       # 形参 const
+        ctrans.translate(still_ok)
+    try:
+        cpptrans.translate("int f() { static int c = 0; return c; }\n")
+    except trans_core.Unsupported:
+        pass
+    else:
+        raise AssertionError("C++ 的函数内 `static` 没被拒")
+    print("      函数内 `static` 点名拒；函数级 static 与局部 const/inline 照旧")
+
+
+
+
+
+
+
+
+
 
 
 #: 四门共用 `trans_core` 的方言表 —— 共享核里的一处守卫要**四门都验**：
@@ -1123,6 +1600,13 @@ _PY_BATTERY = {
     "py_empty": "",
     "py_only_comment": "# nothing\n",
     "py_crlf": "def f(x: int) -> int:\r\n    return x\r\n",
+    # ---- 脚本式写法：顶层语句合成入口 `_start`（只有 python 这一门这样收）
+    "py_script_plain": "\nprint('hi')\nprint(6 * 7)\n",
+    "py_script_def_then_code": "\ndef h(n: int) -> int:\n    return n * 2\n\n"
+                               "print(h(21))\n",
+    "py_script_if": "\nif True:\n    print('yes')\n",
+    "py_script_both": "\nprint(1)\n\ndef _start() -> int:\n    return 0\n",
+    "py_script_line1": "print(1)\n",
 }
 
 
@@ -1232,16 +1716,7 @@ def test_lompotc_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_ctrans_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_ctrans_test")
 
 
 if __name__ == "__main__":

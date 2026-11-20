@@ -1,0 +1,66 @@
+module ir_borrow
+
+// M82 目标文件：**借用类型**（`docs/299`，Tur 2026.3 的第八维 `lifetime`）。
+//
+// 钉住四件事，每一件都是"两个实现必须发同一段文本"：
+//
+//   * `&V` 进形参 -> 产物里是 `ptr`，字段读是"取指针 + GEP + load"（零拷贝视图）；
+//   * `&mut V` 写字段 -> 自动解一层：先 `load ptr`，再 GEP，再 `store`；
+//   * `&[u32]` 规范化回切片（`{ ptr, i64 }`），返回借用的签名照旧是一对 (ptr, len)；
+//   * `*r` 解引用与 `&x`（非数组）取地址 —— 后者**不额外落临时**，值就是 `%x.addr`。
+//
+// 这份文件同时也是 `test_m85_checker_accepts_corpus_units` 的语料之一：自举检查器
+// 对它必须零诊断（借用类型不再是"点名拒"）。
+
+struct V {
+    a: u32,
+    b: u32,
+}
+
+struct Holder {
+    cur: &u32,
+    tag: u32,
+}
+
+fn get_a(v: &V) -> u32 {
+    return v.a;
+}
+
+fn set_a(v: &mut V, x: u32) {
+    v.a = x;
+}
+
+fn tail(xs: &[u32]) -> [u32] {
+    return xs;
+}
+
+fn peek(p: &u32) -> u32 {
+    return *p;
+}
+
+fn bump(p: &mut u32) {
+    *p = *p + 1;
+}
+
+fn tag_of(h: &Holder) -> u32 {
+    return h.tag;
+}
+
+fn main() -> u32 {
+    let v: V = V { a: 1, b: 2 };
+    let r: &V = &v;
+    let first: u32 = get_a(r);
+    let w: V = V { a: 5, b: 6 };
+    let m: &mut V = &mut w;
+    set_a(m, 9);
+    let xs: [u32; 2] = [3, 4];
+    let s: [u32] = tail(&xs);
+    let n: u32 = 7;
+    let pn: &u32 = &n;
+    let q: u32 = peek(pn);
+    let mutn: u32 = 0;
+    let pm: &mut u32 = &mut mutn;
+    bump(pm);
+    let h: Holder = Holder { cur: &q, tag: q };
+    return first + w.a + s[0] + mutn + tag_of(&h);
+}

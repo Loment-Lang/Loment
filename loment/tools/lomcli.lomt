@@ -16,9 +16,11 @@
 // 2026-09-15: st_size 恒为 0), 所以文件大小一律靠"读到底数出来", 不看 stat。
 
 module lomcli
+choose runtime
 
 use bytes
 use sha256
+use errdata
 use surface_data
 
 // ---------------------------------------------------------------- 内存布局
@@ -603,14 +605,14 @@ fn catalog(mem: ptr, fd: u64) {
     sec(mem, fd, "COMPILE & RUN");
     row(mem, fd, "ir", "FILE", "print LLVM IR to stdout");
     row(mem, fd, "check", "FILE", "check only, discard IR (diagnostics on stderr)");
-    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...]", "compile and link to an executable");
-    row(mem, fd, "run", "FILE [--link OBJ...]", "compile, link and run");
-    row(mem, fd, "version", "", "print the version line");
+    row(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt] [--profile hotswap]", "compile and link to an executable");
+    row(mem, fd, "run", "FILE [--link OBJ...] [--opt]", "compile, link and run");
+    row(mem, fd, "version", "[FILE]", "print the version line; with FILE, read its Tur edition");
     row(mem, fd, "lsp", "", "language server over stdio");
     sec(mem, fd, "SOURCE TOOLS");
     row(mem, fd, "fmt", "FILE", "format (prints the result, does not touch the file)");
     row(mem, fd, "doc", "FILE", "API docs from /// comments");
-    row(mem, fd, "skill", "[--print]", "the AI-agent guide (its path, or the whole text)");
+    row(mem, fd, "skill", "[--print]", "the LomentSkill suite entry (its path, or its text)");
     sec(mem, fd, "READ SOURCE");
     row(mem, fd, "cat", "FILE", "print with line numbers");
     row(mem, fd, "stat", "FILE", "lines / bytes / longest line");
@@ -692,11 +694,11 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "build") {
-        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  The object must be self-contained -- no relocations, no undefined symbols (no libc).");
+        usage_line(mem, fd, "build", "FILE [-o NAME] [--link OBJ...] [--opt] [--profile hotswap]", "Compile and link to an executable.\n  -o takes a name WITHOUT an extension: -o hi gives hi.exe on Windows, hi on Linux.\n  --link OBJ adds a foreign ELF object (FFI): give the .o you compiled yourself.\n  A self-contained object needs nothing else. An object that carries undefined symbols is\n  refused by default; the launcher passes --allow-ports in both channels (open since\n  2026-10-17, docs/222 sec 4.5). Calling the self-hosted lomelf directly needs that flag.\n  --opt hands the IR to clang -O2 when clang is installed (ELF) -- the same optimizer C\n  and Rust use; without clang it says so and falls back to the self-hosted lomelf linker.\n  --profile hotswap emits a slot table and an entry gate so the artifact can be replaced\n  in place by a hot update (ELF only; docs/281).");
         return 0;
     }
     if eq_cstr(cmd, n, "run") {
-        usage_line(mem, fd, "run", "FILE [--link OBJ...]", "Compile, link and run. The exit code is the program's own exit code.\n  --link OBJ adds a foreign ELF object (FFI), same rules as build.");
+        usage_line(mem, fd, "run", "FILE [--link OBJ...] [--opt]", "Compile, link and run. The exit code is the program's own exit code.\n  --link OBJ adds a foreign ELF object (FFI), same rules as build.\n  --opt: same as build (clang -O2 when installed, ELF).");
         return 0;
     }
     if eq_cstr(cmd, n, "fmt") {
@@ -728,7 +730,7 @@ fn help_of(mem: ptr, fd: u64, cmd: ptr, n: u32) -> u32 {
         return 0;
     }
     if eq_cstr(cmd, n, "skill") {
-        usage_line(mem, fd, "skill", "[--print]", "The AI-agent guide. No argument prints its path, --print prints the text.");
+        usage_line(mem, fd, "skill", "[--print]", "The LomentSkill suite entry. No argument prints its path, --print prints its text; the topic skills sit beside it.");
         return 0;
     }
     if eq_cstr(cmd, n, "help") {
@@ -957,7 +959,76 @@ fn do_commands(mem: ptr, ab: ptr, argc: u32) -> u32 {
     return 0;
 }
 
+/// `p[i..i+n]` 等于字面量 `s` 吗（`n` 是缓冲里还剩多少字节）。
+fn cur_at(p: ptr, i: u32, n: u32, s: str) -> u32 {
+    if n < str_len(s) {
+        return 0;
+    }
+    let j: u32 = 0;
+    while j < str_len(s) {
+        if load8(p, i + j) != str_byte(s, j) {
+            return 0;
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+/// 从产物里读回 Tur 版次（`docs/296` §1.1）：找 `LOMENT-TUR:` 标记，打出冒号后那段。
+/// **分块扫**：可执行文件常常大于 `FILE_CAP`，一次 `slurp` 会在中间截断。
+fn tur_edition_of_file(mem: ptr, ab: ptr, k: u32) -> u32 {
+    let path: ptr = ptr_add(mem, M_P1);
+    arg_copy(mem, ab, k, path);
+    let fd: i64 = open_ro(path);
+    if fd < 0 {
+        return err_path(mem, "cannot open ", path);
+    }
+    let buf: ptr = ptr_add(mem, M_FILE);
+    let prev_n: u32 = 0;
+    let keep: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        // 把上一块的最后 `keep` 字节搬到开头 —— 标记可能跨块。
+        let q: u32 = 0;
+        while q < keep {
+            store8(buf, q, load8(buf, prev_n - keep + q) as u8);
+            q = q + 1;
+        }
+        let got: u64 = read_all(fd as u64, ptr_add(buf, keep), (FILE_CAP - keep) as u64);
+        let n: u32 = keep + got as u32;
+        let i: u32 = 0;
+        while i + 11 <= n {
+            if cur_at(buf, i, n - i, "LOMENT-TUR:") == 1 && i + 21 <= n {
+                let s: u32 = i + 11;
+                let e: u32 = s;
+                while e < n && load8(buf, e) != 0 && e - s < 16 {
+                    e = e + 1;
+                }
+                wstr(1, "tur edition ");
+                wbytes(1, ptr_add(buf, s), e - s);
+                wstr(1, "\n");
+                close_fd(fd);
+                return 0;
+            }
+            i = i + 1;
+        }
+        if got < (FILE_CAP - keep) as u64 {
+            go = 0;
+        }
+        prev_n = n;
+        keep = 21;
+        if n < 21 {
+            keep = n;
+        }
+    }
+    close_fd(fd);
+    return err_path(mem, "no Tur edition metadata in ", path);
+}
+
 fn do_version(mem: ptr, ab: ptr, argc: u32) -> u32 {
+    if argc >= 3 {
+        return tur_edition_of_file(mem, ab, 2);
+    }
     let bindir: ptr = ptr_add(mem, M_P3);
     let ver: ptr = ptr_add(mem, M_P2);
     version_text(mem, bindir_from(mem, ab, bindir), ver);
@@ -1248,24 +1319,32 @@ fn do_color(mem: ptr, ab: ptr, argc: u32) -> u32 {
 
 // ---------------------------------------------------------------- 错误码
 
-/// 一列: `  E22   <ASCII 一行说明>`。码这一列宽 5、左对齐 —— 与旧的手抄 `codrow` 同形,
+/// 码的显示形状（与 `loment_diag._code_str` 同一条规则）：**< 100 是 `E0xx`（`E042`），
+/// >= 100 是 `E0xxx`（`E0100`）**。诊断正文就是这么印的（`error[E0042]`），表与 explain
+/// 的标题也必须一样 —— 用户从正文里抄一个码去 explain，拿到的是同一个形状（`#9`）。
+fn wcode3(mem: ptr, fd: u64, c: u32) {
+    wstr(fd, "E");
+    if c < 10 {
+        wstr(fd, "00");
+    } else {
+        if c < 100 {
+            wstr(fd, "0");
+        } else {
+            if c < 1000 {
+                wstr(fd, "0");
+            }
+        }
+    }
+    wdec(mem, fd, c);
+}
+
+/// 一列: `  E0042   <ASCII 一行说明>`。码这一列左对齐（`E001` + 一个空格）,
 /// 只是码由数字拼出来 (表里存的是数, 见 surface_data 的注解)。
 fn codrow_n(mem: ptr, fd: u64, c: u32, desc: str) {
     wstr(fd, "  ");
     yellow(mem, fd);
-    wstr(fd, "E");
-    wdec(mem, fd, c);
-    let d: u32 = 1;
-    let x: u32 = c;
-    while x >= 10 {
-        x = x / 10;
-        d = d + 1;
-    }
-    let k: u32 = 0;
-    while 1 + d + k < 5 {
-        wstr(fd, " ");
-        k = k + 1;
-    }
+    wcode3(mem, fd, c);
+    wstr(fd, " ");
     colr(mem, fd);
     wstr(fd, desc);
     wstr(fd, "\n");
@@ -1289,19 +1368,37 @@ fn do_codes(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wstr(1, "  ");
     gray(mem, 1);
     wstr(1, "Codes are grouped by WHAT TO DO, not by wording. The compiler prints e.g.");
-    wstr(1, "\n    `E2 @13 line 4: x`  -  E2 is E002, @13 is the 13th token.");
+    wstr(1, "\n    `error[E002] @13 line 4: x`  -  @13 is the 13th token.");
     colr(mem, 1);
     wstr(1, "\n\n");
     // **不手抄**: 表在 surface_data (由 tools/loment_diag.py --dump-surface 生成; 唯一真源
     // 是那里的 RULES + ASCII_ONE_LINER)。这里原先抄了 23 条 `codrow`, 与那份表是同一件事的
     // 两个副本 —— 而本仓那四个静默 bug 全出自"同一份清单抄第二遍" (docs/179 7.3)。加一个码
     // 忘了改这里, 表现是"新码在 `loment codes` 里凭空消失", 没有任何判据会红。
-    // 码从 1 起**连续编号** (loment_diag 的 RULES 就是这么给的; 那条不变式有判据钉着,
+    // 用户码从 1 起**连续编号** (loment_diag 的 RULES 就是这么给的; 那条不变式有判据钉着,
     // 见 loment_tools_test 的 test_code_tables_cover_the_same_codes), 所以 n_codes()
-    // 也**就是最后一个码**。
+    // 也**就是最后一个用户码**。
+    // **E9xx 是另一段**（`#773`：工具链自己崩了）。它不参与上面那个上界, 否则
+    // 36..899 这些空号会印成一行行空标题。两段各自连续, 分开循环。
     let c: u32 = 1;
     while c <= n_codes() {
         codrow_n(mem, 1, c, code_ascii(c));
+        c = c + 1;
+    }
+    wstr(1, "\n  ");
+    gray(mem, 1);
+    // 这一段的标题不再只写"工具链崩了"：兜底码 `E0999` 也在里面（`#658`），
+    // 它的意思是"分类表没认出这条消息"，不是某个进程死了。
+    wstr(1, "Internal codes (the toolchain's own, not about your source):");
+    colr(mem, 1);
+    wstr(1, "\n");
+    c = internal_lo();
+    while c <= internal_hi() {
+        // **有文字才印**：`901..998` 是空号，印出来就是一行行空标题。上界现在是号段
+        // 边界（`internal_hi()` 含兜底码 `E0999`），不再是"最后一条有文字的码"。
+        if str_len(code_ascii(c)) > 0 {
+            codrow_n(mem, 1, c, code_ascii(c));
+        }
         c = c + 1;
     }
     wstr(1, "\n  ");
@@ -1343,14 +1440,23 @@ fn do_explain(mem: ptr, ab: ptr, argc: u32) -> u32 {
     arg_copy(mem, ab, 2, a);
     let code: u32 = parse_code(a, strlen_n(a));
     // 上界**问 surface_data**, 不写死 —— 写死一个数字就是又一份"同一件事的第二个副本",
-    // 下一个码加进去时它会静默变成错的 (docs/182 5.2)。
-    if code == 0 || code > n_codes() {
+    // 下一个码加进去时它会静默变成错的 (docs/182 5.2)。用户码与内部码是**两段**
+    // (`#773`): 中间 36..899 是空号, 不认。
+    let known: u32 = 0;
+    if code >= 1 && code <= n_codes() {
+        known = 1;
+    }
+    // 内部段里 `901..998` 是空号（上界是号段边界，含兜底码 `E0999`）—— 认它们等于给一个
+    // 不存在的码印一张空表。**有文字才算认**，与 `codes` 那边同一条口径。
+    if code >= internal_lo() && code <= internal_hi() && str_len(code_ascii(code)) > 0 {
+        known = 1;
+    }
+    if known == 0 {
         return err_usage(mem, "explain takes an error code (see `loment codes`)");
     }
     wstr(1, "\n  ");
     yellow(mem, 1);
-    wstr(1, "E");
-    wdec(mem, 1, code);
+    wcode3(mem, 1, code);
     colr(mem, 1);
     wstr(1, "\n\n  ");
     // **每个码都先给一行真话**：原先的长文只覆盖 8/23 个码，其余落进一个通用兜底 ——
@@ -1453,6 +1559,7 @@ fn do_syntax(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "let", "`let x: u32 = e;` - the type annotation is mandatory, there is no inference");
     termrow(mem, 1, "control flow", "if / else if / else / while / for i in lo..hi");
     termrow(mem, 1, "return", "`return <expr>;` - it must carry a value, there is no bare `return;`");
+    termrow(mem, 1, "gc timing (2026.3)", "`lgc end;` / `lgc start;` pause and resume; `lgc end { }` is a scoped pause; `lgc start(10ms) { }` is a budgeted window");
     termrow(mem, 1, "struct", "`struct S { a: u32 }`, literal `S { a: 1 }`, field access `s.a`");
     termrow(mem, 1, "enum", "`enum E { A, B(u32) }`, construct `E::B(3)`");
     termrow(mem, 1, "match", "arm bodies are BLOCKS, not expressions; must be exhaustive or have `_`");
@@ -1464,7 +1571,7 @@ fn do_syntax(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "cast", "`x as u64` - int<->pointer casts must be written explicitly");
     termrow(mem, 1, "string", "\"...\", escapes are only \\n \\t \\\" \\\\ - there is NO \\x escape");
     termrow(mem, 1, "comment", "// and /* */, /// is a doc comment (loment doc extracts it)");
-    termrow(mem, 1, "entry", "freestanding entry is `_start`, it takes no arguments; exit with syscall4(60, ...)");
+    termrow(mem, 1, "entry", "`fn main()` is the entry (no arguments, no return type); `_start` is the freestanding entry and wins when both exist");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "traps: loment cheat   .   builtins: loment builtins   .   error codes: loment codes");
@@ -1485,6 +1592,9 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "str_eq", "str_eq(a: str, b: str) -> bool   content comparison");
     termrow(mem, 1, "str_concat", "str_concat(a, b) -> str   concatenation (bump heap is only 64 KiB)");
     termrow(mem, 1, "str_ptr", "str_ptr(s: str) -> ptr   data pointer (feed it to syscall)");
+    termrow(mem, 1, "print", "print(s: str) -> u32   write s to stdout (one write syscall)");
+    termrow(mem, 1, "tur_edition", "tur_edition() -> str   the Tur edition this program was compiled as (e.g. tur2026.2)");
+    termrow(mem, 1, "print_num", "print_num(n) -> u32   decimal, no newline; any integer; Tur 2026.2 only, needs choose runtime");
     termrow(mem, 1, "alloc", "alloc(n: u32) -> ptr   bump heap (64 KiB ceiling)");
     termrow(mem, 1, "free", "free(p: ptr) -> u32   placeholder, the bump heap does not reclaim");
     termrow(mem, 1, "load8", "load8(p: ptr, off: u32) -> u32   read a byte");
@@ -1497,9 +1607,12 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "inb/outb", "port I/O - only the Rust transpile path supports it, not the native one");
     termrow(mem, 1, "syscall4", "syscall4(nr: u64, a0, a1, a2) -> i64   raw syscall (rax/rdi/rsi/rdx)");
     termrow(mem, 1, "syscall6", "syscall6(nr: u64, a0..a4) -> i64");
+    termrow(mem, 1, "thread_spawn", "thread_spawn(\"worker\", stack_top, arg, done) -> i64   a real thread (ELF only)");
     wstr(1, "\n  ");
     gray(mem, 1);
-    wstr(1, "to print a number, copy write_dec from `loment example tour` - there is no printf.");
+    wstr(1, "to print a number: Tur 2026.2 has print_num (needs `choose runtime`); in Tur 1 copy");
+    wstr(1, "
+  write_dec from `loment example tour` - there is no printf.");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1536,7 +1649,8 @@ fn do_keywords(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "types", "u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str mut");
     termrow(mem, 1, "patterns", "if let  _  as  self");
     termrow(mem, 1, "* capability", "capability  guard  revocable  excluded");
-    termrow(mem, 1, "* program/ABI", "choose  addin  comefor  byuse  extern  interrupt");
+    termrow(mem, 1, "* program/ABI", "choose  addin  comefor  byuse  extern  interrupt  register");
+    termrow(mem, 1, "* GC timing (2026.3)", "lgc  (start / end / start(<duration>) { })");
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "capability domains are the one genuinely new thing: loment caps   .   full table: loment syntax");
@@ -1568,11 +1682,11 @@ fn do_cheat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     title(mem, 1, "One-page cheat sheet");
     wstr(1, "  ");
     gray(mem, 1);
-    wstr(1, "Ordered by how easily they bite - the first two are the worst (item 2 is SILENT: check passes, it crashes at run time).");
+    wstr(1, "Ordered by how easily they bite - the first two still catch the most people, but item 2 no longer waits for run time: check refuses it.");
     colr(mem, 1);
     wstr(1, "\n\n");
     termrow(mem, 1, "1", "match arm bodies must be BLOCKS: `E::A => { return 0; }`, not `E::A => 0,`");
-    termrow(mem, 1, "2", "** a non-void function falling off its end -> SIGILL at run time: check passes, then Illegal instruction. The last statement must be a return");
+    termrow(mem, 1, "2", "** a non-void function that can fall off its end is refused by check (E027) - it used to pass, then die with SIGILL on the path that fell through. Every path must end in a return");
     termrow(mem, 1, "3", "there is no bare `return;` - either `return <expr>;` or finish with if/else");
     termrow(mem, 1, "4", "write generic enum patterns with the monomorphised name: `Result_i64_u32::Ok(v)`");
     termrow(mem, 1, "5", "a generic fn whose T cannot be inferred reports E2 (misleading) - bind a typed `let` first");
@@ -1591,6 +1705,10 @@ fn do_cheat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     wstr(1, "\n  ");
     gray(mem, 1);
     wstr(1, "the whole guide: loment skill --print (a copy ships in the package too)");
+    colr(mem, 1);
+    wstr(1, "\n  ");
+    gray(mem, 1);
+    wstr(1, "the audit: loment lspe state FILE  .  pre-flight: loment lspc check FILE  .  why: loment lspe why SITE FILE");
     colr(mem, 1);
     wstr(1, "\n\n");
     return 0;
@@ -1819,7 +1937,9 @@ fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     // 于是它可 grep、可计数、可审计: 一个工程可以规定"裸指针只许出现在这三个文件"。
     // 数的全是**写出来了没有**, 不是"危不危险" —— 后者要类型, 那是编译器的事。
     let n_sys: u32 = cnt_calls(p, n, str_ptr("syscall4"), str_len("syscall4"))
-                   + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"));
+                   + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"))
+                   + cnt_calls(p, n, str_ptr("syscall7"), str_len("syscall7"))
+                   + cnt_calls(p, n, str_ptr("print"), str_len("print"));
     let n_ptr: u32 = cnt_calls(p, n, str_ptr("ptr_add"), str_len("ptr_add"))
                    + cnt_calls(p, n, str_ptr("ptr_sub"), str_len("ptr_sub"))
                    + cnt_calls(p, n, str_ptr("str_ptr"), str_len("str_ptr"));
@@ -2156,6 +2276,9 @@ fn is_kw(p: ptr, off: u32, n: u32) -> bool {
     if eq_cstr(s, n, "revocable") || eq_cstr(s, n, "excluded") {
         return true;
     }
+    if eq_cstr(s, n, "lgc") {
+        return true;
+    }
     return false;
 }
 
@@ -2316,9 +2439,7 @@ fn do_new(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     wfd(fd, "module ");
     wfdp(fd, nm);
-    wfd(fd, "\n\nfn _start() {\n    let s: str = \"hello from Loment\\n\";\n");
-    wfd(fd, "    syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64);\n");
-    wfd(fd, "    syscall4(60, 0, 0, 0);\n}\n");
+    wfd(fd, "\n\nfn main() {\n    print(\"hello from Loment\\n\");\n}\n");
     close_fd(fd);
     green(mem, 1);
     wstr(1, "  wrote ");

@@ -1,4 +1,5 @@
 module lumtui_paint
+choose runtime
 
 // lumtui_paint.lomt — 把布局好的文档画进一块 **ARGB32 帧缓冲**。
 //

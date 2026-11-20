@@ -1,0 +1,18 @@
+// loment/examples/cmd_hello.lomt — 一条**注册给 `loment` CLI 的命令**（`docs/223` 形态 B）
+//
+// 编出来的产物叫 `loment-cmd-hello`：丢进 `PATH`，`loment cmd-hello ...` 就能用
+// （启动器那条 `loment foo` -> PATH 上的 `loment-foo`，`docs/169` §3b）。
+//
+// **命令不写 `_start`**：声明了 `loment_command()` 之后，进程入口由**工具链生成**
+// （读 `/proc/self/cmdline`、数出字段数、调 `command_main`、把返回值交给 `exit`）。
+// 所以 `command_main` 拿到的 `argv` 就是 cmdline 那一整块字节，`argv[0]` 是命令自己的路径。
+module cmd_hello
+
+pub fn loment_command() -> str { return "cmd-hello"; }
+
+pub fn command_main(argv: ptr, argc: u32) -> u32 {
+    // 把 cmdline 的头四个字节打出来（够看出它确实是命令行），再用 argc 当退出码 ——
+    // 这样"入口到底拿到了什么"是**跑得出来**的，不是靠读代码相信。
+    syscall4(1, 1, argv as u64, 4);
+    return argc;
+}

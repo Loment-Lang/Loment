@@ -5,6 +5,7 @@
 //         -T loment/build/loment.ld loment/build/native_entry.ll -o native_entry.elf
 
 module native_entry
+choose runtime
 
 fn _start() {
     let x: u32 = 0;

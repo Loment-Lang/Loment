@@ -1,0 +1,44 @@
+// internet/udp.lomt — UDP: 数据报的收发 (带对端地址)
+//
+// 为什么单独一层, 以及为什么它值得有: DNS 走的就是 UDP —— 报文层在 `dns.lomt`, 而
+// "把那条报文发到 53 端口、把回包收回来"要的正是 `sendto`/`recvfrom` 这一对**带地址**的
+// 调用。`syscall7` 存在的理由就是它俩的第六个实参 (`socklen_t`) 在 `syscall6` 上没地方放
+// (SKILL.md §3)。
+//
+// 缓冲一律调用方给: `sa` 是 16 字节的 `sockaddr_in` (`sock_addr_in` 填)。
+//
+// 边界: 不做分片重组 (内核那层的事), 不做连接化 UDP (`connect` + `send`)。自检只验纯逻辑。
+//
+// 命名: 公开 udp_*, 内部 udpp_*。自检 test_udp_*。
+
+module udp
+
+use "sock.lomt"
+
+const UDPP_SYS_SENDTO: u64 = 44;
+const UDPP_SYS_RECVFROM: u64 = 45;
+
+/// 一个 UDP socket; 失败返回负数。
+pub fn udp_socket() -> i64 {
+    return sock_new(SOCK_AF_INET, SOCK_DGRAM);
+}
+
+/// 发一个数据报给 `sa` (16 字节) 描述的地址。返回发出的字节数。
+pub fn udp_send_to(fd: i64, p: ptr, n: u64, sa: ptr) -> i64 {
+    return syscall6(UDPP_SYS_SENDTO, fd as u64, p as u64, n, 0, sa as u64);
+}
+
+/// 收一个数据报。`sa` 非 0 时收下对端地址 (16 字节)。返回收到的字节数。
+pub fn udp_recv_from(fd: i64, p: ptr, cap: u64, sa: ptr) -> i64 {
+    return syscall7(UDPP_SYS_RECVFROM, fd as u64, p as u64, cap, 0, sa as u64, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_udp_addr_roundtrip() -> bool {
+    // 不碰网络: 只钉住"给地址建 sockaddr"这一半在 udp 这条路上也是同一个布局。
+    let sa: ptr = alloc(16);
+    let n: u32 = sock_addr_in(sa, 16843009, 53);
+    return n == 16 && load8(sa, 2) == 0 && load8(sa, 3) == 53
+        && load8(sa, 4) == 1 && load8(sa, 7) == 1;
+}

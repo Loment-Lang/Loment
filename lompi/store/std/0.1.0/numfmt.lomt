@@ -59,7 +59,11 @@ pub fn numfmt_hex_into(dst: ptr, v: u64, width: u32) -> u32 {
     let i: u32 = 0;
     while i < w {
         let shift: u32 = (w - 1 - i) * 4;
-        let digit: u32 = ((v >> shift) & 15) as u32;
+        // `shift as u64` **不能省**：`v` 是 u64 而 `shift` 是 u32，`u64 >> u32` 会让参考
+        // 实现发出 `lshr i64 %v, i32 %shift` —— **非法 IR**（**#289** 的一个实例，**#383**）。
+        // `shift` 取值恒在 0..=60（`w <= 16`），所以零扩展就是原意。
+        // 症状是**任何 use 到 numfmt 的单元都编不出来** —— 包括只想要它那个十进制写的调用方。
+        let digit: u32 = ((v >> (shift as u64)) & 15) as u32;
         if digit < 10 {
             store8(dst, i, (48 + digit) as u8);
         } else {

@@ -50,8 +50,14 @@ CLAIMS: list[tuple[str, str, str, list[str]]] = [
      "loment_p9_test", []),
     ("C8", "VS Code 宿主与 LSP 往返 (无头验收)",
      "vscode_ext_test", []),
-    ("C9", "发布工件 sha256 可复现",
-     "loment_release", []),
+    # **C9 的量尺 2026-10-16 换过**：原来指向 `loment_release`（无参 = "入库台账 == 当前树"），
+    # 而那条**只在唯一权威的那棵树上为真**。全树台账不再由 PR 提交之后（原因见
+    # `.github/workflows/manifest.yml` 文件头那节），它从门禁里撤了下来 —— 一条在交付物上
+    # 恒假的判据不能挂在门禁上。换成的量尺是"**两个独立实现给出同一份清单**"；
+    # 台账**与树**的一致性由 `lom_audit` 的 M95 按**滞后容差**接着判（`docs/254`）。
+    ("C9", "发布清单**可复现**：Loment 版生成器与 Python 版 stdout / 落盘字节 / 退出码"
+           "**逐字节相同**（两个独立实现给出同一份清单）",
+     "loment_rel_test", []),
     ("C10", "状态矩阵与 docs/145 一致 (账本不是手改的)",
      "loment_status", []),
     ("C11", "LSP 去 Python: Loment 版语言服务 (补全/跳转/诊断/--check) 与工具等价性",

@@ -1,0 +1,214 @@
+// system/ipc.lomt — System V IPC: 键、创建标志、控制命令
+//
+// 为什么系统工具需要它: System V 的三套设施 (共享内存 shm、信号量 sem、消息队列 msg)
+// 都用同一个"键" (`key_t`) 来认领: 两个**没有亲缘关系**的进程只要算出同一个键, 就能
+// 拿到同一块共享内存。键通常由 `ftok` 从一个路径与一个项目号推出来 —— 这个推导是
+// **约定**, 不是系统调用, 所以两边必须用同一个公式, 否则它们各自建了一块, 彼此看不见,
+// 而且都不报错。另外创建标志 (`IPC_CREAT|IPC_EXCL`) 与控制命令 (`IPC_RMID` 等)
+// 是两套不同的数字, 混用会删错东西。
+//
+// 覆盖: ftok 的推导、ipc_perm 前 16 字节的打包、创建标志与控制命令的名字、
+// shm/sem/msg 九条调用号。**不做的**: 权限检查的语义、消息体格式 (msgsnd 只认
+// "long 类型在前 + 载荷"), 以及 POSIX 那套 (见 `mqueue`)。
+//
+// 命名: 公开 ip_*, 内部 ipq_*。自检 test_ipc_*。
+
+module ipc
+
+/// 不存在就创建 —— 和 `IPC_EXCL` 一起用才是 "只能由我创建"。
+pub const IP_CREAT: u32 = 512;
+/// 已存在就失败 —— 配合 `IPC_CREAT` 用来抢一个独占的键。
+pub const IP_EXCL: u32 = 1024;
+/// 不阻塞 (读/写/删除里哪一条用得上取决于设施)。
+pub const IP_NOWAIT: u32 = 2048;
+
+/// 删除这个对象 (释放内核里那一份)。
+pub const IP_RMID: u32 = 0;
+/// 改写权限与属主。
+pub const IP_SET: u32 = 1;
+/// 读状态 (大小、最后访问与修改时间、属主)。
+pub const IP_STAT: u32 = 2;
+/// 读系统级信息 (不是单个对象)。
+pub const IP_INFO: u32 = 3;
+/// 把共享内存锁在内存里 (要权限)。
+pub const IP_SHM_LOCK: u32 = 11;
+/// 解锁。
+pub const IP_SHM_UNLOCK: u32 = 12;
+
+const IPQ_SYS_SHMGET: u64 = 29;
+const IPQ_SYS_SHMAT: u64 = 30;
+const IPQ_SYS_SHMCTL: u64 = 31;
+const IPQ_SYS_SEMGET: u64 = 64;
+const IPQ_SYS_SEMOP: u64 = 65;
+const IPQ_SYS_SHMDT: u64 = 67;
+const IPQ_SYS_MSGGET: u64 = 68;
+const IPQ_SYS_MSGSND: u64 = 69;
+const IPQ_SYS_MSGRCV: u64 = 70;
+
+fn ipq_st32(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 4;
+}
+
+fn ipq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v as u32;
+}
+
+fn ipq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// `ftok` 的推导 (经典公式): 项目号占高 8 位, 设备的低 8 位占中间, inode 低 16 位占低段。
+/// 两侧进程用**同一对** (路径, 项目号) 才会算出同一个键。
+pub fn ip_ftok(ino: u64, dev: u64, proj: u32) -> u32 {
+    let p: u32 = (proj & 255) << 24;
+    let d: u32 = (dev & 255) as u32;
+    let i: u32 = ((ino & 65535) as u32) << 8;
+    return p | d | i;
+}
+
+/// `ipc_perm` 的前 16 字节: key(0) uid(4) gid(8) mode(12) —— 之后的 cuid/cgid 由内核填。
+pub fn ip_perm_pack(buf: ptr, key: u32, uid: u32, gid: u32, mode: u32) -> u32 {
+    ipq_st32(buf, 0, key as u64);
+    ipq_st32(buf, 4, uid as u64);
+    ipq_st32(buf, 8, gid as u64);
+    ipq_st32(buf, 12, mode as u64);
+    return 16;
+}
+
+pub fn ip_perm_key(buf: ptr) -> u32 { return ipq_ld32(buf, 0); }
+pub fn ip_perm_uid(buf: ptr) -> u32 { return ipq_ld32(buf, 4); }
+pub fn ip_perm_gid(buf: ptr) -> u32 { return ipq_ld32(buf, 8); }
+pub fn ip_perm_mode(buf: ptr) -> u32 { return ipq_ld32(buf, 12); }
+
+fn ipq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return ipq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+/// 创建标志 -> 名字串。
+pub fn ip_flag_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return ipq_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & IP_CREAT) != 0 {
+        pos = ipq_put(out, cap, pos, "IPC_CREAT");
+    }
+    if (mask & IP_EXCL) != 0 {
+        pos = ipq_sep(out, cap, pos);
+        pos = ipq_put(out, cap, pos, "IPC_EXCL");
+    }
+    if (mask & IP_NOWAIT) != 0 {
+        pos = ipq_sep(out, cap, pos);
+        pos = ipq_put(out, cap, pos, "IPC_NOWAIT");
+    }
+    return pos;
+}
+
+/// 控制命令 -> 名字串。未知返回 `"unknown"`。
+pub fn ip_cmd_name(cmd: u32, out: ptr, cap: u32) -> u32 {
+    if cmd == IP_RMID { return ipq_put(out, cap, 0, "IPC_RMID"); }
+    if cmd == IP_SET { return ipq_put(out, cap, 0, "IPC_SET"); }
+    if cmd == IP_STAT { return ipq_put(out, cap, 0, "IPC_STAT"); }
+    if cmd == IP_INFO { return ipq_put(out, cap, 0, "IPC_INFO"); }
+    if cmd == IP_SHM_LOCK { return ipq_put(out, cap, 0, "SHM_LOCK"); }
+    if cmd == IP_SHM_UNLOCK { return ipq_put(out, cap, 0, "SHM_UNLOCK"); }
+    return ipq_put(out, cap, 0, "unknown");
+}
+
+/// `shmget(key, size, flags)` —— 拿 (或创建) 一段共享内存的 id。
+pub fn ip_shmget(key: u32, size: u64, flags: u32) -> i64 {
+    return syscall4(IPQ_SYS_SHMGET, key as u64, size, flags as u64);
+}
+
+/// `shmat(shmid, addr, flags)` —— 映射进本进程地址空间; addr 传 0 让内核选。
+pub fn ip_shmat(shmid: i64, addr: u64, flags: u32) -> i64 {
+    return syscall4(IPQ_SYS_SHMAT, shmid as u64, addr, flags as u64);
+}
+
+/// `shmdt(addr)` —— 取消映射 (不删除这段共享内存)。
+pub fn ip_shmdt(addr: u64) -> i64 {
+    return syscall4(IPQ_SYS_SHMDT, addr, 0, 0);
+}
+
+/// `shmctl(shmid, cmd, buf)` —— `IPC_RMID` 才是删除。
+pub fn ip_shmctl(shmid: i64, cmd: u32, buf: ptr) -> i64 {
+    return syscall4(IPQ_SYS_SHMCTL, shmid as u64, cmd as u64, buf as u64);
+}
+
+pub fn ip_semget(key: u32, nsems: u32, flags: u32) -> i64 {
+    return syscall4(IPQ_SYS_SEMGET, key as u64, nsems as u64, flags as u64);
+}
+
+/// `semop(semid, sops, nsops)` —— sops 每个操作 6 字节 (sem_num u16, sem_op i16, sem_flg i16)。
+pub fn ip_semop(semid: i64, sops: ptr, nsops: u64) -> i64 {
+    return syscall4(IPQ_SYS_SEMOP, semid as u64, sops as u64, nsops);
+}
+
+pub fn ip_msgget(key: u32, flags: u32) -> i64 {
+    return syscall4(IPQ_SYS_MSGGET, key as u64, flags as u64, 0);
+}
+
+pub fn ip_msgsnd(msqid: i64, msgp: ptr, msgsz: u64, flags: u32) -> i64 {
+    return syscall6(IPQ_SYS_MSGSND, msqid as u64, msgp as u64, msgsz, flags as u64, 0);
+}
+
+pub fn ip_msgrcv(msqid: i64, msgp: ptr, msgsz: u64, msgtyp: i64, flags: u32) -> i64 {
+    return syscall6(IPQ_SYS_MSGRCV, msqid as u64, msgp as u64, msgsz, msgtyp as u64,
+                    flags as u64);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ipc_ftok() -> bool {
+    // 项目号 0x41 只占高 8 位; inode 高出的部分被截掉。
+    return ip_ftok(65537, 3, 65) == ip_ftok(65537, 259, 65)
+        && ip_ftok(65537, 3, 65) == 1090519299;
+}
+
+fn test_ipc_perm() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = ip_perm_pack(b, 1090519299, 1000, 1000, 438);
+    return n == 16 && ip_perm_key(b) == 1090519299
+        && ip_perm_uid(b) == 1000 && ip_perm_gid(b) == 1000 && ip_perm_mode(b) == 438;
+}
+
+fn test_ipc_flags() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = ip_flag_text(IP_CREAT | IP_EXCL, o, 64);
+    let want: str = "IPC_CREAT|IPC_EXCL";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return ip_cmd_name(IP_RMID, o, 64) == 8;
+}

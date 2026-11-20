@@ -20,6 +20,7 @@
 // 只转义 " \ 与控制字符) —— 这样 Loment 版 LSP 的帧能和 Python 版逐字节对齐。
 
 module json
+choose runtime
 
 use bytes
 

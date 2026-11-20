@@ -1,0 +1,262 @@
+// system/iouring.lomt — Linux io_uring 的提交/完成两块结构
+//
+// 为什么系统工具需要它: 普通 `read`/`write` 每做一次都要进内核一趟; io_uring 把
+// "要做什么"写进一块共享内存里的**提交队列** (SQE), 内核做完再把结果写进**完成队列**
+// (CQE)。这条路上没有结构体声明可用 (本语言没有 struct), 而 SQE 的字段偏移是内核 ABI:
+// opcode 在第 0 字节、fd 在第 4 字节、user_data 在第 32 字节 —— 写错一个就变成
+// "提交了一个别的操作", 而且通常**不报错**, 只是结果对不上。
+//
+// 覆盖: 常用 opcode 0..19 的名字、SQE 前 40 字节与 CQE 16 字节的打包/取值、
+// setup/enter/register 三条系统调用。**不做的**: 环形缓冲的 mmap (那要读 `io_uring_params`
+// 里每个 offset)、固定缓冲注册表、链式提交的语义 —— 这一层只给"一块一块拼"的原语。
+//
+// 命名: 公开 io_*, 内部 ior_*。自检 test_iouring_*。
+
+module iouring
+
+/// 空操作 —— 只用来量提交/完成的往返延迟。
+pub const IO_OP_NOP: u32 = 0;
+pub const IO_OP_READV: u32 = 1;
+pub const IO_OP_WRITEV: u32 = 2;
+pub const IO_OP_FSYNC: u32 = 3;
+pub const IO_OP_READ_FIXED: u32 = 4;
+pub const IO_OP_WRITE_FIXED: u32 = 5;
+pub const IO_OP_POLL_ADD: u32 = 6;
+pub const IO_OP_POLL_REMOVE: u32 = 7;
+pub const IO_OP_SYNC_FILE_RANGE: u32 = 8;
+pub const IO_OP_SENDMSG: u32 = 9;
+pub const IO_OP_RECVMSG: u32 = 10;
+pub const IO_OP_TIMEOUT: u32 = 11;
+pub const IO_OP_TIMEOUT_REMOVE: u32 = 12;
+pub const IO_OP_ACCEPT: u32 = 13;
+pub const IO_OP_ASYNC_CANCEL: u32 = 14;
+pub const IO_OP_LINK_TIMEOUT: u32 = 15;
+pub const IO_OP_CONNECT: u32 = 16;
+pub const IO_OP_FALLOCATE: u32 = 17;
+pub const IO_OP_OPENAT: u32 = 18;
+pub const IO_OP_CLOSE: u32 = 19;
+
+/// 一个 SQE 的字节数 (内核按 64 字节一格走队列)。
+pub const IO_SQE_BYTES: u32 = 64;
+/// 一个 CQE 的字节数。
+pub const IO_CQE_BYTES: u32 = 16;
+
+pub const IO_ENTER_GETEVENTS: u32 = 1;
+pub const IO_ENTER_SQ_WAKEUP: u32 = 2;
+
+const IORP_SYS_SETUP: u64 = 425;
+const IORP_SYS_ENTER: u64 = 426;
+const IORP_SYS_REGISTER: u64 = 427;
+
+fn ior_st8(p: ptr, off: u32, v: u64) -> u32 {
+    store8(p, off, (v & 255) as u8);
+    return off + 1;
+}
+
+fn ior_st16(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 2 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 2;
+}
+
+fn ior_st32(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 4;
+}
+
+fn ior_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn ior_ld32(p: ptr, off: u32) -> u32 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v as u32;
+}
+
+fn ior_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn ior_zero(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn ior_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 把一条 SQE 写进 `buf` (至少 64 字节): 先把整格清零, 再按 ABI 偏移填前 40 字节。
+/// `fd` 取 i64 是为了让 `-1` (表示"用注册表里的下标") 原样落进低 32 位。
+pub fn io_sqe_pack(buf: ptr, opcode: u32, fd: i64, addr: u64, len: u32, off: u64,
+                  user_data: u64) -> u32 {
+    ior_zero(buf, IO_SQE_BYTES);
+    ior_st8(buf, 0, opcode as u64);
+    ior_st8(buf, 1, 0);
+    ior_st16(buf, 2, 0);
+    ior_st32(buf, 4, fd as u64);
+    ior_st64(buf, 8, off);
+    ior_st64(buf, 16, addr);
+    ior_st32(buf, 24, len as u64);
+    ior_st32(buf, 28, 0);
+    ior_st64(buf, 32, user_data);
+    return IO_SQE_BYTES;
+}
+
+/// CQE 里的 `user_data` —— 提交时自己填的那个数, 用来认领结果。
+pub fn io_cqe_user_data(cqe: ptr) -> u64 {
+    return ior_ld64(cqe, 0);
+}
+
+/// CQE 里的返回值: 非负是字节数/0, 负数就是错误码 (取反即 errno)。
+pub fn io_cqe_res(cqe: ptr) -> i64 {
+    let v: u64 = ior_ld32(cqe, 8) as u64;
+    if v >= 2147483648 as u64 {
+        return (v - 4294967296 as u64) as i64;
+    }
+    return v as i64;
+}
+
+/// CQE 的标志位 (CQE_F_MORE 等)。
+pub fn io_cqe_flags(cqe: ptr) -> u32 {
+    return ior_ld32(cqe, 12);
+}
+
+/// opcode -> 名字。未知返回 `"unknown"`。
+pub fn io_opcode_name(op: u32, out: ptr, cap: u32) -> u32 {
+    if op == IO_OP_NOP { return ior_put(out, cap, 0, "NOP"); }
+    if op == IO_OP_READV { return ior_put(out, cap, 0, "READV"); }
+    if op == IO_OP_WRITEV { return ior_put(out, cap, 0, "WRITEV"); }
+    if op == IO_OP_FSYNC { return ior_put(out, cap, 0, "FSYNC"); }
+    if op == IO_OP_READ_FIXED { return ior_put(out, cap, 0, "READ_FIXED"); }
+    if op == IO_OP_WRITE_FIXED { return ior_put(out, cap, 0, "WRITE_FIXED"); }
+    if op == IO_OP_POLL_ADD { return ior_put(out, cap, 0, "POLL_ADD"); }
+    if op == IO_OP_POLL_REMOVE { return ior_put(out, cap, 0, "POLL_REMOVE"); }
+    if op == IO_OP_SYNC_FILE_RANGE { return ior_put(out, cap, 0, "SYNC_FILE_RANGE"); }
+    if op == IO_OP_SENDMSG { return ior_put(out, cap, 0, "SENDMSG"); }
+    if op == IO_OP_RECVMSG { return ior_put(out, cap, 0, "RECVMSG"); }
+    if op == IO_OP_TIMEOUT { return ior_put(out, cap, 0, "TIMEOUT"); }
+    if op == IO_OP_TIMEOUT_REMOVE { return ior_put(out, cap, 0, "TIMEOUT_REMOVE"); }
+    if op == IO_OP_ACCEPT { return ior_put(out, cap, 0, "ACCEPT"); }
+    if op == IO_OP_ASYNC_CANCEL { return ior_put(out, cap, 0, "ASYNC_CANCEL"); }
+    if op == IO_OP_LINK_TIMEOUT { return ior_put(out, cap, 0, "LINK_TIMEOUT"); }
+    if op == IO_OP_CONNECT { return ior_put(out, cap, 0, "CONNECT"); }
+    if op == IO_OP_FALLOCATE { return ior_put(out, cap, 0, "FALLOCATE"); }
+    if op == IO_OP_OPENAT { return ior_put(out, cap, 0, "OPENAT"); }
+    if op == IO_OP_CLOSE { return ior_put(out, cap, 0, "CLOSE"); }
+    return ior_put(out, cap, 0, "unknown");
+}
+
+fn ior_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return ior_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+/// `io_uring_enter` 的 flags -> 名字串。
+pub fn io_enter_flags_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return ior_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & IO_ENTER_GETEVENTS) != 0 {
+        pos = ior_put(out, cap, pos, "GETEVENTS");
+    }
+    if (mask & IO_ENTER_SQ_WAKEUP) != 0 {
+        pos = ior_sep(out, cap, pos);
+        pos = ior_put(out, cap, pos, "SQ_WAKEUP");
+    }
+    return pos;
+}
+
+/// `io_uring_setup(entries, params)` —— params 是内核回填的队列参数块。
+pub fn io_setup(entries: u32, params: ptr) -> i64 {
+    return syscall4(IORP_SYS_SETUP, entries as u64, params as u64, 0);
+}
+
+/// `io_uring_enter(fd, to_submit, min_complete, flags)`。
+pub fn io_enter(fd: i64, to_submit: u32, min_complete: u32, flags: u32) -> i64 {
+    return syscall6(IORP_SYS_ENTER, fd as u64, to_submit as u64, min_complete as u64,
+                    flags as u64, 0);
+}
+
+/// `io_uring_register(fd, opcode, arg, nr_args)` —— 注册固定文件/缓冲区。
+pub fn io_register(fd: i64, opcode: u32, arg: u64, nr_args: u32) -> i64 {
+    return syscall6(IORP_SYS_REGISTER, fd as u64, opcode as u64, arg,
+                    nr_args as u64, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_iouring_sqe() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = io_sqe_pack(b, IO_OP_READV, 7 as i64, 4096, 128, 64, 1700000000);
+    return n == 64 && load8(b, 0) == 1 && load8(b, 4) == 7
+        && ior_ld64(b, 8) == 64 && ior_ld64(b, 16) == 4096
+        && ior_ld32(b, 24) == 128 && ior_ld64(b, 32) == 1700000000
+        && load8(b, 63) == 0;
+}
+
+fn test_iouring_cqe() -> bool {
+    let c: ptr = alloc(16);
+    ior_st64(c, 0, 99);
+    ior_st32(c, 8, 4294967295 as u64);
+    ior_st32(c, 12, 4);
+    return io_cqe_user_data(c) == 99 && io_cqe_res(c) == (0 as i64 - 1)
+        && io_cqe_flags(c) == 4;
+}
+
+fn test_iouring_names() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = io_opcode_name(IO_OP_CLOSE, o, 32);
+    let want: str = "CLOSE";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return io_enter_flags_text(3, o, 32) == 19;
+}

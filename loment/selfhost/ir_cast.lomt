@@ -1,4 +1,5 @@
 module ir_cast
+choose runtime
 
 // M82 目标文件 (转换子集): `as` 生成 trunc/sext/zext, 必须与 lomentc 逐字节一致。
 // 实参位置的 as 也覆盖: 调用点按被调方形参类型强制 (与 lomentc 的 expr(a, p.type) 同义)。

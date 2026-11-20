@@ -21,6 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { readGrammarDecl, NATIVE_GRAMMARS } = require('./grammar-detect');
 
 /** 相对路径一律用 `/` —— 传给外部命令，反斜杠在 WSL/clang 那侧会被当转义。 */
 function posixRel(root, p) {
@@ -61,17 +62,27 @@ function findWrapper(startDir, maxUp) {
 }
 
 /**
- * 这个文件里有没有 `fn _start`（ELF 的入口）。
+ * 这个文件里有没有程序入口。
+ *
+ * 三种都算（`docs/295`）：
+ *   * `fn main()` —— 正常入口（无参、无返回类型；链接器的入口桩调它再 `exit(0)`）；
+ *   * `fn _start()` —— 裸机/内核那条路，两者都在时 `_start` 赢；
+ *   * `fn command_main(...)` —— 命令单元（`loment_command` + `command_main`），
+ *     `_start` 由工具链生成。
+ *
+ * 2026-11-03 之前只认 `_start`，于是 `fn main() { print(...) }` 这种**合法程序**被当成
+ * 库模块拦在「编译并运行」外面（2026-11-04 用户截图那条报错）。
  *
  * **必须自己有**：2026-09-18 全仓清点过，**没有一例**是"入口来自 `use` 的模块"
- * （`loment` 下所有 `.lomt` 里，凡定义 `_start` 的文件都自己编成程序）。所以这一条能当判据用，
- * 不用去解 `use` 树。
+ * （`loment` 下所有 `.lomt` 里，凡定义入口的文件都自己编成程序）。所以这一条能当判据用，
+ * 不用去解 `use` 树。注释里的同名文本不算（先抹掉注释再看）。
  *
  * 读不了就不拦（返回 true）—— 宁可让它去编，也不假装它是个库。
  */
 function hasEntry(file) {
   try {
-    return /\bfn\s+_start\b/.test(fs.readFileSync(file, 'utf8'));
+    const text = stripComments(fs.readFileSync(file, 'utf8'));
+    return /\bfn\s+(_start|main|command_main)\b/.test(text);
   } catch (e) {
     return true;
   }
@@ -89,6 +100,173 @@ function hasEntry(file) {
  * @param {string[]} [o.toolArgs]  `loment.toolArgs`
  * @param {string} [o.buildDir]  `loment.buildDir`（相对工作区根）
  */
+/** 抹掉注释, 只为了别把注释里的 `use "..."` 当成依赖。换行留着 —— `^` 是按行锚的。 */
+function stripComments(text) {
+  let out = '';
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '/' && text[i + 1] === '/') {
+      while (i < n && text[i] !== '\n') {
+        i += 1;
+      }
+    } else if (c === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < n && !(text[i] === '*' && text[i + 1] === '/')) {
+        i += 1;
+      }
+      i += 2;
+    } else if (c === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== '"') {
+        j += text[j] === '\\' ? 2 : 1;
+      }
+      out += text.slice(i, Math.min(j + 1, n));
+      i = j + 1;
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * 文件头声明了哪门**非原生**表层语法；没有（或声明的是 `loment`/`rust`）就 null。
+ *
+ * 声明怎么读与参考实现逐条对拍（`grammar-detect.js` 那一套，`vscode_ext_test` 枚举全仓
+ * 语料盯着的就是它）。这里只多问一句"是不是原生"。
+ */
+function surfaceGrammarOf(file) {
+  try {
+    const d = readGrammarDecl(fs.readFileSync(file, 'utf8'));
+    return d.declared && NATIVE_GRAMMARS.indexOf(d.grammar) < 0 ? d.grammar : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 这个**编译单元**里第一份带非原生表层语法声明的文件：入口自己，或入口 `use "…"` 的
+ * 同目录模块（一层）。
+ *
+ * **为什么必须看依赖**：`loment/examples/cproject/main.lomt` 是原生写的宿主，表层语法在
+ * 它 `use` 的 `bitkit.lomt` 里 —— 编译失败的是**那个依赖**，而报错说的是"this file"。
+ * 用户照着入口文件找半天，找不到任何 `choose write grammar`。
+ *
+ * **为什么只找一层**：拼接层的 `use` 树由工具链自己解；编辑器这一侧只要够早地认出
+ * "这个单元里有外门语法的叶子"，多解一层就多一份会漂的重复实现。漏一层的代价是退回
+ * 工具链原来的报错，不是错判。
+ */
+function surfaceInUnit(file) {
+  const own = surfaceGrammarOf(file);
+  if (own) {
+    return { file, grammar: own, entry: true };
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    return null;
+  }
+  const dir = path.dirname(file);
+  const re = /^[ \t]*use[ \t]+"([^"]+)"/gm;
+  const src = stripComments(text);
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const dep = path.resolve(dir, m[1]);
+    const g = surfaceGrammarOf(dep);
+    if (g) {
+      return { file: dep, grammar: g, entry: false };
+    }
+  }
+  return null;
+}
+
+/**
+ * 这份源有没有 `use`（路径形式 `use "m.lomt"` 或名字形式 `use std`）。
+ *
+ * 有的话**语言服务的诊断不完整**：两个实现都只查当前文件（`_parse`/`run_check` 都不做
+ * `resolve_deps`），于是跨模块的名字全报 `E002 符号未声明` —— 一份编得过的多文件工程
+ * 在编辑器里满屏假错（2026-10-21 实测，`cproject/main.lomt` 5 条）。调用方据此挑检查器。
+ */
+function usesModules(text) {
+  return /^[ \t]*use[ \t]+(?:"|[A-Za-z_])/m.test(stripComments(text));
+}
+
+/**
+ * 在 PATH 里找一个可执行文件，返回**绝对路径**（找不到给 `''`）。
+ *
+ * Windows 上 `loment` 实际是 `loment.cmd` —— 必须按 `PATHEXT` 试后缀才能找到。
+ * `pathEnv` / `pathExt` 可注入（判据要确定，不能看跑测试的机器装没装 Loment）。
+ */
+function findOnPath(name, pathEnv, pathExt, platform) {
+  const probe = (p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch (e) {
+      return false;
+    }
+  };
+  const dirs = String(pathEnv === undefined ? process.env.PATH || '' : pathEnv)
+    .split(path.delimiter);
+  const exts = platform === 'win32'
+    ? String(pathExt === undefined ? process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD' : pathExt)
+      .split(';').filter(Boolean)
+    : [''];
+  const hasDirOrExt = path.extname(name) !== '' || /[\\/]/.test(name);
+  for (const d of dirs) {
+    if (!d) {
+      continue;
+    }
+    if (hasDirOrExt) {
+      if (probe(path.join(d, name))) {
+        return path.join(d, name);
+      }
+      continue;
+    }
+    for (const e of exts) {
+      const suffix = e ? (e.startsWith('.') ? e : '.' + e) : '';
+      const cand = path.join(d, name + suffix);
+      if (probe(cand)) {
+        return cand;
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * 把 `loment.toolCommand` 解析成真正能 spawn 的 argv 前缀。
+ *
+ * **Windows 上批处理不能直接 spawn**：`child_process.spawn('loment')` 找不到
+ * （CreateProcess 只补 `.exe`），`spawn('loment.cmd')` 直接 `EINVAL` —— 而安装包给
+ * 的就是 `loment.cmd`（2026-11-04 实测）。所以解析到 `.cmd`/`.bat` 时交给 `cmd.exe`，
+ * argv 仍是数组，不拼字符串。
+ */
+function resolveTool(tool, o) {
+  const platform = o.platform || process.platform;
+  const isFile = (p) => {
+    try {
+      return fs.statSync(p).isFile();
+    } catch (e) {
+      return false;
+    }
+  };
+  // 已经是绝对/相对路径（自动探测拿回来的就是）就别再进 PATH 目录拼一遍
+  const found = (/[\\/]/.test(tool) && isFile(tool))
+    ? tool
+    : findOnPath(tool, o.pathEnv, o.pathExt, platform);
+  if (!found) {
+    return { cmd: tool, args: [] };
+  }
+  if (platform === 'win32' && /\.(cmd|bat)$/i.test(found)) {
+    return { cmd: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', found] };
+  }
+  return { cmd: found, args: [] };
+}
+
 function invocation(o) {
   const file = o.file;
   const action = o.action === 'run' ? 'run' : 'build';
@@ -97,19 +275,57 @@ function invocation(o) {
   // 没打开文件夹时（空窗口）调用方给的是**文件所在目录** —— 那也是个合法的基准。
   const root = o.root || path.dirname(file);
 
-  // ---- ⓪ 「运行」一个没有 `_start` 的文件，是**没有意义**的（也编不出可执行）
+  // ---- ⓪' 外门语法：**说清楚是哪个文件，以及现在能怎么编**
+  //
+  // 2026-10-21 用户报"扩展莫名其妙的不可编译 / 显示不是 Loment"：一份**原生**宿主
+  // `use` 了 C 写法的叶子，自举编译器会说 "this file does not look like Loment"
+  // （0.1.5 的 CLI）或"这份源的自举侧收不了…"（开发树的 seed）—— 两句都没点名**哪个**
+  // 文件，而入口文件里连 `choose write grammar` 都没有。先把这句说出来。
+  //
+  // 两种形状都拦：入口自己是外门（编译一片叶子），或依赖是外门（编译整个工程）。
+  // **不判"工具链能不能翻译"** —— 今天所有路径都是自举侧（收不了），而哪天有了翻译器的
+  // 孪生，这条就会变成误拦；所以文案里点名"这条路用的是什么"，而不是下永久结论。
+  const surface = surfaceInUnit(file);
+  if (surface) {
+    const where = path.relative(root, surface.file).replace(/\\/g, '/');
+    // 命令编的是**入口**（`use` 树由工具链自己解），不是那个叶子文件 —— 编叶子只会得到
+    // 它的 IR，用户要的是整个程序。
+    const entry = path.relative(root, file).replace(/\\/g, '/');
+    const dir = o.buildDir || 'loment/build';
+    const stem = path.basename(file).replace(/\.lomt$/i, '');
+    return {
+      error: `\`${where}\` declares the **${surface.grammar}** surface grammar `
+        + `(\`choose write grammar ${surface.grammar}\`)`
+        + (surface.entry ? '.\n' : ' -- it is a module this file uses.\n')
+        + 'The compiler this button runs takes only `choose write grammar loment` '
+        + '(or `rust`); the other spellings wait on the translator\'s Loment twin '
+        + '(docs/189 section 4.1). That module is what the compiler means when it '
+        + 'answers "this file does not look like Loment".\n'
+        + 'If your toolchain has the translator, point `loment.toolCommand` at it. '
+        + 'Otherwise build with the reference implementation (a checkout has one):\n'
+        + `  python tools/lomentc.py "${entry}" --emit-llvm ${dir}/${stem}.ll `
+        + `--emit-potato ${dir}/${stem}.potato.json\n`
+        + `  python tools/lomelf.py ${dir}/${stem}.ll -o ${dir}/${stem} --target elf`,
+    };
+  }
+
+  // ---- ⓪ 「运行」一个没有入口的文件，是**没有意义**的（也编不出可执行）
   //
   // 实测症状：链接器给一句 `cannot find entry symbol _start; not setting start address`，
   // 然后那个 ELF 一跑就 `exit code 11`（段错误）—— **用户看到的是"跑不动"，而且不知道
   // 为什么**（`lomc.ps1` 自己退出码还是 0）。这里把它变成一句能读懂的话。
   //
+  // 入口有三种：`fn main()`（正常入口）、`fn _start()`（裸机/内核，优先）、
+  // `fn command_main()`（命令单元，入口由工具链生成）—— 见 `docs/295` 与 `hasEntry`。
+  //
   // 例子：`loment/examples/mathutil.lomt` 是个库模块（只有 `pub fn`/`pub const`），
   // 要运行的是**用它的那个入口文件**。**编译**不受影响（出 IR/目标文件是正当的）。
   if (action === 'run' && !hasEntry(file)) {
-    return { error: `这个文件不是可运行的程序 —— 它里面没有 \`fn _start\`（ELF 的入口）。` +
-                    `\n多半它是个**库模块**：要运行的是**用它的那个入口文件**` +
-                    `（自己有 \`_start\` 的那个，例如同目录下的 \`tour.lomt\`）。` +
-                    `\n只想编它（出 IR / 目标文件）就用「Loment: 编译当前文件」。` };
+    return { error: `This file is not a runnable program — it has no \`fn main()\` (the normal entry), ` +
+                    `no \`fn _start()\` (the freestanding entry), and no \`command_main\` (a command unit).` +
+                    `\nIt is most likely a **library module**: what you want to run is the **entry file that uses it**` +
+                    ` (e.g. \`tour.lomt\` next to it).` +
+                    `\nTo merely compile it (IR / object file), use "Loment: Build current file".` };
   }
 
   // ---- ① 装了 Loment 命令（产品路径，不需要 Python）
@@ -117,15 +333,16 @@ function invocation(o) {
     const rel = posixRel(root, file);
     if (!rel || rel.startsWith('..')) {
       // 相对路径要传给外部命令，`..` 会指到别处（clang/WSL 那侧解出来不是这个文件）
-      return { error: '这个文件不在工作区里 —— 编译命令的基准是工作区根。'
-                      + '把它的目录加进工作区，或把工作区设成它的上一层。' };
+      return { error: 'This file is not inside the workspace — build commands are relative to the workspace root.'
+                      + ' Add its directory to the workspace, or open the workspace one level above it.' };
     }
     const extra = Array.isArray(o.toolArgs) ? o.toolArgs.map(String) : [];
-    const args = extra.concat([action, rel]);
+    const tail = [action, rel];
     if (action === 'build') {
-      args.push('-o', outName(o.buildDir, file));
+      tail.push('-o', outName(o.buildDir, file));
     }
-    return { cmd: tool, args, cwd: root, how: 'cli' };
+    const rt = resolveTool(tool, o);
+    return { cmd: rt.cmd, args: rt.args.concat(extra, tail), cwd: root, how: 'cli' };
   }
 
   // ---- ② Windows 开发树：scripts/lomc.ps1（种子 + clang + WSL）
@@ -147,15 +364,35 @@ function invocation(o) {
     }
   }
 
+  // ---- ②' 没配 `toolCommand`，但 PATH 上有装好的 `loment`：直接用。
+  //
+  // 安装包把命令放进 PATH，用户不该再手填一遍设置（2026-11-04：默认空值时，一个
+  // `fn main() { print(...) }` 在普通文件夹里点「编译并运行」只会看到"Nothing to build
+  // with"）。**放在 `lomc.ps1` 之后**：检出里那个包装脚本用的是检出的种子，比 PATH 上
+  // 可能过期的发行版更该赢。
+  const autoTool = findOnPath('loment', o.pathEnv, o.pathExt, platform);
+  if (autoTool) {
+    const rel = posixRel(root, file);
+    if (rel && !rel.startsWith('..')) {
+      const tail = [action, rel];
+      if (action === 'build') {
+        tail.push('-o', outName(o.buildDir, file));
+      }
+      const rt = resolveTool(autoTool, o);
+      return { cmd: rt.cmd, args: rt.args.concat(tail), cwd: root, how: 'cli' };
+    }
+  }
+
   // ---- ③ 两条都没有：说清楚该做什么，别静默
   return {
-    error: '找不到能编译的东西。两种办法任选一种：\n'
-      + '  · 装好工具链后在设置里填 `loment.toolCommand`'
-      + '（装了包的话它是 `loment`；Windows 上经 WSL 跑时填 `wsl`，'
-      + '`loment.toolArgs` 填 ["-e", "/home/<你>/.local/share/loment/bin/loment"]）；\n'
-      + '  · 或者把这个文件放在 Loment 仓库里（`scripts/lomc.ps1` 在的话会自动用它 ——'
-      + '**不要求打开文件夹**，从文件往上找）。',
+    error: 'Nothing to build with. Two ways, pick either:\n'
+      + '  · install the toolchain (then `loment` is found on PATH automatically), or set'
+      + ' `loment.toolCommand` (to run through WSL on Windows set `wsl`,'
+      + ' with `loment.toolArgs` = ["-e", "/home/<you>/.local/share/loment/bin/loment"]);\n'
+      + '  · or put this file inside a Loment checkout (`scripts/lomc.ps1` is then used automatically —'
+      + ' **no workspace folder required**, it is searched upward from the file).',
   };
 }
 
-module.exports = { invocation, posixRel, outName, findWrapper };
+module.exports = { invocation, posixRel, outName, findWrapper, surfaceInUnit,
+                   surfaceGrammarOf, stripComments, usesModules };

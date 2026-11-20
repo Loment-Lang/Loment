@@ -1,4 +1,4 @@
-# 静态门禁的**基线** —— 这份清单上的红项是**已知的**（不判失败）；清单之外的**新红**判失败。
+# 静态门禁的**已知红基线** —— 这份清单上的红项**不判失败**；清单之外的**新红**判失败。
 #
 # 纪律（与 `PARSE_KNOWN_GAPS` / `M85_KNOWN_GAPS` 那两道棘轮同一个形状）：
 #
@@ -11,15 +11,49 @@
 #   * 本文件**不进发布清单**：`.github/**` 不在 `loment_release.GLOBS` 里，
 #     所以动它不会让清单过期。
 #
+# **2026-10-19：基线改成逐条判据（`#769`）。** 原先的一行只有套件名，于是"套件在基线里"
+# 等于"它里面**任何**一条判据红都不判失败"—— 133 条判据（14.3%）落在这种整条豁免里，
+# 包括唯一那条种子容量判据（`loment_genesis_test::test_seed_fits_lomelf_input_buffer`）
+# 与镜像链接器的对拍判据（`loment_elf_test::test_lomelf_selfhost_matches_reference`）。
+# 现在每行是 `套件 判据名`；`*` **只**表示"这条套件级失败（崩溃/超时/导入失败）没有可点名的
+# 判据"，**不是**"这条套件里任何一条都算已知红"。逐条匹配的实现与口径在
+# `tools/ci.py` 的 `read_baseline` / `baseline_red` / `baseline_new`。
+#
 # 量于 2026-09-22，`main@61f6289` 那一轮（run 35785011534）实测 10 条：
 # 4 条是"缺 LinuxFUAI 姊妹检出"（与本机同源），其余是 Linux 可移植性（正在逐条修）。
 #
-# 格式：每行一个检查名（`:: [static] <名字> … FAIL` 里的那个名字）；`#` 起头是注释。
-fuai_contract_check          # 环境：缺 LinuxFUAI/ 姊妹检出
-lom_audit                    # 环境：同上（要读对方的 C 头）
-lomc_test                    # 环境：同上（发布副本一致性那两条）
-potato_cross                 # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
-loment_lomtfrom_test         # 仓库：Linux 可移植性
-loment_multisyntax_projects_test  # 仓库：新落的判据，runner 上 2/3（正在修）
-loment_trans_test            # 仓库：Linux 可移植性
-potato_test                  # 仓库：Linux 可移植性（孪生二进制段错误那条）
+# 2026-10-10 删两条（**只许变短**，本轮就是那个 PR）：
+#   * `loment_lomtfrom_test` —— 连续两轮实测全绿；
+#   * `potato_test` —— 同上（那两条"孪生二进制段错误"的 Linux 可移植性已经不再复现；
+#     门禁从 2026-10-09 起每轮都在 summary 里点名它们"已经绿了"，删掉就是消掉那个提醒）。
+#
+# 2026-10-15 加四条（`#371` 把这一族从"在 runner 上静默跳过"改成"原生跑"之后露出来的）：
+# 这四条判据过去**从来没在 runner 上执行过**，所以它们红不红没人知道。加进来是**一个主张**，
+# 理由逐条写在下面；其中两条的真缺陷各开了 issue（`#399` / `#400`），修完就在同一个 PR 里删掉。
+#
+# 2026-10-15 删一条（**只许变短**）：`loment_p8_test` —— `#409` 已在 `main` 上修好
+# （PR `#411`：把 `bin-literal` 登记进判据自己的 `PARSE_LEVEL`，与 `#409` 的诊断一致），
+# 合进 `main` 之后它在本机 29/29，所以那一行连同它下面的理由一起删掉。
+#
+# 2026-10-17 关于 `loment_elf_test` 的历史（**2026-10-19 已按实测变短，整条删除**）：
+#   * 2026-10-16（`#439`，`bf1ff342`）的成因是文本段越界，已由 `f13885fc`（`#414`）修好；
+#   * 2026-10-17（run `38987352154`）红的是 900 秒超时与一条墙钟比值判据，后者已由
+#     `#442` / `#445` 换成 IR 里的确定性量；
+#   * 2026-10-19 的 `main` push（run `39340765771`）实测 `loment_elf_test` **全绿**，
+#     所以按"只许变短"把它从基线里删掉 —— **镜像链接器那条判据从这一笔起真正生效**。
+#
+# 2026-10-19 逐条化（run `39340765771` 实测；同一轮里 `loment_doc_test` / `loment_trans_test`
+# 也已全绿，一并删除）。下面每一条都是**那一条判据**的名字，不是"整个套件"。
+#
+# 格式：每行 `套件 判据名`（或 `套件 *` = 套件级失败，没有可点名的判据）；
+# `#` 起头是注释，行尾 `#` 之后也是注释。
+fuai_contract_check *                        # 环境：缺 LinuxFUAI/ 姊妹检出（driver 脚本，没有判据可点）
+lom_audit *                                  # 环境：同上（要读对方的 C 头）
+potato_cross *                               # 环境：同上（缺 LinuxFUAI/tools/potato_verify.py）
+lomc_test test_spec_json_is_generated        # 环境：要 LinuxFUAI/spec/spec.json（姊妹仓不在树里）
+lomc_test test_fujr_byte_roundtrip           # 环境：同上（缺 m31_res.run 基准）
+loment_cli_test test_cli_check_matches_loment_twin  # 环境：判据在 /tmp 造一个"python 侧安装"，runner 上那份没造出来
+loment_eol_test test_lomeol_matches_python   # 仓库：#400 —— runner 上 git 报 dubious ownership，loment_eol 走 SKIP 分支
+loment_eol_test test_lomeol_reports_crlf_like_python  # 仓库：同上（#400）
+loment_genesis_test test_bootstrap_needs_no_clang  # 环境：判据有意把 PATH 削到 /usr/bin:/bin，前提是树里有 genesis 工件；runner 上没有
+loment_multisyntax_projects_test test_every_project_runs_the_same_as_its_control  # 仓库：新落的判据，runner 上 C++ 对照组编译失败（正在修）

@@ -1,0 +1,112 @@
+// internet/tcp.lomt — TCP: 连接、收发、监听、接受
+//
+// 为什么单独一层: socket 的"建/关/设超时"在 sock 那一层; 这里只放**流上的动作**。
+// 发送一律走 `send`(44) + `MSG_NOSIGNAL` —— 对端挂断后写一个没忽略 SIGPIPE 的 socket
+// 会**直接杀掉进程** (SKILL.md 6.2.18, 实测退出码 13)。
+//
+// 缓冲一律**调用方给** (与整个库同一条约定): 那两个建连接/监听的函数要一块 16 字节的
+// `sockaddr_in` 暂存 (`listen` 还要一块 4 字节的 int 给 SO_REUSEADDR)。零分配。
+//
+// 用法 (客户端):
+//     let sa: ptr = ...;                       // 16 字节
+//     let fd: i64 = tcp_connect4(ip, 80, sa);
+//     if fd >= 0 { tcp_send_all(fd, req, n); let got = tcp_recv(fd, buf, cap); sock_close(fd); }
+// 服务端那条路也在这一层, 但**记得给 accept 回来的 fd 设超时** (SKILL.md 6.2.19:
+// 一个连上却不发东西的客户端能把整个服务拖死)。
+//
+// 边界: 不做 TLS (没有), 不做域名解析 (没有解析器), 不做重连/退避。自检只验纯逻辑。
+//
+// 命名: 公开 tcp_*, 内部 tcpp_*。自检 test_tcp_*。
+
+module tcp
+
+use "sock.lomt"
+
+const TCPP_SYS_CONNECT: u64 = 42;
+const TCPP_SYS_ACCEPT: u64 = 43;
+const TCPP_SYS_SENDTO: u64 = 44;
+const TCPP_SYS_RECVFROM: u64 = 45;
+const TCPP_SYS_BIND: u64 = 49;
+const TCPP_SYS_LISTEN: u64 = 50;
+
+/// 一个已连接的 socket: 建 + connect。`sa` 是调用方给的 16 字节暂存。
+/// 失败返回负数 (**不会**留下打开的 fd)。
+pub fn tcp_connect4(ip: u32, port: u32, sa: ptr) -> i64 {
+    let fd: i64 = sock_new(SOCK_AF_INET, SOCK_STREAM);
+    if fd < 0 {
+        return fd;
+    }
+    sock_addr_in(sa, ip, port);
+    let r: i64 = syscall4(TCPP_SYS_CONNECT, fd as u64, sa as u64, 16);
+    if r < 0 {
+        sock_close(fd);
+        return r;
+    }
+    return fd;
+}
+
+/// 绑 + 监听。`ip` 是绑定的地址 (0.0.0.0 传 0)。`sa` 16 字节, `on` 4 字节, 都是调用方的。
+/// 失败返回负数并关掉 fd。
+pub fn tcp_listen4(ip: u32, port: u32, backlog: u64, sa: ptr, on: ptr) -> i64 {
+    let fd: i64 = sock_new(SOCK_AF_INET, SOCK_STREAM);
+    if fd < 0 {
+        return fd;
+    }
+    sock_reuseaddr(fd, on);
+    sock_addr_in(sa, ip, port);
+    let b: i64 = syscall4(TCPP_SYS_BIND, fd as u64, sa as u64, 16);
+    if b < 0 {
+        sock_close(fd);
+        return b;
+    }
+    let l: i64 = syscall4(TCPP_SYS_LISTEN, fd as u64, backlog, 0);
+    if l < 0 {
+        sock_close(fd);
+        return l;
+    }
+    return fd;
+}
+
+pub fn tcp_accept(fd: i64) -> i64 {
+    return syscall4(TCPP_SYS_ACCEPT, fd as u64, 0, 0);
+}
+
+/// 一次发送。**带 MSG_NOSIGNAL** —— 对端没了也只返回错误, 不杀进程。
+pub fn tcp_send(fd: i64, p: ptr, n: u64) -> i64 {
+    return syscall7(TCPP_SYS_SENDTO, fd as u64, p as u64, n, SOCK_MSG_NOSIGNAL, 0, 0);
+}
+
+pub fn tcp_recv(fd: i64, p: ptr, cap: u64) -> i64 {
+    return syscall7(TCPP_SYS_RECVFROM, fd as u64, p as u64, cap, 0, 0, 0);
+}
+
+/// 把 n 字节都发出去 (处理短写)。返回总共发出的字节数; 出错返回负数。
+/// 收/发被打断或超时 (`sock_retry`) 时**不再重试**, 返回"发出去几个"的负数编码:
+/// `-(sent) - 1` —— 调用方能据此知道进度, 而不是把一次超时当成整条链路坏了。
+pub fn tcp_send_all(fd: i64, p: ptr, n: u64) -> i64 {
+    let sent: u64 = 0;
+    while sent < n {
+        let here: ptr = ((p as u64) + sent) as ptr;
+        let r: i64 = tcp_send(fd, here, n - sent);
+        if r < 0 {
+            if sock_retry(r) {
+                return -(sent as i64) - 1;
+            }
+            return r;
+        }
+        if r == 0 {
+            return sent as i64;
+        }
+        sent = sent + (r as u64);
+    }
+    return sent as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tcp_send_all_zero() -> bool {
+    // n == 0 时不该发系统调用 —— 这条在 Windows 上也能跑 (自检走 Loment->Rust,
+    // 那里的 syscall 是 Linux 的 asm; 真发出去会崩)。
+    let z: ptr = 0 as ptr;
+    return tcp_send_all(0, z, 0) == 0;
+}

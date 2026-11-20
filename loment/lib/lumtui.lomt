@@ -1,4 +1,5 @@
 module lumtui
+choose runtime
 
 // lumtui.lomt — LumtUI 的词汇表 (控件 / 旗标 / 尺寸模式 / 对齐 / 锚点 / 色调)。
 //

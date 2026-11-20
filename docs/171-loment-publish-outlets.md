@@ -2,10 +2,15 @@
 
 > 2026-09-15 用户定 · 工具 `tools/loment_publish.py` · 判据（门禁模式）`--check`
 > · 上游：`docs/162`（发行包）、`docs/170`（lompi 随包）
+>
+> ⚠️ **归属已变（2026-10-17）**：三个库都搬进了 `Loment-Lang` 组织，
+> `tools/loment_publish.py` 的 `ORG` 已改成它。**下面正文里的 `FujoJTOP` 是当时的记录，
+> 不是现状** —— 现状与搬迁的三条坑（站点 URL、门禁镜像、Actions secret）见 `docs/255`。
 
 ## 0. 一句话
 
-**开发在 `FujoJTOP/loment`（2026-09-17 起），发布口在各自的库。**
+**开发在 `Loment-Lang/loment`（2026-10-17 起；此前是 `FujoJTOP/loment`），
+发布口在各自的库。**
 
 | 库 | 地址 | 可见性 | 装什么 |
 |---|---|---|---|
@@ -117,3 +122,76 @@ python tools/loment_publish.py --push loment   # 或 --push lompi / --push all
 - **`--force` 是刻意的**：发布口的内容应当**完全**由单仓决定；留着分叉只会让人困惑。
   代价是"在那边提交过的东西会没"。
 - **切的是 `HEAD`**：只发已提交的内容，工作区里没提交的改动不会进去。
+
+## 5. 第三个发布口：VS Code Marketplace（扩展）
+
+> 2026-10-13 · 首次发布 `hooyan2022.loment` **v0.2.0** · 判据 `vscode_ext_test::test_vscode_publish_ready`
+>
+> **v0.2.1（同日）**：listing 整个换成**英文**、并且**不再拿 FujoOS 介绍自己**（商店页显示的就是
+> `editors/vscode/README.md` 加 `package.json` 的 `description`；第一版是中文、开篇写的是
+> "FUAI-OS 自研底层语言"，而 Loment 自 0.1.4.5 起已经是独立的东西，且 FujoOS 外界拿不到）。
+> 同一次把 `package.json` 里**用户看得见的**文案全换成英文（命令标题、设置说明、调试器标签、
+> 不受信工作区那段）—— 此前 32 条中文串，现在 0 条。`src/*.js` 里的**注释**保持中文（仓内文风），
+> 只有弹给用户看的那几句改了（编译器/工具链找不到时的提示）。
+>
+> **补记（同日的事实，不追因）**：第一次上传用的是**另一个账号**下的 `FujoJTOP` publisher ——
+> `vsce` 同样回了 `DONE`，但那次在浏览器里打开 `manage/publishers/FujoJTOP` 是 **404**，
+> 外面的三个探针（发布者页 / item 页 / 下载端点，外加一个已知存在的扩展做对照）也全查不到。
+> 原因没查明（最可能是**浏览器登的账号与那个发布者不是同一个**），改用 `hooyan2022` 重发，
+> 不再追。旧账号下若真躺着一条，删不删都不影响这里。
+>
+> **建发布者只能人来点**：Marketplace 的 API 明确拒 ——
+> `Creating a publisher from command line is not supported`（错误类型是 `InvalidReCaptchaTokenException`，
+> 它挂了 reCAPTCHA 防脚本建号）。所以这一格写进流程，别指望自动化。
+
+上面两个口是**代码仓**（`loment_publish.py --push`，内容完全由单仓决定）。Marketplace 是
+**另一个形状**：它是个商店 —— 发布要一个发布者账号，而且**版本号发出去就烧掉了**。所以单独成节。
+
+**地址**：<https://marketplace.visualstudio.com/items?itemName=hooyan2022.loment> ·
+管理台 <https://marketplace.visualstudio.com/manage/publishers/hooyan2022> ·
+装法 `code --install-extension hooyan2022.loment`。
+
+### 5.1 账号那一半（做一次，之后不用碰）
+
+微软账号 → 建一个 Azure DevOps 组织 → 建 **PAT**（[短链](https://go.microsoft.com/fwlink/?LinkId=307137)）→
+在 [manage](https://marketplace.visualstudio.com/manage) 建发布者。
+
+两处**填错就 401、而报错看不出来**：
+
+- PAT 的 **Organization** 要选 **All accessible organizations**（选单个组织不行 —— 商店发布跨组织）；
+- Scopes 用 **Custom defined** → **Show all scopes** → **Marketplace → Manage**（只要这一个）。
+
+发布者 **ID 是永久的**（`FujoJTOP`，与 `package.json` 的 `publisher` 必须一致），显示名可以改。
+
+### 5.2 发布
+
+```
+cd editors/vscode
+npx --yes @vscode/vsce@latest publish      # 版本取 package.json；token 走 VSCE_PAT 环境变量
+```
+
+**升版用明确给号的写法**（`vsce publish 0.2.1`），别用 `patch`/`minor` —— 那两个会自己改
+`package.json` **并提交**，与"版本写在源里、由人提交"的既有习惯打架。
+
+### 5.3 发布前那四件（都有判据或工具兜着）
+
+| 件 | 为什么 |
+|---|---|
+| `repository` | 没有它 `vsce` 每次都要求 `--allow-missing-repository` |
+| 扩展目录里的 `LICENSE` | **`vsce` 只找扩展目录**这一份（仓根那份它看不见）；`MIT OR Apache-2.0` 是 SPDX 表达式，缺文件 `vsce` 会提示。判据钉住它与仓根**逐字节相同** |
+| `icon`（128×128 PNG） | 没有它商店卡片是灰的。现在这份是从 `editors/loment.ico` 的 128 帧转出来的 |
+| `package.json` 的 `files` | vsce 的允许清单。**`node_modules` 必须在里面** —— 商店装下来的那份**不会**跑 `npm install` |
+
+判据 `test_vscode_publish_ready` 把它们连同"两份打包清单不许漏同一类文件"一次钉住；
+`vscode_ext.check()` 里另有 `icon` / `LICENSE` 两条（每次打包都会看）。
+
+### 5.4 边界（诚实清单）
+
+- **两个打包器**：商店走 `vsce`，本机侧载走 `python tools/vscode_ext.py --install`（确定性字节、进判据）。
+  **别拿侧载那份去发商店** —— 那份的 `vsixmanifest` 是手写的，商店的校验比侧载严，没验过。
+- **不在 CI 里发**：与 §4 同一条道理 —— 发布是对外动作，得人按；PAT 也不进 secrets。
+- **PAT 是明文的**：`vsce` 从 `VSCE_PAT` 读。**别把它写进任何文件、任何提交**；
+  贴出去过（截图、聊天、日志）就立刻去那个页面撤销重发。
+- **listing 的第一句必须说清"需要一套 Loment 检出"**：扩展不带编译器（`README.md` 顶上那句就是为它写的）。
+  不说的话，第一条评价会是"装了没反应"。
+- **版本号烧掉就没了**：撤下来也没法重发同一个号；发错了就发下一个号。

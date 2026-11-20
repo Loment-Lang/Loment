@@ -1,0 +1,206 @@
+// system/mqueue.lomt — POSIX 消息队列: 名字、打开标志、属性块、优先级
+//
+// 为什么系统工具需要它: POSIX 消息队列是**有名字**的: 两个进程各自 `mq_open("/jobs")`
+// 就接上了同一队列, 不需要 fork 的亲缘关系 (System V 那套要自己算键, 见 `ipc`)。
+// 名字必须以 `/` 开头并落在 mqueuefs 里, 打开标志又和普通文件的 `O_*` 长得一样但
+// **含义有限** —— `O_TRUNC` 在这里没有意义, 给了也不报错。属性块 (maxmsg/msgsize)
+// 是 64 字节、四个 i64 在前; 优先级是 0..32767, 收消息时**高的先出**。
+//
+// 覆盖: 打开/删除/收发/查询五条调用、属性块的打包与取值、优先级校验、标志位名字。
+// **不做的**: 通知 (`mq_notify` 要一个 C 函数指针或 `sigevent`, 本语言今天给不出
+// 可移植的那种)、`/dev/mqueue` 的文本视图。
+//
+// 命名: 公开 mq_*, 内部 mqq_*。自检 test_mqueue_*。
+
+module mqueue
+
+pub const MQ_O_RDONLY: u32 = 0;
+pub const MQ_O_WRONLY: u32 = 1;
+pub const MQ_O_RDWR: u32 = 2;
+/// 不存在就创建 (与普通文件同一个值)。
+pub const MQ_O_CREAT: u32 = 64;
+/// 已存在就失败 —— 抢一个独占的队列名时用。
+pub const MQ_O_EXCL: u32 = 128;
+/// 不阻塞。
+pub const MQ_O_NONBLOCK: u32 = 2048;
+/// 收到 exec 时自动关闭 (默认行为, 写出显式值便于日志)。
+pub const MQ_O_CLOEXEC: u32 = 524288;
+
+/// 优先级的上界 (内核的 `MQ_PRIO_MAX` 是 32768, 合法取值 0..32767)。
+pub const MQ_PRIO_MAX: u32 = 32767;
+
+/// `struct mq_attr` 的字节数 (4 个 i64 + 32 字节保留)。
+pub const MQ_ATTR_BYTES: u32 = 64;
+
+const MQQ_SYS_MQ_OPEN: u64 = 240;
+const MQQ_SYS_MQ_UNLINK: u64 = 241;
+const MQQ_SYS_MQ_TIMEDSEND: u64 = 242;
+const MQQ_SYS_MQ_TIMEDRECEIVE: u64 = 243;
+const MQQ_SYS_MQ_NOTIFY: u64 = 244;
+const MQQ_SYS_MQ_GETSETATTR: u64 = 245;
+
+fn mqq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 8;
+}
+
+fn mqq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn mqq_zero(p: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(p, i, 0 as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn mqq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 把一块 `struct mq_attr` 写全: 四个 i64 在前, 其余 32 字节清零。
+pub fn mq_attr_set(buf: ptr, flags: i64, maxmsg: i64, msgsize: i64, curmsgs: i64) -> u32 {
+    mqq_zero(buf, MQ_ATTR_BYTES);
+    mqq_st64(buf, 0, flags as u64);
+    mqq_st64(buf, 8, maxmsg as u64);
+    mqq_st64(buf, 16, msgsize as u64);
+    mqq_st64(buf, 24, curmsgs as u64);
+    return MQ_ATTR_BYTES;
+}
+
+pub fn mq_attr_flags(buf: ptr) -> u64 { return mqq_ld64(buf, 0); }
+pub fn mq_attr_maxmsg(buf: ptr) -> u64 { return mqq_ld64(buf, 8); }
+pub fn mq_attr_msgsize(buf: ptr) -> u64 { return mqq_ld64(buf, 16); }
+pub fn mq_attr_curmsgs(buf: ptr) -> u64 { return mqq_ld64(buf, 24); }
+
+/// 优先级合法范围 0..32767。
+pub fn mq_prio_valid(prio: u32) -> bool {
+    return prio <= MQ_PRIO_MAX;
+}
+
+/// `mq_open(name, flags, mode, attr)` —— name 是 `/` 开头的 C 串, flags 里有
+/// `MQ_O_CREAT` 时 mode 与 attr 才被看。
+pub fn mq_open(name: ptr, flags: u32, mode: u32, attr: ptr) -> i64 {
+    return syscall6(MQQ_SYS_MQ_OPEN, name as u64, flags as u64, mode as u64, attr as u64, 0);
+}
+
+/// 删除队列名 —— 打开着的描述符仍然可用, 但新进程再也打不开了。
+pub fn mq_unlink(name: ptr) -> i64 {
+    return syscall4(MQQ_SYS_MQ_UNLINK, name as u64, 0, 0);
+}
+
+/// 发一条: `timeout` 是 16 字节 timespec; 传 0 表示不设超时。
+pub fn mq_timedsend(mqdes: i64, msg: ptr, len: u64, prio: u32, timeout: ptr) -> i64 {
+    return syscall6(MQQ_SYS_MQ_TIMEDSEND, mqdes as u64, msg as u64, len, prio as u64,
+                    timeout as u64);
+}
+
+/// 收一条: `prio_ptr` 收这条消息的优先级 (可以传 0 表示不要)。
+pub fn mq_timedreceive(mqdes: i64, buf: ptr, len: u64, prio_ptr: ptr, timeout: ptr) -> i64 {
+    return syscall6(MQQ_SYS_MQ_TIMEDRECEIVE, mqdes as u64, buf as u64, len,
+                    prio_ptr as u64, timeout as u64);
+}
+
+/// 读/写属性块: newattr 为 0 是只读, oldattr 为 0 是不回填。
+pub fn mq_getsetattr(mqdes: i64, newattr: ptr, oldattr: ptr) -> i64 {
+    return syscall4(MQQ_SYS_MQ_GETSETATTR, mqdes as u64, newattr as u64, oldattr as u64);
+}
+
+/// 通知 (本模块只给调用号; `sigevent` 的形状见头注释的"不做")。
+pub fn mq_notify(mqdes: i64, sevp: ptr) -> i64 {
+    return syscall4(MQQ_SYS_MQ_NOTIFY, mqdes as u64, sevp as u64, 0);
+}
+
+fn mqq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return mqq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+/// 打开标志 -> 名字串。
+pub fn mq_flag_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = 0;
+    if (mask & MQ_O_CLOEXEC) != 0 {
+        pos = mqq_put(out, cap, pos, "O_CLOEXEC");
+    }
+    if (mask & MQ_O_CREAT) != 0 {
+        pos = mqq_sep(out, cap, pos);
+        pos = mqq_put(out, cap, pos, "O_CREAT");
+    }
+    if (mask & MQ_O_EXCL) != 0 {
+        pos = mqq_sep(out, cap, pos);
+        pos = mqq_put(out, cap, pos, "O_EXCL");
+    }
+    if (mask & MQ_O_NONBLOCK) != 0 {
+        pos = mqq_sep(out, cap, pos);
+        pos = mqq_put(out, cap, pos, "O_NONBLOCK");
+    }
+    if (mask & MQ_O_RDWR) == MQ_O_RDWR {
+        pos = mqq_sep(out, cap, pos);
+        pos = mqq_put(out, cap, pos, "O_RDWR");
+    }
+    if (mask & MQ_O_WRONLY) == MQ_O_WRONLY && (mask & MQ_O_RDWR) != MQ_O_RDWR {
+        pos = mqq_sep(out, cap, pos);
+        pos = mqq_put(out, cap, pos, "O_WRONLY");
+    }
+    if pos == 0 {
+        return mqq_put(out, cap, 0, "O_RDONLY");
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_mqueue_attr() -> bool {
+    let b: ptr = alloc(64);
+    let n: u32 = mq_attr_set(b, 0, 10, 8192, 3);
+    return n == 64 && load8(b, 0) == 0 && load8(b, 32) == 0
+        && mq_attr_maxmsg(b) == 10 && mq_attr_msgsize(b) == 8192
+        && mq_attr_curmsgs(b) == 3;
+}
+
+fn test_mqueue_prio() -> bool {
+    return mq_prio_valid(0) && mq_prio_valid(32767) && !mq_prio_valid(32768)
+        && MQ_PRIO_MAX == 32767;
+}
+
+fn test_mqueue_flags() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = mq_flag_text(MQ_O_CREAT | MQ_O_NONBLOCK, o, 64);
+    let want: str = "O_CREAT|O_NONBLOCK";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return mq_flag_text(0, o, 64) == 8;
+}

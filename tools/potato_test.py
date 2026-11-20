@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import potato  # noqa: E402
 
 # `lomentc` / `lomelf` **只**用来把孪生编出来（S1 第十五格）—— **判合法与否一次都不经过
@@ -111,7 +112,11 @@ def test_fixture_is_valid():
 # 每条 = (名字, 变异函数, 期望错误片段); M53 跨实现一致性复用同一张表。
 
 MUTATORS = [
-    ("version", lambda d: d.__setitem__("potato", "v11"), "版本"),
+    # 版本串必须是**认得的**那几版之一；`v99` 不认得，所以这条测的是"认版本"本身。
+    # （2026-10-10 改：原先钉的是 `v11`，而 v11 从这次起是**合法**版本 —— 那条夹具
+    #  于是不再报"版本"，改报缺字段，测的就不是这条规则了。同一天 `v12` 也合法了，
+    #  所以这条夹具改钉**永远不认得**的 `v99`，免得每升一版都要来动它。）
+    ("version", lambda d: d.__setitem__("potato", "v99"), "版本"),
     ("v0 禁扩展字段", lambda d: d.__setitem__("potato", "v0"), "未知顶层字段"),
     ("v1 必填 generics", lambda d: d.pop("generics"), "缺字段 generics"),
     ("函数返回类型", lambda d: d["functions"][0].__setitem__("ret", "u9"), "ret 非法类型"),
@@ -138,7 +143,9 @@ MUTATORS = [
      "类型未声明"),
     ("载荷键非变体", lambda d: d["enums"][1]["payloads"].__setitem__("Nope", "u32"),
      "不是已声明变体"),
-    ("常量类型", lambda d: d["consts"][0].__setitem__("type", "str"), "必须是整型"),
+    ("常量类型", lambda d: d["consts"][0].__setitem__("type", "f64"), "必须是整型"),
+    # `docs/342`：`type: "str"` 现在是合法的 —— 但值必须是字符串（不再是整数）。
+    ("常量值形态", lambda d: d["consts"][0].__setitem__("type", "str"), "必须是字符串"),
     ("能力域区间", lambda d: d["capabilities"][0]["domain"].__setitem__("lo", 9), "区间非法"),
     ("布局重叠", lambda d: d["layouts"][0]["fields"][1].__setitem__("offset", 0), "重叠"),
     ("布局越界", lambda d: d["layouts"][0]["fields"][1].__setitem__("offset", 15), "越界"),
@@ -289,6 +296,605 @@ def fixture_v10() -> dict:
     return d
 
 
+def fixture_v11() -> dict:
+    """一份合法的 **v11** 形式对象: v10 的再 + v11 的 `port`（`docs/222` §4）。
+
+    与 `fixture_v7` … `fixture_v10` 同一个理由单独来一份：`port` 从 v11 起才合法 ——
+    拿 v10 去试只会得到"未知顶层字段"，校验器里那几条规则（两个取值、两条冲突）
+    **一条都碰不到**，那种绿是空转。
+    """
+    d = fixture_v10()
+    d["potato"] = "v11"
+    d["port"] = "sealed"
+    return d
+
+
+def fixture_v12() -> dict:
+    """一份合法的 **v12** 形式对象: v11 的再 + v12 的 `surfaces`（`docs/224`）。
+
+    与 `fixture_v7` … `fixture_v11` 同一个理由单独来一份：`surfaces` 从 v12 起才合法 ——
+    拿 v11 去试只会得到"未知顶层字段"，校验器里那几条规则（面名得是标识符、值得是非负
+    整数、各面之和要等于 `total_sites`、以及 `total_sites` 要等于 `boundary.syscalls`）
+    **一条都碰不到**，那种绿是空转。
+
+    这里的数**刻意与 `fixture_v7` 的 `boundary.syscalls`（=3）对上** —— 交叉不变量是
+    v12 独有的那一条，正例里就得先成立，否则测的就不是"自洽"而是"必然报错"。
+    """
+    d = fixture_v11()
+    d["potato"] = "v12"
+    d["surfaces"] = {"file": 1, "net": 2, "total_sites": 3}
+    return d
+
+
+#: v11 的 `port` 那几条规则的反例（`docs/222` §4）。作用在 **v11** 的对象上。
+MUTATORS_V11 = [
+    ("port 缺这一项", lambda d: d.pop("port"), "port 必须是"),
+    ("port 取值拼错", lambda d: d.__setitem__("port", "hosted_nope"), "port 必须是"),
+    ("port 不是字符串", lambda d: d.__setitem__("port", 1), "port 必须是"),
+    # **两条冲突** —— 校验器独立判得了（两个取值都在对象里，不需要读源码）。
+    ("hosted + no_std", lambda d: (d.__setitem__("port", "hosted"),
+                                   d.__setitem__("mode", "no_std")), "不能同时选"),
+    ("hosted + gc_auto_alpha", lambda d: (d.__setitem__("port", "hosted"),
+                                          d.__setitem__("gc", "gc_auto_alpha")),
+     "不能同时选"),
+    # 反面：`hosted` **不**与 `gc_manual` / `gc_auto` 冲突 —— 这一条钉住"别把这一对也拒了"。
+    # 它**不该**报错，所以当合法样本（见 `_cases()`），不在这张反例表里。
+]
+
+
+#: v12 的 `surfaces` 那几条规则的反例（`docs/224`）。作用在 **v12** 的对象上。
+#:
+#: 与 `MUTATORS_V10` 同形，但**多一条 `boundary` 那边没有的**：`surfaces.total_sites`
+#: 必须等于 `boundary.syscalls`。那是 v12 唯一一条**跨字段**的自洽要求 ——
+#: 每个机调用站点落在恰好一个面里，所以两处数的是同一批站点。
+MUTATORS_V12 = [
+    ("surfaces 整个缺掉", lambda d: d.pop("surfaces"), "surfaces 必须是对象"),
+    ("surfaces 不是对象", lambda d: d.__setitem__("surfaces", []),
+     "surfaces 必须是对象"),
+    ("surfaces total_sites 缺掉", lambda d: d["surfaces"].pop("total_sites"),
+     "surfaces.total_sites 必须是非负整数"),
+    ("surfaces total_sites 不是整数", lambda d: d["surfaces"].__setitem__("total_sites", "x"),
+     "surfaces.total_sites 必须是非负整数"),
+    ("surfaces 面名不是标识符", lambda d: d["surfaces"].__setitem__("no such face", 0),
+     "不是标识符"),
+    ("surfaces 面是负数", lambda d: d["surfaces"].__setitem__("net", -1),
+     "必须是非负整数"),
+    ("surfaces 面不是整数", lambda d: d["surfaces"].__setitem__("net", "x"),
+     "必须是非负整数"),
+    # **自洽**：和数只在分量都合法时才去对。
+    ("surfaces 各面之和对不上", lambda d: d["surfaces"].__setitem__("total_sites", 9),
+     "各面之和"),
+    # **交叉不变量**：和数与 `boundary.syscalls` 各说各话时，校验器读不到源码也判得出打架。
+    # 这一条**故意让和数自洽**（`2+3=5`），这样报的只能是交叉那一条。
+    ("surfaces 与 boundary.syscalls 打架",
+     lambda d: d.__setitem__("surfaces", {"file": 2, "net": 3, "total_sites": 5}),
+     "boundary.syscalls"),
+]
+
+
+def fixture_v13() -> dict:
+    """一份合法的 **v13** 形式对象: v12 的再 + v13 的 `vm`（`docs/231`）。
+
+    与 `fixture_v7` … `fixture_v12` 同一个理由单独来一份：`vm` 从 v13 起才合法 ——
+    拿 v12 去试只会得到"未知顶层字段"。
+
+    **这里没有冲突可判**，这是 v13 与前面几维不一样的地方：`vm` 与 `runtime` 今天确实
+    合不来（VM 要用运行期），但那条要**读源码**（源码里用没用到运行期构造）—— 对象里
+    判不了。所以它的反例只有"缺 / 拼错 / 不是字符串"三条，**没有**"不能同时选"那一条。
+    """
+    d = fixture_v12()
+    d["potato"] = "v13"
+    d["vm"] = "no_vm"
+    return d
+
+
+#: v13 的 `vm` 那几条规则的反例（`docs/231`）。作用在 **v13** 的对象上。
+MUTATORS_V13 = [
+    ("vm 缺这一项", lambda d: d.pop("vm"), "vm 必须是"),
+    ("vm 取值拼错", lambda d: d.__setitem__("vm", "vm_t0"), "vm 必须是"),
+    ("vm 不是字符串", lambda d: d.__setitem__("vm", 1), "vm 必须是"),
+    # **反面**：`vm` = `"vm"` 是**合法**的（dev 通道）—— 它不该报错，所以当合法样本
+    # （见 `_cases()`），不在这张反例表里。**发行版拒它是编译器的事，不是校验器的事**：
+    # 对象里没有"渠道"这一栏，校验器也判不了它（`docs/231` §5 判据 D 落在打包侧）。
+]
+
+
+def fixture_v14() -> dict:
+    """一份合法的 **v14** 形式对象: v13 的再 + v14 的 `net_ladder`（`docs/237`）。
+
+    与 `fixture_v7` … `fixture_v13` 同一个理由单独来一份：`net_ladder` 从 v14 起才合法 ——
+    拿 v13 去试只会得到"未知顶层字段"，校验器里那几条规则（四档得是非负整数、四档之和要
+    等于 `total_net`、`total_net` 要等于 `surfaces.net`、不认识的键要报）**一条都碰不到**。
+
+    这里的数**刻意与 `fixture_v12` 的 `surfaces.net`（=2）对上** —— 交叉不变量是 v14
+    独有的那一条，而且比 `surfaces` 那条更深一层（那条是"和 == 另一个字段"，这条是
+    "**和 == 另一个字段的一个分量**"），正例里就得先成立，否则测的不是"自洽"而是"必然报错"。
+    """
+    d = fixture_v13()
+    d["potato"] = "v14"
+    d["net_ladder"] = {"w0": 0, "w1": 1, "w2": 1, "w3": 0, "total_net": 2}
+    return d
+
+
+def fixture_v16() -> dict:
+    """一份合法的 **v16** 形式对象: v14 的再 + v15 的 `lms` + v16 的 `lspe`。
+
+    与 v7…v14 同一个理由单独来一份：`lspe` 从 v16 起才合法 —— 拿 v14 去试只会得到
+    "未知顶层字段"，校验器里那几条规则（state/set_by/mode/level、八个计数、
+    `floors` 必须等于四类地板之和、两个嵌套对象）**一条都碰不到**。
+    """
+    d = fixture_v14()
+    d["potato"] = "v16"
+    # v2/v3/v5 的必填字段（`fixture_v14` 这条链没带它们，而 v16 的累积门禁要）。
+    d["mode"] = "std"
+    d["switches"] = []
+    d["dialects"] = []
+    d["bodies"] = []
+    d["lms"] = "lms_full"
+    d["lspe"] = {
+        "state": "lspe_open_admin",
+        "set_by": "default",
+        "mode": "full",
+        "level": 3,
+        "sites": 0,
+        "obligations": 0,
+        "proved": 0,
+        "undecided": 0,
+        "deferred": 0,
+        "refused": 0,
+        "floors": 0,
+        "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0,
+                         "drop_honest": 0, "pass": 0},
+        "per_kind": {},
+        "passes": [], "pass_sites": 0, "passed_sites": 0, "pass_ratio": "0/0",
+        "invariants": {"i1": "not_run", "i2": "not_run", "i3": "not_run",
+                       "i4": "not_run", "i5": "not_run"},
+        "acked": 0,
+    }
+    return d
+
+
+def fixture_v17() -> dict:
+    """一份合法的 **v17** 形式对象：v16 的再 + **实际开着哪几级** `lms_levels`。
+
+    `lms_levels` 是 v17 起才合法的字段（`docs/253` §11.4）：档名（`lms`）说"想要哪一档"，
+    显式开关可以覆盖它，所以只有这一格记着**最后**是什么。
+    """
+    d = fixture_v16()
+    d["potato"] = "v17"
+    d["lms_levels"] = {
+        "lms_check": True, "lms_manage": True, "lms_guard": True,
+        "lms_reject": True, "lms_crash": True, "lms_restart": True,
+        "lms_seed": True,
+    }
+    return d
+
+
+def fixture_v18() -> dict:
+    """一份合法的 **v18** 形式对象：v17 的再 + **七级的运行期预算** `lms_budgets`。
+
+    `lms_budgets` 是 v18 起才合法的字段（`docs/253` §11.2.1，#1023）：每一级声明它
+    要不要一份运行期状态。今天七级是 `none` / `instructions` / `outside` —— 所以
+    `no_runtime` + `lms_full` 合法，而这件事从"实现碰巧都轻"变成**产物里可判**。
+    """
+    d = fixture_v17()
+    d["potato"] = "v18"
+    d["lms_budgets"] = {
+        "lms_check": "none", "lms_manage": "none", "lms_guard": "instructions",
+        "lms_reject": "instructions", "lms_crash": "instructions",
+        "lms_restart": "outside", "lms_seed": "none",
+    }
+    return d
+
+
+#: v18 的 `lms_budgets` 那几条规则的反例（`docs/253` §11.2.1）。作用在 **v18** 的对象上。
+MUTATORS_V18 = [
+    ("lms_budgets 整个缺掉", lambda d: d.pop("lms_budgets"), "lms_budgets 必须是对象"),
+    ("lms_budgets 少一级", lambda d: d["lms_budgets"].pop("lms_guard"),
+     "lms_budgets 少了"),
+    ("lms_budgets 多一个键", lambda d: d["lms_budgets"].__setitem__("lms_bogus", "none"),
+     "不认识的键"),
+    ("lms_budgets 的值不在表里", lambda d: d["lms_budgets"].__setitem__("lms_check", "heap"),
+     "必须是"),
+]
+
+
+#: v17 的 `lms_levels` 那几条规则的反例（`docs/253` §11.4）。作用在 **v17** 的对象上。
+MUTATORS_V17 = [
+    ("lms_levels 整个缺掉", lambda d: d.pop("lms_levels"), "lms_levels 必须是对象"),
+    ("lms_levels 少一级", lambda d: d["lms_levels"].pop("lms_guard"),
+     "lms_levels 少了"),
+    ("lms_levels 多一个键", lambda d: d["lms_levels"].__setitem__("lms_bogus", True),
+     "不认识的键"),
+    ("lms_levels 的值不是布尔", lambda d: d["lms_levels"].__setitem__("lms_check", 1),
+     "必须是布尔"),
+]
+
+
+#: v16 的 `lspe` 那几条规则的反例（`docs/262`）。作用在 **v16** 的对象上。
+MUTATORS_V16 = [
+    ("lspe 整个缺掉", lambda d: d.pop("lspe"), "lspe 必须是对象"),
+    ("lspe.state 非法", lambda d: d["lspe"].__setitem__("state", "open"), "lspe.state"),
+    ("lspe.sites 负数", lambda d: d["lspe"].__setitem__("sites", -1), "lspe.sites"),
+    ("lspe.floors 与明细不一致", lambda d: d["lspe"].__setitem__("floors", 1), "floors"),
+    # v16 也要验 v13/v14 的字段（版本门是累积的）—— Python 原先是精确匹配，
+    # v15/v16 直接跳过；这两条把那个缺口钉住。
+    ("v16 跳过 net_ladder", lambda d: d.pop("net_ladder"), "net_ladder"),
+    ("v16 坏 vm", lambda d: d.__setitem__("vm", "bad"), "vm"),
+    # 台账是**封闭**对象：未知键必须报，不能静默扩展。
+    ("lspe 未知键", lambda d: d["lspe"].__setitem__("bogus", 1), "不认识的键"),
+    ("floor_detail 未知键",
+     lambda d: d["lspe"]["floor_detail"].__setitem__("bogus", 1), "不认识的键"),
+    ("invariants 未知键",
+     lambda d: d["lspe"]["invariants"].__setitem__("i6", "ok"), "不认识的键"),
+    # `lspe pass` 的收据（`docs/262` §5.16）：形状不对要当场红。
+    ("pass_ratio 形状不对",
+     lambda d: d["lspe"].__setitem__("pass_ratio", "1/2/3"), "pass_ratio"),
+    ("passes 不是数组", lambda d: d["lspe"].__setitem__("passes", 0),
+     "passes 必须是数组"),
+]
+
+
+def fixture_v19() -> dict:
+    """一份合法的 **v19** 形式对象：v18 的再 + `gc_ladder` 的第五格 `l0_5`。
+
+    `l0_5` 是 v19 起才合法的分量（`docs/210` §2.10）：函数级栈区接走的站点。加一格会让
+    v10 的 `l0 + l1 + l2 + l3 == total_sites` 失效，所以**必须升版**，而**旧版对象不被
+    回溯改写** —— `fixture_v18()` 带四格仍然合法，这一条由下面那条判据守着。
+    """
+    d = fixture_v18()
+    d["potato"] = "v19"
+    d["gc_ladder"] = {"l0": 1, "l0_5": 2, "l1": 2, "l2": 3, "l3": 4,
+                      "total_sites": 12}
+    return d
+
+
+#: v19 的 `gc_ladder.l0_5` 那几条规则的反例（`docs/210` §2.10）。作用在 **v19** 的对象上。
+MUTATORS_V19 = [
+    ("l0_5 整个缺掉", lambda d: d["gc_ladder"].pop("l0_5"), "gc_ladder.l0_5"),
+    ("l0_5 是负数", lambda d: d["gc_ladder"].__setitem__("l0_5", -1), "gc_ladder.l0_5"),
+    ("五数之和对不上", lambda d: d["gc_ladder"].__setitem__("total_sites", 11),
+     "项之和"),
+    ("多一格 l0_6", lambda d: d["gc_ladder"].__setitem__("l0_6", 0), "不认识的键"),
+]
+
+
+def fixture_v20() -> dict:
+    """一份合法的 **v20** 形式对象：v19 的再 + **系统索引** `systems`（#1022）。
+
+    六个系统各一条 `{state, detail, cost}`；`detail` **只写字段名**（明细住在别处），
+    `state` / `cost` 与它们指向的字段逐条相同 —— 这正是校验器不读源码判得到的那部分。
+    """
+    d = fixture_v19()
+    d["potato"] = "v20"
+    d["systems"] = {
+        "gc": {"state": "gc_manual", "detail": "gc_ladder", "cost": {"sites": 12}},
+        "runtime": {"state": "no_runtime", "detail": None, "cost": None},
+        "port": {"state": "sealed", "detail": None, "cost": None},
+        "vm": {"state": "no_vm", "detail": None, "cost": None},
+        "lms": {"state": "lms_full", "detail": "lms_levels", "cost": {"levels": 7}},
+        "lspe": {"state": "lspe_open_admin", "detail": "lspe", "cost": {"sites": 0}},
+    }
+    return d
+
+
+def fixture_v21() -> dict:
+    """一份合法的 **v21** 形式对象：v20 的再 + **`lgc` 的时间控制** `gc_control`。
+
+    `fixture_v20` 是 `gc_manual`，所以"至少一处 `lgc`"时 `manual_collector` 必须是
+    `true` —— 这条交叉不变量正是"手动档的收集器例外"能被不读源码读出来的原因。
+    """
+    d = fixture_v20()
+    d["potato"] = "v21"
+    d["gc_control"] = {"pauses": 1, "resumes": 1, "windows": 2,
+                       "timed_windows": 1, "manual_collector": True}
+    return d
+
+
+#: v21 的 `gc_control` 那几条规则的反例（`docs/309`）。作用在 **v21** 的对象上。
+MUTATORS_V21 = [
+    ("gc_control 整个缺掉", lambda d: d.pop("gc_control"), "gc_control 必须是对象"),
+    ("gc_control 多一个键", lambda d: d["gc_control"].__setitem__("budget", 1),
+     "不认识的键"),
+    ("计数为负", lambda d: d["gc_control"].__setitem__("windows", -1),
+     "gc_control.windows"),
+    ("预算窗口多于窗口",
+     lambda d: d["gc_control"].__setitem__("timed_windows", 3),
+     "timed_windows"),
+    ("manual_collector 不是布尔",
+     lambda d: d["gc_control"].__setitem__("manual_collector", 1), "必须是布尔"),
+    ("manual_collector 与档位打架",
+     lambda d: d["gc_control"].__setitem__("manual_collector", False),
+     "manual_collector 是"),
+    ("no_gc 却有 lgc",
+     lambda d: (d.__setitem__("gc", "no_gc"),
+                d.__setitem__("gc_control",
+                              {"pauses": 1, "resumes": 0, "windows": 0,
+                               "timed_windows": 0, "manual_collector": False})),
+     "两者定义上矛盾"),
+]
+
+
+def fixture_v22() -> dict:
+    """一份合法的 **v22** 形式对象：v21 的再 + **生命周期档** `lifetime`。
+
+    默认档是 `lifetime_auto`（2026.3 起）—— 这份夹具用的就是默认值；
+    `lifetime_no` / `lifetime_manual` 在另一个方向上也必须过。
+    """
+    d = fixture_v21()
+    d["potato"] = "v22"
+    d["lifetime"] = "lifetime_auto"
+    return d
+
+
+#: v22 的 `lifetime` 那几条规则的反例（`docs/299`）。作用在 **v22** 的对象上。
+MUTATORS_V22 = [
+    ("lifetime 整个缺掉", lambda d: d.pop("lifetime"), "lifetime 必须是"),
+    ("lifetime 拼错", lambda d: d.__setitem__("lifetime", "lifetime_automatic"),
+     "lifetime 必须是"),
+    ("lifetime 用了不存在的旧开关名",
+     lambda d: d.__setitem__("lifetime", "lifetime_true"), "lifetime 必须是"),
+    ("lifetime 不是字符串", lambda d: d.__setitem__("lifetime", 1), "lifetime 必须是"),
+]
+
+
+def fixture_v23() -> dict:
+    """一份合法的 **v23** 形式对象：v22 的再 + **间接分派** `fp`（`docs/348`）。
+
+    默认档是 `no_fp`（静态调用图，`docs/208` §4 的前提原样成立）。
+    """
+    d = fixture_v22()
+    d["potato"] = "v23"
+    d["fp"] = "no_fp"
+    return d
+
+
+#: v23 的 `fp` 那几条规则的反例（`docs/348`）。作用在 **v23** 的对象上。
+MUTATORS_V23 = [
+    ("fp 整个缺掉", lambda d: d.pop("fp"), "fp 必须是"),
+    ("fp 拼错", lambda d: d.__setitem__("fp", "fnptr"), "fp 必须是"),
+    ("fp 用了不存在的旧开关名",
+     lambda d: d.__setitem__("fp", "fp_true"), "fp 必须是"),
+    ("fp 不是字符串", lambda d: d.__setitem__("fp", 1), "fp 必须是"),
+]
+
+
+#: v20 的 `systems` 那几条规则的反例（#1022）。作用在 **v20** 的对象上。
+#: 三条验收点各至少一条：**错 state / 错 cost / 缺系统**；另外把"指针"那两格也钉住。
+MUTATORS_V20 = [
+    ("systems 整个缺掉", lambda d: d.pop("systems"), "systems 必须是对象"),
+    ("systems 不是对象", lambda d: d.__setitem__("systems", []), "systems 必须是对象"),
+    ("多一个系统", lambda d: d["systems"].__setitem__("gpu", {"state": "on"}),
+     "不认识的系统"),
+    ("少一个系统", lambda d: d["systems"].pop("lms"), "systems 少了"),
+    ("gc.state 与顶层字段不一致",
+     lambda d: d["systems"]["gc"].__setitem__("state", "gc_auto"), "systems.gc.state"),
+    ("runtime.state 与顶层字段不一致",
+     lambda d: d["systems"]["runtime"].__setitem__("state", "runtime"), "systems.runtime.state"),
+    ("lspe.state 与台账不一致",
+     lambda d: d["systems"]["lspe"].__setitem__("state", "lspe_close_admin"),
+     "systems.lspe.state"),
+    ("gc.detail 指错字段",
+     lambda d: d["systems"]["gc"].__setitem__("detail", "surfaces"), "systems.gc.detail"),
+    ("lms.detail 指错字段",
+     lambda d: d["systems"]["lms"].__setitem__("detail", "lms_budgets"), "systems.lms.detail"),
+    ("gc.cost 与 gc_ladder 总数不一致",
+     lambda d: d["systems"]["gc"]["cost"].__setitem__("sites", 11), "systems.gc.cost.sites"),
+    ("lms.cost 与开着的级数不一致",
+     lambda d: d["systems"]["lms"]["cost"].__setitem__("levels", 6), "systems.lms.cost.levels"),
+    ("lspe.cost 与台账 sites 不一致",
+     lambda d: d["systems"]["lspe"]["cost"].__setitem__("sites", 3), "systems.lspe.cost.sites"),
+    ("cost 键写错", lambda d: d["systems"]["gc"].__setitem__("cost", {"checks": 12}),
+     "键必须恰好是"),
+    ("没有明细的系统带了 cost",
+     lambda d: d["systems"]["runtime"].__setitem__("cost", {"sites": 0}),
+     "必须是 null"),
+    ("条目里多一个键", lambda d: d["systems"]["vm"].__setitem__("bogus", 1),
+     "不认识的键"),
+]
+
+
+@test
+def test_v18_requires_the_lms_budgets():
+    """v18 的七级预算（`docs/253` §11.2.1，#1023）：正例合法，四条反例各钉一条规则。"""
+    assert potato.validate(fixture_v18()) == [], potato.validate(fixture_v18())
+    for name, mut, needle in MUTATORS_V18:
+        d = fixture_v18()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v19_adds_l0_5_without_rewriting_old_objects():
+    """v19 的第五格（`docs/210` §2.10）：正例合法、四条反例各钉一条规则；
+    **v18 的四格对象仍然合法** —— 台阶只往上加，不回溯改写。"""
+    assert potato.validate(fixture_v19()) == [], potato.validate(fixture_v19())
+    for name, mut, needle in MUTATORS_V19:
+        d = fixture_v19()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # 反方向：v18 的对象没有 `l0_5`，而不是"少了必填项"
+    assert potato.validate(fixture_v18()) == [], potato.validate(fixture_v18())
+    # v18 的对象**也不许**带 `l0_5`（那一版没有这一格）
+    d = fixture_v18()
+    d["gc_ladder"]["l0_5"] = 0
+    assert any("不认识的键" in e for e in potato.validate(d)), potato.validate(d)
+
+
+@test
+def test_v21_requires_the_gc_control_counts():
+    """v21 的 `gc_control`（`docs/309`）：正例合法，七条反例各钉一条规则。"""
+    assert potato.validate(fixture_v21()) == [], potato.validate(fixture_v21())
+    for name, mut, needle in MUTATORS_V21:
+        d = fixture_v21()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v22_requires_the_lifetime_tier():
+    """v22 的 `lifetime`（`docs/299`）：三个合法档都过，反例各钉一条规则。"""
+    for lt in ("lifetime_no", "lifetime_auto", "lifetime_manual"):
+        d = fixture_v22()
+        d["lifetime"] = lt
+        assert potato.validate(d) == [], (lt, potato.validate(d))
+    for name, mut, needle in MUTATORS_V22:
+        d = fixture_v22()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v23_requires_the_fp_tier():
+    """v23 的 `fp`（`docs/348`）：两档都过（含默认 `no_fp`），反例各钉一条规则。"""
+    for fv in potato.FPS:
+        d = fixture_v23()
+        d["fp"] = fv
+        assert potato.validate(d) == [], (fv, potato.validate(d))
+    for name, mut, needle in MUTATORS_V23:
+        d = fixture_v23()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v22 的对象**不许**带 `fp`（那一版没有这一格）
+    d = fixture_v22()
+    d["fp"] = "no_fp"
+    assert any("未知顶层字段" in e for e in potato.validate(d)), potato.validate(d)
+
+
+@test
+def test_lspe_ledger_cross_checks_reject_self_contradiction():
+    """LSPE 台账自洽（`#1084`）：计数、`per_kind`、地板、`pass_ratio` 互相打架必须红。
+
+    这些都是**产物自己说的数**：校验器不重编译，也判得了它们对不上。
+    """
+    def good():
+        d = fixture_v21()
+        d["lspe"].update({"sites": 2, "obligations": 2, "proved": 1,
+                          "undecided": 1, "floors": 1,
+                          "per_kind": {"InBounds": "1/2"},
+                          "pass_ratio": "0/2",
+                          "interrogations": {"provenance": 1,
+                                             "falsification": 2,
+                                             "cross_exam": 2},
+                          "lspc": "full"})
+        d["lspe"]["floor_detail"]["assumed"] = 1
+        d["systems"]["lspe"]["cost"]["sites"] = 2
+        return d
+
+    assert potato.validate(good()) == [], potato.validate(good())
+    muts = [
+        ("undecided 与 sites 不等",
+         lambda d: d["lspe"].__setitem__("undecided", 2), "proved + undecided"),
+        ("per_kind 分母和",
+         lambda d: d["lspe"]["per_kind"].__setitem__("InBounds", "0/3"),
+         "per_kind 的分母和"),
+        ("floors 与明细和",
+         lambda d: d["lspe"].__setitem__("floors", 2), "地板明细之和"),
+        ("pass_ratio 分母",
+         lambda d: d["lspe"].__setitem__("pass_ratio", "0/3"),
+         "pass_ratio 的分母"),
+        ("interrogations 负值",
+         lambda d: d["lspe"]["interrogations"].__setitem__("cross_exam", -1),
+         "interrogations.cross_exam"),
+        ("lspc 模式",
+         lambda d: d["lspe"].__setitem__("lspc", "sometimes"), "lspe.lspc"),
+    ]
+    for name, mut, needle in muts:
+        d = good()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+    # `lspe_close_admin` 下计数必须全零（"审计关了"与"审了 2 个"不能同时成立）。
+    d = good()
+    d["lspe"]["state"] = "lspe_close_admin"
+    d["systems"]["lspe"]["state"] = "lspe_close_admin"
+    assert any("全零" in e for e in potato.validate(d)), potato.validate(d)
+
+
+@test
+def test_v20_systems_index_cross_checks_every_link():
+    """v20 的系统索引（#1022）：每条链**逐格**钉住，而且**旧版对象不被回溯改写**。
+
+    验收点三条各有反例：**错 state**、**错 cost**、**缺系统**。另外把 `detail`
+    这个**指针**本身也钉住（指错字段必须红 —— 索引不许变成第二份数字）。
+    """
+    assert potato.validate(fixture_v20()) == [], potato.validate(fixture_v20())
+    for name, mut, needle in MUTATORS_V20:
+        d = fixture_v20()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # **v19 的对象没有 `systems`**，仍然合法（台阶只往上加，不回溯改写）。
+    assert potato.validate(fixture_v19()) == [], potato.validate(fixture_v19())
+    # v19 的对象**也不许**带 `systems`（那一版没有这一格）。
+    d = fixture_v19()
+    d["systems"] = fixture_v20()["systems"]
+    assert any("未知顶层字段" in e for e in potato.validate(d)), potato.validate(d)
+    # 索引必须**恰好**是六个系统 —— 少一个、多一个都红。
+    assert set(potato.SYSTEM_KEYS) == {"gc", "runtime", "port", "vm", "lms", "lspe"}
+
+
+@test
+def test_v16_requires_the_lspe_ledger():
+    """v16 的台账：正例合法，四条反例各钉一条规则。"""
+    assert potato.validate(fixture_v16()) == [], potato.validate(fixture_v16())
+    for name, mut, needle in MUTATORS_V16:
+        d = fixture_v16()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+@test
+def test_v17_requires_the_lms_levels():
+    """v17 的七级开关（`docs/253` §11.4）：正例合法，四条反例各钉一条规则。"""
+    assert potato.validate(fixture_v17()) == [], potato.validate(fixture_v17())
+    for name, mut, needle in MUTATORS_V17:
+        d = fixture_v17()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+
+
+#: v14 的 `net_ladder` 那几条规则的反例（`docs/237`）。作用在 **v14** 的对象上。
+#:
+#: 与 `MUTATORS_V10`（`gc_ladder`）同形，**多一条 `gc_ladder` 那边没有的跨字段要求**：
+#: `net_ladder.total_net` 必须等于 `surfaces.net` —— 每个联网站点落在一档里，而它在
+#: `surfaces` 里落在 `net` 面里，所以两处数的是**同一批站点**（少一档 = 有的联网站点没归类，
+#: 多一档 = 给不联网的站点配了宽度）。
+MUTATORS_V14 = [
+    ("net_ladder 整个缺掉", lambda d: d.pop("net_ladder"), "net_ladder 必须是对象"),
+    ("net_ladder 不是对象", lambda d: d.__setitem__("net_ladder", []),
+     "net_ladder 必须是对象"),
+    ("net_ladder 缺一档", lambda d: d["net_ladder"].pop("w2"),
+     "net_ladder.w2 必须是非负整数"),
+    ("net_ladder 一档不是整数", lambda d: d["net_ladder"].__setitem__("w1", "x"),
+     "net_ladder.w1 必须是非负整数"),
+    ("net_ladder 一档是负数", lambda d: d["net_ladder"].__setitem__("w3", -1),
+     "net_ladder.w3 必须是非负整数"),
+    ("net_ladder total_net 缺掉", lambda d: d["net_ladder"].pop("total_net"),
+     "net_ladder.total_net 必须是非负整数"),
+    # **自洽**：和数只在四档都合法时才去对。
+    ("net_ladder 四档之和对不上", lambda d: d["net_ladder"].__setitem__("total_net", 9),
+     "四档之和"),
+    # **交叉不变量**：这一条**故意让和数自洽**（`1+2=3`），于是报的只能是"与 `surfaces.net`
+    # 打架"那一条 —— 否则测的是两件事撞在一起。
+    ("net_ladder 与 surfaces.net 打架",
+     lambda d: d.__setitem__("net_ladder",
+                             {"w0": 1, "w1": 2, "w2": 0, "w3": 0, "total_net": 3}),
+     "surfaces.net"),
+    ("net_ladder 多一个键", lambda d: d["net_ladder"].__setitem__("w4", 0),
+     "不认识的键"),
+]
+
+
+
 #: v8 的 `gc` 那几条规则的反例（`docs/175` §3.4）。作用在 **v8** 的对象上。
 MUTATORS_V8 = [
     ("gc 缺这一项", lambda d: d.pop("gc"), "gc 必须是"),
@@ -331,6 +937,8 @@ MUTATORS_V10 = [
      "gc_ladder 必须是对象"),
     ("gc_ladder 整个缺掉", lambda d: d.pop("gc_ladder"), "gc_ladder 必须是对象"),
 ]
+
+
 
 
 #: v7 的 `boundary` 那几条规则的反例（`docs/205` R5）。**单独一张表**：
@@ -376,6 +984,24 @@ def test_every_spec_rule_has_a_rejection_case():
     # v10 那一组同理（`gc_ladder`, docs/210 §3/§5）。
     for name, mut, needle in MUTATORS_V10:
         d = fixture_v10()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v11 那一组同理（`port`, docs/222 §4）。
+    for name, mut, needle in MUTATORS_V11:
+        d = fixture_v11()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v12 那一组同理（`surfaces`, docs/224）。
+    for name, mut, needle in MUTATORS_V12:
+        d = fixture_v12()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # v13 那一组同理（`vm`, docs/231）。
+    for name, mut, needle in MUTATORS_V13:
+        d = fixture_v13()
         mut(d)
         errs = potato.validate(d)
         assert any(needle in e for e in errs), (name, errs)
@@ -549,7 +1175,11 @@ def _cases() -> list[tuple[str, dict]]:
     """
     out: list[tuple[str, dict]] = [("fixture", fixture()), ("v7", fixture_v7()),
                                    ("v8", fixture_v8()), ("v9", fixture_v9()),
-                                   ("v10", fixture_v10())]
+                                   ("v10", fixture_v10()), ("v11", fixture_v11()),
+                                   ("v12", fixture_v12()), ("v16", fixture_v16()),
+                                   ("v17", fixture_v17()), ("v18", fixture_v18()),
+                                   ("v19", fixture_v19()), ("v20", fixture_v20()),
+                                   ("v21", fixture_v21()), ("v22", fixture_v22())]
     # **`gc_manual` + `no_runtime` 是合法档**（"要运行期、但内存我自己管"的反面：
     # 不要运行期、手动回收）—— 它必须**不报错**。上面那张反例表只会钉"该拒的要拒",
     # 钉不住"不该拒的别拒"，所以这一条以**合法样本**的身份过孪生那一关。
@@ -560,6 +1190,11 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture()
         mut(d)
         out.append((name, d))
+    # v16 那一组（`lspe`）也要过孪生那一关 —— 否则两份校验器在 v16 上从没被比过。
+    for name, mut, _ in MUTATORS_V16:
+        d = fixture_v16()
+        mut(d)
+        out.append((f"v16-{name}", d))
     # v7 那一组（`boundary`）也要过孪生那一关 —— 否则两份校验器在 v7 上从没被比过。
     for name, mut, _ in MUTATORS_V7:
         d = fixture_v7()
@@ -580,6 +1215,71 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v10()
         mut(d)
         out.append((f"v10-{name}", d))
+    # v11 那一组（`port`）同理。
+    for name, mut, _ in MUTATORS_V11:
+        d = fixture_v11()
+        mut(d)
+        out.append((f"v11-{name}", d))
+    # **`hosted` + `gc_manual` 是合法档**（"要对外、但内存我自己管"）—— 必须**不报错**。
+    # 反例表只钉"该拒的要拒"，钉不住"不该拒的别拒"。
+    _okp = fixture_v11()
+    _okp["port"] = "hosted"
+    out.append(("v11-hosted-gc_manual", _okp))
+    # v18 那一组（`lms_budgets`，`#1023`）也要过孪生那一关。
+    for name, mut, _ in MUTATORS_V18:
+        d = fixture_v18()
+        mut(d)
+        out.append((f"v18-{name}", d))
+    # v12 那一组（`surfaces`）同理。
+    for name, mut, _ in MUTATORS_V12:
+        d = fixture_v12()
+        mut(d)
+        out.append((f"v12-{name}", d))
+    # v13 那一组（`vm`, `docs/231`）同理。
+    for name, mut, _ in MUTATORS_V13:
+        d = fixture_v13()
+        mut(d)
+        out.append((f"v13-{name}", d))
+    # **`vm` = `"vm"` 是合法档**（dev 通道："这份产物要由 VM 执行"）—— 必须**不报错**。
+    # 反例表只钉"该拒的要拒"，钉不住"不该拒的别拒"。
+    # 发行版拒它是**编译器**的事：对象里没有"渠道"这一栏，校验器判不了（`docs/231` §5 判据 D）。
+    _okv = fixture_v13()
+    _okv["vm"] = "vm"
+    out.append(("v13-vm", _okv))
+    # v14 那一组（`net_ladder`, `docs/237`）同理。
+    for name, mut, _ in MUTATORS_V14:
+        d = fixture_v14()
+        mut(d)
+        out.append((f"v14-{name}", d))
+    # v19 那一组（`gc_ladder.l0_5`, `docs/210` §2.10）。
+    for name, mut, _ in MUTATORS_V19:
+        d = fixture_v19()
+        mut(d)
+        out.append((f"v19-{name}", d))
+    # v20 那一组（`systems`, `#1022`）—— 这一组**必须**过孪生那一关：
+    # 索引的三条交叉不变量在两份实现里各写一遍，判决与错误条数都要一致。
+    for name, mut, _ in MUTATORS_V20:
+        d = fixture_v20()
+        mut(d)
+        out.append((f"v20-{name}", d))
+    # v22 那一组（`lifetime`，`docs/299`）：三个合法档各来一份，再挂反例。
+    for lt in potato.LIFETIMES:
+        dv = fixture_v22()
+        dv["lifetime"] = lt
+        out.append((f"v22-{lt}", dv))
+    for name, mut, _ in MUTATORS_V22:
+        d = fixture_v22()
+        mut(d)
+        out.append((f"v22-{name}", d))
+    # v23 那一组（`fp`，`docs/348`）：两档各来一份，再挂反例。
+    for fv in potato.FPS:
+        dv = fixture_v23()
+        dv["fp"] = fv
+        out.append((f"v23-{fv}", dv))
+    for name, mut, _ in MUTATORS_V23:
+        d = fixture_v23()
+        mut(d)
+        out.append((f"v23-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)
@@ -662,17 +1362,7 @@ def test_lompotato_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\npotato_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过 "
-          f"(反例 {len(MUTATORS)} 条)")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "potato_test")
 
 
 if __name__ == "__main__":

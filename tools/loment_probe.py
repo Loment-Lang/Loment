@@ -30,6 +30,13 @@ import lomentc    # noqa: E402
 _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = _HERE.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 
 
@@ -52,7 +59,7 @@ def main() -> int:
     elf = pathlib.Path(tempfile.gettempdir()) / "loment_probe_drv.elf"
     elf.write_bytes(drv)
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc",
+        [*_WSLCMD, "bash", "-lc",
          f"cp {_wsl_path(elf)} {_T}p8drv.bin && chmod +x {_T}p8drv.bin && "
          f"cd {_wsl_path(ROOT)} && {_T}p8drv.bin "
          f"{src.relative_to(ROOT).as_posix()}"],

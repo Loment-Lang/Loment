@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,6 +23,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _git(*args: str) -> str:
+    """跑一条 git，返回 stdout（**失败回空串**）。只有 M93/M95 的滞后容差用它 ——
+    "自这些东西上次被写出以来动过哪些路径"问的就是 git。判不了（浅克隆 / 不是 git 树）
+    时回空串，调用方按"判不了"处理而**不是**当成"没动过"（见那一处的注释）。
+    """
+    r = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True,
+                       text=True, errors="replace", shell=False)
+    return r.stdout.strip() if r.returncode == 0 else ""
 LOM_FUAI = ROOT / "lom" / "fuai.lom"
 LOM_FUC = ROOT / "lom" / "fuc.lom"
 LOM_FUJR = ROOT / "lom" / "fujr.lom"
@@ -32,6 +43,14 @@ FUIC = ROOT / "tools" / "fuic.py"
 FUC_RS = ROOT / "kernel" / "src" / "fui" / "fuc.rs"
 FUJR_RS = ROOT / "kernel" / "src" / "fujr.rs"
 FUJPACK = ROOT / "tools" / "fujopack.py"
+
+#: `lom/net.lom`（号 → 面）的对账面 —— **四处**：编译器的计数词汇、链接器的派发面，
+#: 以及自举侧两处**只认 net 那几个号**的派生用法（`docs/229` §2）。
+LOM_NET = ROOT / "lom" / "net.lom"
+NET_TWIN_NET_SETS = [
+    (ROOT / "loment" / "selfhost" / "checker.lomt", "chk_num_is_net"),
+    (ROOT / "loment" / "selfhost" / "potato.lomt", "pt_surf_code"),
+]
 
 # 生成物登记: (lom 源, 生成器, 磁盘路径) — 逐字节对账, 漂移即报错
 GENERATED = [
@@ -48,6 +67,7 @@ GENERATED = [
     (LOM_FUJR, "c", ROOT / "lom" / "build" / "fujr.h"),
     (LOM_FUJR, "python", ROOT / "lom" / "build" / "fujr.py"),
     (LOM_FUJR, "json", ROOT / "lom" / "build" / "fujr.json"),
+    (LOM_NET, "json", ROOT / "lom" / "build" / "net.json"),
 ]
 
 # 部署参数 -> 富士侧实现文件与别名模式 (项目特有知识, 故留在审计脚本而非语言里)
@@ -250,6 +270,94 @@ def audit_generated(diffs: list[str]) -> int:
     return len(GENERATED)
 
 
+def _fn_body(text: str, name: str) -> str:
+    """源码里那个顶层函数的正文（从 `fn NAME(` 到下一行的 `}`）。
+
+    审计要看的是"**这个函数认哪些号**"，所以只取正文 —— 取整个文件会把别处的数字也算进来。
+    """
+    m = re.search(rf"(?m)^fn {name}\(.*$", text)
+    if not m:
+        return ""
+    end = text.find("\n}", m.end())
+    return text[m.start():end if end > 0 else len(text)]
+
+
+def audit_net(diffs: list[str]) -> None:
+    """`lom/net.lom` 是"号 → 面"的**单源**（`docs/229` §2）。
+
+    四处实现/用法各自抄过一份，这里按**两个方向**对账：多一个号、少一个号、面不同，
+    三种都算差异（"方向反了也一样" —— 早期那些对账只查一个方向，于是"实现多了个号"
+    一直没人报）。
+    """
+    import lomentc  # noqa: PLC0415  (审计读实现, 与上面 `import potato` 同一个形状)
+    import lomelf
+
+    mod = lomc.load(LOM_NET)
+    sc = next(e for e in mod.enums if e.name == "Syscall")
+    # 联网面补完后（`docs/234`）这一族整个不在契约里了 —— 缺席 = 空集
+    nd = next((e for e in mod.enums if e.name == "NotDispatched"), None)
+    nd_variants = nd.variants if nd is not None else []
+    want = {v.value: v.meta.get("surface") for v in sc.variants}
+
+    # 运行时**私有号**（4096+）不在 L0 契约里：它们不是 Linux 系统调用，而是运行时给
+    # 自己调用者的入口（`docs/303` 的 lmgr）。契约要收它们得走单独的 L0 PR，所以这里
+    # 显式跳过；它们两边算不算同一面仍由
+    # `loment_pe_test::test_pe_surface_table_matches_the_artifact_counter` 钉住。
+    priv = set(getattr(lomelf, "PE_PRIVATE_SYSCALLS", ()))
+
+    # (a) 编译器那一份 —— 计数词汇（`surfaces` 按面分类用的就是它）
+    got_c = dict(lomentc.SURFACE_NUMBERS)
+    for n in sorted((set(want) | set(got_c)) - priv):
+        if want.get(n) != got_c.get(n):
+            diffs.append(f"[net/lomentc] 号 {n}: .lom={want.get(n)!r} lomentc={got_c.get(n)!r}")
+
+    # (b) 链接器那一份 —— PE 真正派发哪些号 + 各属哪一面
+    pe = {n: s for n, s, _label in lomelf.PE_SYSCALLS}
+    for n in sorted((set(want) | set(pe)) - priv):
+        if want.get(n) != pe.get(n):
+            diffs.append(f"[net/lomelf ] 号 {n}: .lom={want.get(n)!r} PE_SYSCALLS={pe.get(n)!r}")
+
+    # (c) "点名不做"那一族必须**不在**派发面上 —— 哪天谁顺手实现了其中一个，这条红
+    for v in nd_variants:
+        if v.value in pe:
+            diffs.append(f"[net/lomelf ] {v.name}({v.value}) 在 NotDispatched 里, 却被 "
+                         f"PE_SYSCALLS 派发了 —— 两条路选一条: 实现它并挪进 Syscall, "
+                         f"或者把这条从 NotDispatched 删掉")
+
+    # (d) 自举侧那两处派生用法。它们**形状不同**，所以分开对：
+    #     `chk_num_is_net` 只认 net 那一族；`pt_surf_code` 是**整张表**（用代号 1..4
+    #     表示 file/mem/net/proc）—— 后者按**分块**比，免得把那四个代号抄进审计里。
+    path, fn = NET_TWIN_NET_SETS[0]
+    body = _fn_body(path.read_text(encoding="utf-8"), fn)
+    if not body:
+        diffs.append(f"[net/twin   ] {path.name} 里找不到 {fn}()")
+    else:
+        net_want = sorted(n for n, s in want.items() if s == "net")
+        got = sorted(int(x) for x in re.findall(r"\b(?:n|num)\s*==\s*(\d+)", body))
+        if got != net_want:
+            diffs.append(f"[net/twin   ] {path.name} 的 {fn}(): {got} != .lom 的 net 表 {net_want}")
+
+    path, fn = NET_TWIN_NET_SETS[1]
+    body = _fn_body(path.read_text(encoding="utf-8"), fn)
+    if not body:
+        diffs.append(f"[net/twin   ] {path.name} 里找不到 {fn}()")
+    else:
+        by_code: dict[int, list[int]] = {}
+        for m in re.finditer(r"if ([^{]+?)\{\s*return (\d+);", body):
+            for num in re.findall(r"\bnum\s*==\s*(\d+)", m.group(1)):
+                by_code.setdefault(int(m.group(2)), []).append(int(num))
+        by_surface: dict[str, list[int]] = {}
+        for n, s in want.items():
+            by_surface.setdefault(s, []).append(n)
+        # 私有号不算契约的一部分（同 (a)/(b)）：从自举那侧的分块里剔掉再比。
+        got_groups = sorted(g for g in (sorted(x for x in v if x not in priv)
+                                        for v in by_code.values()) if g)
+        want_groups = sorted(sorted(v) for v in by_surface.values())
+        if got_groups != want_groups:
+            diffs.append(f"[net/twin   ] {path.name} 的 {fn}(): 分块 {got_groups} "
+                         f"!= .lom 的面 {want_groups}")
+
+
 def audit_fujr(diffs: list[str]) -> None:
     mod = lomc.load(LOM_FUJR)
     hdr = next(r for r in mod.records if r.name == "Header")
@@ -374,24 +482,66 @@ def audit_l1(diffs: list[str]) -> None:
         elif sh_obj.read_text(encoding="utf-8") != want_sh:
             diffs.append(f"[l1         ] {sh_obj.relative_to(ROOT)} 与 selfhost 源码不一致")
 
-    # M93/M95/M99: 手册站点与发布清单必须与当前工件一致
+    # M93/M95: 手册站点与发布清单必须与当前工件一致 —— **按滞后容差判** (2026-10-16)。
+    #
+    # 这两条原来是"逐字节等于**当前树**"。那时全树生成物由**每个 PR** 提交，所以那句话在
+    # 每个 PR 上都为真；代价是那两个文件是**全树台账**（每一行都是别人的文件），两个并发 PR
+    # 写相邻行 ⇒ **必冲突**（实测见 `.github/workflows/manifest.yml` 文件头那节）。
+    #
+    # 现在全树生成物由 `main` 上的单一写者刷新（同一个 workflow 的 `emit-main`），
+    # 于是**在一棵还没被刷新的树上，落后是预期的** —— 拿它判红就是拿排队现象当缺陷。
+    #
+    # 所以改成：对**自这些东西上次被写出以来没动过的路径**要求相等。
+    #   * 动过 = 还没轮到写者刷新 ⇒ 容忍（那是设计，不是漂）
+    #   * 没动 = 它必须对得上 ⇒ 抓**真正错的**台账（手工改过的、生成器写错的）
+    # 这比原来那条**更强**：原写法在"仓库里的和生成的一起过期"时照样绿
+    # （`docs/162` 记过那个形状：四次都是这么漏掉的）。
+    #
+    # **判不了就不判"绿"，判"红"**：浅克隆（`actions/checkout` 默认 `fetch-depth: 1`）
+    # 里 `git log` 只看得到 HEAD，"自上次写出以来动过什么"问不出来 —— 那时退回严格比较
+    # 会把每个 PR 都判红，而**静默放行**会让这条判据在 CI 上形同不存在。两种都不行，
+    # 所以这里直接报一条能照着修的账（门禁的分片 checkout 要 `fetch-depth: 0`）。
+    def _changed_since(rel: str) -> set[str] | None:
+        """自 `rel` 上次被写出以来动过的路径；拿不到历史就 None。"""
+        if _git("rev-parse", "--is-shallow-repository") == "true":
+            return None
+        last = _git("log", "-1", "--format=%H", "--", rel)
+        if not last:
+            return None
+        # **与工作树比，不与 `HEAD` 比**（`git diff <sha>` 省掉第二个参数就是这个意思）：
+        # `last..HEAD` 看不见**未提交**的改动，于是本机带着改动跑一次，就会把刚改的那几个
+        # 文件报成"台账对不上"（实测：6 处）。CI 上树是干净的，两种写法等价。
+        out = _git("diff", "--name-only", last)
+        return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+    man_stale = _changed_since("docs/manual")
+    rel_stale = _changed_since("loment/build/release-manifest.json")
+
     import loment_manual
     import loment_release
-    for rel, text in loment_manual.build().items():
-        p = ROOT / "docs" / "manual" / rel
-        if not p.exists() or p.read_text(encoding="utf-8") != text:
-            diffs.append(f"[l1         ] docs/manual/{rel} 与编译器版本不一致 (M93)")
-            break
-    man = ROOT / "loment" / "build" / "release-manifest.json"
-    want_rel = {x["path"]: x["sha256"] for x in loment_release.build()["files"]}
-    if not man.exists():
-        diffs.append(f"[l1         ] {man.relative_to(ROOT)} 缺失 (M95)")
+    if man_stale is None or rel_stale is None:
+        diffs.append("[l1         ] M93/M95 判不了：拿不到 git 历史"
+                     "（浅克隆？门禁的分片 checkout 要 fetch-depth: 0）")
     else:
-        got_rel = {x["path"]: x["sha256"]
-                   for x in json.loads(man.read_text(encoding="utf-8")).get("files", [])}
-        bad = [k for k in want_rel if got_rel.get(k) != want_rel[k]]
-        if bad or set(got_rel) != set(want_rel):
-            diffs.append(f"[l1         ] release-manifest.json 与工件不一致 (M95): {bad[:2]}")
+        for rel, text in loment_manual.build().items():
+            p = ROOT / "docs" / "manual" / rel
+            if f"docs/manual/{rel}" in man_stale:
+                continue
+            if not p.exists() or p.read_text(encoding="utf-8") != text:
+                diffs.append(f"[l1         ] docs/manual/{rel} 与生成的页面不一致 (M93)")
+                break
+        man = ROOT / "loment" / "build" / "release-manifest.json"
+        want_rel = {x["path"]: x["sha256"] for x in loment_release.build()["files"]}
+        if not man.exists():
+            diffs.append(f"[l1         ] {man.relative_to(ROOT)} 缺失 (M95)")
+        else:
+            got_rel = {x["path"]: x["sha256"]
+                       for x in json.loads(man.read_text(encoding="utf-8")).get("files", [])}
+            bad = [k for k in want_rel if got_rel.get(k) != want_rel[k] and k not in rel_stale]
+            extra = [k for k in got_rel if k not in want_rel and k not in rel_stale]
+            if bad or extra:
+                diffs.append(f"[l1         ] release-manifest.json 与工件不一致 (M95): "
+                             f"{(bad + extra)[:2]}")
 
 
 def emit() -> int:
@@ -433,6 +583,7 @@ def main(argv: list[str] | None = None) -> int:
         n_prim, n_spec = audit_fuai(diffs)
         audit_fuc(diffs)
         audit_fujr(diffs)
+        audit_net(diffs)
         n_gen = audit_generated(diffs)
         audit_l1(diffs)
     except lomc.LomError as e:

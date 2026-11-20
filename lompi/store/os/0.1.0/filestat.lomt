@@ -1,0 +1,312 @@
+// os/stat.lomt — `statx` 的结构体解码与权限文本
+//
+// 为什么需要它: `stat(2)` 在 32/64 位交叉的年代留下了两套结构体, 而 `statx` 是后来
+// 统一的那个入口 —— 一个新程序想知道"多大、什么时候改的、什么权限", 应该走 statx。
+// 但 statx 的结构是 **256 字节、十几个字段**, 按偏移读错一个字段不会报错: 大小会变成
+// 块数, 时间会变成 inode。所以这一层把字段偏移写成常量与解码函数。
+//
+// 结构 (x86-64 Linux, `struct statx`):
+//   stx_mask u32(0) | stx_blksize u32(4) | stx_attributes u64(8)
+//   stx_nlink u32(16) | stx_uid u32(20) | stx_gid u32(24)
+//   stx_mode u16(28) | (2 字节对齐) | stx_ino u64(32) | stx_size u64(40)
+//   stx_blocks u64(48) | stx_attributes_mask u64(56)
+//   timestamps: atime(64) mtime(80) ctime(96) btime(112), 各 16 字节 (sec i64 + nsec u32)
+//   stx_rdev_major u32(128) | stx_rdev_minor u32(132)
+//   stx_dev_major u32(136) | stx_dev_minor u32(140)
+// **结构大小 256 字节是内核 ABI** —— 调用方给这块内存时按这个数分配。
+//
+// 边界: 只解码 BASIC_STATS 需要的字段; btime (创建时间) 很多文件系统不给, 读到的 0
+// 是"没有", 不是 1970。自检只验纯逻辑 (偏移与权限文本)。
+//
+// 命名: 公开 fs_*, 内部 fsq_。
+
+module filestat
+
+/// `struct statx` 的大小。
+pub const FS_STATX_BYTES: u32 = 256;
+/// `statx` 的 mask: 基本字段全要 (权限/大小/时间/链接数/属主)。
+pub const FS_STATX_BASIC_STATS: u32 = 2047;
+/// 不跟随符号链接。
+pub const FS_AT_SYMLINK_NOFOLLOW: u32 = 256;
+/// `AT_FDCWD` (-100 的 u64 补码)。
+pub const FS_AT_FDCWD: u64 = 18446744073709551516;
+
+/// 字段偏移 (见文件头)。
+pub const FS_OFF_BLKSIZE: u32 = 4;
+pub const FS_OFF_NLINK: u32 = 16;
+pub const FS_OFF_UID: u32 = 20;
+pub const FS_OFF_GID: u32 = 24;
+pub const FS_OFF_MODE: u32 = 28;
+pub const FS_OFF_INO: u32 = 32;
+pub const FS_OFF_SIZE: u32 = 40;
+pub const FS_OFF_BLOCKS: u32 = 48;
+pub const FS_OFF_ATIME: u32 = 64;
+pub const FS_OFF_MTIME: u32 = 80;
+pub const FS_OFF_CTIME: u32 = 96;
+pub const FS_OFF_BTIME: u32 = 112;
+
+const FSQ_SYS_STATX: u64 = 332;
+
+fn fsq_u16(p: ptr, o: u32) -> u32 {
+    let v: u32 = load8(p, o) as u32;
+    v = v | ((load8(p, o + 1) as u32) << 8);
+    return v;
+}
+
+fn fsq_u32(p: ptr, o: u32) -> u32 {
+    let v: u32 = fsq_u16(p, o);
+    v = v | (fsq_u16(p, o + 2) << 16);
+    return v;
+}
+
+fn fsq_u64(p: ptr, o: u32) -> u64 {
+    let lo: u64 = fsq_u32(p, o) as u64;
+    let hi: u64 = fsq_u32(p, o + 4) as u64;
+    return lo | (hi << 32);
+}
+
+fn fsq_put(out: ptr, cap: u32, pos: u32, b: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, b as u8);
+    }
+    return pos + 1;
+}
+
+fn fsq_tri(out: ptr, cap: u32, pos: u32, bits: u32) -> u32 {
+    let p: u32 = pos;
+    if (bits & 4) != 0 {
+        p = fsq_put(out, cap, p, 114);
+    } else {
+        p = fsq_put(out, cap, p, 45);
+    }
+    if (bits & 2) != 0 {
+        p = fsq_put(out, cap, p, 119);
+    } else {
+        p = fsq_put(out, cap, p, 45);
+    }
+    if (bits & 1) != 0 {
+        p = fsq_put(out, cap, p, 120);
+    } else {
+        p = fsq_put(out, cap, p, 45);
+    }
+    return p;
+}
+
+// ---------------------------------------------------------------- 解码
+
+/// 建议 I/O 块大小。
+pub fn fs_blksize(buf: ptr) -> u32 {
+    return fsq_u32(buf, FS_OFF_BLKSIZE);
+}
+
+/// 硬链接数。
+pub fn fs_nlink(buf: ptr) -> u32 {
+    return fsq_u32(buf, FS_OFF_NLINK);
+}
+
+/// 属主 uid。
+pub fn fs_uid(buf: ptr) -> u32 {
+    return fsq_u32(buf, FS_OFF_UID);
+}
+
+/// 属组 gid。
+pub fn fs_gid(buf: ptr) -> u32 {
+    return fsq_u32(buf, FS_OFF_GID);
+}
+
+/// 类型 + 权限位 (u16 的低 12 位是权限, 高位是类型)。
+pub fn fs_mode(buf: ptr) -> u32 {
+    return fsq_u16(buf, FS_OFF_MODE);
+}
+
+/// inode 号。
+pub fn fs_ino(buf: ptr) -> u64 {
+    return fsq_u64(buf, FS_OFF_INO);
+}
+
+/// 文件大小 (普通文件是字节数)。
+pub fn fs_size(buf: ptr) -> u64 {
+    return fsq_u64(buf, FS_OFF_SIZE);
+}
+
+/// 占用块数 (512 字节一块)。
+pub fn fs_blocks(buf: ptr) -> u64 {
+    return fsq_u64(buf, FS_OFF_BLOCKS);
+}
+
+fn fsq_ts_sec(buf: ptr, off: u32) -> u64 {
+    return fsq_u64(buf, off);
+}
+
+/// 访问时间 (秒)。
+pub fn fs_atime_sec(buf: ptr) -> u64 {
+    return fsq_ts_sec(buf, FS_OFF_ATIME);
+}
+
+/// 修改时间 (秒)。
+pub fn fs_mtime_sec(buf: ptr) -> u64 {
+    return fsq_ts_sec(buf, FS_OFF_MTIME);
+}
+
+/// 元数据变更时间 (秒)。
+pub fn fs_ctime_sec(buf: ptr) -> u64 {
+    return fsq_ts_sec(buf, FS_OFF_CTIME);
+}
+
+/// 创建时间 (秒); 文件系统不给时为 0。
+pub fn fs_btime_sec(buf: ptr) -> u64 {
+    return fsq_ts_sec(buf, FS_OFF_BTIME);
+}
+
+// ---------------------------------------------------------------- 系统调用
+
+/// `statx(dirfd, path, flags, mask, buf)` —— buf 至少 FS_STATX_BYTES 字节。
+pub fn fs_statx(dirfd: u64, path: ptr, flags: u32, mask: u32, buf: ptr) -> i64 {
+    return syscall6(FSQ_SYS_STATX, dirfd, path as u64, flags as u64, mask as u64,
+                    buf as u64);
+}
+
+// ---------------------------------------------------------------- 权限文本
+
+/// 权限位 -> `drwxr-xr-x` 这样的 10 个字符 (返回 10; 缓冲区不足时只写放得下的)。
+pub fn fs_mode_text(mode: u32, out: ptr, cap: u32) -> u32 {
+    let kind: u32 = (mode >> 12) & 15;
+    let c: u32 = 45;
+    if kind == 4 { c = 100; }
+    else if kind == 8 { c = 45; }
+    else if kind == 10 { c = 108; }
+    else if kind == 2 { c = 99; }
+    else if kind == 6 { c = 98; }
+    else if kind == 1 { c = 112; }
+    else if kind == 12 { c = 115; }
+    let pos0: u32 = fsq_put(out, cap, 0, c);
+    let pos1: u32 = fsq_tri(out, cap, pos0, (mode >> 6) & 7);
+    let ux: u32 = (mode >> 6) & 1;
+    if (mode & 2048) != 0 {
+        if ux == 1 {
+            store8(out, pos1 - 1, 115 as u8);
+        } else {
+            store8(out, pos1 - 1, 83 as u8);
+        }
+    }
+    let pos3: u32 = fsq_tri(out, cap, pos1, (mode >> 3) & 7);
+    let gx: u32 = (mode >> 3) & 1;
+    if (mode & 1024) != 0 {
+        if gx == 1 {
+            store8(out, pos3 - 1, 115 as u8);
+        } else {
+            store8(out, pos3 - 1, 83 as u8);
+        }
+    }
+    let pos4: u32 = fsq_tri(out, cap, pos3, mode & 7);
+    let ox: u32 = mode & 1;
+    if (mode & 512) != 0 {
+        if ox == 1 {
+            store8(out, pos4 - 1, 116 as u8);
+        } else {
+            store8(out, pos4 - 1, 84 as u8);
+        }
+    }
+    return pos4;
+}
+
+/// 是目录吗。
+pub fn fs_is_dir(mode: u32) -> u32 {
+    if ((mode >> 12) & 15) == 4 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 是符号链接吗。
+pub fn fs_is_link(mode: u32) -> u32 {
+    if ((mode >> 12) & 15) == 10 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_stat_mode_text() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = fs_mode_text(16877, b, 16);
+    if n != 10 {
+        return false;
+    }
+    // d r w x r - x r - x
+    if load8(b, 0) != 100 || load8(b, 1) != 114 || load8(b, 3) != 120 {
+        return false;
+    }
+    if load8(b, 4) != 114 || load8(b, 5) != 45 || load8(b, 9) != 120 {
+        return false;
+    }
+    return true;
+}
+
+fn test_stat_mode_plain() -> bool {
+    let b: ptr = alloc(16);
+    fs_mode_text(33188, b, 16);
+    if load8(b, 0) != 45 || load8(b, 1) != 114 || load8(b, 2) != 119 {
+        return false;
+    }
+    if load8(b, 3) != 45 || load8(b, 4) != 114 || load8(b, 6) != 45 {
+        return false;
+    }
+    return true;
+}
+
+fn test_stat_mode_setuid() -> bool {
+    let b: ptr = alloc(16);
+    fs_mode_text(35309, b, 16);
+    if load8(b, 3) != 115 {
+        return false;
+    }
+    return true;
+}
+
+fn test_stat_mode_sticky() -> bool {
+    let b: ptr = alloc(16);
+    fs_mode_text(17405, b, 16);
+    if load8(b, 9) != 116 {
+        return false;
+    }
+    return true;
+}
+
+fn test_stat_fields() -> bool {
+    let buf: ptr = alloc(256);
+    let i: u32 = 0;
+    while i < 256 {
+        store8(buf, i, 0 as u8);
+        i = i + 1;
+    }
+    // blksize 4096 at 4
+    store8(buf, 4, 0 as u8);
+    store8(buf, 5, 16 as u8);
+    // nlink 3 at 16
+    store8(buf, 16, 3 as u8);
+    // mode 0o40755 at 28
+    store8(buf, 28, 237 as u8);
+    store8(buf, 29, 65 as u8);
+    // size 123456 at 40
+    store8(buf, 40, 64 as u8);
+    store8(buf, 41, 226 as u8);
+    store8(buf, 42, 1 as u8);
+    if fs_blksize(buf) != 4096 {
+        return false;
+    }
+    if fs_nlink(buf) != 3 {
+        return false;
+    }
+    if fs_mode(buf) != 16877 {
+        return false;
+    }
+    if fs_size(buf) != 123456 {
+        return false;
+    }
+    if fs_is_dir(fs_mode(buf)) != 1 || fs_is_link(fs_mode(buf)) != 0 {
+        return false;
+    }
+    return true;
+}

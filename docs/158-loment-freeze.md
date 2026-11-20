@@ -22,7 +22,7 @@
   （`test_m64_all_reference_messages_are_classified`）。
   **这句话原先说宽了**（2026-09-15 更正）：那 81 条是 ast 从 `errs.append` 抽出来的，
   覆盖的是 **checker 的语义诊断**；解析期的消息是 `raise LomError`，不在抽取范围里，
-  于是它们原先在 `loment diag` 里一律显示成 **E999「未分类」**。现在解析期归 **E019**
+  于是它们原先在 `loment diag` 里一律显示成 **E0999「未分类」**。现在解析期归 **E019**
   （语法错的修法只有一种，按「码按修法分」共用一码），并由
   `test_m64_diagnostics_have_codes_and_hints` 之外的两条最小负例钉住。
 
@@ -69,6 +69,8 @@
 | 11 | **B1 · 混宽整数比较不给两边统一宽度**（2026-09-17，**新发现，未修**） | 参考实现只把**左边**提升到较宽类型，右边留原宽 —— 于是 `u32 == u8` 产出**非法 IR**，clang 当场拒（`'%t9' defined with type 'i8' but expected 'i32'`）。自举那边则把左边**截到窄的**再比（对 `load8` 恰好等价，对一般 `u32 == u8` 是**错码**），且在 `load8(…) == x: u8` 这个形状上与参考**不一致** | **最小复现**（两边都"过"，参考产出非法 IR）：<br>`fn eq(a: u32, b: u8) -> bool { return a == b; }`<br>参考发 `%t2 = load i8` 后 `icmp eq i32 %t1, %t2`。语料里从来没有混宽比较，所以逐字节判据一直没覆盖它 —— **两边一致地错**，而"一致"让人以为它是对的。<br>**写 std 核时撞到**：`loment/lib/mem.lomt` 的 `mem_find` 原来写 `load8(hay,i) == needle`（`load8` 是 `u32`、`needle` 是 `u8`），于是 `loment_pkg_test` 三个用例全红（clang 拒 IR）、`loment_cli_test` 的自举/参考对照红 2 字节。<br>**现在的绕法**：`mem.lomt` 显式 `let want: u32 = needle as u32;` 把两边都变宽（合法 IR）。**编译器本身没修** —— 修它要走 §5 四条（两个实现同一次提交 + `_CASES` 加混宽比较的负例 + 上调 `BUDGET`），是一次独立的语言面改动 |
 
 | 12 | **关键字可以当标识符，两个实现处理不同**（2026-09-17，**新发现，未修**） | 参考实现**一律接受**关键字做绑定名 —— `fn` / `if` / `let` 都能当形参名或变量名（Rust 的规则是关键字不能做标识符，这里是个洞）。**自举 checker 撞上它会错位**：它按 token 文本判关键字，参数位置的 `fn` 被当成"又一个函数声明"的起点，于是**后面整段 token 流对不上**，报出一条毫不相干的假阳性 | **最小复现**：给任一函数加一个名叫 `fn` 的形参，自举 checker 就会在**几十行之后**报一条 E002（符号未声明），指着一个字符串字面量，而参考实现干干净净。<br>**写驱动的 `--diag-out` 时撞到**（`docs/182` §5）：`wdiag(..., fn: u32, ...)` 让 `test_m85_checker_accepts_corpus_units` 红 —— 报 `2@65173:",\"line\":"`，而那个 token 与 `fn` 毫无关系（我先按字面量/转义/花括号三个方向查过，都不对）。<br>**现在的绕法**：形参改名 `fnam`。**根因没修** —— 正确方向是**参考实现拒**（关键字不许做绑定名，两个实现才谈得上一致），那是一次语言面改动，要走 §5 四条 |
+
+| 13 | **紧凑形 / T2 没有自举镜像**（2026-10-18，**推迟到 0.1.5**） | `tools/lvm_compact.py`（`docs/250`）与 `tools/lvm_t2.py`（`docs/259`）只有 Python 一侧；`loment/tools/lvm.lomt` 里没有紧凑形（`grep -i compact` 无匹配）。于是 `docs/250` §3 E 那条"两个实现逐字节相同"的孪生判据**对它不适用** | 判据 `lvm_compact_test.py::test_the_mirror_is_still_deferred` 钉住"仍然没有"：镜像一开工它就红，逼着按 §5 四条一起走、并把这条删掉。排期在 #586（0.1.5）。**"紧凑形的判据全绿"不等于"孪生过了"** —— 它只说明 Python 那一侧自洽 |
 
 ## 5. 改冻结面的流程（四条，缺一不可）
 
@@ -250,6 +252,60 @@ python tools/loment_release.py --check # 工件 sha256 全部一致 (件数由�
    原样转发（参数不解析、退出码原样带出），没有才交回官方 CLI。这是**启动器**的行为，
    不在冻结面里（§3 的"工具链内部"），但它**改了 CLI 的对外行为**，所以记在这里：
    官方命令**优先**（`loment version` 不受 PATH 影响），且没有注册表 —— 约定就是文件名。
+
+**2026-10-10 再一条（`register` 块，`docs/223` §2 形态 A / `docs/143` §3.3）** —— 与上面那条
+同一天、同一件事的**另一种写法**：名字由**语法**给出，块里是这条命令的条目。它同样**动了装载
+规则**（词法扫标签那一趟），所以照 §5 再走一遍：
+
+1. **规范**：`docs/143` §2 的语法块与 §3.3 改成以 `register <名字> { <一个函数> }` 为主，先落地的那
+   种写法原样留着；**码集不动**（复用 E024/E025/E026）。**多了一个触发**：声明了命令却没有
+   `command_main` —— 那一向要到**链接**期（未定义符号）才炸，现在拦在检查这一步；
+2. **探针**：`loment_rule_parity._CASES` 再加**五条**（块那种写法与函数那种写法判成**同一批
+   码**），`BUDGET` **81 -> 86**（只升不降）；
+3. **两份实现同一笔**：参考 `tools/lomentc.py`（`command_label_from_tokens` 的形态 A 分支 +
+   块的**形状**判据 + `Parser.parse_items` 的 `register` 分支）与自举 `loment/selfhost/lexer.lomt`
+   （`lex_cmd_find` / `lex_cmd_label` / `lex_reg_one_fn` / `lex_reg_close`）。自举侧动了**两处**：
+   - **词法器**（扫名字与块的形状）：checker 找 `command_main`、codegen 的顶层 `fn` 扫描、
+     字符串常量按函数归属本来就**不看括号深度**，于是块里的那个函数与写在顶层的那一份
+     走同一条路；
+   - **`potato` 收函数那两趟**（`pt_cnt_fn` / `pt_functions`）：**这两处按深度走**，块那层壳
+     对它们是可见的 —— 第一版就是漏了它们，`loment_potato_emit_test` 当场报
+     `register_hello.lomt: 第 14 行不同`（形式对象里 `functions` 是空的）。修法不是"每处各自
+     学会看穿壳"，而是把块**钉成"恰好一个函数"**（E024）—— 别的条目进不来，要看穿壳的地方
+     因此是一个**可数的小集合**（只剩函数那两趟）。
+4. **种子**：`loment/selfhost/{lexer,checker,potato}.lomt` 动了（扫标签与形状、多一条 E026 触发、
+   两趟跳过壳），种子单独一笔重生成。**顺带抬起 `lomelf` 的标签表上限**：这一条特性把
+   driver 单元推到 16914 条（当时主分支只剩 **9** 格余量），`loment_genesis_test` 的两条当场红。
+   同一天**联网那条线撞的是同一格**（它们抬到 32768），合并后取大的那个 ——
+   记录在 `docs/200` §3.1。
+
+**"形态 A 编译到形态 B"这句话要说得更准**（写设计文档时的不精确处，这里钉死）：**语义等价，
+IR 不等**。形态 B 那个标签函数在产物里是一条定义（`@loment_command`）加一个字符串常量
+（`@.str.loment_command.0`），**没有任何人调用**；形态 A 的名字直接从语法来，没有那个函数
+可发。所以判据比的是**行为**而不是逐字节
+（`loment_register_test::test_the_register_form_runs_exactly_like_the_declaration_form`：
+两种写法跑出同一份 stdout 与同一个退出码）。**IR 逐字节那一半仍然有** —— 但它管的是
+"两个**实现**对同一份源发一样的 IR"（`loment_p8_test` 的语料闸门，两份示例都在语料里），
+不是"两种**写法**发一样的 IR"。
+
+**2026-10-10 又一条（命令声明 `loment_command`，`docs/223` / `docs/143` §3.3）** —— 这一条
+**动了装载规则**（`docs/158` §2 那一行），所以按 §5 走：
+
+1. **规范**：`docs/143` 加 §3.3，诊断码进 `tools/loment_diag.RULES`（**E024/E025/E026**，
+   只增不改）；
+2. **探针**：`loment_rule_parity._CASES` 加五条命令声明的负例，`BUDGET` **76 -> 81**
+   （只升不降）。第六条"库不许声明命令"与 `choose` 那第三条同一个落点 —— 它是**装载器**
+   规则（要两个单元），棘轮由 `loment_p8_test` 的驱动闸门承担，**不进这个预算**；
+3. **两份实现同一笔**：参考 `tools/lomentc.py`（`command_label_from_tokens` + `check()` +
+   `_IR_CMD_ENTRY`）与自举（`lexer.lex_cmd_find` / `checker.chk_command` /
+   `codegen.emit_cmd_entry` / `driver.load_file`）。**生成的入口两边发的 IR 逐字节相同**
+   —— 拿 `loment/examples/cmd_hello.lomt` 对着 stage1 比过；
+4. **种子**：`loment/selfhost/{lexer,checker,codegen,driver}.lomt` 都动了，所以种子单独一笔
+   重生成（`loment_seed.py --emit`）。
+
+**这一条与"自定义命令"那条的关系**：那条**没动运行时、没动冻结面**（纯文件名约定）；
+这一条**动了装载规则**，因为它要工具链**读源码里的声明**。两条并存：没有声明的单元，
+行为与改动前逐字节一样。
 
 第 2 条那个"棘轮"由 `loment_p8_test` 的驱动闸门承担：它拿一个真配了 `.foo` 的工程跑
 **自举驱动**，再把同一份工程交给参考实现，要求两边 IR **逐字节一致**；另加一条"配坏的后缀

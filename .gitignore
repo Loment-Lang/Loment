@@ -1,5 +1,7 @@
 /target
 /kernel/target
+# Loment Studio 的 Rust 构建目录（docs/310）
+/editors/loment-studio/target/
 /kernel/fujo-kernel.bin
 /kernel/fujo-kernel-t.bin
 /kernel/boot_blob.bin
@@ -100,6 +102,9 @@ ahci_events.txt
 # 签名私钥/自签证书 (本机, 绝不进仓库 —— 判据 loment_sign_test 会核这条忽略规则)
 /loment/build/sign/
 
+# 线上书的本地渲染产物 (`python tools/loment_book_site.py --out _site`)
+/_site/
+
 # 会话交接件 (整段对话正文, 绝不进仓库)
 /.claude/HANDOFF.md
 /.claude/transcript-extract.txt
@@ -135,3 +140,12 @@ ahci_events.txt
 /loment/build/native_slice.rs
 /loment/build/native_str.rs
 /loment/build/native_trait.rs
+
+# The wiki's source is deliberately not in this repository. It is maintained as
+# a local directory and pushed to https://loment.fandom.com/ over the MediaWiki
+# API; the README links to the wiki itself rather than to its sources.
+/wiki/
+
+# LSPE 的站点级缓存（`docs/262` §5.13 / #752）。**必须在任何 GLOB 目录之外**：
+# 它落进 `loment/**` 或 `tools/**` 会让"树干净"变成假话，也会污染发布清单。
+/.lspe-cache/

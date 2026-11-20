@@ -13,11 +13,17 @@
 // 代价是 O(n²) 最坏, 而一个仓库包数很少 (上限 512), 这个代价换得起。
 // 环也因此自然暴露: A→B→A 两边都永远"还没准备好", 循环结束后它们就是剩下来的。
 //
+// **那条 O(n²) 里真正贵的是 I/O, 不是比较**: 每一遍扫到还没定身份的包就把它的源码
+// 重新列目录 + 重新 lex 一遍 —— 链式依赖下同一份源码会被读 n 遍。所以每一遍记下
+// "这个包当时卡在哪个依赖上" (WS_BLOCK), 挡路的那个还没定身份就直接跳过它。
+// 剩下的每一遍仍然 O(n) 次比较, 但读盘那次只剩"确实可能变了的那些包"。
+//
 // 身份算不出来要**响亮**: 环与缺依赖各自有独立的状态位与消息, 不混成一个"失败"。
 //
 // 命名: 公开 idn_*, 自检 test_idn_*。
 
 module lpi_idn
+choose runtime
 
 use "lpi_pkg.lomt"
 
@@ -28,6 +34,14 @@ use "lpi_pkg.lomt"
 pub const IDN_OK: u32 = 0;
 pub const IDN_CYCLE: u32 = 1;
 pub const IDN_MISSING: u32 = 2;
+
+/// WS_BLOCK 里的"这个包还没被看过"哨兵。与 PKG_NONE 分开: PKG_NONE 在那里是
+/// "缺依赖 = 永远别再重试"的意思, 两者在这一格上必须能分开。
+pub const IDN_UNPARSED: u32 = 4294967294;
+
+/// `idn_resolve_name` 的第三个结果: 名字指向**本包自己的模块** (包内引用) —— 它**不是**
+/// 一条包边。与 PKG_NONE (缺依赖) 必须分开: 前者安静跳过, 后者要报 MISSING。
+pub const IDN_NOEDGE: u32 = 4294967293;
 
 /// 第 idx 个包的边表暂存位置 (WS_EPOOL / WS_EENTS) —— 由 pkg_edges 填。
 fn idn_edges(ws: ptr, idx: u32) -> u32 {
@@ -93,7 +107,10 @@ pub fn idn_pass1(ws: ptr, n: u32) -> u32 {
         let nf: u32 = pkg_list_sources(ws, d);
         if nf != DIR_ERR {
             let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
-            if pkg_own_hash(ws, d, nf, dig) == nf {
+            // `pkg_own_hash` hashes the payload for a foreign package and returns
+            // that count, which is not `nf` (the `.lomt` count). Zero is the
+            // failure sentinel; a valid package always has at least one file.
+            if pkg_own_hash(ws, d, nf, dig) != 0 {
                 sha_hex(dig, pkg_id_hex(ws, i));
                 ok = ok + 1;
             }
@@ -112,7 +129,13 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
     let dig: ptr = ((ws as u64) + WS_DIG as u64) as ptr;
     let hex: ptr = ((ws as u64) + WS_HEX as u64) as ptr;
     let zero: ptr = ((ws as u64) + WS_ZERO as u64) as ptr;
+    let blk: ptr = ((ws as u64) + WS_BLOCK as u64) as ptr;
     store8(zero, 0, 0 as u8);
+    let z: u32 = 0;
+    while z < n {
+        txt_store32(blk, z * 4, IDN_UNPARSED);
+        z = z + 1;
+    }
     let missing: u32 = 0;
     let progress: u32 = 1;
     while progress == 1 {
@@ -120,26 +143,45 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
         let i: u32 = 0;
         while i < n {
             if (pkg_flags(ws, i) & PKG_F_IDENT) == 0 && (pkg_flags(ws, i) & PKG_F_MISSING) == 0 {
+                // **这一遍还要不要再 lex 一遍这个包?**
+                // 上一遍看过它, 而当时卡住它的那个依赖**到现在还没有身份** —— 那它这一遍
+                // 一定还是不 ready (ready 要求**全部**依赖都有身份, 那一个没有)。重新列目录
+                // + 重新 lex 是纯白干, 而链式依赖下这正是"每扫一遍就把每个包的源码重读
+                // 一遍"的来源。拿不准 (没看过 / 缺依赖) 一律走下面老实重解析 —— 这个判断只
+                // 用到"挡路的那个还没身份"这一件事实, 与别处发生了什么无关。
+                let block: u32 = txt_load32(blk, i * 4);
+                let skip: u32 = 0;
+                if block != IDN_UNPARSED && block != PKG_NONE {
+                    if (pkg_flags(ws, block) & PKG_F_IDENT) == 0 {
+                        skip = 1;
+                    }
+                }
+                if skip == 0 {
                 let c: u32 = idn_edges(ws, i);
                 idn_sort_edges(pool, eents, c);
-                // 依赖齐了吗
+                // 依赖齐了吗 (顺手记下第一个还没身份的, 下一遍拿它判断要不要重来)
+                let first: u32 = IDN_UNPARSED;
                 let ready: u32 = 1;
                 let k: u32 = 0;
                 while k < c {
                     if lex_ent_kind(eents, k) == LEX_NAME {
                         let nm: ptr = ((pool as u64) + (lex_ent_off(eents, k) as u64)) as ptr;
                         let nl: u32 = lex_ent_len(eents, k);
-                        let ch: u32 = idn_find_name(ws, n, nm, nl);
+                        let ch: u32 = idn_resolve_name(ws, n, i, nm, nl);
                         if ch == PKG_NONE {
                             ready = 0;
                             pkg_set_flag(ws, i, PKG_F_MISSING);
                             missing = idn_copy_msg(msg, msgcap, nm, nl);
-                        } else if (pkg_flags(ws, ch) & PKG_F_IDENT) == 0 {
+                        } else if ch != IDN_NOEDGE && (pkg_flags(ws, ch) & PKG_F_IDENT) == 0 {
+                            if first == IDN_UNPARSED {
+                                first = ch;
+                            }
                             ready = 0;
                         }
                     }
                     k = k + 1;
                 }
+                txt_store32(blk, i * 4, first);
                 if ready == 1 {
                     // id = H( 自身 hex ⊕ 每条 (边名 0x00 子身份 0x00) )
                     sha_init(st);
@@ -151,11 +193,14 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
                         if lex_ent_kind(eents, m) == LEX_NAME {
                             let nm: ptr = ((pool as u64) + (lex_ent_off(eents, m) as u64)) as ptr;
                             let nl: u32 = lex_ent_len(eents, m);
-                            let ch: u32 = idn_find_name(ws, n, nm, nl);
-                            sha_update(st, nm, nl);
-                            sha_update(st, zero, 1);
-                            sha_update(st, pkg_id_hex(ws, ch), 64);
-                            sha_update(st, zero, 1);
+                            let ch: u32 = idn_resolve_name(ws, n, i, nm, nl);
+                            // 包内模块引用不是包边 —— 不进身份 (ready 那条也只算真边)。
+                            if ch != IDN_NOEDGE {
+                                sha_update(st, nm, nl);
+                                sha_update(st, zero, 1);
+                                sha_update(st, pkg_id_hex(ws, ch), 64);
+                                sha_update(st, zero, 1);
+                            }
                         }
                         m = m + 1;
                     }
@@ -164,6 +209,7 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
                     idn_copy_hex(ws, i, hex);
                     pkg_set_flag(ws, i, PKG_F_IDENT);
                     progress = 1;
+                }
                 }
             }
             i = i + 1;
@@ -183,10 +229,29 @@ pub fn idn_pass2(ws: ptr, n: u32, msg: ptr, msgcap: u32) -> u32 {
     return IDN_OK;
 }
 
-/// 边 `use 名字` 绑到哪个包 —— **与 sto_find(name, "") 同一条规则** (取版本最大)。
-/// 两边不一致的话, 同一个依赖会在"查询"和"解析"里绑到不同版本。
-fn idn_find_name(ws: ptr, n: u32, nm: ptr, nl: u32) -> u32 {
-    return sto_find_bytes(ws, n, nm, nl);
+/// 边 `use 名字` 绑到哪个包。**先按包名找, 再按模块名找** —— 两种都是合法的依赖形状
+/// (docs/199): `use vec` 那种名字既可能是一个包, 也可能是一个包里的模块。std 的
+/// `numfmt` / `out` / `mem` 就是被 host 这么用的 —— 它们是模块, 归属包是 std。
+/// 三种结果:
+///   * 包下标   —— 解析到了 (同名包, 或提供该模块的那个包);
+///   * IDN_NOEDGE —— 名字是**本包自己**的模块 (`from` 那个包), 包内引用, 不是包边;
+///   * PKG_NONE —— 仓库里既没有这个包, 也没有哪个包提供这个模块 (缺依赖)。
+///
+/// 包名优先于模块名 —— 与编译器的层序一致 (`<名字>/<名字>.lomt` 在包内模块那一层之前)。
+/// 与 `sto_find(name, "")` 同一条取版规则 (取版本最大), 否则"查询"和"解析"会绑到不同版本。
+pub fn idn_resolve_name(ws: ptr, n: u32, from: u32, nm: ptr, nl: u32) -> u32 {
+    let p: u32 = sto_find_bytes(ws, n, nm, nl);
+    if p != PKG_NONE {
+        return p;
+    }
+    let m: u32 = sto_find_module(ws, n, nm, nl);
+    if m == PKG_NONE {
+        return PKG_NONE;
+    }
+    if m == from {
+        return IDN_NOEDGE;
+    }
+    return m;
 }
 
 fn idn_copy_msg(msg: ptr, msgcap: u32, p: ptr, n: u32) -> u32 {
@@ -195,6 +260,9 @@ fn idn_copy_msg(msg: ptr, msgcap: u32, p: ptr, n: u32) -> u32 {
         k = msgcap;
     }
     txt_put_bytes(msg, 0, p, 0, k);
+    // 补 NUL —— 少这一个字节, 调用方的 txt_len_cstr(msg) 会一路读到上一个名字的残字
+    // (实测: "out" 写在上一个 "numfmt" 上面, 读回来成了 "outfmt")。
+    store8(msg, k, 0 as u8);
     return 1;
 }
 
@@ -232,12 +300,12 @@ pub fn idn_closure(ws: ptr, n: u32, root: u32, stack: ptr, sc: u32, msg: ptr, ms
                 if lex_ent_kind(eents, k) == LEX_NAME {
                     let nm: ptr = ((pool as u64) + (lex_ent_off(eents, k) as u64)) as ptr;
                     let nl: u32 = lex_ent_len(eents, k);
-                    let ch: u32 = idn_find_name(ws, n, nm, nl);
+                    let ch: u32 = idn_resolve_name(ws, n, idx, nm, nl);
                     if ch == PKG_NONE {
                         idn_copy_msg(msg, msgcap, nm, nl);
                         return 4294967295;
                     }
-                    if (pkg_flags(ws, ch) & PKG_F_INCLOSURE) == 0 && sp < sc {
+                    if ch != IDN_NOEDGE && (pkg_flags(ws, ch) & PKG_F_INCLOSURE) == 0 && sp < sc {
                         mem_store32(stack, sp, ch);
                         sp = sp + 1;
                     }
@@ -581,6 +649,46 @@ fn test_idn_leaf_id_is_same_with_and_without_an_edged_package() -> bool {
     return txt_eq(ia, 0, 64, ib, 0, 64);
 }
 
+/// `use <模块名>` 的两种形状 (docs/199): **别的包**的模块是一条指向**归属包**的包边;
+/// **本包**的模块 (包内引用) 根本不是包边 —— 不能解析成自己, 否则会凭空算出一个自环。
+///
+/// 夹具 `fixture/store_mod`: liba 既 `use helper` (libb 的模块) 又 `use ownmod` (它自己的)。
+/// 真 store 里的形状就是这个 (`host/{io,log,stat}.lomt` 用 std 的 `numfmt`/`out`/`mem`)。
+fn test_idn_module_reference_resolves_to_owner() -> bool {
+    let ws: ptr = sys_alloc(ws_size() as u64);
+    let scr: ptr = ((ws as u64) + WS_SCR as u64) as ptr;
+    let msg: ptr = ((ws as u64) + WS_TMP as u64 + 4096) as ptr;
+    let stack: ptr = ((ws as u64) + WS_TMP as u64 + 5000) as ptr;
+    let nm: ptr = ((ws as u64) + WS_TMP as u64 + 500) as ptr;
+    sys_put_lit(scr, "fixture/store_mod");
+    let n: u32 = sto_scan(ws, scr);
+    if n != 2 {
+        return false;
+    }
+    let la: u32 = sto_find(ws, n, "liba", "");
+    let lb: u32 = sto_find(ws, n, "libb", "");
+    if la == PKG_NONE || lb == PKG_NONE {
+        return false;
+    }
+    let k1: u32 = txt_put(nm, 0, "helper");
+    if idn_resolve_name(ws, n, la, nm, k1) != lb {
+        return false;
+    }
+    let k2: u32 = txt_put(nm, 0, "ownmod");
+    if idn_resolve_name(ws, n, la, nm, k2) != IDN_NOEDGE {
+        return false;
+    }
+    if idn_pass1(ws, n) != n {
+        return false;
+    }
+    if idn_pass2(ws, n, msg, 128) != IDN_OK {
+        return false;
+    }
+    // 闭包 = liba + libb; ownmod 在 liba 自己里, 不进闭包, 也不构成自环。
+    let c: u32 = idn_closure(ws, n, la, stack, 256, msg, 128);
+    return c == 2 && (pkg_flags(ws, lb) & PKG_F_INCLOSURE) != 0;
+}
+
 pub fn selftest_idn() -> u32 {
     let f: u32 = 0;
     if !test_idn_identity_depends_on_child() { f = f + 1; sys_write_str(1, "  FAIL idn_child\n"); }
@@ -590,6 +698,7 @@ pub fn selftest_idn() -> u32 {
     if !test_idn_every_leafless_identity_follows_the_formula() { f = f + 1; sys_write_str(1, "  FAIL idn_pure\n"); }
     if !test_idn_leaf_id_is_same_with_and_without_an_edged_package() { f = f + 1; sys_write_str(1, "  FAIL idn_scratch\n"); }
     if !test_idn_closure_from_geom_pulls_mathutil() { f = f + 1; sys_write_str(1, "  FAIL idn_closure\n"); }
+    if !test_idn_module_reference_resolves_to_owner() { f = f + 1; sys_write_str(1, "  FAIL idn_module\n"); }
     if !test_idn_missing_dependency_is_reported() { f = f + 1; sys_write_str(1, "  FAIL idn_missing\n"); }
     if !test_idn_cycle_is_detected_not_hung() { f = f + 1; sys_write_str(1, "  FAIL idn_cycle\n"); }
     return f;

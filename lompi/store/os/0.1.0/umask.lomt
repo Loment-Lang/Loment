@@ -1,0 +1,158 @@
+// os/umask.lomt — 文件创建掩码: 读、设、与权限文本互转
+//
+// 为什么需要它: `umask` 决定新文件**默认**少哪几位权限。它不是"一个设置", 而是
+// **一次读换一次写** —— 内核只提供"设成 N 并告诉我旧值"这一条系统调用, 所以
+// "读当前值"必须"设个 0 再设回去", 中间有一个**极短的窗口**。这一层把这个窗口
+// 做进一个函数, 调用方不用自己记旧值。
+//
+// 位布局与 `chmod` 的 mode 是同一套（三组 rwx, 高位到低位是 user/group/other）,
+// 但**语义相反**: mode 是"给谁什么", mask 是"拿走什么"。日志里写 `umask 022` 意思是
+// 组与其他人的写位被拿走。`um_apply` 就按这个语义算。
+//
+// 边界: 号是 x86-64 Linux 的。自检只验纯逻辑（文本 <-> mode）, 系统调用那一半由
+// `tools/loment_os_test.py` 判。
+//
+// 命名: 公开 um_*, 内部 umq_*。自检 test_umask_*。
+
+module umask
+
+const UMQ_SYS_UMASK: u64 = 95;
+
+/// 三位的读/写/执行（`um_has_*` 用的那一套）。
+pub const UM_R: u32 = 4;
+pub const UM_W: u32 = 2;
+pub const UM_X: u32 = 1;
+
+/// 读当前掩码（内部是"设 0 → 读回 → 设回去"，返回的是设回前的值）。
+pub fn um_get() -> u32 {
+    let cur: i64 = syscall4(UMQ_SYS_UMASK, 0, 0, 0);
+    if cur < 0 {
+        return 0;
+    }
+    let _back: i64 = syscall4(UMQ_SYS_UMASK, cur as u64, 0, 0);
+    return cur as u32;
+}
+
+/// 设掩码，返回**旧值**（内核的语义就是这样）。
+pub fn um_set(mask: u32) -> u32 {
+    let old: i64 = syscall4(UMQ_SYS_UMASK, mask as u64, 0, 0);
+    if old < 0 {
+        return 0;
+    }
+    return old as u32;
+}
+
+/// mode -> `rwxr-xr-x` 这样的 9 字符文本；cap 不足 9 返回 0。
+pub fn um_mode_text(mode: u32, out: ptr, cap: u32) -> u32 {
+    if cap < 9 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < 9 {
+        let bitpos: u32 = 8 - i;
+        let on: u32 = (mode >> bitpos) & 1;
+        let which: u32 = i % 3;
+        let ch: u32 = 45;
+        if on == 1 {
+            if which == 0 {
+                ch = 114;
+            } else if which == 1 {
+                ch = 119;
+            } else {
+                ch = 120;
+            }
+        }
+        store8(out, i, ch as u8);
+        i = i + 1;
+    }
+    return 9;
+}
+
+/// `rwxr-xr-x` -> mode。长度不是 9 或含非法字符返回 0（`---------` 也是 0, 两者难以
+/// 区分是刻意接受的代价: 掩码里出现 `---------` 就是没有任何权限位, 调用方多半该看长度）。
+pub fn um_parse_text(s: str) -> u32 {
+    if str_len(s) != 9 {
+        return 0;
+    }
+    let mode: u32 = 0;
+    let i: u32 = 0;
+    let ok: u32 = 1;
+    while i < 9 {
+        let c: u32 = str_byte(s, i) as u32;
+        let group: u32 = i / 3;
+        let three: u32 = (2 - group) * 3;
+        if c == 114 {
+            mode = mode | ((1 as u32) << (three + 2));
+        } else if c == 119 {
+            mode = mode | ((1 as u32) << (three + 1));
+        } else if c == 120 {
+            mode = mode | ((1 as u32) << three);
+        } else if c != 45 {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    if ok == 0 {
+        return 0;
+    }
+    return mode;
+}
+
+/// 应用掩码: `mode & ~mask`（新文件最终的权限）。
+pub fn um_apply(mask: u32, mode: u32) -> u32 {
+    return mode ^ (mode & mask);
+}
+
+/// 三位里有没有读位。
+pub fn um_has_read(triple: u32) -> bool {
+    return (triple & UM_R) != 0;
+}
+
+/// 三位里有没有写位。
+pub fn um_has_write(triple: u32) -> bool {
+    return (triple & UM_W) != 0;
+}
+
+/// 三位里有没有执行位。
+pub fn um_has_exec(triple: u32) -> bool {
+    return (triple & UM_X) != 0;
+}
+
+/// mode 里某一组（0=user, 1=group, 2=other）的三位。
+pub fn um_triple(mode: u32, group: u32) -> u32 {
+    let shift: u32 = (2 - group) * 3;
+    return (mode >> shift) & 7;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_umask_mode_text() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = um_mode_text(493, o, 16);
+    let want: str = "rwxr-xr-x";
+    if n != 9 || n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < 9 {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_umask_parse_roundtrip() -> bool {
+    let m: u32 = um_parse_text("rw-r--r--");
+    let o: ptr = alloc(16);
+    let n: u32 = um_mode_text(m, o, 16);
+    return m == 420 && n == 9 && load8(o, 0) == 114 && load8(o, 4) == 45;
+}
+
+fn test_umask_apply() -> bool {
+    let m: u32 = um_apply(18, 438);
+    return m == 420 && um_has_read(um_triple(m, 0)) && um_has_write(um_triple(m, 0))
+        && !um_has_exec(um_triple(m, 0)) && um_triple(m, 1) == 4
+        && um_triple(m, 2) == 4 && !um_has_write(um_triple(m, 1));
+}

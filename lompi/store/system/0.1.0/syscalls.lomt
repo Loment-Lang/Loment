@@ -1,0 +1,166 @@
+// system/syscalls.lomt — x86-64 Linux 的系统调用号表
+//
+// 为什么系统工具需要它: 做系统调用要么走 libc 包装，要么自己发 `syscall` 指令；
+// 后者必须知道**编号**（`write` 是 1，`openat` 是 257）。编号是 ABI 的一部分，
+// 各架构不同；这份表是 x86-64。
+//
+// 覆盖: 常用项（文件、进程、内存、时间、网络、同步）。名字与 `unistd_64.h` 一致。
+// 不做: 参数个数/类型（那是另一张表），aarch64 编号。
+//
+// 命名: 公开 scn_*, 内部 sq_*。自检 test_syscalls_*。
+
+module syscalls
+
+fn sq_put(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 编号 -> 名字。未知返回 `"unknown"`。
+pub fn scn_name(num: i64, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if num == 0 { s = "read"; }
+    else if num == 1 { s = "write"; }
+    else if num == 2 { s = "open"; }
+    else if num == 3 { s = "close"; }
+    else if num == 4 { s = "stat"; }
+    else if num == 5 { s = "fstat"; }
+    else if num == 6 { s = "lstat"; }
+    else if num == 7 { s = "poll"; }
+    else if num == 8 { s = "lseek"; }
+    else if num == 9 { s = "mmap"; }
+    else if num == 10 { s = "mprotect"; }
+    else if num == 11 { s = "munmap"; }
+    else if num == 12 { s = "brk"; }
+    else if num == 13 { s = "rt_sigaction"; }
+    else if num == 14 { s = "rt_sigprocmask"; }
+    else if num == 16 { s = "ioctl"; }
+    else if num == 17 { s = "pread64"; }
+    else if num == 18 { s = "pwrite64"; }
+    else if num == 19 { s = "readv"; }
+    else if num == 20 { s = "writev"; }
+    else if num == 21 { s = "access"; }
+    else if num == 22 { s = "pipe"; }
+    else if num == 23 { s = "select"; }
+    else if num == 24 { s = "sched_yield"; }
+    else if num == 28 { s = "madvise"; }
+    else if num == 32 { s = "dup"; }
+    else if num == 33 { s = "dup2"; }
+    else if num == 35 { s = "nanosleep"; }
+    else if num == 39 { s = "getpid"; }
+    else if num == 41 { s = "socket"; }
+    else if num == 42 { s = "connect"; }
+    else if num == 43 { s = "accept"; }
+    else if num == 44 { s = "sendto"; }
+    else if num == 45 { s = "recvfrom"; }
+    else if num == 49 { s = "bind"; }
+    else if num == 50 { s = "listen"; }
+    else if num == 51 { s = "getsockname"; }
+    else if num == 53 { s = "socketpair"; }
+    else if num == 54 { s = "setsockopt"; }
+    else if num == 55 { s = "getsockopt"; }
+    else if num == 56 { s = "clone"; }
+    else if num == 57 { s = "fork"; }
+    else if num == 59 { s = "execve"; }
+    else if num == 60 { s = "exit"; }
+    else if num == 61 { s = "wait4"; }
+    else if num == 62 { s = "kill"; }
+    else if num == 63 { s = "uname"; }
+    else if num == 72 { s = "fcntl"; }
+    else if num == 79 { s = "getcwd"; }
+    else if num == 80 { s = "chdir"; }
+    else if num == 83 { s = "mkdir"; }
+    else if num == 87 { s = "unlink"; }
+    else if num == 89 { s = "readlink"; }
+    else if num == 90 { s = "chmod"; }
+    else if num == 96 { s = "gettimeofday"; }
+    else if num == 102 { s = "getuid"; }
+    else if num == 104 { s = "getgid"; }
+    else if num == 105 { s = "setuid"; }
+    else if num == 107 { s = "geteuid"; }
+    else if num == 108 { s = "getegid"; }
+    else if num == 110 { s = "getppid"; }
+    else if num == 112 { s = "setsid"; }
+    else if num == 158 { s = "arch_prctl"; }
+    else if num == 186 { s = "gettid"; }
+    else if num == 202 { s = "futex"; }
+    else if num == 218 { s = "set_tid_address"; }
+    else if num == 228 { s = "clock_gettime"; }
+    else if num == 230 { s = "clock_nanosleep"; }
+    else if num == 231 { s = "exit_group"; }
+    else if num == 232 { s = "epoll_wait"; }
+    else if num == 233 { s = "epoll_ctl"; }
+    else if num == 257 { s = "openat"; }
+    else if num == 258 { s = "mkdirat"; }
+    else if num == 262 { s = "newfstatat"; }
+    else if num == 263 { s = "unlinkat"; }
+    else if num == 264 { s = "renameat"; }
+    else if num == 269 { s = "faccessat"; }
+    else if num == 270 { s = "pselect6"; }
+    else if num == 271 { s = "ppoll"; }
+    else if num == 291 { s = "epoll_create1"; }
+    else if num == 292 { s = "dup3"; }
+    else if num == 293 { s = "pipe2"; }
+    else if num == 302 { s = "prlimit64"; }
+    else if num == 318 { s = "getrandom"; }
+    else if num == 332 { s = "statx"; }
+    else if num == 435 { s = "clone3"; }
+    else if num == 436 { s = "close_range"; }
+    else if num == 437 { s = "openat2"; }
+    return sq_put(out, cap, s);
+}
+
+fn sq_eq(p: ptr, n: u32, w: str) -> bool {
+    if n != str_len(w) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(w, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// 名字 -> 编号（x86-64）。未知返回 -1。
+pub fn scn_num(name: str) -> i64 {
+    let p: ptr = str_ptr(name);
+    let n: u32 = str_len(name);
+    if sq_eq(p, n, "read") { return 0 as i64; }
+    if sq_eq(p, n, "write") { return 1 as i64; }
+    if sq_eq(p, n, "open") { return 2 as i64; }
+    if sq_eq(p, n, "close") { return 3 as i64; }
+    if sq_eq(p, n, "mmap") { return 9 as i64; }
+    if sq_eq(p, n, "munmap") { return 11 as i64; }
+    if sq_eq(p, n, "ioctl") { return 16 as i64; }
+    if sq_eq(p, n, "socket") { return 41 as i64; }
+    if sq_eq(p, n, "exit") { return 60 as i64; }
+    if sq_eq(p, n, "exit_group") { return 231 as i64; }
+    if sq_eq(p, n, "openat") { return 257 as i64; }
+    if sq_eq(p, n, "newfstatat") { return 262 as i64; }
+    if sq_eq(p, n, "clone3") { return 435 as i64; }
+    if sq_eq(p, n, "close_range") { return 436 as i64; }
+    return 0 as i64 - 1 as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_syscalls_name() -> bool {
+    let o: ptr = alloc(32);
+    let n: u32 = scn_name(1 as i64, o, 32);
+    return n == 5 && load8(o, 0) == 119; // "write"
+}
+
+fn test_syscalls_num() -> bool {
+    return scn_num("openat") == (257 as i64)
+        && scn_num("nope") == (0 as i64 - 1 as i64);
+}

@@ -20,6 +20,7 @@
 // 一个字都不输出；见 docs/189 §3）。
 
 module lomsyscalls
+choose runtime
 
 // ---------------------------------------------------------------- 内存布局
 const M_ARGV: u32 = 0;             // 8192（/proc/self/cmdline）

@@ -1,0 +1,129 @@
+# 每个套件的判据条数地板 —— 数值就是 `len(TESTS)`，**与环境无关**。
+#
+# 纪律（与 `.github/gate-baseline.txt`、`PARSE_KNOWN_GAPS` 同一形状，但**两个方向**都判失败）：
+#   * **少了** = 有人删了判据（或者把判据挪走了）。这是「把失败的判据删掉」那条路，直接红。
+#   * **多了** = 有人加了判据而没更新这里。文件必须说实话，所以也红；照下面重新量一次即可。
+#
+# 为什么条数能当棘轮：`len(TESTS)` 不随环境变（有没有 clang/WSL 都不改它），所以
+# 「实测 == 文件」这条断言在哪儿都成立 —— 不像跳过表那样要看机器。
+#
+# 重新量：`python tools/ci.py --static-only`，每行 `:: [static] <套件> … <p>/<n> 通过` 里的 n。
+# 13 个 driver 脚本（`lom_audit` / `lompi_sync` / `loment_publish` …）没有 `TESTS`，不在这里。
+
+
+lomc_test 25
+lomentc_test 262
+lspe_test 78
+potato_test 20
+loment_ct_test 2
+loment_comefor_test 12
+loment_choose_matrix_test 27
+lmgr_test 8
+loment_extblock_test 7
+loment_multilang_test 2
+loment_ctrans_test 21
+loment_pytrans_test 7
+loment_jtrans_test 8
+loment_java_test 45
+loment_cstrans_test 6
+loment_cpptrans_test 6
+loment_gotrans_test 7
+loment_nltrans_test 20
+loment_lomtfrom_test 4
+loment_trans_test 8
+loment_potato_emit_test 11
+loment_lms_test 21
+loment_grammar_test 41
+loment_tools_test 66
+loment_p7_test 8
+loment_p8_test 61
+loment_p9_test 2
+loment_crash_test 9
+loment_gc_surface_test 3
+loment_gc_why_test 4
+loment_seed_test 5
+loment_fmt_test 10
+loment_doc_test 5
+loment_oracle_test 8
+loment_channel_test 9
+loment_json_test 4
+loment_pkg_test 3
+loment_lomc_test 4
+loment_lsp_test 26
+loment_elf_test 90
+loment_pe_test 17
+loment_genesis_test 9
+loment_status_test 4
+lvm_test 10
+lvm_twin_test 5
+lvm_mirror_t2_test 5
+loment_net_test 3
+loment_ffi_test 30
+loment_ports_test 27
+loment_hosted_test 14
+loment_rel_test 8
+loment_editors_test 3
+vscode_ext_test 19
+loment_filetype_test 4
+loment_dap_test 4
+loment_eol_test 4
+loment_syscalls_test 3
+loment_capasserts_test 4
+loment_i18n_test 2
+loment_slop_test 9
+loment_docs_test 7
+loment_door_test 6
+loment_admit_test 8
+loment_zwframe_test 7
+loment_lib_test 15
+loment_cli_test 50
+loment_err_test 58
+loment_regex_test 3
+loment_std_test 5
+loment_crypto_test 1
+loment_domains_test 7
+loment_cache_test 4
+loment_libl_test 2
+loment_internet_test 12
+loment_os_test 5
+loment_thread_test 11
+loment_lumtui_test 7
+loment_lompi_test 49
+lompicheck_test 7
+loment_register_test 9
+loment_multisyntax_test 73
+loment_multisyntax_projects_test 3
+loment_megaproject_test 8
+loment_state_test 8
+lvm_profile_test 4
+lvm_t2_test 7
+lvm_a0_test 6
+lvm_cache_test 6
+lvm_fusion_test 7
+lvm_compact_test 11
+loment_store_twin_test 2
+loment_spec_oracle_test 3
+lvm_t3_test 4
+lvm_stability_test 3
+lvm_perf_test 3
+loment_invariant_test 2
+loment_caps_test 11
+loment_book_test 4
+loment_book_site_test 4
+loment_update_test 13
+loment_hotfix_test 7
+loment_staging_test 6
+loment_projection_test 6
+loment_hotline_test 6
+loment_hotart_test 4
+loment_hotstress_test 2
+loment_lsp_hot_test 1
+loment_hotmeta_test 7
+loment_hotswap_test 7
+loment_hotload_test 13
+loment_hotcore_test 7
+loment_hotbuild_test 4
+loment_dev_test 9
+
+# 源码参数台 (docs/310)
+loment_studio_test 7

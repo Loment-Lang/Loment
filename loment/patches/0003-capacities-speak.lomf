@@ -1,0 +1,197 @@
+lomf 1
+mod   0003-capacities-speak
+about 编译器**前端**那几处固定容量：越界时**说出来**，不再静默截断（issue #345 采纳的 (a)）。
+about 
+about #345 的选项里，**(a)「给每个固定容量补一条失败路径」是唯一既安全、又不动那条招牌的一条**
+about （它自己写的），而它的第一档是**能验、能守住**的一条线：**用户一份源文件推得动的那些
+about 容量，越界必须有话**。(b) 让编译器链运行期、(c) 让 `alloc` 变成真正的分配器、(d) 把
+about `no_runtime` 的说法收窄 —— 三条都比这一笔大，理由记在 `docs/258`。
+about 
+about 这一笔落的四处都在 `driver.lomt`，症状都是**静默截断**（不是写穿）：
+about   * `SLOT` —— 源文件不小于 512 KiB 时读满槽，截断后的源会给出一串**与被截断位置无关**的解析错；
+about   * `DIR_CAP` / `SUBP_CAP` —— 路径拼装截断，于是 `openat` 去找一个不存在的路径，
+about     用户看到的是「这个 `use` 找不到」；
+about   * `EXT_CAP` —— `loment.conf` 的源后缀截断，而截断出来的后缀**可能正好又叫中另一个词法档**。
+about 
+about 顺带把 `codegen` 那两张表共用的那一格**点全名**：发射器对 `CG_MAXFN` 与 `CG_MAXENUM` 都只
+about `return 0`，从驱动这一端看不出是哪一张撞的 —— 原先只写函数数，于是枚举爆掉时用户会去删函数。
+about 
+about **2026-10-17 重写过一次**（不是新事，是同一件事的第二次落）：`#440` 把驱动器里所有面向用户的
+about 消息改成了英文 + `wdiag_file`，并删掉了 `fujoc-s:` 这个内部名（用户敲的是 `loment`）。
+about 这一笔那四条消息跟着改成同一口径 —— 两条改动撞在同一段文本上，所以 `expect` 与两块都重写了。
+about
+about **2026-10-19**：`#775` 在最后那一块（`emit_module` 的失败分支）里加了发射器自己的诊断通道
+about （E023）；`old -> new` 的文本因此连带更新，`new` 必须与树里逐字一致。
+about 
+about **2026-11-07**（域块，`docs/314`）：`codegen` 的**空间绑定表**也成了会满的一条，发射器用
+about 2 号报它 —— 最后那一块因此多一条 `ec == 2` 分支，`new` 再跟树走一次。
+about
+about **2026-11-04**（Tur 2 的 `defer`，`docs/296` §2.3）：最后那一块的 `em` 从"一句话"变成
+about 按规则号选消息（3 / 4 / 5 = `defer` 的三个上限）—— 2 号及以后原先一律套"实参超过 20"，
+about 于是 `defer` 撞上捕获表上限时用户读到的是"参数太多"。`new` 块因此再跟树走一次：
+about 这一笔记的是**这一处的最终形状**，不是中间那一版。
+about
+about **2026-11-18**（域树收尾）：`dom_stmt` / `dom_for` 的失败路径改成「前进到块尾」
+about （诊断不再退化成崩溃），并多了一个 6 号（域语句降不下去）—— `new` 再跟树走一次。
+about
+about 棘轮：`loment_caps_test::test_the_front_end_has_no_silent_capacity` 把「前端缺口 0」钉住，
+about `EXPLAINED` 逐条写清每一处排除的来路（见 `tools/loment_caps.py`）。
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
+    syscall4(3, fd as u64, 0, 0);
+    let nb: u32 = strip_cr(slot, raw_n as u32);
+>>>
+new <<<
+    let sunit: u32 = SLOT - 44224;
+    let raw_n: u64 = read_all(fd as u64, slot, sunit as u64);
+    syscall4(3, fd as u64, 0, 0);
+    // **读满了槽 ≠ 文件就这么大**（`#345` 的 (a)：每一个固定容量越界时都要**有话**）。
+    // 槽原先静默截断：一份大于上限的源会**少一截**，用户看到的是一串与被截断位置
+    // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
+    // 等价的写法，但把 `SLOT` **写在比较里**：容量盘点（`tools/loment_caps.py`）认的是
+    // "容量名出现在一条序关系比较里"，`raw_n >= sunit` 里那个名字被别名藏起来了。
+    if raw_n + 44224 as u64 >= SLOT as u64 {
+        let dmsg: str = "this source file is 480 KiB or larger -- the per-file slot cannot hold it (its tail keeps this file's path and use lists), and cutting it short yields parse errors unrelated to where it was cut: split the facade";
+        wdiag_at(diagfd(scr), scr, path, n, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg) as u64;
+    }
+    let nb: u32 = strip_cr(slot, raw_n as u32);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
+    let dent: ptr = ptr_add(scr, DENT_OFF);
+    let i: u32 = 0;
+    while i < dl && i < DIR_CAP - 1 {
+        store8(scr, i, load8(dirp, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+>>>
+new <<<
+fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
+    let dent: ptr = ptr_add(scr, DENT_OFF);
+    // **目录路径比槽大 ⇒ 说出来**（`#345` 的 (a)）。原来这条循环只是**停**：截断过的路径
+    // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
+    // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
+    if dl >= DIR_CAP - 1 {
+        let dmsg: str = "a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
+    let i: u32 = 0;
+    while i < dl && i < DIR_CAP - 1 {
+        store8(scr, i, load8(dirp, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    while j < 200 && e < SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        store8(w, e, load8(dent, nm + j) as u8);
+        e = e + 1;
+        j = j + 1;
+    }
+    store8(w, e, 0 as u8);
+>>>
+new <<<
+    while j < 200 && e < SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        store8(w, e, load8(dent, nm + j) as u8);
+        e = e + 1;
+        j = j + 1;
+    }
+    // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
+    // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
+    if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        let dmsg: str = "a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
+    store8(w, e, 0 as u8);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    while q < sl - 2 && q < EXT_CAP - 1 {
+        let ch: u8 = load8(buf, st + 1 + q) as u8;
+        if ch == 92 {
+            bad = 1;                          // 带转义的也拒 (见下)
+        }
+        store8(dst, q, ch);
+        q = q + 1;
+    }
+    store8(dst, q, 0 as u8);
+>>>
+new <<<
+    while q < sl - 2 && q < EXT_CAP - 1 {
+        let ch: u8 = load8(buf, st + 1 + q) as u8;
+        if ch == 92 {
+            bad = 1;                          // 带转义的也拒 (见下)
+        }
+        store8(dst, q, ch);
+        q = q + 1;
+    }
+    // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
+    // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
+    if q >= EXT_CAP - 1 && q < sl - 2 {
+        let dmsg: str = "the source extension in loment.conf is longer than 256 bytes";
+        wdiag_at(diagfd(scr), scr, 0 as ptr, 0, 0, 999, str_ptr(dmsg), str_len(dmsg));
+        return fail(dmsg);
+    }
+    store8(dst, q, 0 as u8);
+>>>
+
+edit loment/selfhost/driver.lomt expect 1
+old <<<
+    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF));
+    if m == 0 {
+        let msg: str = "more functions than the codegen table holds -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
+>>>
+new <<<
+    // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
+    let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
+                             sw_state_named(unit, sw, "domain_clock_explicit"));
+    if m == 0 {
+        // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
+        // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。
+        let ec: u32 = emit_error_code(cg);
+        if ec != 0 {
+            let et: u32 = emit_error_tok(cg);
+            // 每号一条消息：这一格原先只认"实参超过 20"（1 号），2 号及以后一律套那句话，
+            // 于是 defer 撞上捕获表上限时用户读到的是"参数太多"（错误的方向）。
+            let em: str = "the self-hosted emitter cannot lower a call with more than 20 arguments -- split the call into smaller ones";
+            if ec == 3 {
+                em = "a defer takes at most 4 arguments -- bind them to locals first";
+            }
+            if ec == 2 {
+                em = "too many `in SPACE` bindings in one function -- split the function";
+            }
+            if ec == 4 {
+                em = "too many defer statements in one function -- split the function";
+            }
+            if ec == 5 {
+                em = "defer nesting is too deep -- split the function";
+            }
+            if ec == 6 {
+                em = "a `domain` statement cannot be lowered here -- an empty range (`lo > hi`), an unknown member, or a parallel span mismatch (the reference compiler names the exact one)";
+            }
+            if dfd >= 0 {
+                wdiag(dfd as u64, scr, ap, an, load32(ctoks, et * 20 + 12), 23,
+                      str_ptr(em), str_len(em));
+            }
+            return fail(em);
+        }
+        // **几张表共用这一格，所以几张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN`、
+        // `CG_MAXENUM` 与 `CG_MAXCONST` 都只 `return 0`，从驱动这一端看不出是哪一张撞的
+        // —— 那就别猜，把名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
+        let msg: str = "more functions, constants or enum variants than the codegen tables hold -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
+>>>

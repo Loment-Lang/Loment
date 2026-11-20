@@ -1,0 +1,73 @@
+name: mirror
+
+# Every push to `main` is copied to the four read-only mirrors, so they never drift.
+#
+# The mirrors are byte-for-byte copies; anything opened on them goes unseen. That is why this is
+# a push, not a fork, and why it uses `--force`: a mirror must equal the source even if someone
+# did manage to write to one.
+#
+# Secrets (all set on this repository, all *write* credentials for the account named below):
+#   GITLAB_TOKEN      GitLab PAT (`api` + `write_repository`), used as `oauth2:<token>`
+#   GITEE_TOKEN       Gitee 私人令牌 (`projects`),                  used as `LomentLang:<token>`
+#   CODEBERG_TOKEN    Codeberg access token (`write:repository`),  used as `Loment:<token>`
+#   BITBUCKET_TOKEN   Atlassian API token with Bitbucket repos,    used as `<username>:<token>`
+#                     — the *username*, not the email: the email authenticates the REST API but
+#                     not git, and the failure looks like "you may not have access" (401).
+#
+# Gitee's receive-pack sometimes drops the connection *after* accepting the pack, so the exit
+# code lies in the other direction too; a retry is harmless and the next run repairs anything
+# missed.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push main and tags to GitLab, Gitee, Codeberg and Bitbucket
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          BITBUCKET_TOKEN: ${{ secrets.BITBUCKET_TOKEN }}
+        run: |
+          set -uo pipefail
+          git config --global http.sslVerify true
+          fail=0
+
+          push_one() {
+            name=$1; url=$2
+            echo "--- $name"
+            for attempt in 1 2 3; do
+              if git push --force --tags "$url" 'refs/remotes/origin/main:refs/heads/main'; then
+                echo "    ok (attempt $attempt)"
+                return 0
+              fi
+              echo "    attempt $attempt failed; retrying"
+              sleep $((attempt * 10))
+            done
+            echo "::error::$name mirror failed after 3 attempts"
+            fail=1
+          }
+
+          push_one GitLab    "https://oauth2:${GITLAB_TOKEN}@gitlab.com/lomentlang/Loment.git"
+          push_one Gitee     "https://LomentLang:${GITEE_TOKEN}@gitee.com/LomentLang/loment.git"
+          push_one Codeberg  "https://Loment:${CODEBERG_TOKEN}@codeberg.org/Loment/loment.git"
+          push_one Bitbucket "https://hooyan2024:${BITBUCKET_TOKEN}@bitbucket.org/lomentlang/loment.git"
+
+          exit $fail

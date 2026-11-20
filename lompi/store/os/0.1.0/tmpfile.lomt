@@ -1,0 +1,177 @@
+// os/tmpfile.lomt — 临时文件: 生成不撞的名字并**独占创建**
+//
+// 为什么需要它: 临时文件的名字是可预测的（`/tmp/app-1234`），而可预测的名字是
+// **攻击面**: 别的用户可以先放一个符号链接在那里, 你的 `open` 就写到了别处。
+// 唯一正确的做法是 `O_CREAT | O_EXCL` —— 名字已存在时**创建失败**, 不跟随符号
+// 链接、不覆盖。这一层把"拼名字 + 独占创建 + 撞了就换号"做成一次调用。
+//
+// 名字形状: `dir/prefix-pid-counter`（dir 结尾有没有 `/` 都行）。
+//   * pid 让不同进程不互撞;
+//   * counter 让同进程的多次调用不互撞（调用方持有一个 4 字节计数器）;
+//   * 撞了（EEXIST）就 +1 重试, 最多 16 次。
+//
+// 边界:
+//   * **不删除**在失败路径上已创建的东西 —— 创建成功后的清理是调用方的事;
+//     `tf_unlink` 只是把 `unlink` 包一层。
+//   * 不设 `O_CLOEXEC`: 临时文件偶尔就是要传给子进程（比如让子进程写进来）,
+//     默认关掉它反而挡住正当用法。要关就调用方自己 fcntl。
+//   * 模式是 0600 —— 临时文件不该被同机其他用户读到。
+//
+// 命名: 公开 tf_*, 内部 tfq_*。自检 test_tmpfile_*（只验拼名字, 不创建文件）。
+
+module tmpfile
+
+const TFQ_AT_FDCWD: u64 = 18446744073709551516;
+const TFQ_SYS_OPENAT: u64 = 257;
+const TFQ_SYS_UNLINK: u64 = 87;
+const TFQ_SYS_GETPID: u64 = 39;
+/// O_WRONLY | O_CREAT | O_EXCL。
+const TFQ_OPEN_FLAGS: u64 = 65;
+/// 0600。
+const TFQ_MODE: u32 = 384;
+
+fn tfq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn tfq_num(out: ptr, cap: u32, pos: u32, v: u32) -> u32 {
+    let d: ptr = alloc(12);
+    let x: u32 = v;
+    let k: u32 = 0;
+    if x == 0 {
+        store8(d, 0, 48 as u8);
+        k = 1;
+    }
+    while x > 0 {
+        store8(d, k, ((x % 10) + 48) as u8);
+        x = x / 10;
+        k = k + 1;
+    }
+    let p: u32 = pos;
+    let r: u32 = k;
+    while r > 0 {
+        r = r - 1;
+        if p < cap {
+            store8(out, p, load8(d, r) as u8);
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+/// 拼出 `dir/prefix-pid-counter`（纯函数, 不碰文件系统）, 返回长度。
+pub fn tf_name(dir: str, prefix: str, pid: u32, counter: u32, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = tfq_put(out, cap, 0, dir);
+    let dl: u32 = str_len(dir);
+    if dl > 0 && str_byte(dir, dl - 1) != 47 {
+        pos = tfq_put(out, cap, pos, "/");
+    }
+    pos = tfq_put(out, cap, pos, prefix);
+    pos = tfq_put(out, cap, pos, "-");
+    pos = tfq_num(out, cap, pos, pid);
+    pos = tfq_put(out, cap, pos, "-");
+    return tfq_num(out, cap, pos, counter);
+}
+
+/// 独占创建一个新临时文件。成功返回 fd（>= 0）, 并把**路径（C 串）**写进 out;
+/// 失败返回 -1。`counter` 是 4 字节小端计数器, 每次尝试后 +1 写回。
+pub fn tf_create_excl(dir: str, prefix: str, pid: u32, counter: ptr,
+                      out: ptr, cap: u32) -> i64 {
+    let c: u32 = (load8(counter, 0) as u32) | ((load8(counter, 1) as u32) << 8)
+        | ((load8(counter, 2) as u32) << 16) | ((load8(counter, 3) as u32) << 24);
+    let path: ptr = alloc(512);
+    let fd: i64 = -1;
+    let tries: u32 = 0;
+    let plen: u32 = 0;
+    while fd < 0 && tries < 16 {
+        plen = tf_name(dir, prefix, pid, c, out, cap);
+        if plen + 1 <= 512 && plen < cap {
+            let k: u32 = 0;
+            while k < plen {
+                store8(path, k, load8(out, k) as u8);
+                k = k + 1;
+            }
+            store8(path, plen, 0 as u8);
+            fd = syscall6(TFQ_SYS_OPENAT, TFQ_AT_FDCWD, path as u64,
+                TFQ_OPEN_FLAGS, TFQ_MODE as u64, 0);
+        }
+        c = c + 1;
+        tries = tries + 1;
+    }
+    store8(counter, 0, (c & 255) as u8);
+    store8(counter, 1, ((c >> 8) & 255) as u8);
+    store8(counter, 2, ((c >> 16) & 255) as u8);
+    store8(counter, 3, ((c >> 24) & 255) as u8);
+    if fd >= 0 && plen < cap {
+        store8(out, plen, 0 as u8);
+    }
+    return fd;
+}
+
+/// 用本进程 pid 与一个从 0 起的计数器创建一个临时文件; 路径（C 串）写进 out。
+pub fn tf_make_temp(dir: str, prefix: str, out: ptr, cap: u32) -> i64 {
+    let pid: i64 = syscall4(TFQ_SYS_GETPID, 0, 0, 0);
+    let cb: ptr = alloc(4);
+    store8(cb, 0, 0 as u8);
+    store8(cb, 1, 0 as u8);
+    store8(cb, 2, 0 as u8);
+    store8(cb, 3, 0 as u8);
+    return tf_create_excl(dir, prefix, pid as u32, cb, out, cap);
+}
+
+/// `unlink(path)`。`path` 是 C 串。成功返回 0。
+pub fn tf_unlink(path: ptr) -> i64 {
+    return syscall4(TFQ_SYS_UNLINK, path as u64, 0, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tmpfile_name() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = tf_name("/tmp", "app", 42, 7, o, 64);
+    let want: str = "/tmp/app-42-7";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_tmpfile_name_trailing_slash() -> bool {
+    let o: ptr = alloc(64);
+    let n: u32 = tf_name("/tmp/", "x", 1, 0, o, 64);
+    let want: str = "/tmp/x-1-0";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_tmpfile_name_truncates_but_reports() -> bool {
+    let o: ptr = alloc(8);
+    let n: u32 = tf_name("/tmp", "app", 42, 7, o, 8);
+    return n == 13 && load8(o, 0) == 47 && load8(o, 7) == 112;
+}

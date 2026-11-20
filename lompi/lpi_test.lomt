@@ -7,6 +7,7 @@
 // lompi 的分层是线性链, 汇总入口在这里, 两条路不冲突 (test_* 函数照样在)。
 
 module lpi_test
+choose runtime
 
 use "lpi_cli.lomt"
 
@@ -19,6 +20,7 @@ fn _start() {
     let fp: u32 = selftest_pkg();
     let fi: u32 = selftest_idn();
     let fc: u32 = selftest_cli();
+    let fw: u32 = selftest_net();
     sys_write_str(1, "  sys failures: ");
     txt_write_dec(1, scr, fs as u64);
     sys_write_str(1, "\n  txt failures: ");
@@ -34,7 +36,7 @@ fn _start() {
     sys_write_str(1, "\n  cli failures: ");
     txt_write_dec(1, scr, fc as u64);
     sys_write_str(1, "\n");
-    let f: u32 = fs + ft + fd + fh + fp + fi + fc;
+    let f: u32 = fs + ft + fd + fh + fp + fi + fc + fw;
     sys_write_str(1, "lpi selftest failures: ");
     txt_write_dec(1, scr, f as u64);
     sys_write_str(1, "\n");

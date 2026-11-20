@@ -20,6 +20,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc     # noqa: E402
 import lomentc  # noqa: E402
 import lomfmt   # noqa: E402
@@ -47,11 +48,18 @@ def _clang() -> str | None:
     return fallback if Path(fallback).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -59,6 +67,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -88,6 +98,79 @@ def _corpus() -> list[Path]:
     files += sorted((ROOT / "loment" / "comefor").glob("*.lomt"))
     files.append(SRC)
     return files
+
+
+@test
+def test_fmt_preserves_the_token_sequence_on_the_whole_corpus():
+    """**格式化一个字都不许动**（`#640`）—— 整份语料重新词法一遍，序列必须相同。
+
+    判据不比文本、比 token：格式化器要改的只有空白与换行，token 序列是它的不变量。
+
+    **未修时红**：参考实现按 `tok.val` 判 `{` `}` `;` `,`，于是内容正好是这四个字符的
+    字符串字面量被当标点铺开、**引号丢掉** —— `g(a, "{")` 变成 `g(a, {)`，括号失衡。
+    57 份语料里中 8 份（`checker` / `codegen` / `driver` / `interp` / `lexer` / `parser` /
+    `potato` / `lomfmt` 自己）。孪生与它**同错**，所以等价那条判据一直是绿的。
+    """
+    bad = []
+    files = _corpus()
+    for f in files:
+        src = f.read_text(encoding="utf-8")
+        out = lomfmt.format_source(src)
+        a = [(t.kind, t.val) for t in lomc.lex(src) if t.kind != "eof"]
+        b = [(t.kind, t.val) for t in lomc.lex(out) if t.kind != "eof"]
+        if a != b:
+            i = next((k for k in range(min(len(a), len(b))) if a[k] != b[k]),
+                     min(len(a), len(b)))
+            bad.append(f"{f.name}: {len(a)} -> {len(b)} 个 token，"
+                       f"第 {i} 个起 {a[i:i + 1]} != {b[i:i + 1]}")
+    assert not bad, "; ".join(bad[:4])
+    # 四个字面量各钉一条：它们分别会开块、闭块、结句、分参
+    src = ('module x\n\nfn f(a: u32) -> bool {\n'
+           '    return g(a, ";") && g(a, ",") && g(a, "{") && g(a, "}");\n}\n\n'
+           'fn g(a: u32, s: str) -> bool {\n    return true;\n}\n')
+    out = lomfmt.format_source(src)
+    for lit in ('";"', '","', '"{"', '"}"'):
+        assert lit in out, f"字面量 {lit} 被当成标点了 —— {out!r}"
+    assert out.count("{") == out.count("}"), f"括号失衡: {out!r}"
+    print(f"      {len(files)} 个语料格式化前后 token 序列一字未变")
+
+
+@test
+def test_fmt_keeps_every_comment():
+    """**注释要活下来**（`#45`）—— 至少 `///`，它是语言的一部分（`loment doc` 靠它）。
+
+    这条**不靠与 Python 版等价**：两个实现可以一起把注释丢掉，等价判据照绿。
+    所以它直接数 —— 源里扫出来的注释按行序逐个在输出里出现，一条不少、一条不多。
+    """
+    bad = []
+    files = _corpus()
+    for f in files:
+        src = f.read_text(encoding="utf-8")
+        out = lomfmt.format_source(src)
+        a, b = lomfmt._scan_comments(src), lomfmt._scan_comments(out)
+        la = [t for k in sorted(a[0]) for t in a[0][k]] + [a[1][k] for k in sorted(a[1])]
+        lb = [t for k in sorted(b[0]) for t in b[0][k]] + [b[1][k] for k in sorted(b[1])]
+        if la != lb:
+            i = next((k for k in range(min(len(la), len(lb))) if la[k] != lb[k]),
+                     min(len(la), len(lb)))
+            bad.append(f"{f.name}: {len(la)} -> {len(lb)} 条注释，"
+                       f"第 {i} 条起 {la[i:i + 1]} != {lb[i:i + 1]}")
+    assert not bad, "; ".join(bad[:4])
+
+    # 报告里那份原文：两种注释都得在，`///` 还得**紧挨着**它注释的那条声明
+    # ——`loment doc` 抽的就是它上面那一块。
+    src = ("// module banner comment\nmodule docfmt\n\n"
+           "/// Adds one to an unsigned value.\n"
+           "/// Wraps at the u32 boundary.\n"
+           "pub fn bump(v: u32) -> u32 {\n    return v + 1; // 行尾注释\n}\n")
+    out = lomfmt.format_source(src).split("\n")
+    assert "// module banner comment" in out, out
+    k = next((i for i, s in enumerate(out) if s.startswith("pub fn bump")), None)
+    assert k is not None, out
+    assert out[k - 2:k] == ["/// Adds one to an unsigned value.",
+                            "/// Wraps at the u32 boundary."], out
+    assert any(s.endswith("// 行尾注释") for s in out), out
+    print(f"      {len(files)} 个语料注释一条未丢；`///` 仍紧挨着它注释的声明")
 
 
 @test
@@ -125,7 +208,7 @@ def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:
               f"chmod +x {_T}{name}.bin && "
               f"cd {_wsl_path(ROOT)} && {_T}{name}.bin {entry.relative_to(ROOT).as_posix()} "
               f"> {_wsl_path(got)} 2> {_wsl_path(err)}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     out = got.read_text(encoding="utf-8") if got.exists() else ""
     etext = err.read_text(encoding="utf-8", errors="replace") if err.exists() else ""
@@ -164,6 +247,15 @@ def test_loment_fmt_edge_cases():
         "comment_only": "// 只有注释\n",
         "string_only": 'module x\n\nconst C: u32 = 1;\n\nfn f() -> str {\n    return "a\\\\b\\"c";\n}\n',
         "crlf": 'module x\r\n\r\nfn f() -> u32 {\r\n    return 1;\r\n}\r\n',
+        # `#46`: 修饰词不与自己修饰的那一项分开（这一张**两边都跑**，所以孪生也被钉住）
+        "pub_fn": "module x\n\npub fn f() -> u32 {\n    return 1;\n}\n",
+        "pub_extern": ("module x\n\npub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;\n"
+                       "\nfn f() -> u32 {\n    return 1;\n}\n"),
+        "pub_const_pair": "module x\n\npub const A: u32 = 1;\npub const B: u32 = 2;\n",
+        # `docs/341`: 插值前缀与字符串**粘着** —— 中间加一个空格就把 `f"…"` 拆成两个
+        # token，格式化后的文件编不过。这一张两边都跑，孪生也被钉住。
+        "interp": ('module x\n\nfn f(n: u32) -> str {\n'
+                   '    return f"n={n} {{lit}}";\n}\n'),
     }
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -180,6 +272,92 @@ def test_loment_fmt_edge_cases():
         probe.unlink(missing_ok=True)
         assert not bad, "; ".join(bad)
         print(f"      {len(cases)} 个边界用例一致")
+
+
+@test
+def test_fmt_keeps_interpolated_strings_glued():
+    """`f"…"` / `rf"…"` 格式化之后仍是**一条读法**（`docs/341`）。
+
+    两个格式化器都按 token 排版，而插值在源里是 `ident f` + `string` 两个 token ——
+    中间补一个空格，编译器的改写就再也认不出它。判据把格式化结果**再编一遍**：
+    比"文本里还有 f 加引号"更硬。
+    """
+    src = ('module x\nchoose runtime\n\nfn f(n: u32) -> str {\n'
+           '    let a: str = f"n={n}";\n'
+           '    let b: str = rf"raw\\\\n{n}";\n'
+           '    return a;\n}\n')
+    out = lomfmt.format_source(src)
+    assert 'f"n={n}"' in out, out
+    assert 'rf "raw' not in out and 'f "n=' not in out, out
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        p = td / "interp.lomt"
+        p.write_text(out, encoding="utf-8", newline="")
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+    print("      插值字符串格式化后仍是一条读法（编得过）")
+
+
+@test
+def test_fmt_keeps_the_inference_shorthand_glued():
+    """`let x := e;` 格式化之后 `:` 与 `=` 仍是**粘着的**（`docs/347`）。
+
+    `:=` 是一条读法的两个字符：拆成 `: =` 就不是类型推断了（那是"`: ` 后面缺类型"
+    的语法错）。两个格式化器都要认它 —— 自举那侧由 `test_loment_fmt_matches_python`
+    逐字节对拍，这里钉住参考实现这一半，并把格式化结果**再编一遍**。
+    """
+    src = ('module x\nchoose runtime\n\nfn f(n: u32) -> u32 {\n'
+           '    let a := n;\n'
+           '    let b: auto = a;\n'
+           '    return b;\n}\n')
+    out = lomfmt.format_source(src)
+    assert "let a := n;" in out, out
+    assert ": =" not in out, out
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        p = td / "auto.lomt"
+        p.write_text(out, encoding="utf-8", newline="")
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+    print("      `:=` 格式化后仍是一条读法（编得过）")
+
+
+@test
+def test_fmt_keeps_declaration_modifiers_on_one_line():
+    """**修饰词不单独占一行**（`#46`）—— `pub fn f()` 要待在同一行。
+
+    原先每个顶层关键字都 flush 一次，于是 `pub` 被留成**单独一行**、和它修饰的东西
+    隔了一个空行：
+
+        pub
+        <空行>
+        fn f() -> u32 {
+
+    那不是"格式"，那是把一项声明劈成两段。判据是"**这一行到现在只有修饰词**"而不是
+    "刚看见 `pub`" —— 只认 `pub` 的话 `pub extern fn …;` 仍会被劈开（`extern` 不是顶层
+    关键字）。所以三条形状都钉：`pub fn` / `pub extern fn` / 两条相邻的 `pub const`。
+    """
+    for label, src, want in (
+        ("pub fn", "module x" + chr(10) + chr(10) + "pub fn f() -> u32 {" + chr(10) + "    return 1;" + chr(10)
+                   + "}" + chr(10),
+         ["module x", "", "pub fn f() -> u32 {", "    return 1;", "}"]),
+        ("pub extern fn",
+         "module x" + chr(10) + chr(10) + "pub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;"
+         + chr(10) + chr(10) + "fn f() -> u32 {" + chr(10) + "    return 1;" + chr(10) + "}" + chr(10),
+         ["module x", "", "pub extern fn sys_write(fd: u32, p: ptr, n: u32) -> u32;",
+          "fn f() -> u32 {", "    return 1;", "}"]),
+        ("pub const x2", "module x" + chr(10) + chr(10) + "pub const A: u32 = 1;" + chr(10)
+         + "pub const B: u32 = 2;" + chr(10),
+         ["module x", "", "pub const A: u32 = 1;", "pub const B: u32 = 2;"]),
+    ):
+        got = lomfmt.format_source(src).split(chr(10))
+        while got and got[-1] == "":
+            got.pop()
+        assert got == want, f"{label}: 行不对 —— {got!r}"
+        assert "pub" not in got, f"{label}: `pub` 被留成单独一行"
+    print("      修饰词与声明同处一行：pub fn / pub extern fn / 两条 pub const")
 
 
 @test
@@ -205,17 +383,62 @@ def test_loment_fmt_is_idempotent():
         print("      6 个语料格式化两次结果相同")
 
 
+#: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。
+#: 声明那一行整个是"怎么读" —— 前门会把它抹成等长空白，于是**那一行上的函数
+#: 跟着消失**，而 `--write` 是**原地写回**（`#115`）：用户的源就这么被改坏。
+FOREIGN = """choose write grammar c
+
+unsigned int add(unsigned int a, unsigned int b) {
+    return a + b;
+}
+"""
+
+
+@test
+def test_loment_fmt_refuses_foreign_grammar():
+    """**别的写法要拦住**（`#115` 的后半）—— 两个实现都拒，盘上那份源一个字不动。
+
+    `lomfmt` 是**独立入口**（拿词法层直接读原文、不走前门），所以"这份源该怎么读"
+    这一层得它自己判 —— 参考实现的 `potato_from.refuse_foreign_grammar` 就是这一层，
+    孪生这边是新加的 `lomfmt.lomt::foreign_grammar`。不拦的后果实测过（`#115`）：
+    命令**退 0**、说都不说一句，而文件已经被重排成既不是 C 也不是 Loment 的样子
+    —— 比 `lomdoc` 那半边更重，因为 `--write` 是**原地写回**。
+
+    两边都跑：只钉孪生的话，参考实现哪天松掉就没人管了。
+    退出码**故意不写成同一个数**：`lomfmt.py` 把这条例外归到它文档里的"读取或词法
+    错误"那一档（退 2），孪生的 `fail` 退 1 —— 判据要的是"**拒了**"，不是"退几"。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    probe = ROOT / "loment" / "build" / "lomfmt_foreign.lomt"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with probe.open("w", encoding="utf-8", newline="\n") as f:
+            f.write(FOREIGN)
+        before = probe.read_bytes()
+        # 参考实现：`--write` 真跑一遍 —— 它拒了就不能碰盘上那份
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomfmt.py"),
+                            "--write", str(probe)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", shell=False, timeout=120)
+        assert r.returncode != 0, f"参考实现没拒 (rc={r.returncode}): {r.stdout[:200]}"
+        assert r.stdout == "", f"参考实现拒了却还往 stdout 写了东西: {r.stdout[:200]!r}"
+        assert r.stderr.strip(), "参考实现拒了却没吭声 (stderr 空)"
+        assert probe.read_bytes() == before, "参考实现拒了却把文件改坏了 (#115 就是这个症状)"
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            got, note = _run(elf, td, probe, "foreign")
+            assert got == "", f"孪生拒了却还写了格式化结果: {got[:200]!r} [{note}]"
+            assert "rc=1" in note, f"孪生没退 1: {note}"
+            assert probe.read_bytes() == before, "孪生跑完把文件动过了"
+    finally:
+        probe.unlink(missing_ok=True)
+    print("      别的写法: 两个实现都拒 (参考实现退非 0 / 孪生退 1)，盘上那份源未变")
+
+
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_fmt_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_fmt_test")
 
 
 if __name__ == "__main__":

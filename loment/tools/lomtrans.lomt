@@ -33,6 +33,7 @@
 // 用法: `lomtrans --lang <c|cpp|java|csharp|python> [--keep a,b] [--extern f:i32] [--const K:i32] <src>`
 
 module lomtrans
+choose runtime
 
 use bytes
 
@@ -64,6 +65,12 @@ const M_KP: u32 = 1406976;         // FNMAX*12    -> 1413120 （`--keep` 表）
 const M_EX: u32 = 1413120;         // FNMAX*16    -> 1421312 （`--extern` 表）
 const M_EXN: u32 = 1421312;        // 16384       -> 1437696 （外部名/常量名的池子）
 const M_EB: u32 = 1437696;         // 65536       -> 1503232 （拼一行的暂存）
+// **块作用域栈**（`sc_push` / `sc_pop`）：放在**所有**已分配区之后（C 族那几门用它，
+// Python 那一门有自己的发射器、不碰）。所以 `M_CAP` 跟着往上涨了 16 KB —— 下面
+// `M_CAP` 那一行是唯一的口径。
+const M_SCOPE: u32 = 1525248;      // 16384       -> 1541632 （块作用域栈）
+const SCO_ENT: u32 = 1526272;      // = M_SCOPE + 1024（常量不许引用常量，只能写出来）
+const SCO_MAXD: u32 = 256;         // 块嵌套深度上限（超过了就报错，不静默）
 
 // 记号一条
 const TK_OFF: u32 = 0;             // 文本起点（M_SCR 里）
@@ -407,6 +414,7 @@ fn init_dialect(mem: ptr, lang: u32) -> u32 {
         let _11: u32 = seg_put(mem, SEG_INTDEF, "i64");
         let _b1: u32 = st32(pst(mem), E_I2B, 1);
         let _b2: u32 = st32(pst(mem), E_B2I, 0);
+        let _b3: u32 = st32(pst(mem), E_ARITH, 0);
         return 0;
     }
     if lang == DL_C {
@@ -423,6 +431,7 @@ fn init_dialect(mem: ptr, lang: u32) -> u32 {
         let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
         let _b1: u32 = st32(pst(mem), E_I2B, 1);
         let _b2: u32 = st32(pst(mem), E_B2I, 1);
+        let _b3: u32 = st32(pst(mem), E_ARITH, 1);
         return 0;
     }
     if lang == DL_CPP {
@@ -439,6 +448,7 @@ fn init_dialect(mem: ptr, lang: u32) -> u32 {
         let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
         let _b1: u32 = st32(pst(mem), E_I2B, 1);
         let _b2: u32 = st32(pst(mem), E_B2I, 1);
+        let _b3: u32 = st32(pst(mem), E_ARITH, 1);
         return 0;
     }
     if lang == DL_JAVA {
@@ -455,6 +465,7 @@ fn init_dialect(mem: ptr, lang: u32) -> u32 {
         let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
         let _b1: u32 = st32(pst(mem), E_I2B, 0);
         let _b2: u32 = st32(pst(mem), E_B2I, 0);
+        let _b3: u32 = st32(pst(mem), E_ARITH, 0);
         return 0;
     }
     let _1: u32 = seg_put(mem, SEG_TYPES, "sbyte=i8\nbyte=u8\nshort=i16\nushort=u16\nint=i32\nuint=u32\nlong=i64\nulong=u64\nchar=u16\nbool=bool\nvoid=()");
@@ -470,6 +481,7 @@ fn init_dialect(mem: ptr, lang: u32) -> u32 {
     let _11: u32 = seg_put(mem, SEG_INTDEF, "i32");
     let _b1: u32 = st32(pst(mem), E_I2B, 0);
     let _b2: u32 = st32(pst(mem), E_B2I, 0);
+        let _b3: u32 = st32(pst(mem), E_ARITH, 0);
     return 0;
 }
 
@@ -932,6 +944,75 @@ fn appn(out: ptr, o: u32, p: ptr, off: u32, l: u32) -> u32 {
     return o + l;
 }
 
+/// 追加一个**字节**（转义里那半截用得上）。
+fn appb(out: ptr, o: u32, c: u32) -> u32 {
+    let _s: u32 = store8(out, o, c as u8);
+    return o + 1;
+}
+
+/// 源里的字符串字面量 -> 本语言的写法（与 `pytrans._str_lit` 同一口径）。
+///
+/// 两个语言认同一组转义（`\n \t \r \0 \\ \"`），所以那几个**原样抄**；只有三处要动：
+/// 定界符一律换成双引号、`\'` 还原成 `'`、认不出的转义**报错**（`\uXXXX` / `\b` /
+/// `\f` 本语言没有写法，照抄过去会让词法器报在生成出来的那一份源上）。
+fn str_lit(mem: ptr, off: u32, n: u32, buf: ptr, o: u32) -> u32 {
+    let src: ptr = ptr_add(mem, M_SCR);   // 源正文在 `M_SCR`（`M_SRC` 放的是路径）
+    let end: u32 = off + n;
+    let q: u32 = load8(src, off);
+    if n < 2 || (q != 34 && q != 39) || load8(src, end - 1) != q {
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    let r0: u32 = app(buf, o, "\"");
+    let i: u32 = off + 1;
+    let r: u32 = r0;
+    let ok: u32 = 1;
+    while i < end - 1 && ok == 1 {
+        let c: u32 = load8(src, i);
+        if c == 92 {
+            if i + 1 >= end - 1 {
+                ok = 0;
+            } else {
+                let e2: u32 = load8(src, i + 1);
+                if e2 == 110 || e2 == 116 || e2 == 114 || e2 == 48 || e2 == 92 {
+                    let _a: u32 = appb(buf, r, 92);
+                    let _b: u32 = appb(buf, r + 1, e2);
+                    r = r + 2;
+                    i = i + 2;
+                } else if e2 == 34 {
+                    let _a: u32 = appb(buf, r, 92);
+                    let _b: u32 = appb(buf, r + 1, 34);
+                    r = r + 2;
+                    i = i + 2;
+                } else if e2 == 39 {
+                    let _a: u32 = appb(buf, r, 39);      // `\'` -> `'`
+                    r = r + 1;
+                    i = i + 2;
+                } else {
+                    ok = 0;
+                }
+            }
+        } else if c == 34 {
+            // 源用单引号定界、内容里有 `"` —— 输出是双引号定界，得转义
+            let _a: u32 = appb(buf, r, 92);
+            let _b: u32 = appb(buf, r + 1, 34);
+            r = r + 2;
+            i = i + 1;
+        } else if c == 10 || c == 13 {
+            ok = 0;
+        } else {
+            let _a: u32 = appb(buf, r, c);
+            r = r + 1;
+            i = i + 1;
+        }
+    }
+    if ok == 0 {
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
+    return app(buf, r, "\"");
+}
+
 /// 十进制无符号（暂存在 `M_TMP + 32`）。
 fn appu(mem: ptr, out: ptr, o: u32, v: u32) -> u32 {
     let buf: ptr = ptr_add(mem, M_TMP + 32);
@@ -1054,6 +1135,139 @@ fn is_op1(c: u32) -> u32 {
     }
     if c == 91 || c == 93 || c == 63 || c == 58 || c == 35 {
         return 1;
+    }
+    return 0;
+}
+
+/// `_PRE`（`tools/jtrans.py`）在**解析之前**点名拒绝的那些构造。
+///
+/// 孪生这边它是**兜底**：只在解析已经失败之后跑 —— 正常输入走不到这里，所以不会
+/// 误伤。命中就把"解析不过（2）"改回参考实现的说法："子集外（1）"。不这么做，
+/// 同一条输入在两边给出不同的退出码（`lomtrans_test` 就是这么红起来的）。
+fn pc_skip_sp(p: ptr, i: u32, n: u32) -> u32 {
+    let k: u32 = i;
+    while k < n && is_sp(load8(p, k)) == 1 {
+        k = k + 1;
+    }
+    return k;
+}
+
+fn pc_word_at(p: ptr, i: u32, j: u32, lit: str) -> u32 {
+    let l: u32 = j - i;
+    if l != str_len(lit) {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < l {
+        if load8(p, i + k) != (str_byte(lit, k) as u32) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn pc_word(p: ptr, off: u32, n: u32, lit: str) -> u32 {
+    let j: u32 = off;
+    while j < n && is_w(load8(p, j)) == 1 {
+        j = j + 1;
+    }
+    return pc_word_at(p, off, j, lit);
+}
+
+fn pc_reject(p: ptr, n: u32, lang: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        if c == 64 && i + 1 < n && is_id0(load8(p, i + 1)) == 1 {
+            return 1;                                   // 注解
+        }
+        if c == 45 && i + 1 < n && load8(p, i + 1) == 62 {
+            return 1;                                   // lambda 的 `->`
+        }
+        if c == 46 && i + 1 < n && pc_word(p, i + 1, n, "class") == 1 {
+            return 1;                                   // `X.class`
+        }
+        if is_d(c) == 1 && i + 2 < n && load8(p, i + 1) == 46
+            && is_d(load8(p, i + 2)) == 1 {
+            return 1;                                   // 浮点字面量
+        }
+        if is_id0(c) == 1 {
+            let j: u32 = i + 1;
+            while j < n && is_w(load8(p, j)) == 1 {
+                j = j + 1;
+            }
+            if pc_word_at(p, i, j, "synchronized") == 1
+                || pc_word_at(p, i, j, "instanceof") == 1
+                || pc_word_at(p, i, j, "throws") == 1
+                || pc_word_at(p, i, j, "enum") == 1
+                || pc_word_at(p, i, j, "interface") == 1
+                || pc_word_at(p, i, j, "record") == 1
+                || pc_word_at(p, i, j, "sealed") == 1
+                || pc_word_at(p, i, j, "permits") == 1
+                || pc_word_at(p, i, j, "null") == 1
+                || pc_word_at(p, i, j, "float") == 1
+                || pc_word_at(p, i, j, "double") == 1 {
+                return 1;
+            }
+            if lang == DL_CS && (pc_word_at(p, i, j, "string") == 1
+                || pc_word_at(p, i, j, "object") == 1
+                || pc_word_at(p, i, j, "decimal") == 1) {
+                return 1;
+            }
+            // 参考实现的 `import` / `package` 那条只对 Java 跑（C# 用 `using`）。
+            if lang == DL_JAVA && (pc_word_at(p, i, j, "import") == 1
+                || pc_word_at(p, i, j, "package") == 1) {
+                return 1;
+            }
+            // `String` 是 Java 类型表里明确拒的那一个 —— 但**只在它当类型名的时候**。
+            // `List<String>` 的参考结果是"期望类型名，得到 List"（2）：泛型先把它挡住了，
+            // 这里再按 `String` 报 1 就比参考早了。
+            if lang == DL_JAVA && pc_word_at(p, i, j, "String") == 1 {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && is_id0(load8(p, k)) == 1 {
+                    return 1;
+                }
+            }
+            if pc_word_at(p, i, j, "this") == 1 || pc_word_at(p, i, j, "super") == 1 {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && load8(p, k) == 46 {
+                    return 1;                           // `this.x` / `super.x`
+                }
+            }
+            if pc_word_at(p, i, j, "static") == 1 {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && load8(p, k) == 123 {
+                    return 1;                           // 静态初始化块
+                }
+            }
+            if lang == DL_JAVA && c >= 65 && c <= 90 {  // 构造器: Upper(...) {
+                let k: u32 = pc_skip_sp(p, j, n);
+                if k < n && load8(p, k) == 40 {
+                    let q: u32 = k + 1;
+                    let cl: u32 = 0;
+                    while q < n && cl == 0 {
+                        let d: u32 = load8(p, q);
+                        if d == 41 {
+                            cl = 1;
+                        } else if d == 59 || d == 123 || d == 10 {
+                            q = n;
+                        } else {
+                            q = q + 1;
+                        }
+                    }
+                    if cl == 1 {
+                        let k2: u32 = pc_skip_sp(p, q + 1, n);
+                        if k2 < n && load8(p, k2) == 123 {
+                            return 1;
+                        }
+                    }
+                }
+            }
+            i = j;
+        } else {
+            i = i + 1;
+        }
     }
     return 0;
 }
@@ -1403,9 +1617,17 @@ fn p_at(mem: ptr, src: ptr, text: str, k: u32) -> u32 {
 }
 
 /// 出错的两种（上游 `Unsupported` = 退出 1 / `CError` = 退出 2）。只记码与行号。
+///
+/// **第一条错说了算**：早先的点名拒绝（子集外 = 1）不能被后面跌跌撞撞的
+/// "这里本该有个 `;`"（解析不过 = 2）盖掉。参考实现也是先抛先赢 —— 它先跑
+/// `_precheck`，命中就 `Unsupported`，根本走不到解析器。覆盖会让同一条输入在
+/// 两边给出不同的退出码（`loment_trans_test` 就是这么红起来的）。
 fn perr(mem: ptr, code: u32) -> u32 {
-    let _a: u32 = st32(pst(mem), PS_ERR, code);
-    let _b: u32 = st32(pst(mem), 272, tk_line(mem, ld32(pst(mem), PS_I)));
+    let st: ptr = pst(mem);
+    if ld32(st, PS_ERR) == 0 {
+        let _a: u32 = st32(st, PS_ERR, code);
+        let _b: u32 = st32(st, 272, tk_line(mem, ld32(st, PS_I)));
+    }
     return 0;
 }
 
@@ -1476,6 +1698,9 @@ fn ty_id(p: ptr, l: u32) -> u32 {
     if l == 4 && eq(p, 0, "bool") == 1 {
         return 9;
     }
+    if l == 3 && eq(p, 0, "str") == 1 {
+        return TY_STR_ID;
+    }
     if l == 2 && eq(p, 0, "()") == 1 {
         return 10;
     }
@@ -1509,6 +1734,9 @@ fn ty_text(id: u32) -> str {
     }
     if id == 9 {
         return "bool";
+    }
+    if id == TY_STR_ID {
+        return "str";
     }
     return "()";
 }
@@ -2406,6 +2634,12 @@ fn p_unit(mem: ptr, src: ptr, lang: u32, outp: ptr) -> u32 {
 
 const W_INT: u32 = 0;              // 这个上下文要"整数"
 const W_BOOL: u32 = 1;             // 这个上下文要"条件"
+//: **字符串**上下文。本语言的 `str` 是真类型（`print` / `str_len` / `str_eq` /
+//: `str_concat` 都在），但它**不参与数值转换**：`"a" + 1` 在 Python / Java 里是自动
+//: 转字符串再拼，本语言没有那个转换 —— 所以 `ex_want` 见到 `W_STR` 与数值交叉就报错，
+//: 不像 `W_INT`/`W_BOOL` 那样有转换分支。
+const W_STR: u32 = 2;
+const TY_STR_ID: u32 = 11;         // `str` 的类型 id（见 `ty_id`）
 const TY_VOID_ID: u32 = 10;        // `()` 的类型 id（见 `ty_id`）
 const E_VN: u32 = 840;             // 变量表条数
 const E_CN: u32 = 844;             // 常量表条数
@@ -2423,6 +2657,79 @@ const E_RET: u32 = 888;            // 正在发的那个函数的返回类型 id
 const E_NC: u32 = 892;             // 外部名池（`M_EXN`）的游标
 const E_AC: u32 = 900;             // 辅助名池（`M_SCR` 高处）的游标
 const E_EXN: u32 = 896;            // 外部函数表条数
+const E_ARITH: u32 = 904;          // 方言开关: **寻常算术转换**（C / C++ 开，Java / C# 关）
+const E_SD: u32 = 908;             // 块作用域栈的**深度**（`self.scopes` 有几层）
+const E_SP: u32 = 912;             // 块作用域栈的**条目数**
+
+/// 类型 id -> **秩**（C 的寻常算术转换按它走，见 `tools/trans_core.py` 的 `_INT_RANK`）。
+/// 0 = 比 `int` 窄（先整型提升）、1 = `int` 那一档、2 = `long` 那一档；
+/// `FAIL` = 不参与提升（`bool` / `()` / 还不认识）。
+const TY_I32: u32 = 5;
+const TY_U32: u32 = 6;
+const TY_U64: u32 = 8;
+
+fn ty_rank(t: u32) -> u32 {
+    if t == 1 || t == 2 || t == 3 || t == 4 {
+        return 0;                       // i8 u8 i16 u16
+    }
+    if t == 5 || t == 6 {
+        return 1;                       // i32 u32
+    }
+    if t == 7 || t == 8 {
+        return 2;                       // i64 u64
+    }
+    return FAIL;
+}
+
+fn ty_uns(t: u32) -> u32 {
+    if t == 2 || t == 4 || t == 6 || t == 8 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 整型提升：比 `int` 窄的一律先升到 `i32`（`u16` 的最大值也装得下）。
+fn ty_prom(t: u32) -> u32 {
+    if ty_rank(t) == 0 {
+        return TY_I32;
+    }
+    return t;
+}
+
+/// 上游 `_usual_arith` —— 两侧的整型 id 给进来，返回运算该在哪个宽度做；
+/// `0` = 有一侧不定型（字面量），由另一侧说了算；两侧都 0 才返回 0。
+fn ty_usual(a0: u32, b0: u32) -> u32 {
+    if a0 == 0 {
+        return b0;
+    }
+    if b0 == 0 {
+        return a0;
+    }
+    let a: u32 = ty_prom(a0);
+    let b: u32 = ty_prom(b0);
+    if a == b {
+        return a;
+    }
+    let ra: u32 = ty_rank(a);
+    let rb: u32 = ty_rank(b);
+    if ra == rb {
+        if ty_uns(a) == 1 {
+            return a;                   // 同秩不同符号 ⇒ 无符号那侧
+        }
+        return b;
+    }
+    let hi: u32 = a;
+    if rb > ra {
+        hi = b;
+    }
+    if ty_uns(hi) == 0 {
+        return hi;                      // 秩高的那侧（有符号）装得下秩低那侧
+    }
+    if ty_rank(hi) == 2 {
+        return TY_U64;
+    }
+    return TY_U32;
+}
 
 const VAR_N: u32 = 0;              // 记录（24 字节）: 源名 off/len、发出名 off/len、
 const VAR_L: u32 = 4;              //   声明时的类型 id、**墓碑**（1 = 已删）
@@ -2430,6 +2737,15 @@ const VAR_O: u32 = 8;
 const VAR_OL: u32 = 12;
 const VAR_TY: u32 = 16;
 const VAR_DEAD: u32 = 20;
+
+// 块作用域栈的条目（24 字节，见 `sc_push` / `sc_pop`）:
+//   源名 off/len、外层那个变量的表下标+1（0 = 外层没有这个名字）、它的发出名 off/len、类型 id
+const SC_N: u32 = 0;
+const SC_L: u32 = 4;
+const SC_K: u32 = 8;
+const SC_OO: u32 = 12;
+const SC_OL: u32 = 16;
+const SC_TY: u32 = 20;
 
 fn em_fail(mem: ptr) -> u32 {
     return st32(ptr_add(mem, M_TMP), E_ERR, 1);
@@ -2777,10 +3093,16 @@ fn ty_of(mem: ptr, e: u32) -> u32 {
         }
         return W_INT;
     }
+    if k == NK_STR {
+        return W_STR;
+    }
     if k == NK_VAR {
         let f: u32 = var_find(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
         if f > 0 && var_ty(mem, f) == 9 {
             return W_BOOL;
+        }
+        if f > 0 && var_ty(mem, f) == TY_STR_ID {
+            return W_STR;
         }
         return W_INT;
     }
@@ -2809,11 +3131,269 @@ fn ty_of(mem: ptr, e: u32) -> u32 {
     return 3;
 }
 
+// ---------------------------------------------------------------- 宽度与块作用域
+//
+// 上游 `trans_core.Emitter` 里那几样与**声明位置 / 整数宽度**有关的东西，全在这里：
+//   `num_ty` / `conv` / `sink` —— C 的**寻常算术转换**与三处隐式整型转换
+//   `pin_ex`（带类型那版）      —— 比较的操作数钉住宽度
+//   `decl_bind` / `em_block`    —— **块作用域**（本语言没有，见 `#119` / `#120`）
+// 判据 `loment_trans_test` 逐字节比两个实现的产物，所以两边必须一模一样。
+
+/// 本单元那个函数的 **Fn 表下标**（0 = 没有）。**外部条目不算** —— 上游
+/// `Emitter.fparams` 只收本单元的函数（`extern` 那种的形参表不知道 ⇒ 不转）。
+fn fn_local(mem: ptr, o: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let n: u32 = ld32(st, 40);
+    let k: u32 = 1;
+    while k <= n {
+        if fn_get(mem, k, 1) == 0 && fn_get(mem, k, 3) == l
+                && same_n(s, fn_get(mem, k, 2), s, o, l) == 1 {
+            return k;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 上游 `Emitter.num_ty` —— 表达式在**宽度规则**下的整型 id。
+/// `0` = 不定型（字面量，或全是字面量的式子）或结果不是整数；两种情况处理一样。
+fn num_ty(mem: ptr, e: u32) -> u32 {
+    let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_VAR {
+        let f: u32 = var_find(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        if f > 0 {
+            let t: u32 = var_ty(mem, f);
+            if ty_rank(t) != FAIL {
+                return t;
+            }
+        }
+        return 0;
+    }
+    if k == NK_CALL {
+        let r: u32 = fn_ret(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        if r != FAIL && ty_rank(r) != FAIL {
+            return r;
+        }
+        return 0;
+    }
+    if k == NK_UN {
+        // 一元 `-`（码 1）出的是**提升后**的操作数类型；`!`（码 2）出 bool ⇒ 不参与
+        if nd_get(mem, e, ND_A) == 1 {
+            return num_ty(mem, nd_get(mem, e, ND_B));
+        }
+        return 0;
+    }
+    if k == NK_BIN {
+        let c: u32 = nd_get(mem, e, ND_A);
+        if c == 17 || c == 18 || bin_isbool(c) == 1 {
+            return 0;                       // 比较 / 逻辑 ⇒ bool
+        }
+        if c == 6 || c == 7 {
+            return num_ty(mem, nd_get(mem, e, ND_B));   // 移位只看左操作数
+        }
+        return ty_usual(num_ty(mem, nd_get(mem, e, ND_B)), num_ty(mem, nd_get(mem, e, ND_C)));
+    }
+    return 0;
+}
+
+/// 上游 `Emitter.conv` —— 把表达式转成类型 `t`（`0` = 不转）。只转**已知类型**的式子。
+fn conv(mem: ptr, e: u32, t: u32, buf: ptr, o: u32) -> u32 {
+    if t == 0 {
+        return ex_want(mem, e, W_INT, buf, o);
+    }
+    let s: u32 = num_ty(mem, e);
+    if s == 0 || s == t {
+        return ex_want(mem, e, W_INT, buf, o);
+    }
+    let o2: u32 = app(buf, o, "(");
+    let o3: u32 = ex_want(mem, e, W_INT, buf, o2);
+    let o4: u32 = app(buf, o3, " as ");
+    let o5: u32 = app(buf, o4, ty_text(t));
+    return app(buf, o5, ")");
+}
+
+/// 上游 `Emitter.sink` —— 表达式放进一个**声明类型为 `t`** 的位置（赋值 / 返回 /
+/// 实参 / `for` 初值）。不开 `E_ARITH` 的方言（Java / C#）**不转**（它们的规则不同，
+/// 让它在 check 那层响亮地失败）。
+fn sink(mem: ptr, e: u32, t: u32, buf: ptr, o: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let w: u32 = want_of(t);
+    if w != W_INT || ld32(st, E_ARITH) == 0 {
+        return ex_want(mem, e, w, buf, o);
+    }
+    if ty_rank(t) == FAIL {
+        return ex_want(mem, e, W_INT, buf, o);
+    }
+    return conv(mem, e, t, buf, o);
+}
+
+/// 钉宽度时写哪个宽度名：`t` 为 0（没有宽度信息）时用**方言表那个**
+/// （`SEG_INTDEF`，与上游 `Dialect.int_default` 同一个东西）。
+fn pin_ty(mem: ptr, t: u32, buf: ptr, o: u32) -> u32 {
+    if t == 0 {
+        let tmp: ptr = ptr_add(mem, M_TMP + 960);
+        let tl: u32 = seg_word(mem, SEG_INTDEF, tmp);
+        return appn(buf, o, tmp, 0, tl);
+    }
+    return app(buf, o, ty_text(t));
+}
+
+// ---- 块作用域栈（上游 `Emitter.scopes` / `block` / `decl_bind`）
+
+/// 进一个块：把当前条目数记成这一帧的起点。
+fn sc_push(mem: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let d: u32 = ld32(st, E_SD);
+    if d >= SCO_MAXD {
+        let _e: u32 = em_fail(mem);
+        return 0;
+    }
+    let _a: u32 = st32(ptr_add(mem, M_SCOPE), d * 4, ld32(st, E_SP));
+    let _b: u32 = st32(st, E_SD, d + 1);
+    return 1;
+}
+
+/// 出一个块：**逆序**把这一帧里重新绑定过的名还原（后进先还原）——
+/// 外层本来没有的**撤掉**，外层本来就有的**还回去**。
+fn sc_pop(mem: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let d: u32 = ld32(st, E_SD);
+    if d == 0 {
+        return 0;
+    }
+    let s0: u32 = ld32(ptr_add(mem, M_SCOPE), (d - 1) * 4);
+    let sp: u32 = ld32(st, E_SP);
+    let i: u32 = sp;
+    while i > s0 {
+        i = i - 1;
+        let e: ptr = ptr_add(mem, SCO_ENT + i * 24);
+        let k: u32 = var_find(mem, ld32(e, SC_N), ld32(e, SC_L));
+        if k > 0 {
+            if ld32(e, SC_K) == 0 {
+                let _g: u32 = var_kill(mem, k);
+            } else {
+                let _r: u32 = var_set(mem, k, ld32(e, SC_OO), ld32(e, SC_OL), ld32(e, SC_TY));
+            }
+        }
+    }
+    let _c: u32 = st32(st, E_SP, s0);
+    let _d: u32 = st32(st, E_SD, d - 1);
+    return 1;
+}
+
+/// 当前块里声明过这个名没有（同一个块里重复声明 = 源语言的编译错）。
+fn sc_find(mem: ptr, a: u32, l: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let d: u32 = ld32(st, E_SD);
+    if d == 0 {
+        return 0;
+    }
+    let s0: u32 = ld32(ptr_add(mem, M_SCOPE), (d - 1) * 4);
+    let sp: u32 = ld32(st, E_SP);
+    let s: ptr = ptr_add(mem, M_SCR);
+    let i: u32 = s0;
+    while i < sp {
+        let e: ptr = ptr_add(mem, SCO_ENT + i * 24);
+        if ld32(e, SC_L) == l && same_n(s, ld32(e, SC_N), s, a, l) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn sc_add(mem: ptr, a: u32, l: u32, k0: u32, oo: u32, ol: u32, ty: u32) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let sp: u32 = ld32(st, E_SP);
+    if sp >= 500 {
+        let _e: u32 = em_fail(mem);
+        return 0;
+    }
+    let e: ptr = ptr_add(mem, SCO_ENT + sp * 24);
+    let _1: u32 = st32(e, SC_N, a);
+    let _2: u32 = st32(e, SC_L, l);
+    let _3: u32 = st32(e, SC_K, k0);
+    let _4: u32 = st32(e, SC_OO, oo);
+    let _5: u32 = st32(e, SC_OL, ol);
+    let _6: u32 = st32(e, SC_TY, ty);
+    let _7: u32 = st32(st, E_SP, sp + 1);
+    return 1;
+}
+
+/// 上游 `Emitter.decl_bind` —— 一条声明要发出去的名字（`#119` / `#120`）。
+/// `(起点, 长度)` 写进 `outp`（变量名池 `M_VB` 的下标），返回 1；
+/// 子集外时 `em_fail` 并返回 0。**名字池的游标由这里推**（调用方不再推）。
+fn decl_bind(mem: ptr, a: u32, l: u32, outp: ptr) -> u32 {
+    let st: ptr = ptr_add(mem, M_TMP);
+    let d: u32 = ld32(st, E_SD);
+    let k0: u32 = var_find(mem, a, l);
+    let o0: u32 = ld32(st, E_VBC);
+    let ln: u32 = 0;
+    if d > 0 {
+        if sc_find(mem, a, l) == 1 {
+            let _e: u32 = em_fail(mem);
+            return 0;
+        }
+        let oo: u32 = 0;
+        let ol: u32 = 0;
+        let ty: u32 = 0;
+        if k0 > 0 {
+            oo = var_oo(mem, k0);
+            ol = var_ol(mem, k0);
+            ty = var_ty(mem, k0);
+        }
+        let _s: u32 = sc_add(mem, a, l, k0, oo, ol, ty);
+        if k0 > 0 {
+            // **遮蔽外层** —— 本语言没有块作用域，只能**改名**（出块时 `sc_pop` 还回去）
+            ln = fresh(mem, a, l);
+        } else {
+            // 块里的**新名** —— 照 `bind` 发，`sc_pop` 出块时撤掉
+            ln = safe_name(mem, a, l, ptr_add(ptr_add(mem, M_VB), o0));
+            let _w: u32 = st32(st, E_VBC, o0 + ln);
+        }
+    } else {
+        if k0 > 0 {
+            // **函数层**重复声明 —— 源语言里是编译错
+            let _e: u32 = em_fail(mem);
+            return 0;
+        }
+        ln = safe_name(mem, a, l, ptr_add(ptr_add(mem, M_VB), o0));
+        let _w: u32 = st32(st, E_VBC, o0 + ln);
+    }
+    let _p: u32 = st32(outp, 0, o0);
+    let _q: u32 = st32(outp, 4, ln);
+    return 1;
+}
+
+/// 上游 `Emitter.block` —— 发一个块（`if` / `while` / `for` 的体），**并保住
+/// 源语言的块作用域**：进块压一帧、出块还原（体里遮蔽外层同名的声明走改名，
+/// 新声明的名出块时撤掉）。
+fn em_block(mem: ptr, start: u32, cnt: u32, depth: u32) -> u32 {
+    let _p: u32 = sc_push(mem);
+    let i: u32 = 0;
+    while i < cnt && em_ok(mem) == 1 {
+        let _r: u32 = emit_stmt(mem, li_get(mem, start + i), depth);
+        i = i + 1;
+    }
+    let _q: u32 = sc_pop(mem);
+    return 0;
+}
+
 /// 表达式在**它自己的类型**下的写法。括号一律加上 —— 别让读者去猜优先级。
 /// 结果从 `o` 处往下写进 `buf`，返回新的末端。
 fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     let s: ptr = ptr_add(mem, M_SCR);
     let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_TERN {
+        // 本语言没有**表达式级**的 if —— 三元只在赋值/返回的右边收（见 `pye_bind`
+        // 与 return 那一支）。嵌进别的表达式里点名拒。
+        let _u: u32 = pye_uns(mem);
+        return o;
+    }
+    if k == NK_STR {
+        return str_lit(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), buf, o);
+    }
     if k == NK_LIT {
         if nd_get(mem, e, ND_B) == 1 {
             if nd_get(mem, e, ND_A) == 0 {
@@ -2821,7 +3401,16 @@ fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
             }
             return app(buf, o, "true");
         }
-        return appu(mem, buf, o, nd_get(mem, e, ND_A));
+        let lv: u32 = nd_get(mem, e, ND_A);
+        // **超 32 位的字面量不收**（与 `tools/trans_core.py` 的 `_lit32` 同一条）：
+        // 本语言里没标注宽度的整数字面量在**解析那一层**就被截断（实测 `8589934591`
+        // 读出来是 `4294967295`），事后 `as i64` 也救不回来。静默截断会让
+        // `0x1FFFFFFFF == 0xFFFFFFFF` 从假变真，所以拒。
+        if lv >= 2147483648 {
+            let _e: u32 = em_fail(mem);
+            return o;
+        }
+        return appu(mem, buf, o, lv);
     }
     if k == NK_VAR {
         let vo: u32 = nd_get(mem, e, ND_A);
@@ -2839,17 +3428,49 @@ fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
         return o;
     }
     if k == NK_CALL {
+        // **那道闸在这里也要过一遍**（`docs/198` §3 / #147）：同一个"本单元没有的
+        // 函数"，写在**值位**被拒、写在**语句位**照发。上游 `raw` 里查 `self.fns`，
+        // 这里就查 `ty_of`（两处各写一遍必然漂 —— 复用同一个）。
+        if ty_of(mem, e) == 3 {
+            let _e: u32 = em_fail(mem);
+            return o;
+        }
         let o2: u32 = appn(buf, o, s, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
         let o3: u32 = app(buf, o2, "(");
         let ao: u32 = nd_get(mem, e, ND_C);
         let an: u32 = nd_get(mem, e, ND_D);
+        // **实参按形参类型转**（#125）—— 形参表只知道**本单元**的函数（`extern` 那种
+        // 不知道 ⇒ 不转），而且个数要对得上（变参不转）。见 `fn_local`。
+        let lf: u32 = fn_local(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B));
+        let p0: u32 = 0;
+        let args_ok: u32 = 0;
+        if lf > 0 {
+            if fn_get(mem, lf, 5) == an {
+                p0 = fn_get(mem, lf, 4);
+                args_ok = 1;
+            }
+        }
         let i: u32 = 0;
         let cur: u32 = o3;
         while i < an {
             if i > 0 {
                 cur = app(buf, cur, ", ");
             }
-            cur = ex_want(mem, li_get(mem, ao + i), W_INT, buf, cur);
+            let arg: u32 = li_get(mem, ao + i);
+            if args_ok == 1 && ld32(ptr_add(mem, M_TMP), E_ARITH) == 1 {
+                let pty: u32 = li_get(mem, p0 + i * 3);
+                if want_of(pty) == W_BOOL {
+                    cur = ex_want(mem, arg, W_BOOL, buf, cur);
+                } else {
+                    let ct: u32 = 0;
+                    if ty_rank(pty) != FAIL {
+                        ct = pty;
+                    }
+                    cur = conv(mem, arg, ct, buf, cur);
+                }
+            } else {
+                cur = ex_want(mem, arg, W_INT, buf, cur);
+            }
             i = i + 1;
         }
         return app(buf, cur, ")");
@@ -2867,6 +3488,35 @@ fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     }
     if k == NK_BIN {
         let c: u32 = nd_get(mem, e, ND_A);
+        // **比较（码 8..13）的操作数要钉住宽度**（见 `pin_ex`）—— 宽窄 / 有符号
+        // 无符号会把结论翻掉，而 C 在这里是有符号的。开了 `E_ARITH` 的方言还先按
+        // **寻常算术转换**算出该在哪个宽度比（`int` + `unsigned` ⇒ 无符号）。
+        if c >= 8 && c <= 13 {
+            let pt: u32 = 0;
+            if ld32(ptr_add(mem, M_TMP), E_ARITH) == 1 {
+                pt = ty_usual(num_ty(mem, nd_get(mem, e, ND_B)),
+                              num_ty(mem, nd_get(mem, e, ND_C)));
+            }
+            let o2: u32 = app(buf, o, "(");
+            let o3: u32 = pin_ex(mem, nd_get(mem, e, ND_B), pt, buf, o2);
+            let o4: u32 = app(buf, o3, " ");
+            let o5: u32 = app(buf, o4, bin_text(c));
+            let o6: u32 = app(buf, o5, " ");
+            let o7: u32 = pin_ex(mem, nd_get(mem, e, ND_C), pt, buf, o6);
+            return app(buf, o7, ")");
+        }
+        // **算术也按提升后的宽度做**（码 1..5、14..16：`int` + `long` 在 C 里是 64 位加法）。
+        if ld32(ptr_add(mem, M_TMP), E_ARITH) == 1 && (c <= 5 || (c >= 14 && c <= 16)) {
+            let pt: u32 = ty_usual(num_ty(mem, nd_get(mem, e, ND_B)),
+                                   num_ty(mem, nd_get(mem, e, ND_C)));
+            let o2: u32 = app(buf, o, "(");
+            let o3: u32 = conv(mem, nd_get(mem, e, ND_B), pt, buf, o2);
+            let o4: u32 = app(buf, o3, " ");
+            let o5: u32 = app(buf, o4, bin_text(c));
+            let o6: u32 = app(buf, o5, " ");
+            let o7: u32 = conv(mem, nd_get(mem, e, ND_C), pt, buf, o6);
+            return app(buf, o7, ")");
+        }
         let w: u32 = bin_want(c);
         let o2: u32 = app(buf, o, "(");
         let o3: u32 = ex_want(mem, nd_get(mem, e, ND_B), w, buf, o2);
@@ -2878,6 +3528,91 @@ fn raw_ex(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     }
     let _e: u32 = em_fail(mem);
     return o;
+}
+
+/// 把表达式按**本族的整数宽度**发出来 —— **字面量起头的那些在这里被钉住**。
+///
+/// 与 `tools/trans_core.py` 的 `Emitter.pinned` **逐条对应**（判据 `loment_trans_test`
+/// 逐字节比两个实现的产物，所以两边必须一模一样）。
+///
+/// 本语言里**没标注宽度的整数字面量是不确定的**：实测 `(0 - 1) < 0` 编出来是
+/// `icmp ult i32`（**无符号**），而 `((0 as i32) - (1 as i32)) < (0 as i32)` 才是
+/// `icmp slt`。C 在这里是**有符号**的 —— 于是 `-1 < 0` 在 C 是真、在这边是假。
+/// 所以**比较的操作数**要钉住宽度。
+///
+/// **别处**（赋值 / 返回 / 实参）**不能**钉：那些位置的宽度由**接收方**决定
+/// （`u8` / `u64` …），走 `conv`，而且**只转已知类型的式子**。
+///
+/// `t` 是要钉到哪个宽度（类型 id）；`0` = 没有宽度信息，用**方言表那个**
+/// （`SEG_INTDEF`）。C 那边会传**提升后**的类型 —— `int a; unsigned b; a > b`
+/// 钉成 `u32`，与 C 的规则一致。
+fn pin_ex(mem: ptr, e: u32, t: u32, buf: ptr, o: u32) -> u32 {
+    let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_LIT {
+        if nd_get(mem, e, ND_B) == 1 {
+            return raw_ex(mem, e, buf, o);
+        }
+        let v: u32 = nd_get(mem, e, ND_A);
+        let o2: u32 = app(buf, o, "(");
+        let o3: u32 = appu(mem, buf, o2, v);
+        let o4: u32 = app(buf, o3, " as ");
+        // 超 32 位的字面量在上面（`raw_ex` 的字面量分支）已经拒了，所以到不了这里。
+        let o5: u32 = pin_ty(mem, t, buf, o4);
+        return app(buf, o5, ")");
+    }
+    if k == NK_UN {
+        // `-2147483648`（`#131` 那张表的最后一行）：**正的** 2147483648 不在 i32 里，
+        // 可整个式子（取负之后）在。`raw_ex` 的字面量分支只认**正**字面量，于是会
+        // 误拒 —— 先把负号并进常量再发。只在**有符号**那一侧这么做（与上游
+        // `pinned` 同一条；无符号场合照旧拒，那是另一条未建的规则）。
+        //
+        // 码 `1` 是 `UN_SUB`（常量声明在文件后段，而本语言要求先定义后使用）。
+        let c: u32 = nd_get(mem, e, ND_A);
+        let ch: u32 = nd_get(mem, e, ND_B);
+        if c == 1 && nd_get(mem, ch, ND_KIND) == NK_LIT
+                && nd_get(mem, ch, ND_B) == 0 {
+            let v: u32 = nd_get(mem, ch, ND_A);
+            let signed: u32 = 0;
+            if t == 0 || t == 1 || t == 3 || t == 5 || t == 7 {
+                signed = 1;          // 0 = 方言默认（`i32`）；1/3/5/7 = i8/i16/i32/i64
+            }
+            if signed == 1 && v <= 2147483648 {
+                let o2: u32 = app(buf, o, "(");
+                let o3: u32 = o2;
+                if v != 0 {
+                    o3 = app(buf, o2, "-");
+                }
+                let o4: u32 = appu(mem, buf, o3, v);
+                let o5: u32 = app(buf, o4, " as ");
+                let o6: u32 = pin_ty(mem, t, buf, o5);
+                return app(buf, o6, ")");
+            }
+        }
+    }
+    if k == NK_BIN {
+        // `&&` / `||`（码 17 / 18）**不钉** —— 它们出 bool，宽度无关。
+        let c: u32 = nd_get(mem, e, ND_A);
+        if c == 17 || c == 18 {
+            return ex_want(mem, e, W_INT, buf, o);
+        }
+        let o2: u32 = app(buf, o, "(");
+        let o3: u32 = pin_ex(mem, nd_get(mem, e, ND_B), t, buf, o2);
+        let o4: u32 = app(buf, o3, " ");
+        let o5: u32 = app(buf, o4, bin_text(c));
+        let o6: u32 = app(buf, o5, " ");
+        let o7: u32 = pin_ex(mem, nd_get(mem, e, ND_C), t, buf, o6);
+        return app(buf, o7, ")");
+    }
+    // 其余（变量 / 调用 / 一元）：有确定类型且与目标不同就转（与上游 `pinned` 同一条）
+    let sy: u32 = num_ty(mem, e);
+    if sy != 0 && t != 0 && sy != t {
+        let o2: u32 = app(buf, o, "(");
+        let o3: u32 = ex_want(mem, e, W_INT, buf, o2);
+        let o4: u32 = app(buf, o3, " as ");
+        let o5: u32 = app(buf, o4, ty_text(t));
+        return app(buf, o5, ")");
+    }
+    return ex_want(mem, e, W_INT, buf, o);
 }
 
 /// 表达式，**在 `want` 这个上下文里**的写法（必要时补转换）。
@@ -2896,6 +3631,12 @@ fn ex_want(mem: ptr, e: u32, want: u32, buf: ptr, o: u32) -> u32 {
     if got == want {
         return raw_ex(mem, e, buf, o);
     }
+    if got == W_STR || want == W_STR {
+        // **字符串不参与数值转换**（与 `pytrans.Emitter.ex` 同一口径）。Python / Java
+        // 会替你做 `"a" + 1`，本语言不会 —— 这里报错，不补转换。
+        let _e: u32 = em_fail(mem);
+        return o;
+    }
     if got == W_INT {
         if ld32(st, E_I2B) == 0 {
             let _e: u32 = em_fail(mem);
@@ -2908,12 +3649,17 @@ fn ex_want(mem: ptr, e: u32, want: u32, buf: ptr, o: u32) -> u32 {
         let _e: u32 = em_fail(mem);
         return o;
     }
-    let o2: u32 = app(buf, o, "(");
+    let o2: u32 = app(buf, o, "((");
     let o3: u32 = raw_ex(mem, e, buf, o2);
     let o4: u32 = app(buf, o3, ") as ");
     let t: ptr = ptr_add(mem, M_TMP + 960);
     let tl: u32 = seg_word(mem, SEG_INTDEF, t);
-    return appn(buf, o4, t, 0, tl);
+    let o5: u32 = appn(buf, o4, t, 0, tl);
+    // **整条投影自己要括住**（`tools/trans_core.py` 的 `ex` 那一处，2026-10-09 #124）：
+    // `ex()` 的返回值是拿去当**操作数**用的，而 `… as i32 < c` 里的 `i32 <` 会被
+    // parser 当成**泛型实参**的开头。原先这里漏了这一层 —— 判据在门禁**基线**里
+    // （`loment_trans_test` 标着"已知红"），所以只改参考实现那边一直没被发现。
+    return app(buf, o5, ")");
 }
 
 // ---- 行（上游的 `lines` / `out` / `gap`）
@@ -3009,10 +3755,15 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
         }
         let no: u32 = nd_get(mem, s, ND_C);
         let nl: u32 = nd_get(mem, s, ND_D);
-        let o0: u32 = ld32(st, E_VBC);
-        let ln: u32 = safe_name(mem, no, nl, ptr_add(ptr_add(mem, M_VB), o0));
-        let _s0: u32 = st32(st, E_VBC, o0 + ln);
-        let _vd: u32 = var_decl(mem, no, nl, o0, ln, tid);
+        let nmb: ptr = ptr_add(mem, M_TMP + 916);   // `decl_bind` 的 (起点, 长度)
+        // **声明走 `decl_bind`**（`#119` / `#120`）：块里遮蔽外层的名要**改名**、
+        // 同一层重复声明要**拒**。名字池的游标由 `decl_bind` 推。
+        let ok0: u32 = decl_bind(mem, no, nl, nmb);
+        if ok0 == 0 {
+            return 0;
+        }
+        let o0: u32 = ld32(nmb, 0);
+        let ln: u32 = ld32(nmb, 4);
         let o: u32 = app(eb, 0, "let ");
         let o2: u32 = appn(eb, o, ptr_add(mem, M_VB), o0, ln);
         let o3: u32 = app(eb, o2, ": ");
@@ -3024,8 +3775,12 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
             // 见文件头 §语义选择 1：C 的未初始化在这里变成确定的零值
             o6 = app(eb, o5, "0");
         } else {
-            o6 = ex_want(mem, e - 1, want_of(tid), eb, o5);
+            // **初值在声明生效之前发射**（`#234`，与上游 `stmt(Decl)` 同序）：
+            // 块里遮蔽外层的 `int x = x + 100;` 右边那个 `x` 是外层的 ——
+            // 先 `var_decl` 的话它会解析成刚改名的 `x__1`，发出一条自引用声明。
+            o6 = sink(mem, e - 1, tid, eb, o5);
         }
+        let _vd: u32 = var_decl(mem, no, nl, o0, ln, tid);
         let o7: u32 = app(eb, o6, ";");
         return line_put(mem, o7, depth, 0);
     }
@@ -3037,7 +3792,8 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
         }
         let o: u32 = appn(eb, 0, ptr_add(mem, M_VB), var_oo(mem, f), var_ol(mem, f));
         let o2: u32 = app(eb, o, " = ");
-        let o3: u32 = ex_want(mem, nd_get(mem, s, ND_C), want_of(var_ty(mem, f)), eb, o2);
+        // **赋值位置要按左边声明的类型做隐式转换**（`#125`）
+        let o3: u32 = sink(mem, nd_get(mem, s, ND_C), var_ty(mem, f), eb, o2);
         let o4: u32 = app(eb, o3, ";");
         return line_put(mem, o4, depth, 0);
     }
@@ -3053,7 +3809,8 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
         // 写死"整数"会把它补成 `(x > 0) as i32` —— 而函数声明的是 `-> bool`，
         // 那是本语言的类型错。
         let o: u32 = app(eb, 0, "return ");
-        let o2: u32 = ex_want(mem, e, want_of(ld32(st, E_RET)), eb, o);
+        // **返回位置要按函数声明的返回类型做隐式转换**（`#125`）
+        let o2: u32 = sink(mem, e, ld32(st, E_RET), eb, o);
         let o3: u32 = app(eb, o2, ";");
         return line_put(mem, o3, depth, 0);
     }
@@ -3063,12 +3820,13 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
         let o2: u32 = ex_want(mem, nd_get(mem, s, ND_A), W_BOOL, eb, o);
         let o3: u32 = app(eb, o2, " {");
         let _l1: u32 = line_put(mem, o3, depth, 1);
-        let _t: u32 = stmts(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
+        // 体是**独立的一层作用域**（`#120`：体里重名的声明要改名、出块撤掉）
+        let _t: u32 = em_block(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
         if nd_get(mem, s, ND_E) == FAIL {
             return line_lit(mem, "}", depth, 0);
         }
         let _l2: u32 = line_lit(mem, "} else {", depth, 1);   // 以 `{` 收尾 —— `gap` 看这个
-        let _e2: u32 = stmts(mem, nd_get(mem, s, ND_D), nd_get(mem, s, ND_E), depth + 1);
+        let _e2: u32 = em_block(mem, nd_get(mem, s, ND_D), nd_get(mem, s, ND_E), depth + 1);
         return line_lit(mem, "}", depth, 0);
     }
     if k == NK_WHILE {
@@ -3077,7 +3835,8 @@ fn emit_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
         let o2: u32 = ex_want(mem, nd_get(mem, s, ND_A), W_BOOL, eb, o);
         let o3: u32 = app(eb, o2, " {");
         let _l1: u32 = line_put(mem, o3, depth, 1);
-        let _b: u32 = stmts(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
+        // 体是**独立的一层作用域**（`#120`）
+        let _b: u32 = em_block(mem, nd_get(mem, s, ND_B), nd_get(mem, s, ND_C), depth + 1);
         return line_lit(mem, "}", depth, 0);
     }
     if k == NK_FOR {
@@ -3135,7 +3894,6 @@ fn emit_for(mem: ptr, s: u32, depth: u32) -> u32 {
         }
         let o0: u32 = ld32(st, E_VBC);
         let ln: u32 = fresh(mem, vno, vnl);
-        let _vd: u32 = var_decl(mem, vno, vnl, o0, ln, tid);
         let o: u32 = app(eb, 0, "let ");
         let o2: u32 = appn(eb, o, ptr_add(mem, M_VB), o0, ln);
         let o3: u32 = app(eb, o2, ": ");
@@ -3146,8 +3904,11 @@ fn emit_for(mem: ptr, s: u32, depth: u32) -> u32 {
         if ie == 0 {
             o6 = app(eb, o5, "0");
         } else {
-            o6 = ex_want(mem, ie - 1, want_of(tid), eb, o5);
+            // **初值在循环变量生效之前发射**（`#234`，与上游 `emit_for` 同序）：
+            // `for (int x = x + 1; …)` 右边那个 `x` 是外层的那个。
+            o6 = sink(mem, ie - 1, tid, eb, o5);
         }
+        let _vd: u32 = var_decl(mem, vno, vnl, o0, ln, tid);
         let o7: u32 = app(eb, o6, ";");
         let _l: u32 = line_put(mem, o7, depth, 0);
     } else {
@@ -3165,7 +3926,9 @@ fn emit_for(mem: ptr, s: u32, depth: u32) -> u32 {
     }
     let o3: u32 = app(eb, o2, " {");
     let _l2: u32 = line_put(mem, o3, depth, 1);
-    let _b: u32 = stmts(mem, nd_get(mem, s, ND_D), nd_get(mem, s, ND_E), depth + 1);
+    // 体是**独立的一层作用域**（`#119`：体里 `int i = 9;` 遮蔽循环变量时，
+    // 步进必须还写到循环变量那个名上，而不是被遮蔽的那个）
+    let _b: u32 = em_block(mem, nd_get(mem, s, ND_D), nd_get(mem, s, ND_E), depth + 1);
     let step: u32 = nd_get(mem, s, ND_C);
     if step != 0 {
         let _r: u32 = emit_stmt(mem, step, depth + 1);   // 步进在体**之后**
@@ -3197,6 +3960,8 @@ fn emit_fn(mem: ptr, f: u32) -> u32 {
     let _5: u32 = st32(st, E_NL2, 0);
     let _6: u32 = st32(st, E_BR, 0);
     let _7: u32 = st32(st, E_RET, fn_get(mem, f, 0));
+    let _8: u32 = st32(st, E_SD, 0);
+    let _9: u32 = st32(st, E_SP, 0);
     let p0: u32 = fn_get(mem, f, 4);
     let pn: u32 = fn_get(mem, f, 5);
     let i: u32 = 0;
@@ -3349,7 +4114,7 @@ const M_PV: u32 = 1505792;         // 128*12 = 1536 -> 1507328   变量表
 const M_PF: u32 = 1507328;         // 64*8   = 512  -> 1507840   循环变量表
 const M_PS: u32 = 1507840;         // 16384         -> 1524224   解出来的文档字符串
 const M_RS: u32 = 1524224;         // 1024          -> 1525248   Python 解析器的暂存格
-const M_CAP: u32 = 1525248;
+const M_CAP: u32 = 1541632;
 
 const CT_NO: u32 = 0;
 const CT_NL: u32 = 4;
@@ -3808,6 +4573,12 @@ const NK_PFOR: u32 = 13;
 const NK_DOC: u32 = 14;
 const NK_PASS: u32 = 15;
 const NK_BOOL: u32 = 16;           // `and` / `or` —— **n 元**（`a and b and c` 是一个节点）
+//: 字符串字面量。`ND_A` / `ND_B` 存它在**源里的**起点与长度（含两个引号）—— 原文
+//: 原样留着，发射时逐段翻转子集内的转义（与 `pytrans._str_lit` 同一口径）。
+const NK_STR: u32 = 17;
+//: 条件表达式 `a if c else b`。三个孩子：`ND_A` = 命中的那一支、`ND_B` = 条件、
+//: `ND_C` = 不命中的那一支。**只在赋值/返回的右边收** —— 本语言没有表达式级的 `if`。
+const NK_TERN: u32 = 18;
 
 const UN_SUB: u32 = 1;             // 一元 `-`
 const UN_NOT: u32 = 2;             // `not`
@@ -3909,6 +4680,10 @@ fn pp_type(mem: ptr, src: ptr) -> u32 {
     if l == 4 && eq(src, o, "None") == 1 {
         let _n: u32 = pp_next(mem);
         return 10;                                 // `()`
+    }
+    if l == 3 && eq(src, o, "str") == 1 {
+        let _n: u32 = pp_next(mem);
+        return TY_STR_ID;                          // 上游 `_TYPES["str"]`
     }
     let _u: u32 = pp_uns(mem);
     return 0;
@@ -4078,7 +4853,31 @@ fn pp_block(mem: ptr, src: ptr, outp: ptr) -> u32 {
 // ---- 表达式（优先级由低到高，与 Python 一致）
 
 fn pp_expr(mem: ptr, src: ptr) -> u32 {
-    return pp_or(mem, src);
+    let x: u32 = pp_or(mem, src);
+    if x == 0 {
+        return 0;
+    }
+    if pp_is(mem, src, "if") == 0 {
+        return x;
+    }
+    // `a if c else b` —— Python 的 expr 那一层，右结合。
+    let _n: u32 = pp_next(mem);
+    let c: u32 = pp_or(mem, src);
+    if c == 0 {
+        return 0;
+    }
+    if pp_want(mem, src, "else") == 0 {
+        return 0;
+    }
+    let b: u32 = pp_expr(mem, src);
+    if b == 0 {
+        return 0;
+    }
+    let t: u32 = node_new(mem, NK_TERN, 0);
+    let _a: u32 = nd_set(mem, t, ND_A, x);
+    let _b: u32 = nd_set(mem, t, ND_B, c);
+    let _c: u32 = nd_set(mem, t, ND_C, b);
+    return t;
 }
 
 fn pp_or(mem: ptr, src: ptr) -> u32 {
@@ -4488,8 +5287,12 @@ fn pp_primary(mem: ptr, src: ptr) -> u32 {
         return e;
     }
     if kind == PT_STR {
-        let _u: u32 = pp_uns(mem);              // 散落的字符串 / f-string 之外的字面量
-        return 0;
+        // 字符串字面量。存**源里的**起点与长度（含引号），发射时再翻转子集内的转义。
+        let x: u32 = node_new(mem, NK_STR, line);
+        let _a: u32 = nd_set(mem, x, ND_A, pt_off(mem, k));
+        let _b: u32 = nd_set(mem, x, ND_B, pt_len(mem, k));
+        let _n: u32 = pp_next(mem);
+        return x;
     }
     let _e: u32 = pp_err(mem);
     return 0;
@@ -5053,6 +5856,9 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
         }
         return 7;
     }
+    if k == NK_STR {
+        return TY_STR_ID;
+    }
     if k == NK_VAR {
         let o: u32 = nd_get(mem, e, ND_A);
         let l: u32 = nd_get(mem, e, ND_B);
@@ -5081,9 +5887,29 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
         }
         return 7;
     }
+    if k == NK_TERN {
+        let a: u32 = pye_ty_of(mem, nd_get(mem, e, ND_A));
+        let b: u32 = pye_ty_of(mem, nd_get(mem, e, ND_C));
+        if a == 0 || b == 0 {
+            return 0;
+        }
+        if a != b {
+            let _u: u32 = pye_uns(mem);       // 两个分支类型不同：没有公共类型可写
+            return 0;
+        }
+        return a;
+    }
     if k == NK_BIN {
         if bin_isbool(nd_get(mem, e, ND_A)) == 1 {
             return 9;
+        }
+        // `+` 只要有一边是字符串就是**拼接**（与 `pytrans.ty_of` 同一条）
+        if nd_get(mem, e, ND_A) == 4 {          // `bin_text(4)` == "+"
+            let l: u32 = pye_ty_of(mem, nd_get(mem, e, ND_B));
+            let r: u32 = pye_ty_of(mem, nd_get(mem, e, ND_C));
+            if l == TY_STR_ID || r == TY_STR_ID {
+                return TY_STR_ID;
+            }
         }
         return 7;
     }
@@ -5098,6 +5924,15 @@ fn pye_ty_of(mem: ptr, e: u32) -> u32 {
 fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
     let s: ptr = ptr_add(mem, M_SCR);
     let k: u32 = nd_get(mem, e, ND_KIND);
+    if k == NK_TERN {
+        // 本语言没有**表达式级**的 if —— 三元只在赋值/返回的右边收（见 `pye_bind`
+        // 与 return 那一支）。嵌进别的表达式里点名拒。
+        let _u: u32 = pye_uns(mem);
+        return o;
+    }
+    if k == NK_STR {
+        return str_lit(mem, nd_get(mem, e, ND_A), nd_get(mem, e, ND_B), buf, o);
+    }
     if k == NK_LIT {
         if nd_get(mem, e, ND_B) == 1 {
             if nd_get(mem, e, ND_A) == 0 {
@@ -5105,7 +5940,16 @@ fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
             }
             return app(buf, o, "true");
         }
-        return appu(mem, buf, o, nd_get(mem, e, ND_A));
+        let lv: u32 = nd_get(mem, e, ND_A);
+        // **超 32 位的字面量不收**（与 `tools/trans_core.py` 的 `_lit32` 同一条）：
+        // 本语言里没标注宽度的整数字面量在**解析那一层**就被截断（实测 `8589934591`
+        // 读出来是 `4294967295`），事后 `as i64` 也救不回来。静默截断会让
+        // `0x1FFFFFFFF == 0xFFFFFFFF` 从假变真，所以拒。
+        if lv >= 2147483648 {
+            let _e: u32 = em_fail(mem);
+            return o;
+        }
+        return appu(mem, buf, o, lv);
     }
     if k == NK_VAR {
         let vo: u32 = nd_get(mem, e, ND_A);
@@ -5163,7 +6007,25 @@ fn pye_raw(mem: ptr, e: u32, buf: ptr, o: u32) -> u32 {
         return app(buf, o4, ")");
     }
     if k == NK_BIN {
+        // **Python 这一侧的 `raw` 不钉宽度** —— 与 `tools/pytrans.py` 对齐，
+        // 而那一门**不用 `trans_core`**（它的语法树来自 `ast`，发射器是它自己那份）。
+        // 判据逐字节比两边，所以在那边跟上之前，这边照旧。
         let c: u32 = nd_get(mem, e, ND_A);
+        if c == 4 && pye_ty_of(mem, e) == TY_STR_ID {
+            // 字符串拼接。**两边都必须是字符串**（Python 的 `"a" + 1` 要自动转字符串，
+            // 本语言没有那个转换）—— 交叉就报错，不发一份编不过的源。
+            let l: u32 = nd_get(mem, e, ND_B);
+            let r: u32 = nd_get(mem, e, ND_C);
+            if pye_ty_of(mem, l) != TY_STR_ID || pye_ty_of(mem, r) != TY_STR_ID {
+                let _u: u32 = pye_uns(mem);
+                return o;
+            }
+            let o2: u32 = app(buf, o, "str_concat(");
+            let o3: u32 = pye_ex(mem, l, TY_STR_ID, buf, o2);
+            let o4: u32 = app(buf, o3, ", ");
+            let o5: u32 = pye_ex(mem, r, TY_STR_ID, buf, o4);
+            return app(buf, o5, ")");
+        }
         let o2: u32 = app(buf, o, "(");
         let o3: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 7, buf, o2);
         let o4: u32 = app(buf, o3, " ");
@@ -5246,6 +6108,101 @@ fn pye_loopvars(mem: ptr, start: u32, cnt: u32) -> u32 {
     return from;
 }
 
+/// `return a if c else b` -> 两条 return（顺序与 Python 一致：先算条件）。
+fn pye_return_ternary(mem: ptr, e: u32, depth: u32) -> u32 {
+    let py: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let o0: u32 = app(eb, 0, "if ");
+    let o1: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 9, eb, o0);
+    let o2: u32 = app(eb, o1, " {");
+    let _l: u32 = line_put(mem, o2, depth, 1);
+    let r0: u32 = app(eb, 0, "return ");
+    let r1: u32 = pye_ex(mem, nd_get(mem, e, ND_A), ld32(py, E_RET), eb, r0);
+    let r2: u32 = app(eb, r1, ";");
+    let _r: u32 = line_put(mem, r2, depth + 1, 0);
+    let _z: u32 = line_lit(mem, "}", depth, 0);
+    let s0: u32 = app(eb, 0, "return ");
+    let s1: u32 = pye_ex(mem, nd_get(mem, e, ND_C), ld32(py, E_RET), eb, s0);
+    let s2: u32 = app(eb, s1, ";");
+    return line_put(mem, s2, depth, 0);
+}
+
+/// 声明用的零值（本语言的 `let` 要初值）。
+fn pye_zero(mem: ptr, ty: u32, buf: ptr, o: u32) -> u32 {
+    if ty == 9 {
+        return app(buf, o, "false");
+    }
+    if ty == TY_STR_ID {
+        return app(buf, o, "\"\"");
+    }
+    if ty == 7 {
+        return app(buf, o, "0");
+    }
+    if ty == 5 {
+        return app(buf, o, "0");
+    }
+    if ty == 6 {
+        return app(buf, o, "0");
+    }
+    if ty == 8 {
+        return app(buf, o, "0");
+    }
+    if ty == 1 {
+        return app(buf, o, "0");
+    }
+    if ty == 2 {
+        return app(buf, o, "0");
+    }
+    if ty == 3 {
+        return app(buf, o, "0");
+    }
+    if ty == 4 {
+        return app(buf, o, "0");
+    }
+    return app(buf, o, "0");
+}
+
+/// `x = a if c else b` -> 先给零值，再 `if`/`else` 两条赋值（**顺序不变**）。
+fn pye_bind_ternary(mem: ptr, s: u32, depth: u32, no: u32, nl: u32, e: u32) -> u32 {
+    let py: ptr = ptr_add(mem, M_TMP);
+    let eb: ptr = ptr_add(mem, M_EB);
+    let t: ptr = ptr_add(mem, M_TMP + 1200);
+    let tn: u32 = pye_safe(mem, no, nl, t);
+    let have: u32 = pye_var_find(mem, no, nl);
+    let ty: u32 = have;
+    if have == 0 {
+        ty = pye_ty_of(mem, e);
+        if ty == 0 {
+            return 0;
+        }
+        let _v: u32 = pye_var_set(mem, no, nl, ty);
+        let o0: u32 = app(eb, 0, "let ");
+        let o1: u32 = appn(eb, o0, t, 0, tn);
+        let o2: u32 = app(eb, o1, ": ");
+        let o3: u32 = app(eb, o2, ty_text(ty));
+        let o4: u32 = app(eb, o3, " = ");
+        let o5: u32 = pye_zero(mem, ty, eb, o4);
+        let o6: u32 = app(eb, o5, ";");
+        let _l0: u32 = line_put(mem, o6, depth, 0);
+    }
+    let c0: u32 = app(eb, 0, "if ");
+    let c1: u32 = pye_ex(mem, nd_get(mem, e, ND_B), 9, eb, c0);
+    let c2: u32 = app(eb, c1, " {");
+    let _l1: u32 = line_put(mem, c2, depth, 1);
+    let a0: u32 = appn(eb, 0, t, 0, tn);
+    let a1: u32 = app(eb, a0, " = ");
+    let a2: u32 = pye_ex(mem, nd_get(mem, e, ND_A), ty, eb, a1);
+    let a3: u32 = app(eb, a2, ";");
+    let _l2: u32 = line_put(mem, a3, depth + 1, 0);
+    let _z0: u32 = line_lit(mem, "} else {", depth, 1);
+    let b0: u32 = appn(eb, 0, t, 0, tn);
+    let b1: u32 = app(eb, b0, " = ");
+    let b2: u32 = pye_ex(mem, nd_get(mem, e, ND_C), ty, eb, b1);
+    let b3: u32 = app(eb, b2, ";");
+    let _l3: u32 = line_put(mem, b3, depth + 1, 0);
+    return line_lit(mem, "}", depth, 0);
+}
+
 fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
     let py: ptr = ptr_add(mem, M_TMP);
     let eb: ptr = ptr_add(mem, M_EB);
@@ -5268,6 +6225,9 @@ fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
             // 同上：不带值的 `return` 本语言没有对应写法
             let _u: u32 = pye_uns(mem);
             return 0;
+        }
+        if nd_get(mem, e, ND_KIND) == NK_TERN {
+            return pye_return_ternary(mem, e, depth);
         }
         let o: u32 = app(eb, 0, "return ");
         let o2: u32 = pye_ex(mem, e, ld32(py, E_RET), eb, o);
@@ -5300,12 +6260,68 @@ fn pye_stmt(mem: ptr, s: u32, depth: u32) -> u32 {
             let _e: u32 = pye_uns(mem);
             return 0;
         }
+        if pye_is_print(mem, c) == 1 {
+            return pye_print(mem, c, depth);
+        }
         let o: u32 = pye_raw(mem, c, eb, 0);
         let o2: u32 = app(eb, o, ";");
         return line_put(mem, o2, depth, 0);
     }
     let _e: u32 = pye_uns(mem);
     return 0;
+}
+
+/// 这一条语句是不是 `print(...)`（且本单元**没有**同名函数）。
+fn pye_is_print(mem: ptr, c: u32) -> u32 {
+    let o: u32 = nd_get(mem, c, ND_A);
+    let l: u32 = nd_get(mem, c, ND_B);
+    if l != 5 {
+        return 0;
+    }
+    let src: ptr = ptr_add(mem, M_SCR);   // 源正文在 `M_SCR`（`M_SRC` 放的是路径）
+    if eq(src, o, "print") == 0 {
+        return 0;
+    }
+    if fn_ret(mem, o, l) != FAIL {
+        return 0;                       // 用户自己定义了 `print`，按普通调用走
+    }
+    return 1;
+}
+
+/// `print(x)` -> 本语言的 `print` / `print_num`，**再补一个换行**
+/// （Python 的 `print` 自己换行，本语言的两个内建都不换行）。
+///
+/// 内建按**类型**选；布尔与多实参没有对应写法，点名拒 —— 与 `pytrans._print` 同一口径。
+fn pye_print(mem: ptr, c: u32, depth: u32) -> u32 {
+    let eb: ptr = ptr_add(mem, M_EB);
+    let as: u32 = nd_get(mem, c, ND_C);
+    let an: u32 = nd_get(mem, c, ND_D);
+    if an > 1 {
+        let _u: u32 = pye_uns(mem);
+        return 0;
+    }
+    if an == 0 {
+        let o0: u32 = app(eb, 0, "print(\"\\n\");");
+        return line_put(mem, o0, depth, 0);
+    }
+    let a: u32 = li_get(mem, as);
+    let t: u32 = pye_ty_of(mem, a);
+    let o: u32 = 0;
+    if t == TY_STR_ID {
+        let o1: u32 = app(eb, 0, "print(");
+        let o2: u32 = pye_ex(mem, a, TY_STR_ID, eb, o1);
+        o = app(eb, o2, ");");
+    } else if t == 7 {
+        let o1: u32 = app(eb, 0, "print_num(");
+        let o2: u32 = pye_ex(mem, a, 7, eb, o1);
+        o = app(eb, o2, ");");
+    } else {
+        let _u: u32 = pye_uns(mem);
+        return 0;
+    }
+    let _l: u32 = line_put(mem, o, depth, 0);
+    let o3: u32 = app(eb, 0, "print(\"\\n\");");
+    return line_put(mem, o3, depth, 0);
 }
 
 /// 赋值一条。`is_ann` = 1 时类型来自注解（`NK_DECL` 的 `ND_A`），
@@ -5327,6 +6343,10 @@ fn pye_bind(mem: ptr, s: u32, depth: u32, is_ann: u32) -> u32 {
     if pye_ft_has(mem, no, nl) == 1 {
         let _u: u32 = pye_uns(mem);
         return 0;
+    }
+    // `x = a if c else b` —— 摊成零值 + `if`/`else` 两条赋值（顺序与 Python 一致）
+    if nd_get(mem, e, ND_KIND) == NK_TERN {
+        return pye_bind_ternary(mem, s, depth, no, nl, e);
     }
     let tname: ptr = ptr_add(mem, M_TMP + 1200);
     let tn: u32 = pye_safe(mem, no, nl, tname);
@@ -6367,6 +7387,13 @@ fn _start() -> u32 {
             return errout("unbalanced", 2);
         }
     }
+    // Java 的 `_PRE` 是**解析之前**的点名拒绝（`tools/jtrans.py`）。孪生这边也必须
+    // 在解析之前跑：`synchronized void f()` 这类输入孪生的解析器**吃得下**（静默丢掉
+    // 修饰词），只有参考实现拒 —— 放到失败之后跑就永远等不到它。
+    // C# 没有这条前置检查（它自己的 `_unwrap` 没有），所以只在失败路径上兜底。
+    if lang == DL_JAVA && pc_reject(body, n, lang) == 1 {
+        return errout("unsupported", 1);
+    }
     let out: ptr = ptr_add(mem, M_OUT);
     if pre == 1 {
         let o: u32 = appn(out, 0, body, 0, n);
@@ -6393,6 +7420,9 @@ fn _start() -> u32 {
     if ec == 1 {
         return errout("unsupported", 1);
     }
+    if ec == 2 && (lang == DL_JAVA || lang == DL_CS) && pc_reject(body, n, lang) == 1 {
+        return errout("unsupported", 1);
+    }
     if ec == 2 {
         return errout("cerror", 2);
     }
@@ -6416,6 +7446,9 @@ fn _start() -> u32 {
     if p_unit(mem, body, lang, ptr_add(st, 440)) == 0 {
         let e: u32 = ld32(st, PS_ERR);
         if e == 1 {
+            return errout("unsupported", 1);
+        }
+        if (lang == DL_JAVA || lang == DL_CS) && pc_reject(body, n, lang) == 1 {
             return errout("unsupported", 1);
         }
         return errout("cerror", 2);

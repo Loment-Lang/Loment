@@ -1,0 +1,251 @@
+// system/inotify.lomt — inotify: 目录/文件的变动变成一串定长头 + 变长名字
+//
+// 为什么系统工具需要它: 构建系统、编辑器、同步程序都要知道"这个目录里谁改了"。
+// 轮询 stat 既慢又会漏掉"建了又删"；inotify 是内核把事件直接推过来。它的坑全在
+// **读出来的缓冲区**上：一次 read 可能带回**多个**事件，每个事件是 16 字节头
+// （wd / mask / cookie / len）后面跟 `len` 字节名字（带 NUL 与填充），最后一个事件
+// 可能被 read 截断 —— 所以遍历要按 `16 + len` 一步步走，且**不能**假设名字是
+// 以 0 结尾的 C 串。
+//
+// 覆盖: `IN_*` 的公开事件位与两个修饰位、`inotify_init1` / `add_watch` /
+// `rm_watch` 三条系统调用、事件头的读取与名字拷贝。
+//
+// 不做的: `IN_Q_OVERFLOW` 之后的重新同步策略、`inotify` 老版（没有 flags 的 253）、
+// 递归监视（内核不支持，要调用方逐目录加）。
+//
+// 命名: 公开 in_*, 内部 iw_*。自检 test_inotify_*。
+
+module inotify
+
+pub const IN_ACCESS: u32 = 1;
+pub const IN_MODIFY: u32 = 2;
+pub const IN_ATTRIB: u32 = 4;
+pub const IN_CLOSE_WRITE: u32 = 8;
+pub const IN_CLOSE_NOWRITE: u32 = 16;
+pub const IN_OPEN: u32 = 32;
+pub const IN_MOVED_FROM: u32 = 64;
+pub const IN_MOVED_TO: u32 = 128;
+pub const IN_CREATE: u32 = 256;
+pub const IN_DELETE: u32 = 512;
+pub const IN_DELETE_SELF: u32 = 1024;
+pub const IN_MOVE_SELF: u32 = 2048;
+pub const IN_UNMOUNT: u32 = 8192;
+pub const IN_Q_OVERFLOW: u32 = 16384;
+pub const IN_IGNORED: u32 = 32768;
+
+/// 只监视目录。
+pub const IN_ONLYDIR: u32 = 16777216;
+/// 不跟随符号链接。
+pub const IN_DONT_FOLLOW: u32 = 33554432;
+/// 被删掉的文件不再报未链接事件。
+pub const IN_EXCL_UNLINK: u32 = 67108864;
+/// 把这一组位**加**到已有掩码上，而不是替换。
+pub const IN_MASK_ADD: u32 = 536870912;
+/// 事件来自一个目录。
+pub const IN_ISDIR: u32 = 1073741824;
+/// 报一次就自动移除。
+pub const IN_ONESHOT: u32 = 2147483648;
+
+/// 事件头的字节数。
+pub const IN_EV_HEAD: u32 = 16;
+
+const IW_SYS_ADD_WATCH: u64 = 254;
+const IW_SYS_RM_WATCH: u64 = 255;
+const IW_SYS_INIT1: u64 = 294;
+
+fn iw_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn iw_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return iw_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+fn iw_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 事件掩码 -> 名字串。0 返回 `"0"`。
+pub fn in_mask_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return iw_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & IN_ACCESS) != 0 {
+        pos = iw_put(out, cap, pos, "IN_ACCESS");
+    }
+    if (mask & IN_MODIFY) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_MODIFY");
+    }
+    if (mask & IN_ATTRIB) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_ATTRIB");
+    }
+    if (mask & IN_CLOSE_WRITE) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_CLOSE_WRITE");
+    }
+    if (mask & IN_CLOSE_NOWRITE) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_CLOSE_NOWRITE");
+    }
+    if (mask & IN_OPEN) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_OPEN");
+    }
+    if (mask & IN_MOVED_FROM) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_MOVED_FROM");
+    }
+    if (mask & IN_MOVED_TO) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_MOVED_TO");
+    }
+    if (mask & IN_CREATE) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_CREATE");
+    }
+    if (mask & IN_DELETE) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_DELETE");
+    }
+    if (mask & IN_DELETE_SELF) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_DELETE_SELF");
+    }
+    if (mask & IN_MOVE_SELF) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_MOVE_SELF");
+    }
+    if (mask & IN_ISDIR) != 0 {
+        pos = iw_sep(out, cap, pos);
+        pos = iw_put(out, cap, pos, "IN_ISDIR");
+    }
+    return pos;
+}
+
+/// 掩码里"要不要看这个事件"—— 修饰位不算事件位，这里把它们剥掉。
+pub fn in_mask_watch(mask: u32) -> u32 {
+    return mask & (IN_ACCESS | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE
+        | IN_CLOSE_NOWRITE | IN_OPEN | IN_MOVED_FROM | IN_MOVED_TO
+        | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF
+        | IN_UNMOUNT | IN_Q_OVERFLOW | IN_IGNORED);
+}
+
+/// `inotify_init1(flags)` —— 0 或 `IN_NONBLOCK`/`IN_CLOEXEC` 的位。
+pub fn in_init1(flags: u32) -> i64 {
+    return syscall4(IW_SYS_INIT1, flags as u64, 0, 0);
+}
+
+/// `inotify_add_watch(fd, path, mask)` —— path 是 C 串。
+pub fn in_add_watch(fd: u64, path: ptr, mask: u32) -> i64 {
+    return syscall4(IW_SYS_ADD_WATCH, fd, path as u64, mask as u64);
+}
+
+/// `inotify_rm_watch(fd, wd)`。
+pub fn in_rm_watch(fd: u64, wd: u32) -> i64 {
+    return syscall4(IW_SYS_RM_WATCH, fd, wd as u64, 0);
+}
+
+/// 事件头里的 watch 描述符（i32 的位）。
+pub fn in_ev_wd(ev: ptr) -> u32 {
+    return iw_ld32(ev, 0);
+}
+
+/// 事件头里的事件位。
+pub fn in_ev_mask(ev: ptr) -> u32 {
+    return iw_ld32(ev, 4);
+}
+
+/// 事件头里的 cookie（`MOVED_FROM` 与 `MOVED_TO` 配对用）。
+pub fn in_ev_cookie(ev: ptr) -> u32 {
+    return iw_ld32(ev, 8);
+}
+
+/// 事件头里的名字长度（含 NUL 与填充）。
+pub fn in_ev_len(ev: ptr) -> u32 {
+    return iw_ld32(ev, 12);
+}
+
+/// 一条事件占的字节数（头 + 名字）。
+pub fn in_ev_step(ev: ptr) -> u32 {
+    return IN_EV_HEAD + in_ev_len(ev);
+}
+
+/// 把事件名拷进 out（去掉尾部 NUL）。返回写入的字节数。
+pub fn in_ev_name(ev: ptr, out: ptr, cap: u32) -> u32 {
+    let n: u32 = in_ev_len(ev);
+    let pos: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        if load8(ev, IN_EV_HEAD + i) == 0 {
+            return pos;
+        }
+        if pos < cap {
+            store8(out, pos, load8(ev, IN_EV_HEAD + i) as u8);
+        }
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_inotify_mask_text() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = in_mask_text(1073741890, o, 128);
+    let want: str = "IN_MODIFY|IN_MOVED_FROM|IN_ISDIR";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_inotify_event_name() -> bool {
+    let b: ptr = alloc(32);
+    store8(b, 0, 3 as u8);
+    store8(b, 4, 2 as u8);
+    store8(b, 12, 8 as u8);
+    store8(b, 16, 97 as u8);
+    store8(b, 17, 46 as u8);
+    store8(b, 18, 116 as u8);
+    store8(b, 19, 0 as u8);
+    let out: ptr = alloc(8);
+    let n: u32 = in_ev_name(b, out, 8);
+    return in_ev_wd(b) == 3 && in_ev_mask(b) == 2 && in_ev_len(b) == 8
+        && in_ev_step(b) == 24 && n == 3 && load8(out, 0) == 97
+        && load8(out, 1) == 46 && load8(out, 2) == 116;
+}
+
+fn test_inotify_watch_mask() -> bool {
+    return in_mask_watch(IN_ONLYDIR | IN_CREATE | IN_DELETE) == (IN_CREATE | IN_DELETE)
+        && in_mask_watch(IN_ISDIR) == 0 && IN_EV_HEAD == 16;
+}

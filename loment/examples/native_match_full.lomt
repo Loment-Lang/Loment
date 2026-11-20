@@ -8,6 +8,7 @@
 // 语料里当时恰好没有"全覆盖且不写 `_`"的 match，所以两道棘轮都没红。
 
 module native_match_full
+choose runtime
 
 enum Kind {
     Red,

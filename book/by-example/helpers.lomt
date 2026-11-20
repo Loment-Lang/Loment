@@ -1,0 +1,48 @@
+// helpers.lomt — the printing helpers every example imports.
+//
+// By-example files stay short by borrowing these. The book's own long chapters write them out
+// once, on purpose, so you see what they cost: there is no printf in Loment.
+
+module helpers
+
+choose runtime
+
+pub fn write_str(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+pub fn write_dec(fd: u64, v: u32) {
+    let b: ptr = alloc(12);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 {
+        store8(b, 0, 48 as u8);
+        n = 1;
+    }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        let hi: u8 = load8(b, n - 1 - i) as u8;
+        store8(b, i, hi);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    syscall4(1, fd, b as u64, n as u64);
+}
+
+pub fn out(s: str) -> i64 {
+    return write_str(1, s);
+}
+
+pub fn dec(v: u32) {
+    write_dec(1, v);
+}
+
+pub fn nl() {
+    write_str(1, "\n");
+}

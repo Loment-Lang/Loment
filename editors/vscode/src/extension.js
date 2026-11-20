@@ -15,17 +15,25 @@ const vscode = require('vscode');
 const path = require('path');
 const fs = require('fs');
 const { LanguageClient } = require('vscode-languageclient/node');
-const { findServer } = require('./server-path');
-const { invocation } = require('./build-cmd');
+const { findServer, findTool } = require('./server-path');
+const { invocation, usesModules } = require('./build-cmd');
 const { invocation: debugInvocation } = require('./debug-cmd');
+const { readGrammarDecl, languageIdFor } = require('./grammar-detect');
+const { DEFAULT_L1_EXT, sourceExtForDir } = require('./conf-ext');
 
 const SERVER_COMMAND = 'python';
 const clientName = 'loment';
+
+//: 「Loment 家族」的语言 id：`loment`（原生）与 `loment-<规范名>`（外门表层语法）。
+//: **`lom`（L0）不在内** —— 它是另一门语言，命令 / 任务 / 检测都不该罩到它。
+const LOMENT_FAMILY = /^loment(-|$)/;
 
 /** @type {LanguageClient | undefined} */
 let client;
 /** @type {vscode.OutputChannel} */
 let output;
+/** @type {Map<string, string>} 目录 -> 该项目配置的 L1 后缀（`loment.conf` 的 `source_ext`） */
+const extCache = new Map();
 
 function cfg() {
   return vscode.workspace.getConfiguration('loment');
@@ -50,13 +58,57 @@ function out() {
   return output;
 }
 
-/** 工作区根 (第一个文件夹); 没有就退回当前文件的目录。 */
+/**
+ * 弹一条错误，**并同时写进输出通道**。
+ *
+ * `showErrorMessage` 只弹窗，不落盘 —— VS Code 的日志目录里只有输出通道与扩展宿主的
+ * 异常，于是"用户截图里那条红字"从磁盘上根本查不到（2026-11-04 就是这么漏的）。
+ * 写进 `LogOutputChannel` 之后它同时出现在「输出 → Loment」与
+ * `logs/<会话>/window1/exthost/<ident>/Loment.log`，`vscode_ext --logs` 能直接读。
+ */
+function fail(detail) {
+  out().error(detail);
+  return vscode.window.showErrorMessage(`Loment: ${detail}`);
+}
+
+/**
+ * 工作区根: **包含这个文件的那个文件夹**; 单根工作区就是它自己; 没有文件夹就退回文件目录。
+ *
+ * 原先一律取 `folders[0]` —— 多根工作区里第二、第三个文件夹中的文件于是用**别人的根**
+ * 算相对路径，`build-cmd.js` 拿到 `../…` 就报"这个文件不在工作区里"（2026-10-21）。
+ */
 function workspaceRoot(fallbackDir) {
   const folders = vscode.workspace.workspaceFolders;
   if (folders && folders.length) {
+    if (fallbackDir) {
+      for (const f of folders) {
+        const base = f.uri.fsPath;
+        const rel = path.relative(base, fallbackDir);
+        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+          return base;
+        }
+      }
+    }
     return folders[0].uri.fsPath;
   }
   return fallbackDir || undefined;
+}
+
+/**
+ * 建好 `loment.buildDir`。
+ *
+ * `loment build FILE -o <buildDir>/<stem>` 的 `-o` 只是**路径**：目录不存在时链接器说的是
+ * `lomelf: 写不了输出` —— 用户看不出跟自己有关。本仓里那个目录恰好一直在，所以只有
+ * **在别的项目里**才现形（2026-10-21 实测）。失败不拦：真写不了时编译器自己会说。
+ */
+function ensureBuildDir(root) {
+  if (!root) {
+    return;
+  }
+  try {
+    fs.mkdirSync(path.resolve(root, cfg().get('buildDir') || 'loment/build'),
+                 { recursive: true });
+  } catch (e) { /* 让编译器去报 */ }
 }
 
 function resolveServerPath() {
@@ -76,6 +128,128 @@ function resolveServerPath() {
     return findServer(path.dirname(active.document.uri.fsPath));
   }
   return undefined;
+}
+
+/**
+ * 用户设置里额外列的自定义 L1 后缀（`loment.extraExtensions`）。
+ *
+ * 为什么要有它：`source_ext` 是从**项目的 `loment.conf`** 读的，而那份文件可能不在
+ * 打开的那个文件夹里（打开的是子目录、或项目根在上一层）—— 那时用户可以直接把后缀
+ * 写进设置。两处都算了。
+ */
+function extraExtensions() {
+  const v = cfg().get('extraExtensions');
+  return (Array.isArray(v) ? v : []).map((s) => String(s).trim().toLowerCase())
+                                 .filter(Boolean);
+}
+
+/** 某个目录所在项目配置的 L1 后缀（带缓存 —— 每开一个文件都往上走 8 层目录不合适）。 */
+function projectExt(dir) {
+  if (!extCache.has(dir)) {
+    extCache.set(dir, sourceExtForDir(dir));
+  }
+  return extCache.get(dir);
+}
+
+/**
+ * 这份文档该用哪个语言 id；`undefined` = **不认领**。
+ *
+ * 两条来源，**声明优先**（`docs/188` §2 那条分工：**声明**说"这份 Loment 是用哪种写法写的"）：
+ *
+ *   1. 文件头那一行 `choose write grammar <别名>`（`grammar-detect.js`，与参考实现逐条
+ *      对拍）—— 原生写法（`loment` / `rust`）仍归 `loment`，其余七门各有 `loment-<规范名>`；
+ *   2. **没写声明**时，看后缀是不是这个项目自己配的 L1 后缀（`loment.conf` 的
+ *      `source_ext`，或设置里的 `loment.extraExtensions`）—— 是就按 `loment` 认。
+ *
+ * 都没命中就不认领：`.lomt` 有 `package.json` 的静态登记，用不着这里再管一遍。
+ */
+function targetLanguageId(doc) {
+  const decl = readGrammarDecl(doc.getText());
+  if (decl.declared) {
+    return languageIdFor(decl.grammar);
+  }
+  const ext = path.extname(doc.uri.fsPath).toLowerCase();
+  if (!ext || ext === DEFAULT_L1_EXT) {
+    // **回 `loment`，不是"不认领"**：删掉声明之后它仍是原生 Loment 源。返回 undefined
+    // 会让它一直停在 `loment-<x>`（状态栏写着外门语法、语言服务也不接）—— 2026-10-21。
+    return 'loment';
+  }
+  if (extraExtensions().indexOf(ext) >= 0) {
+    return 'loment';
+  }
+  const proj = projectExt(path.dirname(doc.uri.fsPath)).toLowerCase();
+  return proj !== DEFAULT_L1_EXT && proj === ext ? 'loment' : undefined;
+}
+
+/** 我们给哪些文档设过语言 —— 设过的同值不再设（见下面那条注释）。 */
+const applied = new Map();
+
+/**
+ * 按文件头那行声明 / 项目后缀，把文档切到该在的语言 id 上。
+ *
+ * **`setTextDocumentLanguage` 会触发一次该文档的 close+open**（VS Code 的既定行为），
+ * 所以必须防自激：`applied` 记着"这个文档被我们设成了什么"，同值直接返回。
+ * 顺带买到一条更好的性质 —— **用户手动改回去之后我们不再去抢**。
+ */
+async function applyLanguageHint(doc) {
+  if (doc.uri.scheme !== 'file') {
+    return;
+  }
+  const want = targetLanguageId(doc);
+  if (!want || want === doc.languageId) {
+    return;
+  }
+  // **不抢**用户显式指定的语言：只动 Loment 家族与"没人认领"（plaintext）。
+  // `lom`（L0）因此也不会被这里改掉。
+  if (doc.languageId !== 'plaintext' && !LOMENT_FAMILY.test(doc.languageId)) {
+    return;
+  }
+  const key = doc.uri.toString();
+  if (applied.get(key) === want) {
+    return;
+  }
+  applied.set(key, want);
+  try {
+    await vscode.languages.setTextDocumentLanguage(doc, want);
+  } catch (e) {
+    applied.delete(key);
+    out().appendLine(`Language switch failed (${want}): ${e}`);
+  }
+}
+
+/**
+ * 订阅"文档开了 / 文件头动过 / 关了"，并给**已经开着**的文档各补一次。
+ *
+ * 不带 `context` 也能跑（判据就是拿一个假 `vscode` 直接调的），订阅由 `activate` 收集。
+ */
+function registerLanguageHints(context) {
+  const sub = (d) => {
+    applyLanguageHint(d);
+  };
+  context.subscriptions.push(
+    vscode.workspace.onDidOpenTextDocument(sub),
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      // 声明写在文件头，所以只在这几行动过时才重看 —— 不必每敲一个字就重读一份源。
+      if (e.contentChanges.some((c) => c.range.start.line <= 2)) {
+        sub(e.document);
+      }
+    }),
+    vscode.workspace.onDidCloseTextDocument((d) => {
+      applied.delete(d.uri.toString());
+    }),
+  );
+  // `loment.conf` 改了要重看 —— 缓存不清的话后缀会一直是旧的那个。
+  const watcher = vscode.workspace.createFileSystemWatcher('**/loment.conf');
+  const drop = (uri) => {
+    extCache.delete(path.dirname(uri.fsPath));
+  };
+  watcher.onDidChange(drop);
+  watcher.onDidCreate(drop);
+  watcher.onDidDelete(drop);
+  context.subscriptions.push(watcher);
+  for (const d of vscode.workspace.textDocuments || []) {
+    applyLanguageHint(d);
+  }
 }
 
 /** 用 VS Code 任务跑一条 Loment 工具链命令 (argv 数组, 无 shell)。 */
@@ -118,7 +292,7 @@ async function runExec(name, cmd, args, cwd, matcher) {
 function currentFile() {
   const ed = vscode.window.activeTextEditor;
   if (!ed) {
-    vscode.window.showWarningMessage('Loment: 请先打开一个 .lomt 文件');
+    vscode.window.showWarningMessage('Loment: open a .lomt file first');
     return undefined;
   }
   return ed.document.uri.fsPath;
@@ -143,11 +317,14 @@ function toolPath(root, ...rest) {
 class LomentTaskProvider {
   provideTasks() {
     const ed = vscode.window.activeTextEditor;
-    if (!ed || ed.document.languageId !== 'loment') {
+    // 用**家族**判据而不是 `=== 'loment'`：一份 `choose write grammar python` 的源
+    // 还是 Loment 程序，`Ctrl+Shift+B` 该照常能编它。
+    if (!ed || !LOMENT_FAMILY.test(ed.document.languageId)) {
       return [];
     }
     const file = ed.document.uri.fsPath;
     const root = workspaceRoot(path.dirname(file));
+    ensureBuildDir(root);
     const out = [];
     for (const [action, label] of [['build', 'Loment: 编译'], ['run', 'Loment: 编译并运行']]) {
       const inv = invocation({
@@ -207,8 +384,8 @@ async function startClient(context) {
     const serverPath = resolveServerPath();
     if (!serverPath) {
       vscode.window.showWarningMessage(
-        'Loment: 找不到 tools/loment_lsp.py（可在设置 loment.serverPath 里指定绝对路径，'
-        + '或改用 loment.serverCommand/serverArgs 指向 Loment 版语言服务）');
+        'Loment: cannot find tools/loment_lsp.py (set loment.serverPath to an absolute path, '
+        + 'or use loment.serverCommand/serverArgs to point at a Loment language server)');
       return undefined;
     }
     args = [serverPath];
@@ -220,10 +397,14 @@ async function startClient(context) {
     'Loment',
     // v10 的 Executable 是**接口**: 用对象字面量; 默认 stdio 传输
     { run: { command, args }, debug: { command, args } },
-    { documentSelector: [{ scheme: 'file', language: 'loment' }], outputChannel: chan });
+    { documentSelector: [{ scheme: 'file', language: 'loment' },
+                          // `#351`：`.nl` 由静态登记成为 `loment-natural` —— 它的正文是
+                          // natural 写法，语言服务按后缀认出来、只回一条 Info（不报假错）。
+                          { scheme: 'file', language: 'loment-natural' }],
+      outputChannel: chan });
   context.subscriptions.push(c);
   await c.start();
-  chan.appendLine(`语言服务已启动: ${label}`);
+  chan.appendLine(`Language server started: ${label}`);
   return c;
 }
 
@@ -242,6 +423,7 @@ async function compileCurrent(action) {
     return;
   }
   const r = workspaceRoot(path.dirname(file));
+  ensureBuildDir(r);
   const inv = invocation({
     root: r,
     file,
@@ -252,7 +434,7 @@ async function compileCurrent(action) {
     buildDir: cfg().get('buildDir'),
   });
   if (inv.error) {
-    await vscode.window.showErrorMessage(`Loment: ${inv.error}`);
+    fail(inv.error);
     return;
   }
   await runExec(action === 'run' ? 'Loment: 编译并运行' : 'Loment: 编译', inv.cmd, inv.args,
@@ -303,13 +485,35 @@ function activate(context) {
       }
       const r = workspaceRoot(path.dirname(file));
       const rel = path.relative(r, file).replace(/\\/g, '/');
-      // 语言服务的 `--check` 与编辑器里的诊断同源 (自举 checker), 且**不需要 Python**
+      // **两种情况先问检出里的参考实现**（否则用户拿到的是假错）：
+      //   1. 文件有 `use` —— 两个语言服务都不解 `use` 树，跨模块调用一律报
+      //      `E002 符号未声明`（#1166）；
+      //   2. 文件声明了外门语法 —— 参考实现认得声明（`[OK]`），而**自举版** `lsp --check`
+      //      不认（2026-10-21 实测：`bitkit.lomt` 满屏 E002，Python 版同一份文件干净）。
+      // 其余单文件仍走 `--check`（**不需要 Python**）。
+      let needsReference = false;
+      try {
+        const text = fs.readFileSync(file, 'utf8');
+        const decl = readGrammarDecl(text);
+        needsReference = usesModules(text)
+          || (decl.declared && languageIdFor(decl.grammar) !== 'loment');
+      } catch (e) { /* 读不了就按单文件走 */ }
+      if (needsReference) {
+        const ref = findTool(r, 'loment.py')
+          || findTool(path.dirname(file), 'loment.py');
+        if (ref) {
+          await runToolTask('Loment: 静态检查', [ref, 'diag', file], r);
+          return;
+        }
+      }
       const inv = serverInvocation(['--check', rel]);
       if (inv) {
         await runExec('Loment: 静态检查', inv.cmd, inv.args, r, '$loment');
         return;
       }
-      await runToolTask('Loment: 静态检查', [toolPath(r, 'loment.py'), 'diag', file], r);
+      fail('no checker found — this window has neither a Loment checkout '
+           + '(`tools/loment.py`) nor a language server (set `loment.serverPath` or '
+           + '`loment.serverCommand`).');
     }),
 
     vscode.commands.registerCommand('loment.runTests', async () => {
@@ -345,6 +549,10 @@ function activate(context) {
   context.subscriptions.push(
     vscode.tasks.registerTaskProvider('loment', new LomentTaskProvider()));
 
+  // 表层语法: 按文件头那行 `choose write grammar <别名>` 给文档换语言 id
+  // (七门外门语法各有 `loment-<规范名>` 一套语法, 见 package.json 的 `grammars`)
+  registerLanguageHints(context);
+
   // 调试适配器: 让 F5 真的开始调试，而不是弹"没有用于调试 Loment 的扩展"。
   // **选哪条命令不在这里判** —— 那是 debug-cmd.js 的事（纯模块，判据无头跑它）。
   context.subscriptions.push(
@@ -362,10 +570,10 @@ function activate(context) {
         });
         if (inv.error) {
           // 不能返回 undefined（那会是一个"按了没反应"的调试会话）—— 弹出来说清楚。
-          vscode.window.showErrorMessage(`Loment: ${inv.error}`);
+          fail(inv.error);
           return undefined;
         }
-        out().appendLine(`调试适配器: ${inv.cmd} ${inv.args.join(' ')}（${inv.how}）`);
+        out().appendLine(`Debug adapter: ${inv.cmd} ${inv.args.join(' ')} (${inv.how})`);
         return new vscode.DebugAdapterExecutable(inv.cmd, inv.args);
       },
     }));
@@ -374,7 +582,7 @@ function activate(context) {
     startClient(context).then((c) => {
       client = c;
     }, (e) => {
-      vscode.window.showErrorMessage(`Loment 语言服务启动失败: ${e}`);
+      fail(`the language server failed to start: ${e}`);
     });
   }
 }

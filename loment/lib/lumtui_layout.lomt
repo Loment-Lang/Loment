@@ -1,4 +1,5 @@
 module lumtui_layout
+choose runtime
 
 // lumtui_layout.lomt — 布局引擎: 把"设计尺寸"算成**绝对像素**。
 //

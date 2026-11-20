@@ -1,0 +1,209 @@
+module main
+
+choose runtime
+
+use "m000.lomt"
+use "m001.lomt"
+use "m002.lomt"
+use "m003.lomt"
+use "m004.lomt"
+use "m005.lomt"
+use "m006.lomt"
+use "m007.lomt"
+use "m008.lomt"
+use "m009.lomt"
+use "m010.lomt"
+use "m011.lomt"
+use "m012.lomt"
+use "m013.lomt"
+use "m014.lomt"
+use "m015.lomt"
+use "m016.lomt"
+use "m017.lomt"
+use "m018.lomt"
+use "m019.lomt"
+use "m020.lomt"
+use "m021.lomt"
+use "m022.lomt"
+use "m023.lomt"
+use "m024.lomt"
+use "m025.lomt"
+use "m026.lomt"
+use "m027.lomt"
+use "m028.lomt"
+use "m029.lomt"
+use "m030.lomt"
+use "m031.lomt"
+use "m032.lomt"
+use "m033.lomt"
+use "m034.lomt"
+use "m035.lomt"
+use "m036.lomt"
+use "m037.lomt"
+use "m038.lomt"
+use "m039.lomt"
+use "m040.lomt"
+use "m041.lomt"
+use "m042.lomt"
+use "m043.lomt"
+use "m044.lomt"
+use "m045.lomt"
+use "m046.lomt"
+use "m047.lomt"
+use "m048.lomt"
+use "m049.lomt"
+use "m050.lomt"
+use "m051.lomt"
+use "m052.lomt"
+use "m053.lomt"
+use "m054.lomt"
+use "m055.lomt"
+use "m056.lomt"
+use "m057.lomt"
+use "m058.lomt"
+use "m059.lomt"
+use "m060.lomt"
+use "m061.lomt"
+use "m062.lomt"
+use "m063.lomt"
+use "m064.lomt"
+use "m065.lomt"
+use "m066.lomt"
+use "m067.lomt"
+use "m068.lomt"
+use "m069.lomt"
+use "m070.lomt"
+use "m071.lomt"
+use "m072.lomt"
+use "m073.lomt"
+use "m074.lomt"
+use "m075.lomt"
+use "m076.lomt"
+use "m077.lomt"
+use "m078.lomt"
+use "m079.lomt"
+use "m080.lomt"
+use "m081.lomt"
+use "m082.lomt"
+use "m083.lomt"
+use "m084.lomt"
+use "m085.lomt"
+use "m086.lomt"
+use "m087.lomt"
+use "m088.lomt"
+use "m089.lomt"
+use "m090.lomt"
+use "m091.lomt"
+use "m092.lomt"
+use "m093.lomt"
+use "m094.lomt"
+use "m095.lomt"
+use "m096.lomt"
+use "m097.lomt"
+use "m098.lomt"
+use "m099.lomt"
+
+fn _start() {
+    let acc: i64 = 0;
+    acc = (acc * 31 + m000_entry() as i64) % 1000003;
+    acc = (acc * 31 + m001_entry() as i64) % 1000003;
+    acc = (acc * 31 + m002_entry() as i64) % 1000003;
+    acc = (acc * 31 + m003_entry() as i64) % 1000003;
+    acc = (acc * 31 + m004_entry() as i64) % 1000003;
+    acc = (acc * 31 + m005_entry() as i64) % 1000003;
+    acc = (acc * 31 + m006_entry() as i64) % 1000003;
+    acc = (acc * 31 + m007_entry() as i64) % 1000003;
+    acc = (acc * 31 + m008_entry() as i64) % 1000003;
+    acc = (acc * 31 + m009_entry() as i64) % 1000003;
+    acc = (acc * 31 + m010_entry() as i64) % 1000003;
+    acc = (acc * 31 + m011_entry() as i64) % 1000003;
+    acc = (acc * 31 + m012_entry() as i64) % 1000003;
+    acc = (acc * 31 + m013_entry() as i64) % 1000003;
+    acc = (acc * 31 + m014_entry() as i64) % 1000003;
+    acc = (acc * 31 + m015_entry() as i64) % 1000003;
+    acc = (acc * 31 + m016_entry() as i64) % 1000003;
+    acc = (acc * 31 + m017_entry() as i64) % 1000003;
+    acc = (acc * 31 + m018_entry() as i64) % 1000003;
+    acc = (acc * 31 + m019_entry() as i64) % 1000003;
+    acc = (acc * 31 + m020_entry() as i64) % 1000003;
+    acc = (acc * 31 + m021_entry() as i64) % 1000003;
+    acc = (acc * 31 + m022_entry() as i64) % 1000003;
+    acc = (acc * 31 + m023_entry() as i64) % 1000003;
+    acc = (acc * 31 + m024_entry() as i64) % 1000003;
+    acc = (acc * 31 + m025_entry() as i64) % 1000003;
+    acc = (acc * 31 + m026_entry() as i64) % 1000003;
+    acc = (acc * 31 + m027_entry() as i64) % 1000003;
+    acc = (acc * 31 + m028_entry() as i64) % 1000003;
+    acc = (acc * 31 + m029_entry() as i64) % 1000003;
+    acc = (acc * 31 + m030_entry() as i64) % 1000003;
+    acc = (acc * 31 + m031_entry() as i64) % 1000003;
+    acc = (acc * 31 + m032_entry() as i64) % 1000003;
+    acc = (acc * 31 + m033_entry() as i64) % 1000003;
+    acc = (acc * 31 + m034_entry() as i64) % 1000003;
+    acc = (acc * 31 + m035_entry() as i64) % 1000003;
+    acc = (acc * 31 + m036_entry() as i64) % 1000003;
+    acc = (acc * 31 + m037_entry() as i64) % 1000003;
+    acc = (acc * 31 + m038_entry() as i64) % 1000003;
+    acc = (acc * 31 + m039_entry() as i64) % 1000003;
+    acc = (acc * 31 + m040_entry() as i64) % 1000003;
+    acc = (acc * 31 + m041_entry() as i64) % 1000003;
+    acc = (acc * 31 + m042_entry() as i64) % 1000003;
+    acc = (acc * 31 + m043_entry() as i64) % 1000003;
+    acc = (acc * 31 + m044_entry() as i64) % 1000003;
+    acc = (acc * 31 + m045_entry() as i64) % 1000003;
+    acc = (acc * 31 + m046_entry() as i64) % 1000003;
+    acc = (acc * 31 + m047_entry() as i64) % 1000003;
+    acc = (acc * 31 + m048_entry() as i64) % 1000003;
+    acc = (acc * 31 + m049_entry() as i64) % 1000003;
+    acc = (acc * 31 + m050_entry() as i64) % 1000003;
+    acc = (acc * 31 + m051_entry() as i64) % 1000003;
+    acc = (acc * 31 + m052_entry() as i64) % 1000003;
+    acc = (acc * 31 + m053_entry() as i64) % 1000003;
+    acc = (acc * 31 + m054_entry() as i64) % 1000003;
+    acc = (acc * 31 + m055_entry() as i64) % 1000003;
+    acc = (acc * 31 + m056_entry() as i64) % 1000003;
+    acc = (acc * 31 + m057_entry() as i64) % 1000003;
+    acc = (acc * 31 + m058_entry() as i64) % 1000003;
+    acc = (acc * 31 + m059_entry() as i64) % 1000003;
+    acc = (acc * 31 + m060_entry() as i64) % 1000003;
+    acc = (acc * 31 + m061_entry() as i64) % 1000003;
+    acc = (acc * 31 + m062_entry() as i64) % 1000003;
+    acc = (acc * 31 + m063_entry() as i64) % 1000003;
+    acc = (acc * 31 + m064_entry() as i64) % 1000003;
+    acc = (acc * 31 + m065_entry() as i64) % 1000003;
+    acc = (acc * 31 + m066_entry() as i64) % 1000003;
+    acc = (acc * 31 + m067_entry() as i64) % 1000003;
+    acc = (acc * 31 + m068_entry() as i64) % 1000003;
+    acc = (acc * 31 + m069_entry() as i64) % 1000003;
+    acc = (acc * 31 + m070_entry() as i64) % 1000003;
+    acc = (acc * 31 + m071_entry() as i64) % 1000003;
+    acc = (acc * 31 + m072_entry() as i64) % 1000003;
+    acc = (acc * 31 + m073_entry() as i64) % 1000003;
+    acc = (acc * 31 + m074_entry() as i64) % 1000003;
+    acc = (acc * 31 + m075_entry() as i64) % 1000003;
+    acc = (acc * 31 + m076_entry() as i64) % 1000003;
+    acc = (acc * 31 + m077_entry() as i64) % 1000003;
+    acc = (acc * 31 + m078_entry() as i64) % 1000003;
+    acc = (acc * 31 + m079_entry() as i64) % 1000003;
+    acc = (acc * 31 + m080_entry() as i64) % 1000003;
+    acc = (acc * 31 + m081_entry() as i64) % 1000003;
+    acc = (acc * 31 + m082_entry() as i64) % 1000003;
+    acc = (acc * 31 + m083_entry() as i64) % 1000003;
+    acc = (acc * 31 + m084_entry() as i64) % 1000003;
+    acc = (acc * 31 + m085_entry() as i64) % 1000003;
+    acc = (acc * 31 + m086_entry() as i64) % 1000003;
+    acc = (acc * 31 + m087_entry() as i64) % 1000003;
+    acc = (acc * 31 + m088_entry() as i64) % 1000003;
+    acc = (acc * 31 + m089_entry() as i64) % 1000003;
+    acc = (acc * 31 + m090_entry() as i64) % 1000003;
+    acc = (acc * 31 + m091_entry() as i64) % 1000003;
+    acc = (acc * 31 + m092_entry() as i64) % 1000003;
+    acc = (acc * 31 + m093_entry() as i64) % 1000003;
+    acc = (acc * 31 + m094_entry() as i64) % 1000003;
+    acc = (acc * 31 + m095_entry() as i64) % 1000003;
+    acc = (acc * 31 + m096_entry() as i64) % 1000003;
+    acc = (acc * 31 + m097_entry() as i64) % 1000003;
+    acc = (acc * 31 + m098_entry() as i64) % 1000003;
+    acc = (acc * 31 + m099_entry() as i64) % 1000003;
+    syscall4(60, (acc % 256) as u64, 0, 0);
+}

@@ -1,4 +1,5 @@
 module selfcheck
+choose runtime
 
 // M77: 内核自检 —— Loment 程序在用户态验证内核 ABI 的基本不变量。
 

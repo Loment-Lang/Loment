@@ -1,0 +1,7 @@
+// `#38`：`use std` —— 曾记着「18 分钟，然后 SIGILL」。今天两边都**立刻有声**拒绝。
+module use_std
+use std
+
+fn _start() {
+    syscall4(60, 7, 0, 0);
+}

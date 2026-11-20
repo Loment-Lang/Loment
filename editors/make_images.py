@@ -153,8 +153,8 @@ def pipeline():
         ("hello.lomt", ["Loment source", "any of the six", "surface syntaxes"]),
         ("loment-driver", ["load  ·  check", "emit  LLVM IR", "written in Loment"]),
         ("hello.ll", ["LLVM IR", "text, not bytes", "the only handover"]),
-        ("loment-lomelf", ["the linker,", "also in Loment", "no libc, no ld"]),
-        ("hello", ["ELF  ·  PE  ·  bare", "static, one file", "8 KB"]),
+        ("loment-lomelf", ["the linker,", "also in Loment", "no external ld"]),
+        ("hello", ["ELF  ·  PE  ·  bare", "sealed: one static file", "8 KB"]),
     ]
     for i, (name, subs) in enumerate(boxes):
         x = bx + i * (bw + gap)
@@ -170,7 +170,7 @@ def pipeline():
             arrow(d, x + bw + 10, x + bw + gap - 8, by + bh / 2)
 
     f_note = font(UI, 15)
-    txt(d, (44, 258), "No runtime and no libc go into the output; no Python and no C compiler into the build.",
+    txt(d, (44, 258), "Sealed by default — no runtime, no libc, no undefined symbols.  choose hosted is the other path.",
         f_note, SOFT)
     txt(d, (44, 284), "That same compiler is what compiles the compiler.",
         f_note, DIM)

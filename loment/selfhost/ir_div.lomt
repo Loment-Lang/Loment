@@ -1,4 +1,5 @@
 module ir_div
+choose runtime
 
 // M82 目标文件 (除法/取模子集): 除零走 trap 跳转块, 并触发 freestanding 运行时文本块;
 // 生成的 .ll 必须与 lomentc 的 --emit-llvm 逐字节一致。

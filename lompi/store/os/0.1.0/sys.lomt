@@ -1,0 +1,235 @@
+// os/sys.lomt — 一进程对操作系统要的那些事: 目录、文件、链接、管道、fd
+//
+// 为什么需要它: `host` 那一层是**工具链自己**跟宿主打交道用的 (它的文件头就是这么写的:
+// "给跑在 FujoOS 外面的工具链用")。而一个**用户程序**要的东西是另一张清单: 建目录、
+// 删文件、改名、`uname`、`chdir`、管道、`lseek`。这一层是那张清单。
+//
+// 与 host 的分界 (写在这里, 免得两处都长一点): **host 是工具链的手脚, os 是程序的
+// 手脚。** 重名的地方 (`host/fs`) 是**读整个文件**, 这里是**逐条系统调用**; 需要
+// "读一个文件全部内容"的用 `use fs`, 需要 "mkdir/unlink/rename" 的用 `use sys`。
+//
+// **路径一律是 C 串** (NUL 结尾) —— 系统调用要的就是这个。本语言的字面量**不带 NUL**
+// (SKILL.md §6.2), 所以这里给一个 `sys_cstr` 把字符串拷成 C 串; 调用方也可以自己拼。
+//
+// 边界: 号是 x86-64 Linux 的 (与 `lom/net.lom` 同一套)。PE 上除了那 8 个之外一律 -1。
+// 本模块的自检只验**纯逻辑** (C 串拷贝、utsname 字段偏移) —— 系统调用那一半由
+// `tools/loment_os_test.py` 判 (理由见 user.lomt 头)。
+//
+// 命名: 公开 sys_*, 内部 sysp_。
+
+module sys
+
+/// 系统调用失败 (-1)。
+pub const SYS_ERR: i64 = -1;
+/// `access` 的模式位。
+pub const SYS_F_OK: u32 = 0;
+pub const SYS_X_OK: u32 = 1;
+pub const SYS_W_OK: u32 = 2;
+pub const SYS_R_OK: u32 = 4;
+/// `utsname` 每个字段的字节数 (Linux: 6 个字段各 65, 整个结构 390)。
+pub const SYS_UTS_LEN: u32 = 65;
+/// `utsname` 字段序号。
+pub const SYS_UTS_SYSNAME: u32 = 0;
+pub const SYS_UTS_NODENAME: u32 = 1;
+pub const SYS_UTS_RELEASE: u32 = 2;
+pub const SYS_UTS_VERSION: u32 = 3;
+pub const SYS_UTS_MACHINE: u32 = 4;
+pub const SYS_UTS_DOMAIN: u32 = 5;
+/// `lseek` 的 whence。
+pub const SYS_SEEK_SET: u32 = 0;
+pub const SYS_SEEK_CUR: u32 = 1;
+pub const SYS_SEEK_END: u32 = 2;
+
+/// `openat` 的 dirfd: 相对当前工作目录 (AT_FDCWD = -100 的 u64 补码; 与 host/io 同一个值)。
+pub const SYS_AT_FDCWD: u64 = 18446744073709551516;
+/// `open` 的常用旗标 (与 host/io 同一口径: 577 = O_WRONLY|O_CREAT|O_TRUNC)。
+pub const SYS_O_RDONLY: u64 = 0;
+pub const SYS_O_WRONLY_CREAT_TRUNC: u64 = 577;
+/// 0644。
+pub const SYS_MODE_RW: u32 = 420;
+
+const SYSP_SYS_CLOSE: u64 = 3;
+const SYSP_SYS_OPENAT: u64 = 257;
+const SYSP_SYS_ACCESS: u64 = 21;
+const SYSP_SYS_PIPE2: u64 = 293;
+const SYSP_SYS_DUP2: u64 = 33;
+const SYSP_SYS_LSEEK: u64 = 8;
+const SYSP_SYS_FSYNC: u64 = 74;
+const SYSP_SYS_FTRUNCATE: u64 = 77;
+const SYSP_SYS_UNAME: u64 = 63;
+const SYSP_SYS_GETCWD: u64 = 79;
+const SYSP_SYS_CHDIR: u64 = 80;
+const SYSP_SYS_RENAME: u64 = 82;
+const SYSP_SYS_MKDIR: u64 = 83;
+const SYSP_SYS_RMDIR: u64 = 84;
+const SYSP_SYS_LINK: u64 = 86;
+const SYSP_SYS_UNLINK: u64 = 87;
+const SYSP_SYS_SYMLINK: u64 = 88;
+const SYSP_SYS_READLINK: u64 = 89;
+const SYSP_SYS_CHMOD: u64 = 90;
+const SYSP_SYS_SCHED_YIELD: u64 = 24;
+
+// ---------------------------------------------------------------- C 串
+
+/// 把 str 拷成 C 串 (尾部补 NUL) 写进 out。返回**含 NUL 的长度**; 放不下返回 0。
+/// 缓冲区至少 str_len(s)+1 字节。
+pub fn sys_cstr(out: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    if n + 1 > cap {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(out, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(out, n, 0 as u8);
+    return n + 1;
+}
+
+/// 缓冲区里第一个 NUL 之前的字节数 (C 串长度)。
+pub fn sys_cstr_len(p: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cap && load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+// ---------------------------------------------------------------- 身份信息
+
+/// `uname` 写进 u (至少 390 字节)。成功返回 0。
+pub fn sys_uname(u: ptr) -> i64 {
+    return syscall4(SYSP_SYS_UNAME, u as u64, 0, 0);
+}
+
+/// `utsname` 第 which 个字段**在 u 里的偏移**; 长度写进 out_len (若不在场, 写 C 串长度)。
+pub fn sys_uts_field(u: ptr, which: u32, out_len: ptr) -> u32 {
+    let off: u32 = which * SYS_UTS_LEN;
+    let n: u32 = sys_cstr_len(((u as u64) + (off as u64)) as ptr, SYS_UTS_LEN);
+    store8(out_len, 0, n as u8);
+    store8(out_len, 1, (n >> 8) as u8);
+    store8(out_len, 2, (n >> 16) as u8);
+    store8(out_len, 3, (n >> 24) as u8);
+    return off;
+}
+
+// ---------------------------------------------------------------- 目录与文件
+
+/// 当前工作目录写进 buf (C 串)。成功返回**含 NUL 的长度** —— 这是系统调用的原样
+/// (glibc 的 `getcwd` 会替你减 1, 这一层不减: 库不该悄悄改系统调用的语义)。
+/// 于是"路径有几个字节"是 `返回值 - 1`。
+pub fn sys_getcwd(buf: ptr, cap: u64) -> i64 {
+    return syscall4(SYSP_SYS_GETCWD, buf as u64, cap, 0);
+}
+
+pub fn sys_chdir(p: ptr) -> i64 {
+    return syscall4(SYSP_SYS_CHDIR, p as u64, 0, 0);
+}
+
+/// 建目录。mode 是权限位 (0755 就是 493)。
+pub fn sys_mkdir(p: ptr, mode: u32) -> i64 {
+    return syscall4(SYSP_SYS_MKDIR, p as u64, mode as u64, 0);
+}
+
+/// 删**空**目录 (要连内容一起删是调用方的事 —— `rmdir` 不递归)。
+pub fn sys_rmdir(p: ptr) -> i64 {
+    return syscall4(SYSP_SYS_RMDIR, p as u64, 0, 0);
+}
+
+pub fn sys_unlink(p: ptr) -> i64 {
+    return syscall4(SYSP_SYS_UNLINK, p as u64, 0, 0);
+}
+
+/// 改名 / 移动。同一个文件系统内。
+pub fn sys_rename(old: ptr, new: ptr) -> i64 {
+    return syscall4(SYSP_SYS_RENAME, old as u64, new as u64, 0);
+}
+
+pub fn sys_chmod(p: ptr, mode: u32) -> i64 {
+    return syscall4(SYSP_SYS_CHMOD, p as u64, mode as u64, 0);
+}
+
+pub fn sys_symlink(target: ptr, linkpath: ptr) -> i64 {
+    return syscall4(SYSP_SYS_SYMLINK, target as u64, linkpath as u64, 0);
+}
+
+/// 硬链接。
+pub fn sys_link(old: ptr, new: ptr) -> i64 {
+    return syscall4(SYSP_SYS_LINK, old as u64, new as u64, 0);
+}
+
+/// 读符号链接的目标, 写进 buf; 成功返回字节数 (**不含 NUL**)。
+pub fn sys_readlink(p: ptr, buf: ptr, cap: u64) -> i64 {
+    return syscall4(SYSP_SYS_READLINK, p as u64, buf as u64, cap);
+}
+
+/// 可达性 / 权限检查。模式见 SYS_F_OK 那四个。
+pub fn sys_access(p: ptr, mode: u32) -> i64 {
+    return syscall4(SYSP_SYS_ACCESS, p as u64, mode as u64, 0);
+}
+
+// ---------------------------------------------------------------- fd
+
+/// `openat(dirfd, path, flags, mode)` —— 打开/新建一个文件。成功返回 fd (>= 0)。
+/// `dirfd` 传 `SYS_AT_FDCWD` 就是"相对当前目录"。旗标见上面三个常量。
+pub fn sys_openat(dirfd: u64, p: ptr, flags: u64, mode: u32) -> i64 {
+    return syscall6(SYSP_SYS_OPENAT, dirfd, p as u64, flags, mode as u64, 0);
+}
+
+pub fn sys_close(fd: u64) -> i64 {
+    return syscall4(SYSP_SYS_CLOSE, fd, 0, 0);
+}
+
+/// 建一对管道, 两个 fd 写进 fds (8 字节: 读端 4 / 写端 4, 小端)。
+pub fn sys_pipe2(fds: ptr, flags: u32) -> i64 {
+    return syscall4(SYSP_SYS_PIPE2, fds as u64, flags as u64, 0);
+}
+
+pub fn sys_dup2(old: u64, new: u64) -> i64 {
+    return syscall4(SYSP_SYS_DUP2, old, new, 0);
+}
+
+pub fn sys_lseek(fd: u64, off: i64, whence: u32) -> i64 {
+    return syscall4(SYSP_SYS_LSEEK, fd, off as u64, whence as u64);
+}
+
+pub fn sys_fsync(fd: u64) -> i64 {
+    return syscall4(SYSP_SYS_FSYNC, fd, 0, 0);
+}
+
+pub fn sys_ftruncate(fd: u64, len: u64) -> i64 {
+    return syscall4(SYSP_SYS_FTRUNCATE, fd, len, 0);
+}
+
+pub fn sys_yield() -> i64 {
+    return syscall4(SYSP_SYS_SCHED_YIELD, 0, 0, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_sys_cstr() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = sys_cstr(b, 16, "ab");
+    return n == 3 && load8(b, 0) == 97 && load8(b, 1) == 98 && load8(b, 2) == 0;
+}
+
+fn test_sys_cstr_rejects_small_buffer() -> bool {
+    let b: ptr = alloc(2);
+    return sys_cstr(b, 2, "abc") == 0;
+}
+
+fn test_sys_cstr_len() -> bool {
+    let b: ptr = alloc(16);
+    sys_cstr(b, 16, "hello");
+    store8(b, 5, 0 as u8);
+    return sys_cstr_len(b, 16) == 5;
+}
+
+fn test_sys_uts_field_offsets() -> bool {
+    let u: ptr = alloc(390);
+    let l: ptr = alloc(4);
+    let a: u32 = sys_uts_field(u, SYS_UTS_SYSNAME, l);
+    let b: u32 = sys_uts_field(u, SYS_UTS_MACHINE, l);
+    return a == 0 && b == 260 && load8(l, 0) == 0;
+}

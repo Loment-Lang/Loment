@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -169,6 +170,22 @@ def _sig_params(fn: dict) -> str:
     return ", ".join(out)
 
 
+def _whose_line(e: object, body_at: dict[str, int]) -> str | None:
+    """从翻译器抛出的消息里取出 `第 N 行`，回查那是**哪个函数**的正文（`docs/186` §4）。
+
+    没有行号、或没有函数落在它之前，就返回 `None`（调用方照旧走原来那句话）。
+    """
+    m = re.search(r"第 (\d+) 行", str(e))
+    if m is None:
+        return None
+    ln = int(m.group(1))
+    best: str | None = None
+    for name, start in body_at.items():
+        if start <= ln and (best is None or start > body_at[best]):
+            best = name
+    return best
+
+
 def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]]:
     """Potato 形式对象 -> (L1 单元源码, 跳过的项)。
 
@@ -198,6 +215,15 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
     if impl:
         lines[1] = "// 它是**带实现的单元** (`--impl`, docs/186): 带正文的函数是真 `pub fn`，"
         lines[2] = "// 没带正文的仍是 `extern fn` (实现在源语言那一侧, docs/173 §2)。"
+        # **实体单元带运行期声明**（`docs/227`）。翻译过来的程序按 C / Python / Java / Go
+        # 的语义算 —— 那几门语言**都有运行期**（除法要 trap、内存要分配），而 Loment 从
+        # 2026-10-10 起默认档是一句**保证**：`no_runtime` 的产物里不许出现那段运行期。
+        # 不带这一行，**每一份**翻出来的程序都会在检查器那里被拒。
+        #
+        # **只加在 `impl=True` 这一支**，两个理由：接口单元（全是 `extern fn`，没有正文）
+        # 一个构造都不产生，本来就不需要它；而自举侧的孪生 `loment/tools/lomtfrom.lomt`
+        # **只走 `impl=False` 那一支**（见它的头注），所以这一改**不用动孪生**。
+        lines.insert(6, "choose runtime")
 
     # ---- 能力域
     caps = doc.get("capabilities") or []
@@ -329,10 +355,17 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 # 而这一门也未必有翻译器（`_TOOLS` 里没有就得先有孪生，`docs/189` §4.1）。
                 why = ("这是个 Loment 函数但对象里没带正文 —— 接口单元里没有它的实现。"
                        if not impl else
-                       "对象里没有这个函数的正文（已经是 `--impl` 这条路了）—— "
-                       "这份对象的 grammar 是抽接口那条路读出来的，它只记声明、不抓正文"
-                       "（`docs/179` §2）；要么换 `choose write grammar` 那条前门，"
-                       "要么这一门还没有带正文的翻译器（`docs/188` §7.1）")
+                       # **`impl=True` 这条**：`front_door` 就是用它调的。所以走到这里
+                       # 最常见的情形是"**源码里这条只有声明、没有定义**"——C 里就是
+                       # **原型**（`int g(int x);`）。原先把原因写成"这份对象的 grammar 是
+                       # **抽接口那条路**读出来的，它只记声明、不抓正文" —— 那句话对
+                       # 前门那条路**是反的**（前门就是抓正文的那条），用户按它去"换
+                       # `choose write grammar` 前门"只会原地打转。
+                       "这份对象里没有这个函数的正文 —— 走 `choose write grammar` 前门时，"
+                       "那意味着**源码里这条只有声明、没有定义**（C 里就是**原型** "
+                       "`int g(int x);`，而 Stage A **不支持原型**）。给它补一个定义；"
+                       "若它本来就是**外部函数**，那走 `pub extern fn` 那条路（`docs/186` §9），"
+                       "不是这一条。")
                 skipped.append((n, why))
                 continue
             if abi != "c":
@@ -371,7 +404,11 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
             # 所以 Python 单元里的跨函数调用只认带正文的那些 —— 缺了会**响亮报错**。
             kw: dict = {}
             if lang == "c":
-                kw["externs"] = {n: _ty(f.get("ret") or "()")
+                # 键**必须**是 `f.get("name")`，不能写成 `n` —— 上面那个 `for f in fns`
+                # 的循环变量叫 `n`，循环结束后它留着**最后一个函数**的名字。曾经写的就是
+                # `n`，于是每个条目的键都塌成同一个名字、字典只剩一条，跨单元那条路
+                # 整个失效（而报出来的话是"本单元没有这个函数"，指向别处）。
+                kw["externs"] = {f.get("name"): _ty(f.get("ret") or "()")
                                  for f in fns
                                  if _is_ident(f.get("name")) and f.get("name") not in bodies
                                  and _ffi_ok(f.get("ret") or "()")}
@@ -388,8 +425,20 @@ def emit_lomt(doc: dict, impl: bool = False) -> tuple[str, list[tuple[str, str]]
                 text = mod.translate(_join_bodies(bodies, body_at),
                                      keep=set(bodies), **kw)
             except errs as e:  # type: ignore[misc]
-                # **翻不过去就说清有多少个、以及是什么毛病** —— 只说"子集外"的话，
-                # 一份文件里十几个函数，用户不知道去改哪一个。
+                # **报得出是哪个函数** —— `docs/186` §4 的承诺（"一份文件里往往十几个
+                # 函数，只说'子集外'用户不知道该去改哪一个"）。
+                #
+                # 异常里带的是**原文行号**（`_join_bodies` 按 `body_line` 垫空行保证了
+                # 这一点），而 `body_at` 记着每个函数的**起始行** —— 拿行号回查就能点名。
+                #
+                # 原先只给"`{len(bodies)}` 个带正文的函数里有子集外的写法"：那个数是
+                # **所有**带正文的函数的个数，不是"有几个出问题"，而且**函数名一个都
+                # 没有**。实测：一份 4 个函数的文件、第 3 个非法，报的是
+                # "**4 个**带正文的函数里有子集外的写法: 第 4 行: 不支持 `switch`"。
+                who = _whose_line(e, body_at)
+                if who is not None:
+                    raise NotRepresentable(
+                        f"函数 `{who}` 里有子集外的写法（{tool} 的 Stage A {hint}）: {e}")
                 raise NotRepresentable(
                     f"{len(bodies)} 个带正文的函数里有子集外的写法（{tool} 的 Stage A "
                     f"{hint}）: {e}")
@@ -428,6 +477,23 @@ def main(argv: list[str] | None = None) -> int:
     #: 实际**认成**的那个语言 (不是 `a.lang` —— 用户多半给的是 `auto`)。
     #: 初值给 `a.lang` 只是为了下面那个 `except SyntaxError` 里引用得到它。
     got = a.lang
+
+    # **不给 `--lang` 时按输入的性质分**，不是一律当 JSON 读。
+    #
+    # 这个工具有两种输入：`.potato.json`（形式对象）与**源文件**（配 `--lang`）。
+    # 原先不给 `--lang` 就一律走 JSON 那一支，于是 `lomt_from.py g.c` 把一份 C 源码
+    # 喂给 `json.loads`，端到用户面前的是 **Python 的 json 异常文本**：
+    #
+    #     [ERR] 读取失败: Expecting value: line 1 column 1 (char 0)
+    #
+    # 那句话对一份 C 文件没有任何意义；而同一个文件经**上游那一段**
+    # （`potato_from.py g.c`）却好好出来（rc=0）。`.c` 后缀本来就有确定答案
+    # （`potato_from.EXT[".c"] == "c"`），而 `resolve_lang` 这台工具**本来就有**
+    # （给了 `--lang auto` 时走的就是它）。
+    #
+    # 判据取**后缀**而不是内容：`.json` 是形式对象，别的都当源文件交给 `auto`。
+    if a.lang is None and Path(a.path).suffix.lower() != ".json":
+        a.lang = "auto"
 
     try:
         if a.lang is not None:

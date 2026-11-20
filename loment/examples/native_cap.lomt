@@ -3,6 +3,7 @@
 // M35 域描述表 / M36 guard (字面量越界编译期拒绝, 运行期检查) / M38 审计计数。
 
 module native_cap
+choose runtime
 
 capability blk_write : disk[0..4] revocable
 

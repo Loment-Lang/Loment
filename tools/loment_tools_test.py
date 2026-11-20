@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 import shutil
@@ -16,8 +18,10 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
+import loment_build  # noqa: E402  (缓存的两处信任缺口: #900 / #901)
 
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "loment" / "examples"
@@ -159,31 +163,178 @@ def test_every_tool_is_in_the_release_manifest():
         f"这些被跟踪的 `tools/*.py` 不在 `loment_release.GLOBS` 里 —— 发布账本上"
         f"没有它们，于是它们变了也不会有人知道（`--check` 照样绿）：{missing}。"
         f"加进 GLOBS，并**与 `loment/tools/lomrel.lomt` 的 `globs_text()` 插入同一位置**"
-        f"（两份逐条同序，否则 `loment_rel_test` 红）。")
+        f"（两份逐条同序 —— `loment_rel_test::test_lomrel_globs_match_python_globs` "
+        f"纯 Python 逐条比这两份清单，缺项/失序当场红）。")
     assert not dead, (
         f"`loment_release.GLOBS` 里这些条目一个文件都匹配不到（陈旧条目）：{dead}")
     print(f"      发布清单覆盖：{len(have)} 个 tools/*.py 一件不少，{len(loment_release.GLOBS)} 条 glob 无空转")
+
+
+# ------------------------------------------------- 生成物不是一个**共享寄存器**（docs/254）
+
+#: **整树生成物** —— 内容取决于 `GLOBS` 里**每一个**文件。`docs/manual/` 也算：它的
+#: `index.md` 第 3 行是 `tools/lomentc.py` 的哈希戳（`loment_manual.compiler_version`），
+#: 于是**任何两个都改了编译器的 PR** 也会在同一行上对撞 —— 而编译器正是本仓的主线。
+WHOLE_TREE_ARTIFACTS = ("loment/build/release-manifest.json",
+                        "loment/build/SHA256SUMS",
+                        "docs/manual")
+
+
+def _workflow() -> str:
+    return (ROOT / ".github" / "workflows" / "manifest.yml").read_text(encoding="utf-8")
+
+
+def _add_list(job: str) -> str:
+    """那个 job 里 `git add` 收的路径（本仓纪律是点名 add，不是 `-A`）。
+
+    **先把反斜杠续行接起来**：`git add` 的路径表在 main 那一路是两行长（五件 + `docs`），
+    只看第一行会漏掉续行上的整树生成物 —— 那正是这条要抓的东西。
+    """
+    flat = re.sub(r"\\\n\s*", " ", job)
+    adds = re.findall(r"git add (.+)", flat)
+    assert adds, "这个 job 里找不到 `git add`"
+    return " ".join(a.strip() for a in adds)
+
+
+def _whitelist_res(job: str) -> list[str]:
+    """那个 job 白名单守卫用的正则，**去掉转义**再返回（好看它有没有放行某件生成物）。"""
+    pats = re.findall(r"grep -v -E '([^']+)'", job)
+    assert pats, "这个 job 里找不到白名单守卫"
+    return [re.sub(r"\\(.)", r"\1", p) for p in pats]
+
+
+@test
+def test_pr_path_carries_no_whole_tree_artifact():
+    """**PR 路径不许提交整树生成物** —— 这条就是"并发 PR 不再冲突"的那个结构保证。
+
+    **它挡的是什么**：`release-manifest.json` 与 `SHA256SUMS` 记的是 `GLOBS` 里
+    **每一个文件**的 sha256。这种文件放在 PR 路径上时，两个**各改互不相干文件**的 PR
+    写的是它里面**相邻的行** —— 而 git 的合并上下文只有 3 行 ⇒ 必冲突。实测
+    （`docs/254` §1）：两个分支各加一份不同的 doc，谁都没碰别人的东西，试合时冲突
+    就在那两件台账上，别处干净；当时唯一开着的 `CONFLICTING` PR（#436）5 个文件里
+    3 个是生成物，冲突点同样是它们。
+
+    **为什么不是"少收几条"而是"整件挪走"**：见 `docs/254` §2 —— `merge=union` 在同一行
+    两改时会留下同一路径的两条哈希（**静默损坏**），GitHub 侧又不跑自定义 merge driver；
+    而"入库但不核新鲜度"等于存一份**没人核**的账，比不存更坏。
+
+    **反向也钉**：PR 侧**必须**仍然重算与"这个 PR 改了什么"一一对应的那两件 —— 种子
+    （随 `loment/selfhost/*.lomt` 变）与 `surface_data.lomt`（随内建表/诊断码变）。
+    它们动了就是**真**冲突，该让人看见；一起挪走会让 PR 的树上带着过期种子。
+    """
+    job = _job_block(_workflow(), "emit")
+    added = _add_list(job)
+    bad = [a for a in WHOLE_TREE_ARTIFACTS if a in added]
+    assert not bad, (
+        f"PR 路径（`emit` job）又在提交整树生成物了：{bad}。它们的每一行都是**别人的"
+        f"文件**，两个并发 PR 必在同一片相邻行上对撞 —— 见 `docs/254`。"
+        f"重算它们的是 `emit-main`（`main` 上的单一写者），不是这里。")
+    for pat in _whitelist_res(job):
+        for a in WHOLE_TREE_ARTIFACTS:
+            assert a not in pat, f"PR 侧的白名单放行了整树生成物 `{a}`：{pat!r}"
+    for cmd in ("loment_seed.py --emit", "loment_diag.py --dump-surface"):
+        assert cmd in job, (
+            f"PR 侧不再重算 `{cmd}` —— 它是**与这次改动一一对应**的生成物，"
+            f"不该静默退出 PR 路径")
+    print("      PR 路径只带种子 + surface_data（与这次改动一一对应），不带整树生成物")
+
+
+@test
+def test_main_writer_is_not_behind_the_gate():
+    """**`main` 上有一个单一写者，而且它不排在门禁后面。**
+
+    **"不排在门禁后面"为什么要单独钉**：这条路上最容易写成的形状是
+    `workflow_run: [gate]` 或 `needs: [static-*]` —— 两种都把重算**串在门禁之后**，
+    于是每一次合并变成"先等门禁、再等重算"。2026-10-16 明确否掉了这个形状：重算只读树、
+    只写生成物，没有任何理由等门禁，**并行**才是对的。
+
+    **"写者存在"为什么要钉**：整树生成物从 PR 路径上撤下来之后，"台账与树一致"就
+    **只**由这个写者保证（`lom_audit` 的 M93/M95 按滞后容差接着判，见 `docs/254` §3）。
+    它被删掉或被改名，门禁不会有别的判据发现 —— 就是这一条。
+    """
+    src = _workflow()
+    on_m = re.search(r"^on:\s*$", src, re.M)
+    perms_m = re.search(r"^permissions:", src, re.M)
+    assert on_m and perms_m, "`manifest.yml` 的 `on:` / `permissions:` 结构变了"
+    assert "workflow_run" not in src[on_m.end():perms_m.start()], (
+        "`manifest.yml` 挂到 `workflow_run` 上了 —— 那是「等门禁跑完再重算」的形状")
+
+    job = _job_block(src, "emit-main")
+    assert "refs/heads/main" in job, "`emit-main` 没有钉在 `main` 上"
+    assert "github.event_name == 'push'" in job, "`emit-main` 不是由 `push` 触发的"
+    assert not re.search(r"^ {4}needs:", job, re.M), (
+        "`emit-main` 挂了 `needs:` —— 重算被排到别的 job 后面了（`docs/254` §3）")
+    for cmd in ("loment_seed.py --emit",
+                "loment_diag.py --dump-surface",
+                "loment_manual.py --emit docs/manual",
+                "loment_release.py --emit",
+                "loment_release.py --checksums"):
+        assert cmd in job, f"`emit-main` 少重算了一件：`{cmd}`"
+    # **顺序是硬的**：清单记的是**那一刻的树**，所以它必须排在种子 / surface / 手册之后。
+    order = [job.index(c) for c in ("loment_seed.py --emit",
+                                    "loment_diag.py --dump-surface",
+                                    "loment_manual.py --emit",
+                                    "loment_release.py --emit",
+                                    "loment_release.py --checksums")]
+    assert order == sorted(order), (
+        "`emit-main` 的重算顺序错了 —— 发布清单必须**最后**算，它记的是那一刻的树")
+    added = _add_list(job)
+    missing = [a for a in WHOLE_TREE_ARTIFACTS if a not in added]
+    assert not missing, f"`emit-main` 没有把整树生成物收进提交：{missing}"
+    # **推的是分支，不是 `main`**（`#891`）。直推靠的是 `enforce_admins=false`，也就是
+    # "这一笔绕过必需检查"，而它带着 `loment/build/selfhost_driver.ll` —— 一把凭据改信任根。
+    # 现在走"分支 + PR + auto-merge"：重算仍然不等门禁（上面那两条钉着），等的是**合并**。
+    assert 'BRANCH=chore/emit-main' in job and 'HEAD:refs/heads/$BRANCH' in job, (
+        "`emit-main` 没有推到 `chore/emit-main` —— 直推 `main` 那条路绕过必需检查（#891）")
+    assert "HEAD:main" not in job, (
+        "`emit-main` 里还有直推 `main` —— 那是绕过必需检查那条路（#891）")
+    assert "gh pr create" in job and "--auto" in job, (
+        "`emit-main` 没有开 PR / 没开 auto-merge —— 生成物必须在门禁之后落地")
+
+    # **PR 用 `GITHUB_TOKEN` 开，但门禁必须显式派发**：`GITHUB_TOKEN` 触发的
+    # `pull_request` 不新建 workflow run，而 `workflow_dispatch` 是那条规则的**例外**。
+    # 少了这次派发，必需检查永远不出现，auto-merge 永远等不到东西。
+    assert "secrets.MANIFEST_TOKEN" not in job, (
+        "`emit-main` 还在用 `MANIFEST_TOKEN` —— 一条长期凭据不该参与信任根的写入；"
+        "改用这次运行的 `github.token` + 显式派发门禁")
+    assert "gh workflow run gate.yml" in job and '--ref "$BRANCH"' in job, (
+        "`emit-main` 没有把门禁派发到生成物分支 —— `GITHUB_TOKEN` 开的 PR 不触发"
+        "`pull_request`，必需检查因此不会出现，auto-merge 永远落不了地")
+    assert "actions: write" in job, (
+        "`emit-main` 没给 `actions: write` —— `gh workflow run` 派发不了门禁")
+    print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全、"
+          "推分支 + PR + dispatch 门禁 + auto-merge")
 
 
 # ---------------------------------------------------------------- M55 格式化
 
 @test
 def test_m55_fmt_idempotent_and_semantics():
+    """格式化幂等 + 不改语义。**格式化后的副本写在本进程私有的临时目录**里。
+
+    **为什么不能写在源同目录**：那样它就是一个 `loment/examples/*.lomt` 能匹配到的
+    **仓库内临时文件**（原先叫 `._fmt_<名字>.lomt`）。原先赌的是"点开头的名字 glob
+    匹配不到" —— 那是 **shell 与 `glob` 模块**的规矩，**`pathlib.Path.glob` 不遵守**
+    （按 `fnmatch` 比，`*.lomt` 照样命中），于是它会被
+    `loment_rel_test::test_manifest_order_is_platform_independent` 数进 GLOB 组里，
+    报"这一组在清单里的次序不是字节序"（与 `loment_gc_surface._ladder_of` 那处同一个
+    形状：两条判据分到同一片之后就成了偶发红）。副本**不必**挨着源：名字形式的 `use`
+    按 `NAME_ROOTS` 解析，路径形式先试 `root`。
+    """
     import lomfmt
-    for p in sorted(EX.glob("*.lomt")):
-        src = p.read_text(encoding="utf-8")
-        f1 = lomfmt.format_source(src)
-        assert lomfmt.format_source(f1) == f1, f"{p.name} 非幂等"
-        tmp = p.with_name("._fmt_" + p.name)
-        tmp.write_text(f1, encoding="utf-8")
-        try:
+    with tempfile.TemporaryDirectory(prefix="fmt-sem-") as tds:
+        td = Path(tds)
+        for p in sorted(EX.glob("*.lomt")):
+            src = p.read_text(encoding="utf-8")
+            f1 = lomfmt.format_source(src)
+            assert lomfmt.format_source(f1) == f1, f"{p.name} 非幂等"
+            tmp = td / p.name
+            tmp.write_text(f1, encoding="utf-8")
             m1 = lomentc.load(p)
             d1 = lomentc.emit_potato(m1, ROOT, lomentc.resolve_deps(m1, ROOT, p.parent, entry=p))
             m2 = lomentc.load(tmp)
             d2 = lomentc.emit_potato(m2, ROOT, lomentc.resolve_deps(m2, ROOT, tmp.parent, entry=tmp))
             assert d1 == d2, f"{p.name} 格式化改变了语义"
-        finally:
-            tmp.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- M56 LSP
@@ -195,7 +346,10 @@ def test_m56_lsp_three_capabilities():
     docs: dict[str, str] = {}
     init = loment_lsp.handle({"id": 1, "method": "initialize", "params": {}}, docs)
     caps = init[0]["result"]["capabilities"]
-    assert caps["definitionProvider"] and caps["completionProvider"]
+    # **"在不在"而不是"真不真"**：`completionProvider` 现在是 `{}` —— 那是刻意的
+    # （支持补全、但不广告触发字符，见 #28）。空 dict 在 Python 里是假值，
+    # 拿它当真假判会红，而它表达的恰恰是"支持"。
+    assert caps["definitionProvider"] and "completionProvider" in caps
     text = TOOLCHAIN.read_text(encoding="utf-8")
     msgs = loment_lsp.handle({"method": "textDocument/didOpen",
                               "params": {"textDocument": {"uri": uri, "text": text}}}, docs)
@@ -467,6 +621,43 @@ def test_m62_bench_table():
 
 
 @test
+def test_bench_refuses_a_negative_iteration_count():
+    """`--n -5` 是**用法错误**，不是 rustc 的事（`#507`）。
+
+    负数会被原样拼进 `let n = -5u32;`，于是用户看到的是 Rust 的报错 —— 一个他没写过的
+    语言，指着一个临时文件。入口挡住，退 2（与"没有 bench_*() 函数"同一个码）。
+    """
+    import loment
+    with tempfile.TemporaryDirectory(prefix="loment-bench-neg-") as td:
+        f = Path(td) / "b.lomt"
+        f.write_text("module b\n\nfn bench_x() -> u32 {\n    return 1;\n}\n",
+                     encoding="utf-8", newline="\n")
+        assert loment.main(["bench", str(f), "--n", "-5"]) == 2
+
+
+@test
+def test_diag_reports_an_unreadable_input_as_e031():
+    """`loment diag /nope` 要报 **E031**，不是一段 Python 栈（`#483`）。
+
+    `lomentc` 自己的入口早就接住了这一层（`E031` 那条规则就是为它写的），`diag` 这个
+    入口漏了 —— 同一个失败两个入口两种表现，而用户只知道"工具炸了"。
+    """
+    import contextlib
+    import io
+    import loment_diag
+    with tempfile.TemporaryDirectory(prefix="loment-diag-missing-") as td:
+        missing = Path(td) / "nope.lomt"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = loment_diag.main([str(missing), "--json"])
+        # 有诊断就是 1（与别的 linter 同一个约定）；这里要的是**不是栈**，而是一条 E031。
+        assert rc == 1, f"有诊断时该退 1，得到 {rc}"
+        got = json.loads(buf.getvalue())
+    codes = [d["code"] for d in got["diagnostics"]]
+    assert codes == ["E031"], f"期望 E031，得到 {codes}"
+
+
+@test
 def test_m63_coverage():
     import loment
     assert loment.main(["cov", str(TOOLCHAIN), "--call", "cov_main"]) == 0
@@ -507,7 +698,7 @@ def test_m64_diagnostics_have_codes_and_hints():
         assert errs, f"{name}: 应当报错"
         diags = loment_diag.diagnose(errs)
         for d in diags:
-            assert d["code"] != "E999", f"{name}: 未分类 {d['message']}"
+            assert d["code"] != "E0999", f"{name}: 未分类 {d['message']}"
             assert d["hint"], f"{name}: 缺建议"
             codes.add(d["code"])
     assert len(codes) >= 10, sorted(codes)
@@ -518,9 +709,9 @@ def test_m64_all_reference_messages_are_classified():
     """分类表**完整覆盖**参考实现能发出的每一条消息模板。
 
     为什么要这条: 自举 checker 与参考实现的对照判据是"码集相等", 而码是从消息**分类**
-    来的 —— 分类表漏一条, 那条规则在对照里就变成"两边都看不见"(都成了 E999 被丢掉),
+    来的 —— 分类表漏一条, 那条规则在对照里就变成"两边都看不见"(都成了 E0999 被丢掉),
     缺口会**静默消失**。这里用 ast 把 lomentc.py 里的消息模板抽出来, 逐个渲染成样例
-    消息再分类, 任何一条落到 E999 就算回归。
+    消息再分类, 任何一条落到 E0999 就算回归。
 
     **2026-09-17 补第二个通道**: 原先只抽 `errs.append(...)`（`check()` 的语义错误）,
     于是 `raise LomError(...)`（词法/解析/装载期）**一条都没被覆盖过** —— 实测 50 条里
@@ -571,7 +762,7 @@ def test_m64_all_reference_messages_are_classified():
             s = line.strip()
             if not s:
                 continue
-            if loment_diag.classify(s)[0] == "E999":
+            if loment_diag.classify(s)[0] == "E0999":
                 bad.append(s)
     assert not bad, "未分类的参考消息模板:\n  " + "\n  ".join(sorted(set(bad)))
     print(f"      参考消息模板 {len(tpls)} 条全部有错误码")
@@ -621,12 +812,27 @@ def test_code_tables_cover_the_same_codes():
     assert ruled == ascii_, (
         f"只在 RULES 里: {sorted(ruled - ascii_)}; 只在 ASCII 表里: {sorted(ascii_ - ruled)}")
     assert 0 not in ruled, "有码解不出数字"
-    # **编码必须从 1 起连续**: `surface_data.n_codes()` 给的是**条数**, 而两个消费者
-    # (`lomcli` 的 `codes`/`explain`, 循环 1..n_codes()) 拿它当**上界**用 —— 那只有在
-    # 连续编号时才等价。留个空号(比如只有 E24 没有 E25)会让两边静默错位。
-    assert ruled == set(range(1, max(ruled) + 1)), (
-        f"码不是连续编号, 缺: {sorted(set(range(1, max(ruled) + 1)) - ruled)}")
-    print(f"      两张码表键集相等 ({len(ruled)} 条: E{min(ruled)}–E{max(ruled)})")
+    # **两段各自从起点连续**（`#773`）：用户码 1..max 与内部码 E0900..max 分开编号。
+    # `surface_data.n_codes()` 只给**用户码**的上界，而 `lomcli` 的 `codes`/`explain`
+    # 拿它当 `1..n_codes()` 的循环上界用 —— 那只有在用户码连续时才等价；40..899
+    # 这种空号不许出现，否则 `codes` 会印出一行行空标题。内部码另起一段，同样连续。
+    user = {c for c in ruled if not loment_diag.is_internal_code(c)}
+    # `E0999` 是**兜底码**（没有任何规则命中时才落到它，见 `loment_diag` 里那条恒假的规则）。
+    # 它按设计钉在区间顶端，不属于"内部码从 900 起连续"那条不变式 —— 生成器那边同样
+    # 排除它（`FALLBACK`）。不排除的话，加一条兜底规则就会把这条判据判红。
+    fallback = 999
+    internal = {c for c in ruled if loment_diag.is_internal_code(c) and c != fallback}
+    assert user, "一个用户码都没有"
+    assert user == set(range(1, max(user) + 1)), (
+        f"用户码不是连续编号, 缺: {sorted(set(range(1, max(user) + 1)) - user)}")
+    if internal:
+        assert internal == set(range(min(internal), max(internal) + 1)), (
+            f"内部码不是连续编号, 缺: "
+            f"{sorted(set(range(min(internal), max(internal) + 1)) - internal)}")
+        assert min(internal) >= loment_diag.INTERNAL_LO, (
+            f"内部码低于 {loment_diag.INTERNAL_LO}: {sorted(internal)}")
+    print(f"      两张码表键集相等 ({len(ruled)} 条: 用户 E1–E{max(user)}"
+          f", 内部 {sorted('E%d' % c for c in internal)})")
 
 
 @test
@@ -815,7 +1021,7 @@ def test_m64_structured_diagnostics_are_jsonl():
     """
     cases = [
         # (源码, 期望的码) —— 一条走 check(), 一条走 LomError
-        ("module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n", "E022"),
+        ("module m\n\nchoose std\nchoose no_std\n\nfn f() -> u32 {\n    return 1;\n}\n", "E0159"),
         ("module m\n\nfn f() -> u32 {\n    return 1;\n}\n@@@\n", "E019"),
     ]
     with tempfile.TemporaryDirectory() as t:
@@ -834,7 +1040,7 @@ def test_m64_structured_diagnostics_are_jsonl():
             recs = [json.loads(x) for x in lines]   # 一行一条，每行都是完整 JSON
             for d in recs:
                 assert set(d) == set(lomentc.DIAG_FIELDS), (set(d), lomentc.DIAG_FIELDS)
-                assert d["code"] != "E999", d
+                assert d["code"] != "E0999", d
             assert recs[0]["code"] == want, (recs[0]["code"], want)
     print("      结构化诊断: 一行一条 JSON, 字段齐全, check/LomError 两条通道都覆盖")
 
@@ -843,7 +1049,7 @@ def test_m64_structured_diagnostics_are_jsonl():
 def test_e019_parse_errors_are_classified():
     """解析期消息有自己的码 (E019), 而且**不抢** E001 的活。
 
-    原先解析期消息一条都不在分类表里 —— `loment diag` 把它们显示成 E999「未分类, 请报告」,
+    原先解析期消息一条都不在分类表里 —— `loment diag` 把它们显示成 E0999「未分类, 请报告」,
     可它恰恰是新手最常撞上的一类 (`match` 臂写成表达式、无值 `return`、漏分号)。
     这条同时钉住**顺序**: E001 的模式里有「期望」二字, E019 若排在它前面就会把类型错也吞掉。
     """
@@ -851,8 +1057,8 @@ def test_e019_parse_errors_are_classified():
     assert loment_diag.classify("5:1: 期望 ;，得到 'capability'")[0] == "E019"
     assert loment_diag.classify("7:17: 期望 {，得到 '0'")[0] == "E019"
     assert loment_diag.classify("4:11: 期望表达式，得到 ';'")[0] == "E019"
-    assert loment_diag.classify("实参类型 u32，期望 bool")[0] == "E001"
-    assert loment_diag.classify("调用未定义的函数 pick")[0] == "E002"
+    assert loment_diag.classify("实参类型 u32，期望 bool")[0] == "E054"
+    assert loment_diag.classify("调用未定义的函数 pick")[0] == "E096"
 
 
 @test
@@ -863,8 +1069,10 @@ def test_cli_reports_parse_errors_without_traceback():
     traceback。对"照指南写第一个程序"的人, 这是最坏的第一印象, 而且它看起来像编译器崩了,
     而不是"你写错了"。
     """
+    # 裸 `return;` 从 2026.2 起是合法写法，而**默认已经是最新版次**（`docs/312`）——
+    # 所以这一格显式钉 Tur 1，测的仍是"语法错给一行 [ERR]，不甩回溯"。
     cases = {"漏了分号": "module a\n\nconst X: u32 = 3\n",
-             "无值 return": "module b\n\nfn f() {\n    return;\n}\n"}
+             "无值 return": "choose write grammar tur2026.1\nmodule b\n\nfn f() {\n    return;\n}\n"}
     with tempfile.TemporaryDirectory() as td:
         for name, src in cases.items():
             p = Path(td) / "bad.lomt"
@@ -1031,17 +1239,1177 @@ def test_m65_m66_incremental_and_cache():
         assert loment_build.main([str(out.parent), "--out", str(out)]) == 0
 
 
-def main() -> int:
-    failed = []
-    for name, fn in TESTS:
+# ---------------------------------------------------------------- 缓存的信任缺口 (#900/#901)
+#
+# 下面四条都不是"缓存慢了一点"，是"缓存给了错的东西还报成功"：
+#   * `#900`：键只哈希源文件 —— 换了编译器，同一份源照样命中**上一个编译器**的产物；
+#   * `#901`：命中只看产物**路径存在** —— 任何能往 `build/` 写字的东西都能占住
+#     `main.ll` 这个名字，而每次构建都打印 `[HOT]`。
+# 判据跑**真工具**（`loment_build.main`），不测复制出来的小模型：那两条缺陷原本就在
+# `main()` 的分支里，绕开它测等于没测。
+
+#: 一个够小、够真、三个后端都发得出来的单元。
+_BUILD_SRC = """module m
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+"""
+
+
+def _build_project(td: Path) -> Path:
+    src = td / "src"
+    src.mkdir()
+    (src / "m.lomt").write_text(_BUILD_SRC, encoding="utf-8", newline="\n")
+    return src
+
+
+def _build(argv: list[str]) -> tuple[int, str]:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        rc = loment_build.main(argv)
+    return rc, buf.getvalue()
+
+
+def _build_index(out: Path) -> dict:
+    return json.loads((out / ".loment-cache.json").read_text(encoding="utf-8"))
+
+
+@test
+def test_a_poisoned_artifact_is_not_a_hit():
+    """产物内容被换掉之后，下一次构建必须**重编**（`#901`）。
+
+    旧行为：命中只查 `(out / x).exists()` —— 把 `m.ll` 写成 CANARY 之后 `[HOT]` 照报，
+    CANARY 留在盘上被下游消费。新行为：记录里带每份产物的 sha256，对不上就是 miss。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src, out = _build_project(td), td / "build"
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 0, log
+        assert "[COLD" in log, log
+
+        target = out / "m.ll"
+        assert target.exists(), f"没有 .ll 产物: {sorted(p.name for p in out.iterdir())}"
+        target.write_text("CANARY\n", encoding="utf-8", newline="\n")
+
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 0, log
+        assert "[HOT " not in log, f"被换过的产物仍然命中: {log}"
+        assert target.read_text(encoding="utf-8") != "CANARY\n", (
+            "CANARY 还在盘上 —— 构建报成功却把别人的内容留给下游")
+        rec = next(r for r in _build_index(out)["records"] if r["file"].endswith("m.lomt"))
+        assert rec["hashes"]["m.ll"] == loment_build._sha256_file(target), rec["hashes"]
+        print("      换过的产物被重编，记录里的哈希跟着更新")
+
+
+@test
+def test_a_foreign_toolchain_does_not_hit():
+    """记录里的工具链与本机不同 ⇒ 全部重编（`#900`）。
+
+    直接改索引里的 `toolchain`：那是"上一个编译器写下的记录"的可控替身 ——
+    真的升级工具链没法在一条判据里做，但分支判的是同一个字段。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src, out = _build_project(td), td / "build"
+        assert _build([str(src), "--out", str(out)])[0] == 0
+        idx = _build_index(out)
+        for r in idx["records"]:
+            r["toolchain"] = "0" * 64
+        (out / ".loment-cache.json").write_text(
+            json.dumps(idx), encoding="utf-8", newline="\n")
+
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 0, log
+        assert "[HOT " not in log, f"换过工具链的记录仍然命中: {log}"
+        rec = next(r for r in _build_index(out)["records"] if r["file"].endswith("m.lomt"))
+        assert rec["toolchain"] == loment_build.compiler_id(ROOT)
+        print("      外来工具链的记录被判成 miss")
+
+
+@test
+def test_the_cache_key_carries_the_toolchain():
+    """同一个文件、两个工具链身份 ⇒ 两个键（`#900` 的单元那一半）。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        f = td / "a.lomt"
+        f.write_text("module a\n", encoding="utf-8", newline="\n")
+        a = loment_build.cache_key([f], "toolchain-a")
+        b = loment_build.cache_key([f], "toolchain-b")
+        assert a != b, "工具链没有进键 —— 升级编译器后旧产物会继续命中"
+        assert a == loment_build.cache_key([f], "toolchain-a"), "键不稳定"
+        assert loment_build.compiler_id(ROOT) == loment_build.compiler_id(ROOT)
+        print("      键随工具链变，且同输入稳定")
+
+
+@test
+def test_a_git_tracked_build_dir_is_refused():
+    """提交进仓库的 `build/` 直接拒绝（`#901`）。
+
+    `#901` 的"至少"那一条：索引和产物可以**一起**被伪造，内容哈希挡不住它。
+    拒绝而不是"小心地命中"，因为那份目录根本不是本机构建留下的。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src, out = _build_project(td), td / "build"
+        out.mkdir()
+        (out / "shipped.txt").write_text("来自仓库\n", encoding="utf-8", newline="\n")
+        r = subprocess.run(["git", "init", "-q", str(td)], capture_output=True,
+                           text=True, shell=False)
+        assert r.returncode == 0, r.stderr
+        r = subprocess.run(["git", "-C", str(td), "add", "build/shipped.txt"],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 0, r.stderr
+
+        rc, log = _build([str(src), "--out", str(out)])
+        assert rc == 2, f"被跟踪的构建目录没有被拒绝: rc={rc}\n{log}"
+        assert "git" in log, log
+        print("      被跟踪的 build/ 被判用法错误")
+
+
+@test
+def test_gate_reports_how_many_criteria_did_not_run():
+    """门禁必须把"这条检查里有多少判据没跑"数出来报进那一行（`#371`）。
+
+    **Why**：每个判据套件的运行器都是 `try: fn(); print("  PASS  {name}")` —— 一条判据
+    打印 `SKIP: 无 clang/WSL` 之后 `return`，在它眼里**正常返回就是通过**。于是那一行报的
+    是"没抛异常的总数"。实测（把 `wsl` 从 `shutil.which` 里藏掉，也就是 runner 的条件）：
+    `loment_elf_test` 打印 26 行 SKIP、汇总照报 `31/31 通过`、退出码 0。
+
+    而 CI 是 ubuntu 容器，里面**没有 `wsl`**（它不是 apt 包，镜像也没装垫片）—— 所以那道
+    必需检查在 runner 上对**整条运行时护栏**失明，而且它报满。被判据门着的那些条
+    （sweep 精度、L0 提升、L1 定活、L2 纪元、`free` 所有权那一对、自适应与分代）正是
+    "跑一个产物"才有意义的那一类。
+    **门静默失效比门误报更坏** —— 这是 `loment_door_test` 立论的原话，这里是它的同一件事。
+
+    **How to apply**：`ci.py` 把每条检查输出里"行首是 SKIP"的行数出来，放进
+    `:: [static] …` 那一行；0 的时候不喧哗（大多数检查一条都不跳）。
+
+    **证伪**：把 `ci.py` 里 `count_skips` 那几处去掉，下面第 (2)(3) 两段立刻红
+    （`format_line` 与 5 元组都不存在）—— 这条判据证伪的是**报数**，不是"跳过该不该跳过"。
+    """
+    import ci
+
+    # (1) 计数规则: 只认**行首**是 SKIP 的那种行（各套件都写成 `print("      SKIP: …")`）。
+    #     放在中间的不算 —— 否则某条判据的说明文字里带一个 SKIP 就会被误数。
+    assert ci.count_skips("  PASS  a\n      SKIP: 无 clang/WSL\n  PASS  b\n") == 1
+    assert ci.count_skips("  PASS  a\n") == 0
+    assert ci.count_skips("") == 0
+    assert ci.count_skips("  PASS  a  # 这一条没跳过, 只是提到了 SKIP\n") == 0
+
+    # (2) 那一行必须带上这个数; 0 的时候不出现
+    line = ci.format_line("loment_elf_test", True, "31/31 通过", 1.2, 26)
+    assert "26" in line and "SKIP" in line, line
+    quiet = ci.format_line("loment_tools_test", True, "12/12 通过", 1.2, 0)
+    assert "SKIP" not in quiet, quiet
+
+    # (3) **端到端**：造一个真模块喂给 `_run_one_check`（走的就是门禁那条路），
+    #     它打印两条行首 SKIP、一条只是提到 SKIP —— 数出来的必须正好是 2。
+    #
+    #     **为什么不拿某个真实套件来钉**：那个数**随平台走**。第一版钉的是
+    #     "藏掉 `wsl` 之后 `loment_elf_test` 跳过 >= 20 条"，而同一个 PR 的下半
+    #     （`#371` 第二半）恰恰让这族判据在 Linux 上**原生跑**、于是那个数掉到 0 ——
+    #     判据和它的修法在同一个 PR 里互相打架，CI 当场报 `loment_tools_test` 新红。
+    #     这一条要钉的是**报数这件事**，不是某个套件在某个平台上跳几条。
+    import shutil
+    import tempfile
+
+    probe = Path(tempfile.mkdtemp(prefix="loment-skipcount-"))
+    try:
+        (probe / "loment_skipcount_probe.py").write_text(
+            "def main() -> int:\n"
+            "    print('  PASS  a')\n"
+            "    print('      SKIP: 无 clang/WSL')\n"
+            "    print('  PASS  b')\n"
+            "    print('      SKIP: 需要 WSL')\n"
+            "    print('  PASS  c  # 这一行只是提到 SKIP')\n"
+            "    return 0\n", encoding="utf-8", newline="\n")
+        # 另一份**走共享运行器**的探针：它把 `SKIP` 连**判据名**打出来，逐条预算才对得了账。
+        (probe / "loment_namedskip_probe.py").write_text(
+            "import loment_suite\n"
+            "\n"
+            "TESTS = []\n"
+            "\n"
+            "def test(fn):\n"
+            "    TESTS.append((fn.__name__, fn))\n"
+            "    return fn\n"
+            "\n"
+            "@test\n"
+            "def test_needs_wsl():\n"
+            "    print('      SKIP: 需要 WSL')\n"
+            "\n"
+            "@test\n"
+            "def test_runs():\n"
+            "    print('      跑过了')\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return loment_suite.run(TESTS, 'loment_namedskip_probe')\n",
+            encoding="utf-8", newline="\n")
+        sys.path.insert(0, str(probe))
         try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_tools_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+            r0 = ci._run_one_check("loment_skipcount_probe")
+            r1 = ci._run_one_check("loment_namedskip_probe")
+        finally:
+            sys.path.remove(str(probe))
+            sys.modules.pop("loment_skipcount_probe", None)
+            sys.modules.pop("loment_namedskip_probe", None)
+        assert r0.ok, "探针模块自己没跑通"
+        assert r0.skips == 2, f"跳过数该是 2（两条行首的算、提到的不算），得到 {r0.skips}"
+
+        # (4) `#371` 的**判定面**（2026-10-15 补）：跳过必须**认得出是哪一条**，否则
+        #     `ci.check_budget` 没法逐条对账签入的 `.github/gate-skips.txt`。这一条与上面
+        #     钉"条数"的那条是一对：数得出条数却认不出名字，等于预算对那个套件失明。
+        assert r1.ok, "走共享运行器的探针自己没跑通"
+        assert r1.skips == 1 and r1.skipped == ("test_needs_wsl",), \
+            f"跳过要连名字认出来，得到 {r1.skipped!r}"
+        assert r1.passed == ("test_runs",), f"通过的那条也要认得出来，得到 {r1.passed!r}"
+        assert r1.declared == 2, f"len(TESTS) 要读出来，得到 {r1.declared}"
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+
+@test
+def test_no_shipped_tool_prints_an_internal_name():
+    """包里那些工具**写给人看的消息不许以内部组件名开头**（`issue #8`）。
+
+    用户敲的是 `loment`（或 `lompi`）。`fujoc-s`（自举驱动的旧内部名）、`lomelf`、
+    `fujofmt` / `lomfmt`、`lomdoc` 这些名字对他不指向任何他手上的东西 —— 而
+    `fujoc-s: 打不开 x.lomt` 正是他实际看到的那一行。`issue #8` 报的三条里两条是这个。
+
+    **为什么扫源码而不是跑二进制**：跑一遍要构建整包（分钟级），而这一条要守的是
+    "新加的消息别再带内部名" —— 那是纯静态的，扫一遍就够。跑真东西那半由
+    `loment_p8_test` 的入口装载那条与 `loment_err_test` 的渲染那条承担。
+
+    **`lompi:` 与 `lomenterr:` 不在此列**：它们是独立命令，用户真的会敲（包里
+    `bin/lompi`、`bin/lomenterr` 就在那儿）。这里禁的是**用户没敲过**的名字。
+    """
+    pat = re.compile(r'"((?:fujoc-s|fujofmt|lomelf|lomfmt|lomdoc)\s*:)')
+    bad = []
+    for d in (ROOT / "loment" / "selfhost", ROOT / "loment" / "tools"):
+        for src in sorted(d.glob("*.lomt")):
+            for n, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+                # **整行注释跳过** —— 源码里本来就有几处在注解里引用旧消息（那些正是
+                # 这一条要记的事），扫它们会把"记录"当成"违规"。
+                if line.lstrip().startswith("//"):
+                    continue
+                for m in pat.finditer(line):
+                    bad.append(f"{src.relative_to(ROOT)}:{n}: {m.group(1)}")
+    assert not bad, ("有人把内部组件名写进了面向用户的消息 (用户敲的是 `loment`):\n  "
+                     + "\n  ".join(bad))
+    print("      包里没有工具以内部组件名开头报消息")
+
+
+@test
+def test_gate_budget_matches_the_suites():
+    """`#371` 两道棘轮的**签入文件本身**说得通吗。
+
+    `.github/gate-floors.txt` 说每个套件该有多少条判据，`.github/gate-skips.txt` 说哪些判据
+    允许在这台机器上不跑。`ci.check_budget` 拿它们判成败 —— 所以文件本身错了就是整个机制错了。
+    这条钉四件事：
+
+    1. 两份都能被 `ci.read_budget()` 读出来（格式对）；
+    2. **每个有 `TESTS` 的套件都在地板里，且数字 == `len(TESTS)`** —— 漏一个套件就等于它
+       从此不受地板约束（「把判据删光」那条路又通了）；
+    3. 两份里点到的套件名都在 `STATIC_CHECKS` 里（写错名字 = 那一行永远不生效）；
+    4. 跳过表里点到的**判据名**在那个套件里真的存在（判据改名或删掉之后，那条豁免会变成
+       一句永远不生效的谎话）。
+    """
+    import ci
+
+    floors, skips = ci.read_budget()
+
+    declared: dict[str, int] = {}
+    for name in ci.STATIC_CHECKS:
+        tests = getattr(__import__(name), "TESTS", None)
+        if tests:
+            declared[name] = len(tests)
+
+    missing = sorted(set(declared) - set(floors))
+    assert not missing, f"这些套件有判据却不在 gate-floors.txt 里: {missing}"
+    wrong = {n: (floors[n], c) for n, c in declared.items() if floors.get(n) != c}
+    assert not wrong, f"地板与实测不符（文件, 实测）: {wrong}"
+
+    unknown = sorted({s for s, _ in skips if s not in ci.STATIC_CHECKS})
+    assert not unknown, f"预算里点到了 STATIC_CHECKS 里没有的套件: {unknown}"
+
+    for suite, crit in sorted(skips):
+        if crit == "*":
+            continue
+        tests = getattr(__import__(suite), "TESTS", None)
+        if tests:
+            # 归一走 `loment_suite.entries` —— `TESTS` 有 `(名字, 函数)` 与裸函数两种写法
+            names = {n for n, _ in loment_suite.entries(tests)}
+        else:
+            # 没搬上共享运行器的套件（`check()` 那一族）没有 `TESTS` —— 名字从**源码**里认：
+            # 那里必须有 `SKIP  <判据名>:` 这么一行。少了这一路，那几家的豁免写错名字
+            # 也没人管（一条永远不生效的谎话）。
+            src = (Path(__file__).parent / f"{suite}.py").read_text(
+                encoding="utf-8", errors="replace")
+            # f-string 里的 `{pair['label']}` 在**源码**里是字面量，而量出来的名字是渲染后的
+            # （`lompi_sync[指南]`）—— 所以占位符当通配符比。
+            pats = [re.compile("^" + ".*".join(
+                        re.escape(p) for p in re.split(r"\{[^}]*\}", n)) + "$")
+                    for n in re.findall(r"SKIP\s+([^:\n]+?):", src)]
+            assert any(p.match(crit) for p in pats), (
+                f"gate-skips.txt 里 {suite} 的 {crit} 在那个套件里找不到（改名了？）")
+            continue
+        assert crit in names, f"gate-skips.txt 里 {suite} 的 {crit} 不在那个套件里（改名了？）"
+    print(f"      gate-floors {len(floors)} 个套件 / gate-skips {len(skips)} 条豁免，都对得上")
+
+
+@test
+def test_every_criterion_is_registered():
+    """套件里每个 `def test_*` 都必须**有人跑它**：进 `TESTS`，或者在别处被点名过。
+
+    没人跑的后果是**它从不运行，而套件照样绿** —— 与 `#371` 同一个形状（有一层安全检查
+    看不见洞）。新写一条判据、忘了装饰器，是最容易发生也最难发现的一种。
+
+    **为什么不去认"必须挂 `@test`"**：仓里有四种注册惯用法 —— `@test` 装饰器（多数套件）、
+    `check()` 闭包往 `RESULTS` 里塞（`loment_dist_test` / `loment_sign_test`）、手写 `main`
+    里直接调、以及按名字约定收（`lvm_test` / `lvm_twin_test` 的
+    `sorted(globals().items())`）。所以**不去猜惯用法，直接问套件自己**：把模块 import
+    进来，看 `def test_*` 的名字在不在那份 `TESTS` 里。对没有 `TESTS` 的套件
+    （`check()` 闭包那几个）退回到**可达性**：名字在模块里被读到过就算有人跑。
+
+    这条与 `test_gate_budget_matches_the_suites` 一样要 import 全部套件 —— 那份代价那边
+    已经付过了（`len(TESTS)` 只能从 import 拿），这里是同一笔账。
+    """
+    import ast
+
+    import ci
+
+    def registered(mod) -> set[str] | None:
+        """套件自己说"我要跑哪些"；没有 `TESTS` 就返回 `None`（退回可达性）。"""
+        tests = getattr(mod, "TESTS", None)
+        if not tests:
+            return None
+        out: set[str] = set()
+        for e in tests:
+            if isinstance(e, tuple) and len(e) >= 2:
+                out.add(str(e[0]))          # `(名字, 函数)`；名字可能就是显示名
+                if callable(e[1]):
+                    out.add(getattr(e[1], "__name__", ""))
+            elif callable(e):
+                out.add(e.__name__)         # 裸函数
+        return out
+
+    offenders = []
+    for name in ci.STATIC_CHECKS:
+        p = Path(__file__).resolve().parent / f"{name}.py"
+        if not p.exists():
+            continue
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        loaded = {n.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        loaded |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        reg = registered(__import__(name))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            decs = [ast.unparse(d) for d in node.decorator_list]
+            if any(d == "test" or d.endswith(".test") for d in decs):
+                continue
+            if node.name in loaded:
+                continue          # 被别处点名（`check()` 闭包 / 手写 main）—— 有人跑它
+            if reg is not None and node.name in reg:
+                continue          # 进了 `TESTS` —— 有人跑它（按名字收的那种套件走这条）
+            offenders.append(f"{name}.py:{node.lineno} {node.name}")
+    assert not offenders, ("这些 def test_* 既没挂 @test 也没进 TESTS，因而从不运行: "
+                           + ", ".join(offenders))
+    print("      每个 def test_* 都有人跑（进了 TESTS 或挂 @test）")
+
+
+# ------------------------------------------------- 门禁 workflow 自己的形状（`#371`）
+
+def _gate_workflow() -> str:
+    return (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+
+
+def _job_block(wf: str, job: str) -> str:
+    """取 `jobs:` 下面那个 job 的整段（到下一个同缩进的 job 名为止）。
+
+    **为什么不用 YAML 解析**：PyYAML 不在 CI 镜像的包名单里 —— 引一个依赖只为读
+    两个 workflow 文件不值当（`ci-image.yml` 的包名单有"不加"的纪律）。这里的形状是
+    **固定**的（job 名两格缩进，键四格），正则足够且看得见自己在断言什么。
+
+    两处调用：`gate.yml`（下面那一族）与 `manifest.yml`（生成物那条线）。
+    """
+    m = re.search(rf"^  {re.escape(job)}:\n(.*?)(?=^  \S|\Z)", wf, re.M | re.S)
+    assert m, f"workflow 文件里找不到 job `{job}`"
+    return m.group(0)
+
+
+@test
+def test_gate_workflow_shard_shape_matches_ci():
+    """分片那个数**写在三处**：`GATE_SHARDS`、矩阵每条的 `total`、`ci.py` 现算的片数。
+
+    文件头写着"改分片形状要同时改 `ci.py` 和这里" —— 而此前**没有任何东西**钉住它。
+    这个数一偏，分片划分就变、并集不再是 `STATIC_CHECKS`，`static` 那步的条数校验
+    会红 —— 但那是**跑完之后**才发现。三处对齐让它当场红。
+
+    片 1 归 `static-exclusive`（独占那一片串在其余片前面），所以矩阵该是 `2..N`；
+    这里连"少一片"也一起钉 —— 少的那一片就是**从此不跑**的那几条判据。
+    """
+    import ci
+
+    wf = _gate_workflow()
+    m = re.search(r'^  GATE_SHARDS: "(\d+)"', wf, re.M)
+    assert m, "gate.yml 里找不到 `GATE_SHARDS`"
+    n = int(m.group(1))
+
+    trips = re.findall(r"-\s*\{\s*shard:\s*(\d+),\s*total:\s*(\d+)\s*\}", wf)
+    assert trips, "矩阵 `include:` 一条都没有 —— 分片那几条判据从此不跑"
+    totals = {int(t) for _, t in trips}
+    assert totals == {n}, f"矩阵里的 total {sorted(totals)} 与 GATE_SHARDS={n} 不一致"
+    ids = sorted(int(s) for s, _ in trips)
+    assert ids == list(range(2, n + 1)), (
+        f"矩阵该是 2..{n}（片 1 归 static-exclusive），实际 {ids}")
+
+    excl = _job_block(wf, "static-exclusive")
+    assert '--shard "1/$GATE_SHARDS"' in excl, "`static-exclusive` 没在跑片 1"
+
+    plan = ci.shards(n)
+    assert len(plan) == n, f"`ci.shards({n})` 切出 {len(plan)} 片，与 GATE_SHARDS={n} 不符"
+    flat = [x for s in plan for x in s]
+    assert sorted(flat) == sorted(ci.STATIC_CHECKS), "分片不是 STATIC_CHECKS 的一个划分"
+    print(f"      分片形状三处一致: GATE_SHARDS={n}, 矩阵 2..{n}, ci.shards({n}) 切出 {n} 片")
+
+
+@test
+def test_gate_workflow_keeps_the_required_check_name():
+    """`static` 那个 job 的 `name:` **就是**保护规则里挂着的必需检查名。
+
+    文件头第三条边界：名字一没，保护规则就永远等不到它，PR 会**全部**卡住
+    （不是松开）。这条钉两件事：它还是那个名字，而且**只有一个** job 叫这个名字
+    —— 两个同名 job 会让"必需检查"的归属变成看谁先报。
+
+    `static-manual` 特意起了别的名字（它是手工诊断，不该顶替 PR 上那道门），
+    这里把那条也钉住。
+    """
+    wf = _gate_workflow()
+    req = "ci.py --static-only"
+    names = re.findall(r"^    name: (.+)$", wf, re.M)
+    assert names.count(req) == 1, (
+        f"`{req}` 在 job 名里出现 {names.count(req)} 次（应为 1 次）—— {names}")
+    assert f"    name: {req}" in _job_block(wf, "static"), (
+        f"job `static` 的 name 不再是 `{req}`：保护规则等的就是这个字符串")
+    print(f"      必需检查名 `{req}` 仍由唯一一个 job 扛着")
+
+
+@test
+def test_gate_workflow_aggregation_fails_closed():
+    """聚合那几步里各有一条"不许静默变绿"，以及两处"基线不见了就判失败"。
+
+    堵的是两个**静默通过**的形状：
+
+    * 少一片就少几条判据，而门禁照样绿 —— 合成那一步要对不上就红（`#443` 之后
+      这件事由 `ci.py --merge-shards` 做，见 `test_gate_workflow_merges_shard_logs_by_name`）；
+    * `needs` 的默认行为是"依赖失败就**跳过**"，而跳过不算失败 —— 保护规则会一直
+      等下去。所以那里必须显式看 `needs.*.result`。
+
+    以及基线文件**不见了**时不能当成"没有基线"放行：两个跑片的 job 各有一处守卫。
+    """
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert "needs.static-exclusive.result != 'success'" in agg, (
+        "少了分片红就是红那一步 —— 依赖失败会跳过，而跳过不算失败，"
+        "保护规则会一直等")
+    assert "needs.static-shard.result != 'success'" in agg, "同上（另一片）"
+
+    guard = wf.count("基线文件 .github/gate-baseline.txt 不见了")
+    assert guard == 2, (
+        f"基线缺失的守卫有 {guard} 处，应为 2（独占片 / 分片各一处）—— "
+        f"少了就是那一类 job 会把'基线没了'当成'没有基线'放行")
+
+    # 基线棘轮（**只许变短**）本身也要有人钉 —— 否则它自己会被悄悄删掉。
+    # **钉步骤名，不钉那几个字**：段落里那句 `echo "基线只许变短: OK…"` 与注释都含着
+    # 同样几个字，按字面子串判会在步骤被删掉之后**照样绿**（第一版就是这样，
+    # 变异验证时两条棘轮改动一条都没抓住）。
+    assert re.search(r"^\s*- name: 基线只许变短$", agg, re.M), (
+        "少了基线棘轮那一步 —— 往基线里**加**一条就没人拦了，"
+        "而那条路等于把一条新红登记成合法")
+    # 判失败要**带 `::error::`**：变异成一句普通 echo 之后 GitHub 不会红那一步
+    assert 'echo "::error::取对照面失败' in agg, (
+        "棘轮取不到对照面时没判失败（fail closed）—— 静默跳过的棘轮会变成"
+        "一句永远不生效的谎话")
+    assert 'echo "::error::对照面（$base）里读不到' in agg, "同上（读不到基线那一处）"
+    # `#769`: "只许变短"按 (套件, 判据) 比，且解析只在 `ci.py` 一份（逐条匹配的
+    # 覆盖关系 —— 旧的整条 `套件 *` 可以细化为几条具体判据 —— 没法用 `comm` 表达）。
+    assert "tools/ci.py --baseline-growth old.txt new.txt" in agg, (
+        "棘轮没在按逐条判据算'新增'（`ci.py --baseline-growth`）")
+    assert "python3 tools/ci.py --baseline-pairs .github/gate-baseline.txt > new.txt" in agg, (
+        "棘轮比的不是树里那份基线（而且必须走 `ci.py` 的解析，不要按列 awk）")
+    print("      聚合的两条防静默 + 两处基线缺失守卫 + 基线棘轮都在")
+
+
+@test
+def test_baseline_is_matched_per_criterion():
+    """`#769`：基线按 **(套件, 判据)** 匹配 —— 整条套件豁免不再吞掉别的判据。
+
+    **Why**：原先 `gate.yml` 用 `awk '{print $3}'` 取套件名，基线里写 `<套件>` 就豁免
+    **整条套件**。实测代价：133 条判据（14.3%）落在这种豁免里，包括唯一那条种子容量判据
+    （`loment_genesis_test::test_seed_fits_lomelf_input_buffer`）与镜像链接器的对拍判据
+    （`loment_elf_test::test_lomelf_selfhost_matches_reference`）。一条环境红会把同一套件
+    里别的判据一起带走。
+
+    **How to apply**：`ci.baseline_red()` 从 `:: [static] … FAIL` 行的 `[failed=a,b]`
+    读判据名（机器可读，不解析给人看的那句 tail）；`ci.baseline_new()` 逐条比。
+    `(套件, *)` 只表示**套件级失败**（崩溃/超时，没有可点名的判据），它**不**授权
+    同套件的其它判据。
+    """
+    import ci
+
+    out = ("  PASS  a\n"
+           "  FAIL  test_a: AssertionError: x\n"
+           "  FAIL  test_b: ValueError: y\n")
+    assert ci.failed_criteria(out) == ("test_a", "test_b")
+    assert ci.failed_criteria("  PASS  a\n") == ()
+    # `loment_dist_test` 的收尾清单是另一种形状（名字可带空格、无冒号）——
+    # 不认它，那条套件的任何一条判据失败都只剩一个 `*`，定位不到是哪条。
+    assert ci.failed_criteria("  FAIL  Windows 安装脚本  [TimeoutExpired: x]\n") == \
+        ("Windows 安装脚本",)
+    assert ci.failed_criteria("  FAIL  test_a: x\n  FAIL  test_a: y\n") == ("test_a",)
+
+    # 一行里点名两条判据 = 两条已知红; 没有 `[failed]` / `*` = 套件级红。
+    gate = (":: [static] loment_elf_test FAIL     1.0s  [failed=test_a,test_b]  …\n"
+            ":: [static] lom_audit      FAIL     0.0s  [failed=*]  boom\n"
+            ":: [static] loment_p8_test PASS     1.0s  ok\n")
+    red = ci.baseline_red(gate)
+    assert red == {("loment_elf_test", "test_a"), ("loment_elf_test", "test_b"),
+                   ("lom_audit", "*")}, red
+
+    # 只登记了 test_a 时，同套件的 test_b **仍然**是新红 —— 这正是本 issue 的要点。
+    base = {("loment_elf_test", "test_a")}
+    assert ci.baseline_new(red, base) == [("lom_audit", "*"),
+                                           ("loment_elf_test", "test_b")], (
+        "同套件的另一条判据被整条豁免吞掉了 —— `#769` 没生效")
+
+    # `(套件, *)` 只授权套件级红，不授权任何具名判据。
+    assert ci.baseline_new({("s", "t")}, {("s", "*")}) == []
+    assert ci.baseline_new({("s", "*")}, {("s", "t")}) == [("s", "*")], (
+        "一条逐条豁免反向授权了整条豁免 —— 那是变粗，不是变短")
+
+    # 旧格式（只有套件名）为对照面保留：读成 `(套件, *)`。
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "old-baseline.txt"
+        p.write_text("loment_elf_test   # 旧格式\n", encoding="utf-8", newline="\n")
+        assert ci.read_baseline(p) == {("loment_elf_test", "*")}
+
+    # `:: [static]` 那一行必须带机器可读的失败名单（否则 workflow 只能猜 tail）。
+    assert "[failed=test_a,test_b]" in ci.format_line("x", False, "…", 1.0, 0,
+                                                      ("test_a", "test_b"))
+    assert "[failed=*]" in ci.format_line("x", False, "…", 1.0, 0, ())
+    assert "[failed=" not in ci.format_line("x", True, "…", 1.0, 0, ())
+    print("      逐条匹配: 同套件的另一条判据仍是新红；整条豁免只能由整条豁免授权")
+
+
+@test
+def test_baseline_only_shrinks_per_criterion():
+    """`#769` 的"只许变短"也按逐条判据比 —— 细化不算变长，变粗才算。
+
+    **Why**：把原来的一整条 `套件 *` 拆成几条具体判据**是收紧**（覆盖面从"全部"缩到
+    那几条），必须放过；反过来，把几条具体判据合并成 `套件 *` 是**放宽**，必须红。
+    `comm` 表达不了这个覆盖关系，所以这一半也在 `ci.py` 里（`baseline_growth`）。
+    """
+    import ci
+
+    fine = {("s", "t1")}
+    coarse = {("s", "*")}
+    assert ci.baseline_growth(coarse, fine) == [], "细化（整条 -> 逐条）被判成了变长"
+    assert ci.baseline_growth(fine, coarse) == [("s", "*")], "变粗（逐条 -> 整条）没判红"
+    assert ci.baseline_growth(fine, fine | {("s", "t2")}) == [("s", "t2")], (
+        "新增一条逐条豁免没判红")
+    assert ci.baseline_growth(fine, set()) == [], "变短（删条目）被判成了失败"
+    assert ci.baseline_growth(coarse, coarse | {("s", "t1")}) == [], (
+        "整条豁免下补一条逐条记录不算变长（覆盖已经包含它）")
+    print("      整条 -> 逐条 = 收紧；逐条 -> 整条 = 放宽；两者都按 (套件,判据) 判")
+
+
+@test
+def test_gate_workflow_uses_the_per_criterion_baseline():
+    """`#769` 的接线：三处基线解析都走 `ci.py`，不再按列 `awk`。"""
+    wf = _gate_workflow()
+    for job in ("static-exclusive", "static-shard", "static"):
+        block = _job_block(wf, job)
+        assert "tools/ci.py --baseline-red gate.out > red.txt" in block, (
+            f"{job}: 没按逐条判据读红项")
+        assert "tools/ci.py --baseline-pairs .github/gate-baseline.txt > base.txt" in block, (
+            f"{job}: 没按逐条判据读基线")
+        assert "tools/ci.py --baseline-new gate.out .github/gate-baseline.txt" in block, (
+            f"{job}: 没按逐条判据算新红")
+        assert "awk '{print $3}'" not in block, (
+            f"{job}: 还在按列取套件名 —— 那正是整条豁免的来源")
+    assert "tools/ci.py --baseline-gone gate.out .github/gate-baseline.txt" in \
+        _job_block(wf, "static"), "汇总 job 没按逐条判据算'基线该变短了'"
+    # 单跑确认按**套件**（一次跑整条），但确认/假红的记录要保留判据对。
+    for job in ("static-exclusive", "static-shard"):
+        block = _job_block(wf, job)
+        assert "cut -f1 new_red.txt | sort -u > new_red_suites.txt" in block, (
+            f"{job}: 单跑复用的套件名没从逐条对里取")
+        assert 'awk -F\'\\t\' -v n="$name" \'$1==n\' new_red.txt' in block, (
+            f"{job}: confirmed/flaked 记的不是 (套件,判据) 对")
+    print("      三处基线解析 + 汇总的 gone + 单跑套件名都接在逐条对上")
+
+
+@test
+def test_the_static_line_carries_the_failed_criteria():
+    """端到端：一条真失败的套件在 `:: [static]` 行里带出 `[failed=<名字>]`（`#769`）。
+
+    **Why**：workflow 解析的是 `gate.out`，而那里每个套件只有**一行**。如果那一行只写
+    "FAIL"、名字只在给人看的 tail 里（可能被截断、也可能含 `；`），逐条基线就没法可靠
+    匹配。所以 `_run_one_check` 从套件自己的 `  FAIL  <名字>:` 行里收集，`format_line`
+    打成机器可读的字段。没有点名判据的失败 = `[failed=*]`（套件级）。
+    """
+    import ci
+
+    probe = Path(tempfile.mkdtemp(prefix="loment-baseline-probe-"))
+    try:
+        (probe / "loment_baseline_probe.py").write_text(
+            "import loment_suite\n"
+            "\n"
+            "TESTS = []\n"
+            "\n"
+            "def test(fn):\n"
+            "    TESTS.append((fn.__name__, fn))\n"
+            "    return fn\n"
+            "\n"
+            "@test\n"
+            "def test_green():\n"
+            "    pass\n"
+            "\n"
+            "@test\n"
+            "def test_red():\n"
+            "    raise AssertionError('boom')\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return loment_suite.run(TESTS, 'loment_baseline_probe')\n",
+            encoding="utf-8", newline="\n")
+        sys.path.insert(0, str(probe))
+        try:
+            r = ci._run_one_check("loment_baseline_probe")
+            r2 = ci._run_one_check("loment_baseline_probe_no_such_module")
+        finally:
+            sys.path.remove(str(probe))
+            sys.modules.pop("loment_baseline_probe", None)
+        assert not r.ok, "探针的 test_red 没让套件失败"
+        assert r.failed == ("test_red",), f"失败的判据没认出来：{r.failed!r}"
+        line = ci.format_line(r.name, r.ok, r.tail, r.dt, r.skips, r.failed)
+        assert "[failed=test_red]" in line, line
+        assert r2.failed == (), "导入失败的套件不该凭空点名一条判据"
+        assert "[failed=*]" in ci.format_line(r2.name, r2.ok, r2.tail, r2.dt,
+                                              r2.skips, r2.failed)
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    print("      套件失败 -> [failed=<判据>]；崩溃/导入失败 -> [failed=*]")
+
+
+@test
+def test_every_static_check_has_a_measured_shard_cost():
+    """`#435`：分片表必须覆盖 `STATIC_CHECKS` 全表 —— 漏掉的一条按 8 秒静默算。
+
+    这一条就是 `loment_elf_test` 把 6/6 拖成 30 分钟那件事的判据。它只断言**覆盖**：
+    每个名字要么有实测条目、要么在 `SHARD_COST_EXEMPT` 里明确豁免。数字准不准量不
+    出来（墙钟会漂），但"有没有量过"能钉 —— 而那正是当时漏掉的那一件。
+
+    后半段是**反向自检**：把 `loment_elf_test` 从表里拿掉，`unpriced_checks()` 必须
+    点名它。没有这一半，这条判据只证明"今天恰好没漏"，证明不了它抓得住漏。
+    """
+    import ci
+
+    missing = ci.unpriced_checks()
+    assert not missing, (
+        f"这些判据没有实测耗时：{missing} —— 量一次填进 SHARD_COST，或者放进 "
+        f"SHARD_COST_EXEMPT 并写清理由。没登记的会按 {ci.SHARD_DEFAULT_S}s 静默算，"
+        f"一条重判据（`loment_elf_test` 曾 245～617s）就能把一片拖到几十分钟")
+    assert ci.SHARD_COST_EXEMPT <= set(ci.STATIC_CHECKS), (
+        f"SHARD_COST_EXEMPT 里有 STATIC_CHECKS 之外的名字: "
+        f"{sorted(ci.SHARD_COST_EXEMPT - set(ci.STATIC_CHECKS))}")
+    overlap = ci.SHARD_COST_EXEMPT & set(ci.SHARD_COST)
+    assert not overlap, f"这些名字既在实测表里又在豁免名单里: {sorted(overlap)}"
+
+    saved = dict(ci.SHARD_COST)
+    try:
+        del ci.SHARD_COST["loment_elf_test"]
+        assert "loment_elf_test" in ci.unpriced_checks(), (
+            "把一条重判据从表里拿掉之后 `unpriced_checks()` 没点名 —— 这条判据抓不住漏")
+    finally:
+        ci.SHARD_COST.clear()
+        ci.SHARD_COST.update(saved)
+    print(f"      {len(ci.SHARD_COST)} 条实测耗时覆盖 {len(ci.STATIC_CHECKS)} 条判据"
+          f"（明确豁免 {len(ci.SHARD_COST_EXEMPT)} 条）")
+
+
+@test
+def test_gate_budget_only_tightens_against_the_base():
+    """`#418`：预算与**对照面**比 —— 地板只许升，跳过表只许变短。
+
+    树内那两条棘轮（`check_budget`）比的是同一份提交里的两个数，所以"删一条判据 +
+    把地板改小"与"加一条跳过 + 把它登记进来"都能绿。这条判据钉住缺的那一半。
+    """
+    import ci
+
+    base_f = {"a": 5, "b": 2}
+    base_s = {("a", "t1")}
+    same = ci.check_budget_against_base(base_f, base_s, dict(base_f), set(base_s))
+    assert same == [], f"一模一样的预算不该判失败：{same}"
+
+    lower = ci.check_budget_against_base(base_f, base_s, {"a": 4, "b": 2}, set(base_s))
+    assert any(b.startswith("a:") for b in lower), f"地板降了（5 -> 4）没被判失败：{lower}"
+    gone = ci.check_budget_against_base(base_f, base_s, {"a": 5}, set(base_s))
+    assert any(b.startswith("b:") for b in gone), f"整条套件消失没被判失败：{gone}"
+    added = ci.check_budget_against_base(base_f, base_s, dict(base_f),
+                                         {("a", "t1"), ("b", "t2")})
+    assert any("t2" in b for b in added), f"新增跳过没被判失败：{added}"
+
+    # 收紧必须放过：加新套件、加条数、删跳过 —— 否则棘轮没法用。
+    tighter = ci.check_budget_against_base(base_f, base_s, {"a": 6, "b": 2, "c": 1}, set())
+    assert tighter == [], f"收紧预算被判失败（那会让棘轮没法用）：{tighter}"
+    print("      地板降 / 套件消失 / 新增跳过 = 红；加套件、加条数、删跳过 = 绿")
+
+
+@test
+def test_gate_workflow_checks_the_budget_against_the_base():
+    """`#418` 的接线：聚合 job 里要有一步把两份预算与对照面比，取不到就 fail closed。"""
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert re.search(r"^\s*- name: 判据预算只许收紧（#418）$", agg, re.M), (
+        "聚合 job 里没有与对照面比预算的那一步 —— 树内两条棘轮是同一份提交里的两个数，"
+        "一起改就绿了")
+    assert "tools/ci.py --budget-vs old-gate-floors.txt old-gate-skips.txt" in agg, (
+        "那一步没把两份对照面文件喂给 `ci.py --budget-vs`")
+    assert 'git show "FETCH_HEAD:.github/$f"' in agg, (
+        "没从对照面里取预算文件 —— 比的必须是 base 分支那一份，不是工作树里的")
+    # fail closed：取不到对照面、读不到文件时都要 `::error::`。基线那一步各有一处，
+    # 预算这一步也要有 —— 按整个 `static` job 数，"取对照面失败"应是 2 处。
+    assert agg.count("取对照面失败") == 2, (
+        f"`取对照面失败` 出现 {agg.count('取对照面失败')} 处，应为 2"
+        "（基线 / 预算各一处）—— 少一处就是那条棘轮静默失效")
+    assert agg.count("里读不到 .github/$f") == 1, (
+        "预算检查没在对照面缺文件时 fail closed")
+    print("      预算棘轮接在聚合 job 上，对照面取不到时 fail closed")
+
+
+@test
+def test_shard_merge_ignores_the_merged_artifact_and_dedupes():
+    """`#443`：合成按**判据名**取并集，`gate-log-merged` 不算数。
+
+    复现的就是那件事：一次 `gh run rerun --failed` 之后，聚合 job 上一次 attempt
+    上传的 `gate-log-merged`（全量副本）还躺在 artifact 里，而 `cat gate-log-*/*.out`
+    把它也读了进去 —— 每条判据出现两遍，174 = 2×87。合成函数必须只认
+    `gate-log-<片号>`，并且同名判据**后者覆盖前者**（新 attempt 赢）。
+    """
+    import ci
+
+    def shard(root: Path, name: str, text: str) -> None:
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "gate.out").write_text(text, encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        shard(root, "gate-log-1",
+              ":: [static] alpha          PASS     1.0s   ok\n"
+              ":: [static] beta           FAIL     2.0s   bad\n")
+        # 重跑的那一片：同一条 beta 这次绿了 —— 后者必须赢。
+        shard(root, "gate-log-2",
+              ":: [static] beta           PASS     1.5s   ok\n"
+              ":: [static] gamma          PASS     0.1s   ok\n")
+        # 上一次 attempt 的全量副本：不认它，否则 alpha/beta/gamma 各出现两遍。
+        shard(root, "gate-log-merged",
+              ":: [static] alpha          PASS     1.0s   dup\n"
+              ":: [static] beta           PASS     1.5s   dup\n"
+              ":: [static] gamma          PASS     0.1s   dup\n")
+        text, bad = ci.merge_shard_logs(root, ("alpha", "beta", "gamma"))
+        assert bad == [], f"正常的三片被判失败：{bad}"
+        lines = text.splitlines()
+        assert len(lines) == 3, f"应恰好 3 条（每条判据一次），得到 {len(lines)}：{text!r}"
+        assert ":: [static] beta           PASS" in text, (
+            f"重跑那一片的 PASS 没覆盖旧的 FAIL：{text!r}")
+        assert "dup" not in text, "`gate-log-merged` 被算进来了（#443 就是这一条）"
+
+        # 少一条（有一片没跑完）与多一条（STATIC_CHECKS 之外的东西）要分开报。
+        _, missing = ci.merge_shard_logs(root, ("alpha", "beta", "gamma", "delta"))
+        assert any("delta" in b for b in missing), f"少一条没点名：{missing}"
+        _, extra = ci.merge_shard_logs(root, ("alpha", "beta"))
+        assert any("gamma" in b for b in extra), f"多一条没点名：{extra}"
+    print("      合成只认 gate-log-<片号>：merged 不算、同名后者覆盖、少/多分开报")
+
+
+@test
+def test_gate_workflow_merges_shard_logs_by_name():
+    """`#443` 的接线：聚合不再 `cat gate-log-*`，而是走 `--merge-shards`。"""
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert "tools/ci.py --merge-shards shards > gate.out" in agg, (
+        "聚合那一步没走 `ci.py --merge-shards` —— 行数检查分不清"
+        "'少一片'与'一片跑了两遍'")
+    assert "pattern: gate-log-[0-9]*" in agg, (
+        "下载 artifact 的 pattern 还是 `gate-log-*` —— 它会把 `gate-log-merged`"
+        "（上次 attempt 的全量副本）也拉下来，`--failed` 重跑就双重计数（#443）")
+    assert "cat shards/gate-log-*/*.out" not in agg, (
+        "还在 `cat gate-log-*` —— 见上一条：那个通配符把全量副本也算进来")
+    assert "if [ $rc -ne 0 ]" in agg, "合成失败（rc 非零）时没判失败"
+    print("      聚合走 --merge-shards（不再按行数数）")
+
+
+@test
+def test_gate_container_image_matches_the_recipe():
+    """镜像的**属主与 tag** 都写在两处：`gate.yml` 各 job 的 `container.image`，
+    与 `ci-image.yml` 的 `TAG` + 它按 `github.repository_owner` **算出来**的那个属主。
+
+    文件头第四条边界："改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的
+    **唯一**动作"。两处不一致的后果是**静默**的：构建推的是新 tag，各 job 拉的还是
+    旧镜像 —— 看起来改了，其实没改（而"看起来配上了、其实没配上"正是最费时间的一类）。
+
+    **属主那一半是 2026-10-17 补的**，因为当天搬家时差点让每一片都拉不到镜像：
+    `gate.yml` 里属主是**写死的**，`ci-image.yml` 里是**算的**，库一换组织两边就分叉，
+    而**没有任何东西会提醒**。这条判据在当时是**红的**（库已经住进 `Loment-Lang`，
+    `gate.yml` 还指着 `fujojtop`）—— 它就是为那一刻写的。
+
+    期望的属主取自 `loment_publish.ORG` —— "这个项目住在哪个组织"在本仓的单一真源。
+    转小写是因为 **ghcr 的仓库名必须全小写**（Docker 的硬要求，`ci-image.yml` 那儿也这么做）。
+
+    没拉镜像的那个 job（`static-exclusive`）刻意留在 runner 上，见它自己那段注释；
+    所以这里只比**出现过的**那些。
+    """
+    wf = _gate_workflow()
+    # **各 job 拉的是摘要，不是 tag**（`#890`）：`image: ghcr.io/<org>/loment-ci@sha256:<64 hex>`。
+    # tag 是可移动的 —— 谁重打 `:5`，谁就决定了"绿"是什么意思，而运行记录里没有痕迹。
+    digests = re.findall(r"image:\s*ghcr\.io/[^@\s]+@(sha256:[0-9a-f]{64})", wf)
+    assert digests, "gate.yml 里一个按摘要钉住的 `container.image` 都没有（#890）"
+    assert len(set(digests)) == 1, f"两个 job 拉的不是同一个镜像: {sorted(set(digests))}"
+    digest = digests[0]
+    floating = re.findall(r"image:\s*ghcr\.io/[^@\s]+:([^\s@]+)\s*$", wf, re.M)
+    assert not floating, f"还有 job 按浮动 tag 拉镜像: {floating} —— 那是可移动的指针（#890）"
+
+    # 三处副本必须相等：两个 `image:` + 顶层 `CI_IMAGE_DIGEST`（聚合那一步把它写进工件）
+    env_digest = re.search(r'^  CI_IMAGE_DIGEST: "([^"]+)"', wf, re.M)
+    assert env_digest, "gate.yml 顶层没有 `CI_IMAGE_DIGEST` —— 聚合那一步没东西可记"
+    assert env_digest.group(1) == digest, (
+        f"`CI_IMAGE_DIGEST` 是 {env_digest.group(1)}，而各 job 拉的是 {digest} —— "
+        "工件里记的将不是真正判定的那个环境")
+
+    # **tag 那一半仍然要比**：摘要不可读，人是靠 `CI_IMAGE_TAG` 知道换的是哪一版。
+    recipe = (ROOT / ".github" / "workflows" / "ci-image.yml").read_text(encoding="utf-8")
+    m = re.search(r'^  TAG: "([^"]+)"', recipe, re.M)
+    assert m, "ci-image.yml 里找不到 `TAG`"
+    alias = re.search(r'^  CI_IMAGE_TAG: "([^"]+)"', wf, re.M)
+    assert alias, "gate.yml 顶层没有 `CI_IMAGE_TAG` —— 摘要与 recipe 之间就没有可读的连线"
+    assert alias.group(1) == m.group(1), (
+        f"gate.yml 记的 tag 是 {alias.group(1)}，ci-image.yml 构建 {m.group(1)} —— "
+        f"镜像抬了 tag 而各 job 没跟，是静默的（新摘要要用 `docker pull` 取，见 ci-image.yml 文件头）")
+
+    import loment_publish
+    owners = set(re.findall(r"image:\s*ghcr\.io/([^/:\s]+)/", wf))
+    want = loment_publish.ORG.lower()
+    assert owners == {want}, (
+        f"gate.yml 拉的是 {sorted(owners)} 名下的镜像，而库住在 `{loment_publish.ORG}`"
+        f"（ghcr 里该是 `{want}`）—— 库一换组织，`ci-image.yml` **算出来**的属主就变了、"
+        f"`gate.yml` 这一行**不会**跟着变，而两处谁都不提醒谁。"
+        f"换的顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**"
+        f"（包默认私有，fork 的 PR 拉不到）、**最后**才改 gate.yml —— `docs/255` §2")
+    print(f"      镜像属主 `{want}` + tag `{m.group(1)}` 两处一致")
+
+
+@test
+def test_gate_workflow_fails_when_the_budget_disagrees():
+    """判据预算对不上时，门禁必须**真的红** —— 而这一步得在 workflow 里**单独**认出来。
+
+    `ci.py` 在**每条判据都 PASS** 的情况下也可能判失败：有人漏登记一条跳过、或者动了
+    地板。那种失败**不在** `:: [static] … FAIL` 里（没有任何一条套件失败），而各分片
+    "对照基线（新红，单跑确认）"那一步只读那些 FAIL 行 —— 于是**预算不符的片会报绿**，
+    每条套件都写着 PASS。这正是这一整版要堵的形状，落在它自己身上就太讽刺了。
+
+    （落这一版时实测：`gate-skips.txt` 空着，若少了这一步，那几片确实会报绿。）
+
+    两个跑片的 job（`static-exclusive` / `static-shard`）各要一处，且判失败要带
+    `::error::` —— 少一个前缀，GitHub 不会红那一步。
+    """
+    wf = _gate_workflow()
+    steps = re.findall(r"^\s*- name: .*$", wf, re.M)
+    n = sum(1 for s in steps if s.strip() == "- name: 判据预算（#371）")
+    assert n == 2, (
+        f"认预算那一步有 {n} 处，应为 2（独占片 / 分片各一处）—— "
+        f"少了就是预算不符时门禁**报绿**")
+    assert wf.count("grep -q 'fujoci: 判据预算对不上' gate.out") == 2, (
+        "两处都要认 `ci.py` 那句原话（只看退出码分不清预算不对与某条套件红）")
+    assert wf.count('echo "::error::判据预算对不上') == 2, (
+        "两处判失败都要带 `::error::`，否则那一步不会红")
+    print("      判据预算对不上时，两个跑片的 job 都会红")
+
+
+@test
+def test_gate_checks_the_budget_even_when_a_suite_is_red():
+    """有套件红的时候，判据预算**照样要查** —— 否则最需要它的时候它不跑。
+
+    形状（2026-10-15 在 CI 上实测到）：`main()` 原先在"有红就中止"那一步就 `return 1`，
+    而预算那一段写在它**后面** —— 于是任何一条套件红（哪怕那条红早就登记在基线里、
+    根本不算新红）都会把整段跳过。那天的第 5 片有 109 条判据跳过，**一条都没量到**，
+    就因为它有一条基线内的红。
+
+    这里把 `run_static` 换掉，喂它一条红的、一条带**未登记**跳过的，直接跑 `main()`：
+    要求输出里**同时**出现预算那句。
+    """
+    import contextlib
+    import io
+
+    import ci
+
+    red = ci.Result("probe_red_suite", False, "probe: 1/1 通过", 0.1,
+                    0, ("p",), (), 1, False)
+    skip = ci.Result("probe_skip_suite", True, "probe: 1/2 通过, 1 SKIP", 0.1,
+                     1, ("p",), ("test_needs_the_moon",), 2, False)
+    orig_run, orig_argv = ci.run_static, sys.argv
+    out = io.StringIO()
+    try:
+        ci.run_static = lambda *a, **k: [red, skip]
+        sys.argv = ["ci.py", "--static-only"]
+        with contextlib.redirect_stdout(out):
+            rc = ci.main()
+    finally:
+        ci.run_static, sys.argv = orig_run, orig_argv
+    text = out.getvalue()
+    assert "判据预算对不上" in text, (
+        "有套件红的时候预算那一段没跑 —— 跳过表与地板在那一次跑里完全没有约束力。"
+        f"输出尾部：{text[-300:]!r}")
+    assert rc == 1, "有红又有预算问题时，退出码必须是 1"
+    print("      有红的套件时预算照样查（两条一起报出来）")
+
+
+@test
+def test_gate_makes_an_unnamed_skip_loud():
+    """跳过**没有名字**时必须判失败 —— 没名字的跳过对预算完全不可见。
+
+    仓里当时有三个套件没搬上 `loment_suite.run`（`check()` 那一族：`loment_dist_test` /
+    `loment_sign_test` / `loment_eol`），它们打的是 `SKIP <原因>` 这种没名字的写法：
+    `count_skips` 数得到（所以 `N SKIP` 那一栏会报），而**名字**认不出来 —— 于是
+    `gate-skips.txt` 对它们毫无约束力，`CONTRIBUTING.md` 禁的那条路
+    （"给一条既有判据加个环境门让它不跑"）在这三个套件里一直开着。
+
+    这条直接跑 `check_budget`：一条"打了 2 条 SKIP、0 条带名字"的结果必须出问题；
+    反过来"1 条带名字且登记过"不能出问题（否则判据本身在滥杀）。
+    """
+    import ci
+
+    r = ci.Result("probe_unnamed", True, "probe: 1/1 通过", 0.1, 2, ("p",), (), 1, False)
+    bad = ci.check_budget([r], {"probe_unnamed": 1}, set(), in_ci=False)
+    assert any("没有名字" in b for b in bad), f"没名字的跳过没被判失败：{bad}"
+
+    r2 = ci.Result("probe_named", True, "probe: 1/2 通过, 1 SKIP", 0.1,
+                   1, ("p",), ("test_x",), 2, False)
+    assert not ci.check_budget([r2], {"probe_named": 2}, {("probe_named", "test_x")},
+                               in_ci=False), "登记好的跳过不该被判失败"
+    print("      跳过没名字 = 判失败；有名字且登记过 = 放过")
+
+
+@test
+def test_gate_only_reports_a_stale_skip_for_a_suite_it_ran():
+    """「登记了却没跳」的 notice **只能对"这一趟跑过的套件"打**。
+
+    分片跑的时候 `results` 只是这一片的套件。若直接拿 `skips - seen` 去滤，表里所有
+    **不在这一片**的条目都会被点成"这次没跳" —— 于是那句"照 notice 把表削短"会变成
+    **把整张表删光**。实测过：合并 `#382` 之后那一轮（run 38817007229），六个分片的
+    notice 合起来正好覆盖整张 140 条的表；按它削，表会被清空而不是变短。
+
+    这里直接跑 `check_budget`：一个"这一趟没跑的套件"的条目**不许**出现在 notice 里。
+    """
+    import contextlib
+    import io
+
+    import ci
+
+    ran = ci.Result("probe_ran", True, "probe: 1/1 通过", 0.1, 0, ("p",), (), 1, False)
+    skips = {("probe_ran", "test_never_runs"),        # 这一趟跑了 → 该点它
+             ("probe_absent", "test_other")}          # 这一趟没跑 → 不许点它
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        ci.check_budget([ran], {"probe_ran": 1}, skips, in_ci=True)
+    text = out.getvalue()
+    assert "probe_ran test_never_runs" in text, (
+        f"这一趟跑过、而它没跳的条目没被点名（削表就少了依据）：{text!r}")
+    assert "probe_absent" not in text, (
+        "把**这一趟没跑**的套件的条目也点成没跳 —— 照它削表会把整张表删光")
+    print("      只点「跑了却没跳」的条目（没跑的套件不点）")
+
+
+@test
+def test_lomf_patches_in_the_tree_are_applied():
+    """树里的每一份 `.lomf` 都**已经套用**了 —— 补丁是这一笔的**记录**，源是**事实**。
+
+    **Why**：`.lomf` 不参与编译（编译器不认这个后缀），所以它唯一的价值就是"这一笔改了什么"
+    的那份**可核对**记录。若允许"补丁放着、源另说"，它就会立刻腐烂成一份没人对得上的说明书
+    —— 那比没有更坏。这条判据把两者钉在一起：**每一处 `old` 都必须 0 次、`new` 都必须
+    正好 `expect` 次**（也就是 `lomf.DONE`）。
+
+    **How to apply**：套用器分得清"待套用"与"已套用"，所以这一条能问得很准。新增补丁要
+    在**同一个 PR 里**套用；套用器报"待套用"就是这条红。
+    """
+    import lomf
+    pats = sorted((ROOT / "loment" / "patches").glob("*.lomf"))
+    assert pats, ("`loment/patches/` 下一份修改件都没有 —— 这条判据自己先失效了"
+                  "（那时它无法证明任何事）")
+    bad = []
+    for p in pats:
+        _slug, _about, edits = lomf.load(p)
+        for e in edits:
+            st, old_n, new_n = e.state()
+            if st != lomf.DONE:
+                bad.append(f"{p.name}: {e.path}（旧={old_n} 新={new_n} 期望={e.expect}）")
+    assert not bad, (
+        f"这些修改件在树里**没有套用**（或只套了一半）：{bad} —— `.lomf` 与源必须一致，"
+        "否则它就成了一份对不上的说明书")
+    print(f"      {len(pats)} 份修改件都已在树里套用")
+
+
+@test
+def test_lomf_never_applies_on_a_guess():
+    """对不上就**一处也不改**，互为子串就**拒收**（`.lomf` 的两条硬规矩）。
+
+    **Why**：修改件不按行号、按逐字节片段定位，所以"对不上"是**必然会发生**的事（别人改过
+    同一段、或者这一笔只落了一半）。那一时刻只有两种选择：猜，或者停。猜的后果是**静默改错
+    文件**，而这类改动住在运行时 IR 里 —— 猜错的地方不会报错，只会在很久以后表现为一个
+    莫名的回收行为。所以：**对不上报错、一处不动**。
+
+    "互为子串"那条更隐蔽：套用是**幂等**的（靠「旧 0 次、新 expect 次」认"已经套过"），
+    而插入式替换天然让 `old` 成为 `new` 的子串 —— 那种补丁套第二次会**再插一遍**，
+    且套用器无从分辨。所以那条形状在**解析期**就被拒。
+    """
+    import lomf
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        target = tmp / "x.txt"
+        pat = tmp / "p.lomf"
+
+        def write_patch(body: str) -> None:
+            pat.write_text("lomf 1\nmod t\nabout 试\n\n" + body,
+                           encoding="utf-8", newline="\n")
+
+        old_root = lomf.ROOT
+        lomf.ROOT = tmp
+        try:
+            # ① 次数对不上（期望 2、实际 1）—— 必须报错，且**不动盘**
+            target.write_bytes(b"aaa\n")
+            write_patch("edit x.txt expect 2\nold <<<\naaa\n>>>\nnew <<<\nbbb\n>>>\n")
+            rc = lomf.cmd_apply(pat, write=True)
+            assert rc == 1, f"次数对不上却返回 {rc}（期望 1）"
+            assert target.read_bytes() == b"aaa\n", "次数对不上却动了盘"
+
+            # ② 次数多出来也一样（期望 1、实际 2）
+            target.write_bytes(b"aaa\naaa\n")
+            write_patch("edit x.txt expect 1\nold <<<\naaa\n>>>\nnew <<<\nbbb\n>>>\n")
+            rc = lomf.cmd_apply(pat, write=True)
+            assert rc == 1, f"次数多出来却返回 {rc}（期望 1）"
+            assert target.read_bytes() == b"aaa\naaa\n", "次数多出来却动了盘"
+
+            # ③ 插入式（old 是 new 的子串）—— 解析期就拒
+            write_patch("edit x.txt expect 1\nold <<<\naaa\n>>>\nnew <<<\naaa\nccc\n>>>\n")
+            try:
+                lomf.load(pat)
+            except lomf.LomfError as e:
+                assert "互为子串" in str(e), f"拒了，但报文不对：{e}"
+            else:
+                raise AssertionError("插入式替换（old 是 new 的子串）应该被拒 —— "
+                                     "它套第二次会再插一遍")
+
+            # ④ 好的一笔：逐字节替换 + 幂等（第二次说"已经套用"，一个字节都不改）
+            target.write_bytes(b"aaa\n")
+            write_patch("edit x.txt expect 1\nold <<<\naaa\n>>>\nnew <<<\nbbb\n>>>\n")
+            assert lomf.cmd_apply(pat, write=True) == 0, "该套用的没套上"
+            assert target.read_bytes() == b"bbb\n", f"落盘字节不对：{target.read_bytes()!r}"
+            assert lomf.cmd_apply(pat, write=True) == 0, "重复套用应当无害"
+            assert target.read_bytes() == b"bbb\n", "重复套用改了盘（该是幂等）"
+            _slug, _about, edits = lomf.load(pat)
+            assert edits[0].state()[0] == lomf.DONE, "套过之后状态应当是「已套用」"
+        finally:
+            lomf.ROOT = old_root
+    print("      对不上就报错、一处不动；插入式在解析期被拒；套用与重复套用都幂等")
+
+
+@test
+def test_m77_lspe_state_why_and_verify_are_real():
+    """`lspe state` 打台账；`why` 打派生链；`verify` 核旁挂（0.1.5.2 起不再是桩）。"""
+    src = str(EX / "demo.lomt")
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "state", src],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert r.returncode == 0, r.stderr[-300:]
+    doc = json.loads(r.stdout)
+    assert doc["state"] == "lspe_open_admin", doc
+    assert doc["sites"] == doc["proved"] + doc["undecided"], doc
+
+    # `why`：拿一个真实站点 id，派生链要打出 claim / obligation / proof_hash。
+    mod, deps = lomentc.load_unit(EX / "demo.lomt", ROOT)
+    sid = mod.lspe_sites[0]["id"]
+    s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "why", sid, src],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert s.returncode == 0, s.stderr[-300:]
+    assert ("claim" in s.stdout and "obligation" in s.stdout
+            and "proof_hash" in s.stdout), s.stdout
+
+    # `why` 不给文件 = 用法错（不是"0.1.5.2 的桩"）。
+    s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "why", "S47"],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert s.returncode == 2 and "用法" in s.stderr, (s.returncode, s.stderr)
+
+    # `verify`：进程内出旁挂，再离线核 —— 不重编译。
+    side: dict = {}
+    potato = lomentc.emit_potato(mod, ROOT, deps, sidecar=True, sidecar_out=side)
+    with tempfile.TemporaryDirectory() as td:
+        art = Path(td) / "demo.potato.json"
+        sc = Path(td) / "demo.lspe"
+        art.write_text(potato, encoding="utf-8", newline="\n")
+        sc.write_text(json.dumps(side, ensure_ascii=False), encoding="utf-8")
+        v = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "lspe", "verify", str(art), str(sc)],
+                           capture_output=True, text=True, encoding="utf-8", shell=False)
+        assert v.returncode == 0, v.stderr[-300:]
+        assert "[LSPE] ok" in v.stdout, v.stdout
+
+    s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                        "lspe", "verify", "x"],
+                       capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert s.returncode == 2 and "用法" in s.stderr, (s.returncode, s.stderr)
+
+
+@test
+def test_m77b_lspe_state_lists_q013_for_unchecked_blocks():
+    """`loment lspe state` 每次都列 **Q013** 那一族（`docs/262` §5.10 / §5.16 / #786）。
+
+    有旁路块时一条族级 + 每块一条；**没有块时也有族级那一条**（"0 block"）——
+    LSPC 不沉默，沉默不是合法的"没风险"。
+    """
+    import tempfile
+    src = ("module q013\n\nfn f(a: [u32; 4]) -> u32 {\n"
+           "    lspe pass \"caller checked\" {\n"
+           "        let p: u32 = a[1];\n"
+           "    }\n"
+           "    return a[0] + p;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "q013.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                            "lspe", "state", str(p)],
+                           capture_output=True, text=True, encoding="utf-8", shell=False)
+        assert r.returncode == 0, r.stderr[-400:]
+        doc = json.loads(r.stdout)
+        assert doc["pass_sites"] == 1 and doc["passed_sites"] == 1, doc
+        assert "[LSPC] Q013" in r.stderr, r.stderr
+        assert "1 block" in r.stderr, r.stderr
+        assert "caller checked" in r.stderr, r.stderr
+    # 没有块的单元：仍有一条**族级** Q013（0 是一个可核的声明）。
+    r0 = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
+                         "lspe", "state", str(EX / "demo.lomt")],
+                        capture_output=True, text=True, encoding="utf-8", shell=False)
+    assert r0.returncode == 0, r0.stderr[-300:]
+    assert "[LSPC] Q013" in r0.stderr and "0 block" in r0.stderr, r0.stderr
+
+
+def main() -> int:
+    return loment_suite.run(TESTS, "loment_tools_test")
 
 
 if __name__ == "__main__":

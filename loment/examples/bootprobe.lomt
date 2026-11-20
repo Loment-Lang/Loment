@@ -1,4 +1,5 @@
 module bootprobe
+choose runtime
 
 // M76: 引导探针 —— 在 FujoOS 用户态读内核事实 (uname) 并打印。
 

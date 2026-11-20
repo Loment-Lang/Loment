@@ -12,6 +12,7 @@
 //   ./lomdoc <文件.lomt> > out.md
 
 module lomdoc
+choose runtime
 
 use lexer
 use switches
@@ -74,8 +75,21 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 面向用户的失败消息: `loment: <msg>` 换行。前缀是 **`loment`**(用户敲的那个命令),
+/// 不是 `lomdoc`(这个包里的文档器组件名) —— issue #8。
 fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
     write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
+    return die(1);
+}
+
+/// 同 `fail`, 消息后面接一段**已经量好的字节** (路径)。
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, tail, n as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
     return die(1);
 }
 
@@ -291,6 +305,58 @@ fn pack(i: u32, o: u32) -> u64 {
 
 /// 类型名 -> 规范化文本 (`mut [X]` / `[X; N]` / `Name<A, B>`), 与 lomentc.type_name 同口径。
 fn ptype(mem: ptr, src: ptr, t: ptr, i: u32) -> u64 {
+    // 借用 `&T` / `&mut T` / `&a T`（`docs/299`），与 `lomentc.type_name` 同口径：
+    // 切片借用规范化（`&[T]` -> `[T]`、`&mut [T]` -> `mut [T]`），区域标记照写。
+    if tk_is(src, t, i, "&") {
+        let j: u32 = i + 1;
+        let mf: u32 = 0;
+        if tk_is(src, t, j, "mut") {
+            mf = 1;
+            j = j + 1;
+        }
+        let rg: u32 = 0;
+        if tk_kind(t, j) == 0 && (tk_kind(t, j + 1) == 0 || tk_is(src, t, j + 1, "[")) {
+            rg = 1;
+            j = j + 1;
+        }
+        let sep: u32 = 0;
+        if tk_is(src, t, j, "[") {
+            let c: u32 = j + 1;
+            let d: u32 = 0;
+            let done: u32 = 0;
+            while tk_kind(t, c) != 4 && done == 0 {
+                if tk_is(src, t, c, "[") {
+                    d = d + 1;
+                } else if tk_is(src, t, c, "]") {
+                    if d == 0 {
+                        done = 1;
+                    } else {
+                        d = d - 1;
+                    }
+                } else if tk_is(src, t, c, ";") && d == 0 {
+                    sep = 1;
+                }
+                if done == 0 {
+                    c = c + 1;
+                }
+            }
+        }
+        if sep == 0 && tk_is(src, t, j, "[") {
+            if mf == 1 {
+                em(mem, "mut ");
+            }
+            return ptype(mem, src, t, j);
+        }
+        em(mem, "&");
+        if mf == 1 {
+            em(mem, "mut ");
+        }
+        if rg == 1 {
+            em_tok(mem, src, t, j - 1);
+            em(mem, " ");
+        }
+        return ptype(mem, src, t, j);
+    }
     if tk_is(src, t, i, "mut") && tk_is(src, t, i + 1, "[") {
         em(mem, "mut [");
         let r1: u64 = ptype(mem, src, t, i + 2);
@@ -672,8 +738,8 @@ fn sec_structs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                     em_tok(mem, src, t, i + 1);
                     el(mem, "`");
                     em_doc_part(mem, src, len, tk_line(t, i));
-                    el(mem, "| 字段 | 类型 |");
-                    el(mem, "|---|---|");
+                    el(mem, "| 字段 | 类型 | 说明 |");
+                    el(mem, "|---|---|---|");
                     let h: u32 = i + 2;
                     let g: u32 = h;
                     let go: u32 = 1;
@@ -694,8 +760,12 @@ fn sec_structs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                         em_tok(mem, src, t, f);
                         em(mem, "` | `");
                         let fr: u64 = ptype(mem, src, t, f + 2);
-                        em(mem, "` |");
-                        el(mem, "");
+                        em(mem, "` | ");
+                        // 字段的 `///` 与声明一样按**行号**取（镜像 `Struct.field_lines`）：
+                        // 注释挂在字段名那一行上方，与类型写在哪一行无关。
+                        let fdn: u32 = collect_doc(mem, src, len, tk_line(t, f));
+                        em_doc(mem, src, fdn);
+                        el(mem, " |");
                         f = (fr / 4294967296) as u32;
                         if tk_is(src, t, f, ",") {
                             f = f + 1;
@@ -762,6 +832,8 @@ fn sec_enums(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                     }
                     let v: u32 = h + 1;
                     while v < n && !tk_is(src, t, v, "}") && tk_kind(t, v) != 4 {
+                        // 变体的 `///` 与别的声明同一口径：按**变体名那一行**往上取。
+                        let vdn: u32 = collect_doc(mem, src, len, tk_line(t, v));
                         em(mem, "- `");
                         em_tok(mem, src, t, i + 1);
                         em(mem, "::");
@@ -774,6 +846,11 @@ fn sec_enums(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                             v = ((pr / 4294967296) as u32) + 1;
                         } else {
                             v = v + 1;
+                        }
+                        // 空注释不印分隔符 —— 空行上没有要说的东西，多一个 ` — ` 就是噪声。
+                        if vdn > 0 {
+                            em(mem, " — ");
+                            em_doc(mem, src, vdn);
                         }
                         el(mem, "");
                         if tk_is(src, t, v, ",") {
@@ -952,17 +1029,28 @@ fn skip_generics(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
 }
 
 /// 函数: 顶层 fn + impl 方法 (折叠名 `<类型>_<方法>`, 首参 `__self: <类型>`)。
+///
+/// `register <名字> { … }` (`docs/223` 形态 A) 里的那个函数**也是顶层函数** ——
+/// 块那层壳语义上是透明的 (参考实现按 AST 收, 根本没有这一层), 但对**按深度走**
+/// 的这里它是可见的: 不单独认出来, 块里的函数就整个看不见 (#399)。
 fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
     let i: u32 = 0;
     let depth: u32 = 0;
     let cnt: u32 = 0;
     let impl_ty: u32 = 0;
     let impl_depth: u32 = 0;
+    let reg_depth: u32 = 0;            // register 块那一层的深度 (不在块里就是 0)
     while i < n && tk_kind(t, i) != 4 {
         if tk_is(src, t, i, "{") {
+            let d0: u32 = depth;
             depth = depth + 1;
             if impl_ty != 0 && impl_depth == 0 {
                 impl_depth = depth;
+            }
+            // 块 `{` 前面两格正好是 `register` `<名字>` —— 形状由 `_reg_one_fn` 钉死
+            // (块里恰好一个函数)。`fn register(…)` 那种的 `{` 前面是 `)`, 不会误认。
+            if d0 == 0 && reg_depth == 0 && i >= 2 && tk_is(src, t, i - 2, "register") {
+                reg_depth = depth;
             }
             i = i + 1;
         } else {
@@ -973,6 +1061,9 @@ fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                 if impl_ty != 0 && depth < impl_depth {
                     impl_ty = 0;
                     impl_depth = 0;
+                }
+                if reg_depth != 0 && depth < reg_depth {
+                    reg_depth = 0;
                 }
                 i = i + 1;
             } else {
@@ -1007,6 +1098,9 @@ fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                         }
                         let is_free: u32 = 0;
                         if depth == 0 && tk_is(src, t, i, "fn") {
+                            is_free = 1;
+                        }
+                        if reg_depth != 0 && depth == reg_depth && tk_is(src, t, i, "fn") {
                             is_free = 1;
                         }
                         if is_method == 1 || is_free == 1 {
@@ -1115,6 +1209,47 @@ fn render(mem: ptr, src: ptr, len: u32, t: ptr, n: u32, path: ptr, pn: u32) -> u
     return olen(mem);
 }
 
+// ---------------------------------------------------------------- 别的写法要拦住
+
+/// 文件头是不是**别的表层写法**（`docs/182` §1.9 / `#144`）？是就返回 1。
+///
+/// `lomdoc` 是**独立入口**：它拿词法层直接读原文、**不走前门** —— 而一份 `.lomt`
+/// 里可以装六种写法的任何一种。对 C 那门后果很重：
+///
+///     choose write grammar c unsigned int f(unsigned int x) {   ← 声明与函数头揉成一行
+///
+/// 声明那一行整个是"**怎么读**"：前门按它定读法、再抹成等长空白 ⇒ **那一行上的
+/// 函数跟着一起消失**，单元变空，而这里**退 0** 给出一份没有函数的文档（模块名还
+/// 成了 `grammar`）。同一份文件 `loment check` 是**响亮地拒**的 —— 一套工具链两个答案。
+///
+/// 所以与参考实现 `potato_from.refuse_foreign_grammar` 同一条：**认出非原生写法就拒**。
+/// `loment` / `rust` 是原生（`NATIVE_GRAMMARS`），照旧放行。
+///
+/// 找法与报错器的 `decl_at` 同一个形状：**只找那一行**（`choose write grammar <别名>`
+/// 三个词同行、别名紧跟着），而且它必须在 `module` 之前（`docs/188` §1）。
+fn foreign_grammar(src: ptr, t: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        if tk_is(src, t, i, "module") == true {
+            return 0;                       // 声明必须写在 `module` 之前
+        }
+        if tk_is(src, t, i, "choose") == true && i + 3 < n
+                && tk_is(src, t, i + 1, "write") == true
+                && tk_is(src, t, i + 2, "grammar") == true
+                && tk_line(t, i) == tk_line(t, i + 1)
+                && tk_line(t, i) == tk_line(t, i + 2)
+                && tk_line(t, i) == tk_line(t, i + 3) {
+            if tk_is(src, t, i + 3, "loment") == true
+                    || tk_is(src, t, i + 3, "rust") == true {
+                return 0;                   // 原生写法，照旧放行
+            }
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 // ---------------------------------------------------------------- 入口
 
 fn _start() -> u32 {
@@ -1125,7 +1260,7 @@ fn _start() -> u32 {
     let scrv: u64 = sys_alloc(SCR_CAP as u64);
     let swv: u64 = sys_alloc(SW_BYTES as u64);
     if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 || swv == 0 {
-        return fail("lomdoc: brk failed\n");
+        return fail("out of memory (brk failed)");
     }
     let mem: ptr = memv as ptr;
     let src: ptr = srcv as ptr;
@@ -1134,13 +1269,13 @@ fn _start() -> u32 {
     let sw: ptr = swv as ptr;
     let av: u64 = argv1(argv_buf as ptr, 65536, scr);
     if av == 0 {
-        return fail("lomdoc: 用法: lomdoc <文件.lomt>\n");
+        return fail("usage: loment doc <file.lomt>");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, scr);
     if fd < 0 {
-        return fail("lomdoc: 打不开输入文件\n");
+        return failp("cannot open the input file: ", ap, an);
     }
     let raw: u64 = read_all(fd as u64, src, SRC_CAP as u64);
     syscall4(3, fd as u64, 0, 0);
@@ -1150,6 +1285,11 @@ fn _start() -> u32 {
     // 里的声明落在 depth 1, 走查顶层的那一圈**看不见它**, 而参考实现走 `lomentc.load`
     // （已摊开）会记下来, 两边对照就红了。实测撞到（`loment_doc_test`）。
     let ntok0: u32 = lex(src, len, toks);
+    // **别的写法在这里拦住**（`#144`）—— 必须在**看词法流之前**，因为声明那一行
+    // 一旦被 `apply_switches` 吃掉，下文就全是"照着译文读原文"的错位。
+    if foreign_grammar(src, toks, ntok0) == 1 {
+        return fail("this source is written in another grammar (its header has `choose write grammar`) and this documentation generator takes the native spelling only -- hand the file to the compiler instead: `loment check <file>`");
+    }
     let ntok: u32 = apply_switches(src, toks, ntok0, sw);
     let m: u32 = render(mem, src, len, toks, ntok, ap, an);
     write_all(1, ptr_add(mem, OUT_OFF), m as u64);

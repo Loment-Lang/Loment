@@ -66,12 +66,24 @@ def _sh(*argv: str, timeout: int = 300) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=timeout)
 
 
-def _ps(script: str, timeout: int = 300) -> subprocess.CompletedProcess:
-    """跑一段 PowerShell (Windows 自带; 没有它就没法做 Authenticode)。"""
+def _ps(script: str, timeout: int = 300,
+        env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """跑一段 PowerShell (Windows 自带; 没有它就没法做 Authenticode)。
+
+    `env` 是**整份子进程环境**: 口令、证书路径、目标路径都从这里交给脚本, 由脚本用
+    `$env:` 读 —— 它们绝不进 argv, 也就不出现在进程命令行/日志里 (#426)。
+    """
     ps = "powershell" if os.name == "nt" else "pwsh"
     return subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-                          capture_output=True, text=True, shell=False,
+                          capture_output=True, text=True, shell=False, env=env,
                           encoding="utf-8", errors="replace", cwd=str(ROOT), timeout=timeout)
+
+
+def _env_with(**values: str) -> dict[str, str]:
+    """复制当前环境并放上这次的动态值 (不修改 os.environ)。"""
+    env = dict(os.environ)
+    env.update(values)
+    return env
 
 
 def find_signtool() -> str | None:
@@ -102,15 +114,17 @@ def keygen(subject: str = SUBJECT) -> int:
     SIGN.mkdir(parents=True, exist_ok=True)
     # 先清掉同主题的旧证书: 反复 --keygen 不该在存储里堆一串同名证书
     # (否则"这份文件是谁签的"要看指纹才知道, 而且旧证书仍能签名)
-    _ps(f"Get-ChildItem Cert:\\CurrentUser\\My | "
-        f"Where-Object {{ $_.Subject -eq '{subject}' }} | "
-        f"Remove-Item -Force -ErrorAction SilentlyContinue")
+    _ps("Get-ChildItem Cert:\\CurrentUser\\My | "
+        "Where-Object { $_.Subject -eq $env:LOMENT_SIGN_SUBJECT } | "
+        "Remove-Item -Force -ErrorAction SilentlyContinue",
+        env=_env_with(**{"LOMENT_SIGN_SUBJECT": subject}))
     r = _ps(
-        f"$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject '{subject}' "
-        f"-KeyUsage DigitalSignature -CertStoreLocation Cert:\\CurrentUser\\My "
-        f"-NotAfter (Get-Date).AddYears(2) -FriendlyName 'Loment dev signing'; "
-        f"Export-Certificate -Cert $c -FilePath '{CER}' | Out-Null; "
-        f"Write-Output $c.Thumbprint")
+        "$c = New-SelfSignedCertificate -Type CodeSigningCert -Subject $env:LOMENT_SIGN_SUBJECT "
+        "-KeyUsage DigitalSignature -CertStoreLocation Cert:\\CurrentUser\\My "
+        "-NotAfter (Get-Date).AddYears(2) -FriendlyName 'Loment dev signing'; "
+        "Export-Certificate -Cert $c -FilePath $env:LOMENT_SIGN_CER | Out-Null; "
+        "Write-Output $c.Thumbprint",
+        env=_env_with(**{"LOMENT_SIGN_SUBJECT": subject, "LOMENT_SIGN_CER": str(CER)}))
     if r.returncode != 0 or not r.stdout.strip():
         print(f"[ERR] 生成自签证书失败: {(r.stderr or r.stdout)[-300:]}", file=sys.stderr)
         return 1
@@ -143,11 +157,12 @@ def trust(add: bool) -> int:
     thumb = THUMB.read_text(encoding="utf-8").strip()
     verb = "Add" if add else "Remove"
     stores = ["Cert:\\CurrentUser\\TrustedPublisher", "Cert:\\CurrentUser\\Root"]
-    script = "; ".join(f"{verb}-Item -Path Cert:\\CurrentUser\\My\\{thumb} "
-                       f"-CertStoreLocation '{s}'" if add else
-                       f"Remove-Item -Path '{s}\\{thumb}' -Force -ErrorAction SilentlyContinue"
-                       for s in stores)
-    r = _ps(script)
+    script = "$t = $env:LOMENT_SIGN_THUMB; " + "; ".join(
+        (f"{verb}-Item -Path (\"Cert:\\CurrentUser\\My\\\" + $t) "
+         f"-CertStoreLocation '{s}'" if add else
+         f"Remove-Item -Path ('{s}\\' + $t) -Force -ErrorAction SilentlyContinue")
+        for s in stores)
+    r = _ps(script, env=_env_with(**{"LOMENT_SIGN_THUMB": thumb}))
     if r.returncode != 0:
         print(f"[ERR] 信任操作失败: {(r.stderr or '')[-200:]}", file=sys.stderr)
         return 1
@@ -159,8 +174,9 @@ def trust(add: bool) -> int:
 def remove(purge: bool) -> int:
     if THUMB.exists():
         thumb = THUMB.read_text(encoding="utf-8").strip()
-        r = _ps(f"Remove-Item -Path Cert:\\CurrentUser\\My\\{thumb} -Force "
-                f"-ErrorAction SilentlyContinue; Write-Output done")
+        r = _ps("Remove-Item -Path (\"Cert:\\CurrentUser\\My\\\" + $env:LOMENT_SIGN_THUMB) "
+                "-Force -ErrorAction SilentlyContinue; Write-Output done",
+                env=_env_with(**{"LOMENT_SIGN_THUMB": thumb}))
         print(f"[OK] 已从证书存储删除 {thumb}" if r.returncode == 0 else f"[WARN] 删除失败: {r.stderr[-160:]}")
         THUMB.unlink()
     if GPG_FPR.exists():
@@ -177,6 +193,25 @@ def remove(purge: bool) -> int:
 
 
 # ---------------------------------------------------------------- Authenticode
+
+def _authenticode_script(use_pfx: bool, ts: bool) -> str:
+    """Set-AuthenticodeSignature 脚本 —— 动态值一律经 `$env:` 读，不做字符串拼接。
+
+    这是 #426 的根：口令/路径一旦被 `'...'` 拼进脚本，它们就同时出现在
+    `powershell.exe` 的命令行上（任何能读进程命令行的人都能看到），而且带撇号的路径
+    会提前结束引号、把后半段变成 PowerShell 代码。脚本本身现在是**常量**。
+    """
+    sign = ("$s = Set-AuthenticodeSignature -Certificate $c "
+            "-FilePath $env:LOMENT_SIGN_FILE -HashAlgorithm SHA256")
+    if ts:
+        sign += " -TimestampServer $env:LOMENT_SIGN_TS"
+    if use_pfx:
+        head = (f"$c = New-Object System.Security.Cryptography.X509Certificates."
+                f"X509Certificate2($env:{ENV_PFX}, $env:{ENV_PASS}); ")
+    else:
+        head = '$c = Get-Item ("Cert:\\CurrentUser\\My\\" + $env:LOMENT_SIGN_THUMB); '
+    return head + sign + "; Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)"
+
 
 def sign_pe(files: list[str], a) -> int:
     pfx, pw, thumb = cert_spec(a)
@@ -205,19 +240,21 @@ def sign_pe(files: list[str], a) -> int:
                 r = _sh(*argv)
                 status = "signtool rc=0" if r.returncode == 0 else ""
             else:
-                ts = (f"; $s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
-                      f"-HashAlgorithm SHA256 -TimestampServer '{a.ts}'" if a.ts else
-                      f"; $s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
-                      f"-HashAlgorithm SHA256")
-                r = _ps(f"$c = New-Object System.Security.Cryptography.X509Certificates."
-                        f"X509Certificate2('{pfx}','{pw}')" + ts +
-                        "; Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)")
+                # #426: password, PFX path and target path go through the CHILD'S
+                # ENVIRONMENT, never argv and never spliced into the -Command string.
+                # The passphrase would otherwise be readable from process command lines
+                # (another user, an endpoint agent, a log), and `'{p}'` ends the quoted
+                # string when a path contains an apostrophe.
+                env = _env_with(**{ENV_PFX: pfx, ENV_PASS: pw,
+                                   "LOMENT_SIGN_FILE": str(p)})
+                if a.ts:
+                    env["LOMENT_SIGN_TS"] = a.ts
+                r = _ps(_authenticode_script(True, bool(a.ts)), env=env)
                 status = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
         else:
-            r = _ps(f"$c = Get-Item Cert:\\CurrentUser\\My\\{thumb}; "
-                    f"$s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
-                    f"-HashAlgorithm SHA256; "
-                    f"Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)")
+            r = _ps(_authenticode_script(False, False),
+                    env=_env_with(**{"LOMENT_SIGN_FILE": str(p),
+                                     "LOMENT_SIGN_THUMB": thumb or ""}))
             status = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
         # **必须看返回的状态**: Set-AuthenticodeSignature 签名失败时既不抛异常也不改退出码,
         # 只看 rc 会报"已签名"而文件其实没签 (2026-09-12 真踩到: verify 立刻说 NotSigned)
@@ -227,10 +264,9 @@ def sign_pe(files: list[str], a) -> int:
             # 刚 --keygen 出来的证书偶尔第一次签不上 (私钥容器还没就绪): 隔 1 秒重试一次
             import time
             time.sleep(1.0)
-            r2 = _ps(f"$c = Get-Item Cert:\\CurrentUser\\My\\{thumb}; "
-                     f"$s = Set-AuthenticodeSignature -Certificate $c -FilePath '{p}' "
-                     f"-HashAlgorithm SHA256; "
-                     f"Write-Output ($s.Status.ToString() + '|' + $s.StatusMessage)")
+            r2 = _ps(_authenticode_script(False, False),
+                     env=_env_with(**{"LOMENT_SIGN_FILE": str(p),
+                                      "LOMENT_SIGN_THUMB": thumb or ""}))
             status2 = (r2.stdout or "").strip().splitlines()[-1] if r2.stdout.strip() else ""
             st2 = status2.split("|")[0].strip()
             if status2 and st2 in ("UnknownError", "Valid"):
@@ -254,9 +290,10 @@ def verify_pe(files: list[str], strict: bool) -> int:
             print(f"[ERR] 文件不存在: {f}", file=sys.stderr)
             rc = 1
             continue
-        r = _ps(f"$s = Get-AuthenticodeSignature -FilePath '{p}'; "
-                f"$sub = if ($s.SignerCertificate) {{ $s.SignerCertificate.Subject }} else {{ '-' }}; "
-                f"Write-Output ($s.Status.ToString() + '|' + $sub)")
+        r = _ps("$s = Get-AuthenticodeSignature -FilePath $env:LOMENT_SIGN_FILE; "
+                "$sub = if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { '-' }; "
+                "Write-Output ($s.Status.ToString() + '|' + $sub)",
+                env=_env_with(**{"LOMENT_SIGN_FILE": str(p)}))
         line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else "|"
         status, _, sub = line.partition("|")
         signed = sub not in ("", "-")

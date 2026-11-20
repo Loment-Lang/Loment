@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Loment (C# surface grammar)",
+  "scopeName": "source.loment.csharp",
+  "comment": "一份 Loment 源，文件头写了 `choose write grammar csharp`（别名还收 `cs` / `c#`）—— 正文是 C# 写法、语义仍是 Loment（docs/188）。上色借宿主的 `source.cs`（由 C# 扩展提供）；宿主没装时只有声明那一行着色。",
+  "patterns": [
+    { "include": "source.loment#grammar-decl" },
+    { "include": "source.cs" }
+  ]
+}

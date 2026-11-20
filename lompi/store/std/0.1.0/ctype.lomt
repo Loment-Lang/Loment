@@ -1,0 +1,158 @@
+// std/ctype.lomt — LibL 的 `<ctype.h>`：字节分类与大小写（C locale）
+//
+// **LibL 是什么**：这门语言的标准库的专有名词。它的形态照 libc —— 一个 libc 头对一个
+// 模块，函数名、参数序、返回值语义都取 libc 的。这一份就是 `<ctype.h>`（docs/232）。
+//
+// 为什么不复用 `char.lomt`：`char_*` 是同一件事的**早一层**写法（8 个函数，没有
+// punct/cntrl/print/graph/blank），而 LibL 要的是 libc 那一整套名字与集合。所以这里
+// 是**在 char_* 之上补全到 libc 的面**，不是另写一份判定：`isdigit` 直接调 `char_is_digit`，
+// 于是两个模块对同一个字节不会给出两个答案。
+//
+// **C locale 就是 ASCII**：判据里与 glibc 对跑（tools/loment_libl_test.py）时两边都在
+// 默认 locale 下，所以 `>=128` 的字节一律不是字母/数字。这不是"只做 ASCII 的降级"，
+// 是 libc 在 C locale 下的原语义。
+//
+// **返回值是 `bool`，不是 libc 的位掩码**：glibc 的 `isdigit` 展开成
+// `(*__ctype_b_loc())[c] & _ISdigit`，返回的是**掩码值**（不是 1）。判据里两边都归一化
+// 成 0/1 再比 —— 比的是"是不是"，不是 glibc 的内部常量。
+//
+// 命名：平名字空间，公开一律 libc 名（`isdigit` …），内部一律 `ct_*`。
+// 自检一律 `test_ctype_*`（私有名同样占全局拼写，不带前缀会按 E13 撞车，docs/158 §2）。
+
+module ctype
+
+// 需求：这一族要用到运行期（除法/取模/`alloc`）—— 库里写 `choose` 是**声明需求**，
+// 根单元要满足它（docs/227 §2.2）。包内 126 个模块已是同一个形状。
+
+use "char.lomt"
+
+/// `isdigit` —— '0'..'9'。
+pub fn isdigit(c: u32) -> bool {
+    return char_is_digit(c);
+}
+
+/// `isupper` —— 'A'..'Z'。
+pub fn isupper(c: u32) -> bool {
+    return char_is_upper(c);
+}
+
+/// `islower` —— 'a'..'z'。
+pub fn islower(c: u32) -> bool {
+    return char_is_lower(c);
+}
+
+/// `isalpha` —— 字母。
+pub fn isalpha(c: u32) -> bool {
+    return char_is_alpha(c);
+}
+
+/// `isalnum` —— 字母或数字。
+pub fn isalnum(c: u32) -> bool {
+    return char_is_alnum(c);
+}
+
+/// `isspace` —— 空格与 \t \n \v \f \r（0x09..0x0D 加 0x20）。
+pub fn isspace(c: u32) -> bool {
+    return char_is_space(c);
+}
+
+/// `isxdigit` —— 十六进制数字，大小写都收。
+pub fn isxdigit(c: u32) -> bool {
+    return char_is_hex(c);
+}
+
+/// `isblank` —— 空格或 \t（**不是** `isspace`：\n 不算）。
+pub fn isblank(c: u32) -> bool {
+    return c == 32 || c == 9;
+}
+
+/// `iscntrl` —— 0x00..0x1F 与 0x7F。
+pub fn iscntrl(c: u32) -> bool {
+    return c < 32 || c == 127;
+}
+
+/// `isprint` —— 0x20..0x7E。
+pub fn isprint(c: u32) -> bool {
+    return c >= 32 && c <= 126;
+}
+
+/// `isgraph` —— 0x21..0x7E（可打印且不是空格）。
+pub fn isgraph(c: u32) -> bool {
+    return c >= 33 && c <= 126;
+}
+
+/// `ispunct` —— 可打印、不是空格、也不是字母数字。
+///
+/// **分成两步写而不是一个大区间**：直接写区间会把 `char_is_alnum` 那份集合抄第二遍，
+/// 两边一旦分叉就是"同一个字节两个答案"。
+pub fn ispunct(c: u32) -> bool {
+    if isgraph(c) == false {
+        return false;
+    }
+    return char_is_alnum(c) == false;
+}
+
+/// `toupper` —— 只动 'a'..'z'，其余原样返回。
+pub fn toupper(c: u32) -> u32 {
+    return char_to_upper(c);
+}
+
+/// `tolower` —— 只动 'A'..'Z'，其余原样返回。
+pub fn tolower(c: u32) -> u32 {
+    return char_to_lower(c);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_ctype_digit() -> bool {
+    return isdigit(48) && isdigit(57) && !isdigit(47) && !isdigit(58);
+}
+
+fn test_ctype_alpha() -> bool {
+    return isalpha(65) && isalpha(97) && !isalpha(48) && !isalpha(64) && !isalpha(91);
+}
+
+fn test_ctype_alnum() -> bool {
+    return isalnum(48) && isalnum(90) && isalnum(122) && !isalnum(32) && !isalnum(95);
+}
+
+fn test_ctype_space_and_blank() -> bool {
+    // \n 是 space 但**不是** blank —— 这一条把两个集合分开。
+    return isspace(10) && !isblank(10) && isblank(32) && isblank(9) && !isspace(48);
+}
+
+fn test_ctype_xdigit() -> bool {
+    return isxdigit(48) && isxdigit(70) && isxdigit(102) && !isxdigit(71) && !isxdigit(32);
+}
+
+fn test_ctype_print_graph_punct() -> bool {
+    // 0x20 空格: print 真, graph 假, punct 假。
+    // 0x21 '!':  三者都真。
+    // 0x7F:      三者都假 (cntrl 真)。
+    let sp: bool = isprint(32) && !isgraph(32) && !ispunct(32);
+    let bang: bool = isprint(33) && isgraph(33) && ispunct(33);
+    let del: bool = !isprint(127) && !isgraph(127) && iscntrl(127);
+    return sp && bang && del;
+}
+
+fn test_ctype_cntrl() -> bool {
+    return iscntrl(0) && iscntrl(31) && iscntrl(127) && !iscntrl(32) && !iscntrl(65);
+}
+
+fn test_ctype_high_bytes_are_not_alpha() -> bool {
+    // C locale: >=128 一律不是字母/数字。128..255 全扫一遍。
+    let i: u32 = 128;
+    while i < 256 {
+        if isalpha(i) || isdigit(i) || isalnum(i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_ctype_case_convert() -> bool {
+    return toupper(97) == 65 && tolower(65) == 97
+        && toupper(65) == 65 && tolower(48) == 48
+        && toupper(123) == 123;
+}

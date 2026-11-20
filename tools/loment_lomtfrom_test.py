@@ -42,6 +42,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 
 import lomelf  # noqa: E402
 import lomentc  # noqa: E402
@@ -252,23 +253,69 @@ def test_lomtfrom_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomtfrom.lomt 成功，且 IR 与参考逐字节相同 ({len(want)}B)")
 
 
+@test
+def test_externs_keys_are_the_declared_names():
+    """`emit_lomt(impl=True)` 递给翻译器的 `externs` 表，**每个键必须是那条声明自己的名字**。
+
+    `docs/186` §9 那条"声明在此、实现在别处"的口子就是它：带正文的函数体里调用一个
+    **本单元没有正文**的函数时，靠这张表让调用点解析得到。
+
+    曾经写成 `{n: _ty(...) for f in fns ...}` —— 而 `n` 不是这个推导式的变量，它是上面
+    `for f in fns:` 那个循环**残留下来**的最后一个函数名。于是每个条目的键都塌成同一个
+    名字、表只剩一条，调用点解析不到，报出来的却是"本单元没有这个函数"（指向别处）。
+
+    这一条**不在孪生的覆盖面上** —— `lomtfrom.lomt` 只走 `impl=False` 那条路
+    （它的头注写明），所以只在参考实现这边钉。
+    """
+    doc = _base(functions=[
+        # 无正文 + `abi="c"` = 外部函数：发 `pub extern fn`，并进 `externs` 表
+        _fn(name="helper", params=[{"name": "x", "type": "i32"}], ret="i32"),
+        # 有正文的那个调用它
+        _fn(name="main", abi=None, body="int main() { return helper(3); }", body_line=3),
+    ])
+    text, skipped = lomt_from.emit_lomt(doc, impl=True)
+    assert not skipped, f"没有东西该被跳过，却跳了：{skipped}"
+    assert "pub extern fn helper" in text, text
+    assert "helper(3)" in text, text
+    print("      externs 的键是声明自己的名字；调用点因此解析得到")
+
+
+@test
+def test_cli_without_lang_reads_a_source_file_not_json():
+    """不给 `--lang` 时**按输入的性质分**：`.json` 是形式对象，别的都是源文件。
+
+    这个工具有两种输入，而原先"不给 `--lang`"一律走 JSON 那一支 —— 于是
+    `lomt_from.py g.c` 把一份 C 源码喂给 `json.loads`，端到用户面前的是
+    **Python 的 json 异常文本**（`Expecting value: line 1 column 1 (char 0)`），
+    那句话对一份 C 文件没有任何意义；而**同一条流水的上一段**（`potato_from.py g.c`）
+    却好好出来（rc=0）。`.c` 后缀本来就有确定答案，而 `resolve_lang` 这台工具本来就有
+    （给了 `--lang auto` 时走的就是它）。
+
+    两面都钉：源码文件不给 `--lang` 能过（且打得出 `[detect]`），
+    而 `.potato.json` **照旧**当对象读（不许被 `resolve_lang` 拿去嗅）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        src = td / "g.c"
+        src.write_text("int f(int x) { return x + 1; }\n", encoding="utf-8", newline="\n")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomt_from.py"), str(src)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 0, f"rc={r.returncode} {(r.stdout + r.stderr)[:200]}"
+        assert "[detect]" in r.stderr and "-> c" in r.stderr, r.stderr[:200]
+        assert "Expecting value" not in r.stderr, f"又按 JSON 读了:\n{r.stderr[:200]}"
+        # 形式对象那条路照旧（喂一份**合法**对象）
+        obj = td / "o.potato.json"
+        obj.write_text(json.dumps(_base(functions=[_fn(name="f")])), encoding="utf-8")
+        r2 = subprocess.run([sys.executable, str(ROOT / "tools" / "lomt_from.py"), str(obj)],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", shell=False, timeout=120)
+        assert r2.returncode == 0, f"rc={r2.returncode} {(r2.stdout + r2.stderr)[:200]}"
+    print("      源码文件不给 --lang 会按后缀认；`.potato.json` 照旧当对象读")
+
+
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-        except AssertionError as e:
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {e}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  ERROR {fn.__name__}: {type(e).__name__}: {e}")
-    print()
-    if failed:
-        print(f"loment_lomtfrom_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-        return 1
-    print(f"loment_lomtfrom_test: {len(TESTS)}/{len(TESTS)} 通过")
-    return 0
+    return loment_suite.run(TESTS, "loment_lomtfrom_test")
 
 
 if __name__ == "__main__":

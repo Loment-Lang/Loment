@@ -1,4 +1,5 @@
 module mem
+choose runtime
 
 // mem.lomt — 字节级原语 (std 核)
 //

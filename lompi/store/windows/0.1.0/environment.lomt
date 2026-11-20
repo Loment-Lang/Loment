@@ -1,0 +1,199 @@
+// windows/environment.lomt — 环境变量、命令行、模块路径、当前目录
+//
+// 为什么标准库要有它: Windows 上读环境变量不是"拿一个 char**"，而是
+// `GetEnvironmentVariableA(name, buf, size)` —— 缓冲不够时它返回**需要的长度**，
+// 这是"先问大小再读"的那个两段式；命令行是 `GetCommandLineA()` 返回的**一整条**
+// 字符串（引号由程序的解析器处理，系统不做切分）；`GetModuleFileNameA` 才是
+// "可执行文件在哪"。
+//
+// **边界**: 与 `kernel32` 同一条 —— PE 还没有 FFI（#1262）。这里给声明面与缓冲
+// 约定；不做命令行切分（那是 `shellwords` 那一类的事，且 Windows 的规则不同）。
+//
+// 约定:
+//   * 路径/名字都是 `ptr` 指向的 NUL 结尾缓冲；`we_get` 成功时返回字节数（不含
+//     NUL），缓冲太小时返回**需要的长度**且不写缓冲 —— 与系统同义。
+//   * `GetCommandLineA` 返回的指针指向进程自己的内存，长度要扫 NUL 才知道。
+//   * `we_get_u32` 只接受纯十进制；空串/非数字返回 0 并置 `ok` 为 0。
+//
+// 命名: 公开 we_*, 内部 weq_*。自检 test_environment_*。
+
+module environment
+
+choose runtime
+choose hosted
+
+/// `GetEnvironmentVariableA` 的"没找到"返回值。
+pub const WE_NOT_FOUND: u32 = 0;
+/// 最大路径/名字缓冲（Windows 的 32K 上限之内的常用值）。
+pub const WE_NAMELEN: u32 = 32767;
+
+extern fn GetEnvironmentVariableA(name: ptr, buf: ptr, size: u32) -> u32;
+extern fn SetEnvironmentVariableA(name: ptr, val: ptr) -> u32;
+extern fn GetCommandLineA() -> ptr;
+extern fn GetModuleFileNameA(modl: u64, buf: ptr, size: u32) -> u32;
+extern fn GetCurrentDirectoryA(size: u32, buf: ptr) -> u32;
+
+fn weq_put(s: str, out: ptr, cap: u32) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if i < cap {
+            store8(out, i, str_byte(s, i) as u8);
+        }
+        i = i + 1;
+    }
+    if n < cap {
+        store8(out, n, 0 as u8);
+    }
+    return n;
+}
+
+/// 把字符串写成 NUL 结尾的名字缓冲。
+pub fn we_cstr(s: str, out: ptr, cap: u32) -> u32 {
+    return weq_put(s, out, cap);
+}
+
+/// 读环境变量。返回字节数；缓冲不够返回所需长度（此时缓冲不动）；没有返回 0。
+pub fn we_get(name: ptr, buf: ptr, size: u32) -> u32 {
+    return GetEnvironmentVariableA(name, buf, size);
+}
+
+/// 设环境变量。`val` 传空指针表示删除。
+pub fn we_set(name: ptr, val: ptr) -> bool {
+    return SetEnvironmentVariableA(name, val) != 0;
+}
+
+/// 一整条命令行（系统给的原样字符串）。
+pub fn we_cmdline() -> ptr {
+    return GetCommandLineA();
+}
+
+/// 扫描一条 NUL 结尾字符串的长度。
+pub fn we_strlen(p: ptr) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = 0;
+    while i < WE_NAMELEN {
+        if load8(p, i) == 0 {
+            return n;
+        }
+        n = n + 1;
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 当前可执行文件的完整路径。返回长度；缓冲不够返回所需长度。
+pub fn we_exe_path(buf: ptr, size: u32) -> u32 {
+    return GetModuleFileNameA(0 as u64, buf, size);
+}
+
+/// 当前工作目录。返回长度；缓冲不够返回所需长度。
+pub fn we_cwd(buf: ptr, size: u32) -> u32 {
+    return GetCurrentDirectoryA(size, buf);
+}
+
+/// 解析一个十进制 u32。成功 `ok` 写 1，失败写 0 并返回 0。
+pub fn we_get_u32(p: ptr, n: u32, ok: ptr) -> u32 {
+    store8(ok, 0, 0 as u8);
+    if n == 0 {
+        return 0;
+    }
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i) as u32;
+        if c < 48 || c > 57 {
+            return 0;
+        }
+        let d: u32 = c - 48;
+        if v > 429496729 as u32 {
+            return 0;
+        }
+        if v == 429496729 as u32 && d > 5 {
+            return 0;
+        }
+        v = v * 10 + d;
+        i = i + 1;
+    }
+    store8(ok, 0, 1 as u8);
+    return v;
+}
+
+/// 名字里有"PROCESSOR_ARCHITECTURE"这类大写写法 —— 大小写不敏感比较的是系统，
+/// 这里只是把两个缓冲按 ASCII 比较（调用方负责 NUL 结尾）。
+pub fn we_eq(a: ptr, b: ptr) -> bool {
+    let i: u32 = 0;
+    while i < WE_NAMELEN {
+        let ca: u32 = load8(a, i) as u32;
+        let cb: u32 = load8(b, i) as u32;
+        if ca >= 65 && ca <= 90 {
+            ca = ca + 32;
+        }
+        if cb >= 65 && cb <= 90 {
+            cb = cb + 32;
+        }
+        if ca != cb {
+            return false;
+        }
+        if ca == 0 {
+            return true;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_environment_parse_u32() -> bool {
+    let b: ptr = alloc(16);
+    let ok: ptr = alloc(1);
+    weq_put("4294967295", b, 16);
+    if we_get_u32(b, 10, ok) != 4294967295 {
+        return false;
+    }
+    if load8(ok, 0) != 1 {
+        return false;
+    }
+    weq_put("12x", b, 16);
+    if we_get_u32(b, 3, ok) != 0 {
+        return false;
+    }
+    if load8(ok, 0) != 0 {
+        return false;
+    }
+    if we_get_u32(b, 0, ok) != 0 {
+        return false;
+    }
+    return true;
+}
+
+fn test_environment_cstr_and_len() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = we_cstr("ABC", b, 16);
+    if n != 3 {
+        return false;
+    }
+    if load8(b, 3) != 0 {
+        return false;
+    }
+    if we_strlen(b) != 3 {
+        return false;
+    }
+    return true;
+}
+
+fn test_environment_case_insensitive_eq() -> bool {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    we_cstr("Path", a, 32);
+    we_cstr("PATH", b, 32);
+    if !we_eq(a, b) {
+        return false;
+    }
+    we_cstr("Patz", b, 32);
+    if we_eq(a, b) {
+        return false;
+    }
+    return true;
+}

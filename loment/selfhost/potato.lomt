@@ -44,7 +44,7 @@
 //     顺序也要对上：参考实现"每轮过一遍池子、只走没走过的"＝这里"每轮走上一轮新建的"，
 //     而实例的创建顺序是逐字节判据的一部分。见 `pt_mono_all` / `pt_mono_inst`。
 //     ⚠ 顺带补上的一格：`K as T` 的 K **原先只认标识符**（kind 0），于是 `1 as u32`
-//     这种字面量实参落到"实参形态超出这一节"上 —— `native_chain.lomt` 的 `main` 正是
+//     这种字面量实参落到"实参形态超出这一节"上 —— `native_chain.lomt` 的 `chain_main` 正是
 //     那么写的，只是它以前排在 `REFUSED` 里，碰不到。
 //   * **嵌套泛型实参**(`Outer<Inner<u32>>`)—— 2026-09-23 做掉。**规则先定，代码后写**：
 //     `docs/147` §2「命名层」定下"**分隔的长度 = 嵌套深度**"（`Outer_Inner__u32`），
@@ -86,6 +86,7 @@
 //   * 枚举/结构体体里的分隔符 **`,` 与 `;` 都算**, 而 `<...>` / `[...]` / `(...)` 里的
 //     逗号**不算** —— 否则 `Result<T, E>` 会被数成两个变体。
 module potato
+choose runtime
 
 use bytes
 use switches
@@ -94,6 +95,7 @@ use switches
 // / `l2_ok_at` / `l0_safe_callee`，那边已 `pub`）。不复制一份的理由：复制必然漂，而这三条
 // 已经由 IR 逐字节比对钉住与参考实现一致（`loment_p8_test` 的 m88/m89/m91）。
 use codegen
+use lspe
 
 /// 无符号里当"哨兵"用。token 下标从 0 起, 这个值不可能撞上 (与 `switches.SW_NONE` 同形)。
 const PT_NONE: u32 = 4294967295;
@@ -173,6 +175,31 @@ fn pt_hex1(out: ptr, o: u32, v: u32) -> u32 {
     return o + 1;
 }
 
+/// 8 位小写十六进制（`pass` 的 id）。高 nibble 先写。
+fn pt_hex8(out: ptr, o: u32, v: u32) -> u32 {
+    o = pt_hex1(out, o, (v >> 28) & 15);
+    o = pt_hex1(out, o, (v >> 24) & 15);
+    o = pt_hex1(out, o, (v >> 20) & 15);
+    o = pt_hex1(out, o, (v >> 16) & 15);
+    o = pt_hex1(out, o, (v >> 12) & 15);
+    o = pt_hex1(out, o, (v >> 8) & 15);
+    o = pt_hex1(out, o, (v >> 4) & 15);
+    return pt_hex1(out, o, v & 15);
+}
+
+/// 源偏移 `off` 的行号（1 起）。token 记录里没有行号，只能数换行。
+fn pt_line_at(unit: ptr, off: u32) -> u32 {
+    let n: u32 = 1;
+    let i: u32 = 0;
+    while i < off {
+        if load8(unit, i) == 10 {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
 /// `\u00XX` —— `json.dumps` 对 < 0x20 的其余控制字符就是**十六进制小写**两位。
 fn pt_uesc(out: ptr, o: u32, c: u32) -> u32 {
     o = pt_str(out, o, "\\u00");
@@ -213,6 +240,50 @@ fn pt_q(out: ptr, o: u32, src: ptr, off: u32, n: u32) -> u32 {
             o = o + 1;
         }
         i = i + 1;
+    }
+    store8(out, o, 34 as u8);
+    return o + 1;
+}
+
+/// **解码后**再 JSON 转义的字符串（`lspe pass` 的理由，`#1082`）。
+/// `off`/`n` 圈的是**源里的原始片段**（含引号）—— 与 `pt_q` 同形，但它先按词法表
+/// 解转义（`\n \t \r \0 \\ \"`），所以 `"a\"b"` 写出来是 `a\"b`，不是 `a\\\"b`。
+fn pt_q_dec(out: ptr, o: u32, src: ptr, off: u32, n: u32) -> u32 {
+    store8(out, o, 34 as u8);
+    o = o + 1;
+    let i: u32 = 1;
+    while i + 1 < n {
+        let c: u32 = load8(src, off + i) as u32;
+        let d: u32 = c;
+        let skip: u32 = 1;
+        if c == 92 && i + 2 < n {
+            let e: u32 = load8(src, off + i + 1) as u32;
+            d = e;
+            if e == 110 { d = 10; } else if e == 116 { d = 9; }
+            else if e == 114 { d = 13; } else if e == 48 { d = 0; }
+            skip = 2;
+        }
+        if d == 34 {
+            o = pt_str(out, o, "\\\"");
+        } else if d == 92 {
+            o = pt_str(out, o, "\\\\");
+        } else if d == 8 {
+            o = pt_str(out, o, "\\b");
+        } else if d == 12 {
+            o = pt_str(out, o, "\\f");
+        } else if d == 10 {
+            o = pt_str(out, o, "\\n");
+        } else if d == 13 {
+            o = pt_str(out, o, "\\r");
+        } else if d == 9 {
+            o = pt_str(out, o, "\\t");
+        } else if d < 32 {
+            o = pt_uesc(out, o, d);
+        } else {
+            store8(out, o, d as u8);
+            o = o + 1;
+        }
+        i = i + skip;
     }
     store8(out, o, 34 as u8);
     return o + 1;
@@ -324,8 +395,15 @@ fn pt_has_byte(src: ptr, off: u32, n: u32, c: u32) -> u32 {
 // ---------------------------------------------------------------- 拒绝出口
 
 /// 说一句话到 stderr 并返回 0。**返回 0 就是"没发出东西"**, 由调用方翻成退出码 1。
+///
+/// 前缀在这儿写死, 与驱动主路的 `fail` 同一个 `loment` —— 用户敲的是那个命令,
+/// `fujoc-s` 是自举驱动的旧内部名, 对装包的人不指向任何东西 (issue #8)。
 fn pt_wfail(msg: str) -> u32 {
+    let pre: str = "loment: ";
+    let _a: i64 = syscall4(1, 2, str_ptr(pre) as u64, str_len(pre) as u64);
     let _w: i64 = syscall4(1, 2, str_ptr(msg) as u64, str_len(msg) as u64);
+    let nl: str = "\n";
+    let _n: i64 = syscall4(1, 2, str_ptr(nl) as u64, str_len(nl) as u64);
     return 0;
 }
 
@@ -404,7 +482,7 @@ fn pt_imports(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, n: u32) -> u32 {
 /// 预置块（`__prelude`）自己带 `<T>`，两段都要跳过它 —— 否则每个单元都被拒。
 fn pt_refuse(unit: ptr, t: ptr, lo: u32, hi: u32, pre: u32, nt: u32) -> u32 {
     if !pt_tis(unit, t, 0, "module") {
-        let _w0: u32 = pt_wfail("fujoc-s: --emit-potato: 单元不以 `module` 开头 (参考实现的前门也是这一条)\n");
+        let _w0: u32 = pt_wfail("--emit-potato: the unit does not start with `module` (the reference implementation's front door has the same rule)");
         return 1;
     }
     // ---- 整个单元(除预置块): 泛型声明 + L0 布局
@@ -438,7 +516,7 @@ fn pt_refuse(unit: ptr, t: ptr, lo: u32, hi: u32, pre: u32, nt: u32) -> u32 {
             // 照抄出去就是两个实现的字节不一样 —— 与其发错, 不如点名。
             if pt_tis(unit, t, i, "excluded") && pt_kind(t, i + 1) == 2 {
                 if pt_has_byte(unit, pt_off(t, i + 1) + 1, pt_tlen(t, i + 1) - 2, 92) == 1 {
-                    let _w5: u32 = pt_wfail("fujoc-s: --emit-potato: `excluded` 的字符串里有 `\\` 转义 —— 自举词法器不解转义, 这一格还没做到\n");
+                    let _w5: u32 = pt_wfail("--emit-potato: an `excluded` string carries a `\\` escape -- the self-hosted lexer does not decode escapes, so this slot is not done yet");
                     return 1;
                 }
             }
@@ -667,6 +745,16 @@ fn pt_cnt_fn(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             if ft != PT_NONE {
                 its = ft + 1;
             }
+        } else if d == 0 && pt_tis(unit, t, i, "register")
+                && (pt_kind(t, i + 1) == 0 || pt_kind(t, i + 1) == 2)
+                && pt_tis(unit, t, i + 2, "{") {
+            // `register <名字> { <那个函数> }`（`docs/223` 形态 A）：那层壳是**透明的** ——
+            // 块里的函数在语义上就是顶层条目（参考实现按 AST 收，根本没有这一层）。
+            // 跳过 `register` 与名字，下一轮就落在 `{` 的**下一个** token 上，深度不动；
+            // 块的 `}` 落在 d == 0 上，被上面那条 `&& d > 0` 挡住，不会把深度打成负数。
+            // 块里**只允许一个函数**（形状那一关在 `lex_reg_one_fn`，两个实现同一份规则），
+            // 所以跳过壳就够了，不必为别的条目再开一条路。
+            i = i + 2;
         } else if pt_tis(unit, t, i, "fn") && (d == 0 || (d == 1 && its != PT_NONE)) {
             if d == 0 && pt_is_body_fn(unit, t, i + 1) == 0 {
                 // `extern fn` 不进 `functions`(参考实现收在 `mod.externs`)
@@ -842,6 +930,182 @@ fn pt_cnt_boundary_extcalls(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return n;
 }
 
+// ---------------------------------------------------------------- 面的组成 (docs/224, v12)
+//
+// v12 的 `surfaces`：把**机调用站点**按"面"分一分。**与参考实现的 `_count_surfaces` 数
+// 同一批站点** —— 口径是词法的：只看 `syscall4/6/7` 的第一个实参**写没写成字面量**，
+// 是字面量就查表得面名（查不到落 `other`），不是字面量也落 `other`。
+// 表（号 → 面）与参考实现 `lomentc.SURFACE_NUMBERS` 的一致由两处钉住：
+// `loment_pe_test::test_surface_table_matches_the_runtime`（表本身）与
+// `loment_potato_emit_test`（42 份单元的逐字节孪生 —— 数不对当场对不上）。
+
+/// 号 → 面代号：0=other 1=file 2=mem 3=net 4=proc。**代号只为分桶**，名字在发射处。
+fn pt_surf_code(num: u32) -> u32 {
+    if num == 0 || num == 1 || num == 3 || num == 217 || num == 257 || num == 262 {
+        return 1;                                   // file
+    }
+    if num == 12 {
+        return 2;                                   // mem
+    }
+    if num == 7 || num == 23 || num == 41 || num == 42 || num == 43 || num == 44 || num == 45
+            || num == 48 || num == 49 || num == 50 || num == 51 || num == 52
+            || num == 54 || num == 55 || num == 288
+            || num == 46 || num == 47 || num == 53 || num == 232 || num == 233 || num == 291 {
+        return 3;                                   // net
+    }
+    if num == 60 || num == 4096 || num == 4097 {
+        return 4;                                   // proc（4096 = lmgr 的 PDH）
+    }
+    return 0;                                       // other（含"号不是字面量"）
+}
+
+/// 数字 token 的十进制 / `0x` 十六进制值；不是数字 token（或写法不认识）返回 `4294967295`。
+/// **与参考实现同口径**：那边读 `IntLit.value`（十进制与 `0x` 都认）；一个**负号**在两边
+/// 都会落 `other` —— 这边因为 `-` 是个 punct token，根本不是数字 token。
+fn pt_tok_num(unit: ptr, t: ptr, i: u32) -> u32 {
+    if pt_kind(t, i) != 1 {
+        return 4294967295;
+    }
+    let p: u32 = pt_off(t, i);
+    let n: u32 = pt_tlen(t, i);
+    if n == 0 {
+        return 4294967295;
+    }
+    let k: u32 = 0;
+    let v: u32 = 0;
+    if n >= 2 && load8(unit, p) == 48 && (load8(unit, p + 1) == 120 || load8(unit, p + 1) == 88) {
+        k = 2;
+        while k < n {
+            let c: u32 = load8(unit, p + k);
+            let d: u32 = 4294967295;
+            if c >= 48 && c <= 57 {
+                d = c - 48;
+            } else if c >= 97 && c <= 102 {
+                d = c - 97 + 10;
+            } else if c >= 65 && c <= 70 {
+                d = c - 65 + 10;
+            }
+            if d == 4294967295 {
+                return 4294967295;
+            }
+            v = v * 16 + d;
+            k = k + 1;
+        }
+        return v;
+    }
+    while k < n {
+        let c: u32 = load8(unit, p + k);
+        if c < 48 || c > 57 {
+            return 4294967295;                      // 不猜
+        }
+        v = v * 10 + (c - 48);
+        k = k + 1;
+    }
+    return v;
+}
+
+/// 号 → 宽度档代号：0=`w0` 1=`w1` 2=`w2` 3=`w3`。**非联网号返回 `4294967295`** ——
+/// 与 `pt_surf_code` 的 `other` 不同：梯子上**没有兜底档**，它只回答"联网的那部分按宽度
+/// 怎么分"（`docs/237`）。返回一个哨兵而不是 0，是为了让"不是联网号"与"最窄那档"分开。
+///
+/// **定义在 `pt_surf_count` 之前**：那个循环要调它，而自举侧**没有前向引用**。
+fn pt_rung_code(num: u32) -> u32 {
+    if num == 53 {
+        return 0;                                   // w0：同机的一对端点
+    }
+    if num == 41 || num == 42 || num == 44 || num == 45 || num == 46 || num == 47
+            || num == 48 || num == 51 || num == 52 || num == 54 || num == 55 {
+        return 1;                                   // w1：一条有界连接
+    }
+    if num == 7 || num == 23 || num == 232 || num == 233 || num == 291 {
+        return 2;                                   // w2：多条并发
+    }
+    if num == 49 || num == 50 || num == 43 || num == 288 {
+        return 3;                                   // w3：接受任意对端
+    }
+    return 4294967295;
+}
+
+/// 名字 `name` 的调用点里、"第一个实参是字面量且 `table` 那张表分到的桶 == `code`"的个数。
+/// 判据与 `pt_cnt_boundary_call` 同一套：名字 token + 紧跟 `(` + 不是 `fn NAME(` 那个声明。
+/// `table`：0 = 面（`docs/224`），1 = 宽度档（`docs/237`）—— **同一个循环服务两张表**，
+/// 分成两遍就会漂（两边各按自己的口径认号）。
+fn pt_surf_count(unit: ptr, t: ptr, lo: u32, hi: u32, name: str, table: u32, code: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, name) && pt_tis(unit, t, i + 1, "(")
+                && !(i > lo && pt_tis(unit, t, i - 1, "fn")) {
+            let num: u32 = pt_tok_num(unit, t, i + 2);
+            let c: u32 = 0;
+            if num != 4294967295 {
+                if table == 0 {
+                    c = pt_surf_code(num);
+                } else {
+                    c = pt_rung_code(num);
+                }
+            }
+            if c == code {
+                n = n + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// `print(...)` 是一次 `write(1, …)` —— 面是 file (1)。它没有"第一个实参是号"这回事，
+/// 所以不走 `pt_surf_count` 的号表，直接按名字数（与参考实现 `_machine_call_sites`
+/// 里给 print 填号 1 是同一条）。
+fn pt_surf_print(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let n: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "print") && pt_tis(unit, t, i + 1, "(")
+                && !(i > lo && pt_tis(unit, t, i - 1, "fn")) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 某个面（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍；`print` 补在 file 面。
+fn pt_surf_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
+    let p: u32 = 0;
+    if code == 1 {
+        p = pt_surf_print(unit, t, lo, hi);
+    }
+    return pt_surf_count(unit, t, lo, hi, "syscall4", 0, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6", 0, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall7", 0, code)
+         + p;
+}
+
+// ---------------------------------------------------------------- 宽度组成 (docs/237, v14)
+//
+// v14 的 `net_ladder`：联网站点按"它要求多少宽度"分四档。**与参考实现的
+// `lomentc.NET_WIDTH_RUNGS` 同表、同一批站点**（`surfaces.net` 那一批），表的一致由
+// 逐字节孪生判据钉住（数不对当场对不上）。表本身（`pt_rung_code`）定义在上面 ——
+// 共用的那个计数循环要调它。
+
+/// 某一档（`code`）在这份单元里的站点数 —— 三个机调用内建各数一遍（表选 1）。
+fn pt_rung_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
+    return pt_surf_count(unit, t, lo, hi, "syscall4", 1, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6", 1, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall7", 1, code);
+}
+
+/// 写一个面（名 + 数）；`first` 为 0 时先补一个逗号。**只写非零的那些、按面名字母序**，
+/// 与参考实现的 `sorted(counts)` 同口径（两边逐字节要比）。
+fn pt_surf_one(out: ptr, o: u32, first: u32, name: str, n: u32) -> u32 {
+    if first == 0 {
+        o = pt_str(out, o, ",\n");
+    }
+    o = pt_key(out, o, 2, name);
+    return pt_dec(out, o, n as u64);
+}
+
 // ---------------------------------------------------------------- GC 的四层梯 (docs/210 §3/§5)
 //
 // v10 的 `gc_ladder`：本单元每一处 `alloc` 从强到弱、先到先得分到一层。**与参考实现的
@@ -958,7 +1222,8 @@ fn pt_gl_inrange(nm: u32, out: ptr, n: u32) -> u32 {
 /// 回对数。`while` / `for VAR in …` 之后**第一个** `{` 就是体 —— 解析器在循环头里
 /// `no_struct`，所以那里不会冒出结构体字面量的 `{`（与 `lomentc` 的 `at = self.i + 1` 同一起点）。
 /// **`impl T for X` 里的 `for` 不算**：靠 "`for` 名字 `in`" 这个形状分开。
-fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, out: ptr) -> u32 {
+fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, out: ptr,
+                  safe: ptr) -> u32 {
     let n: u32 = 0;
     let i: u32 = fat;
     while i < fend && n < PT_GLRMX {
@@ -967,7 +1232,10 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
             isloop = 1;
         }
         if pt_tis(unit, t, i, "for") && pt_kind(t, i + 1) == 0
-                && pt_tis(unit, t, i + 2, "in") {
+                && (pt_tis(unit, t, i + 2, "in")
+                    || (pt_tis(unit, t, i + 2, ",") && pt_kind(t, i + 3) == 0
+                        && pt_tis(unit, t, i + 4, "in"))) {
+            // `for x in xs` 与 2026.3 的 `for i, x in xs`（`docs/329` §5）
             isloop = 1;
         }
         if isloop == 1 {
@@ -978,7 +1246,7 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
             if b < fend {
                 let at: u32 = b + 1;
                 let end: u32 = skip_block(unit, t, b) - 1;
-                if l2_ok_at(unit, t, at, end, fat, fend, npar, par) == 1 {
+                if l2_ok_at(unit, t, at, end, fat, fend, npar, par, safe) == 1 {
                     store32(out, n * 8, at);
                     store32(out, n * 8 + 4, end);
                     n = n + 1;
@@ -986,6 +1254,14 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
             }
         }
         i = i + 1;
+    }
+    // **表满了就拒**（`FujoJTOP/loment#774`）：`n` 停在 `PT_GLRMX` 而后面还有 token，
+    // 说明还有**没扫到的循环体**。原先直接 `return n` —— 那些循环里的分配于是被算成
+    // L3，与参考实现（无界 list）在"33 个带 alloc 的循环"这一个输入上分叉，而两边
+    // 都不报错。返回 `PT_GLRMX + 1` = "溢出了"，由 `pt_gl_fn` → `pt_gl_all` →
+    // `potato_emit` 一路点名拒。
+    if n >= PT_GLRMX && i < fend {
+        return PT_GLRMX + 1;
     }
     return n;
 }
@@ -1000,10 +1276,18 @@ fn pt_gl_l2ranges(unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr, o
 ///   * 其余落 L3（由调用方用 `total` 减出来）。
 /// 12 个十六进制位的打包与"站点数不可能过 65535"这条一起成立 —— 单元规模那里早有上限。
 fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr) -> u64 {
-    let nrng: u32 = pt_gl_l2ranges(unit, t, fat, fend, npar, par, ptr_add(sc, PT_GLRNG));
+    let nrng: u32 = pt_gl_l2ranges(unit, t, fat, fend, npar, par, ptr_add(sc, PT_GLRNG),
+                                   ptr_add(sc, PT_GLSAFE));
+    if nrng > PT_GLRMX {
+        // 纪元表溢出：高位置 1 = "这个函数拒"，由 `pt_gl_all` / `potato_emit` 点名报。
+        return ((1 as u64) << 63);
+    }
     let nl0: u32 = 0;
     let nl1: u32 = 0;
     let nl2: u32 = 0;
+    let nl05: u32 = 0;
+    let l05n: u32 = 0;
+    let l05tot: u32 = 0;
     let d: u32 = fat;
     while d < fend {
         let nm: u32 = d + 1;
@@ -1027,20 +1311,38 @@ fn pt_gl_fn(sc: ptr, unit: ptr, t: ptr, fat: u32, fend: u32, npar: u32, par: ptr
                 j = j + 1;
             }
             if done == 1 && pt_tis(unit, t, j, ";") {
-                if l0_size_at(unit, t, nm, fat, fend, npar, par) != 0 {
-                    nl0 = nl0 + 1;
+                let lsz: u32 = l0_size_at(unit, t, nm, fat, fend, npar, par,
+                                          ptr_add(sc, PT_GLSAFE));
+                if lsz != 0 {
+                    // **L0.5**（`docs/210` §2.10）：`_l05_plan` 按声明序把 L0 站点摆进
+                    // 一块区（放不下的留下），而**少于两处就不开区**。这里在 token 流上
+                    // 逐步模拟，于是两处数的是同一批站点。
+                    let pad5: u32 = (lsz + 7) & 4294967288;
+                    if l05tot + pad5 <= 2048 && l05n < 256 {
+                        l05n = l05n + 1;
+                        l05tot = l05tot + pad5;
+                        nl05 = nl05 + 1;
+                    } else {
+                        nl0 = nl0 + 1;
+                    }
                 } else if pt_gl_inrange(nm, ptr_add(sc, PT_GLRNG), nrng) == 1 {
                     nl2 = nl2 + 1;
                 } else if pt_gl_istop(unit, t, fat, nm) == 1
                         && l1_ptr_only_at(unit, t, nm, fat, fend, npar, par,
-                                          ptr_add(sc, PT_GLSCR)) == 1 {
+                                          ptr_add(sc, PT_GLSCR),
+                                          ptr_add(sc, PT_GLSAFE)) == 1 {
                     nl1 = nl1 + 1;
                 }
             }
         }
         d = d + 1;
     }
-    return (nl0 as u64) | ((nl1 as u64) << 16) | ((nl2 as u64) << 32);
+    if l05n < 2 {                                  // 一处站点不值得开区：留在 L0
+        nl0 = nl0 + nl05;
+        nl05 = 0;
+    }
+    return (nl0 as u64) | ((nl1 as u64) << 16) | ((nl2 as u64) << 32)
+            | ((nl05 as u64) << 48);
 }
 
 /// 本单元是不是 `gc_auto_alpha` 档（`docs/175` §3.4）—— 四层梯**只在这一档算**，别的档
@@ -1079,6 +1381,7 @@ fn pt_gl_all(sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
     let nl0: u64 = 0;
     let nl1: u64 = 0;
     let nl2: u64 = 0;
+    let nl05: u64 = 0;
     let fi: u32 = lo;
     while fi < hi && pt_kind(t, fi) != 4 {
         if pt_tis(unit, t, fi, "fn")
@@ -1097,16 +1400,20 @@ fn pt_gl_all(sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
                         let npar: u32 = pt_gl_params(unit, t, lp, ptr_add(sc, PT_GLPAR));
                         let pk: u64 = pt_gl_fn(sc, unit, t, fat, fend, npar,
                                                ptr_add(sc, PT_GLPAR));
+                        if (pk >> 63) == 1 {
+                            return ((1 as u64) << 63);   // 纪元表满 —— 一路传到 `potato_emit`
+                        }
                         nl0 = nl0 + (pk & 65535);
                         nl1 = nl1 + ((pk >> 16) & 65535);
                         nl2 = nl2 + ((pk >> 32) & 65535);
+                        nl05 = nl05 + ((pk >> 48) & 65535);
                     }
                 }
             }
         }
         fi = fi + 1;
     }
-    return nl0 | (nl1 << 16) | (nl2 << 32);
+    return nl0 | (nl1 << 16) | (nl2 << 32) | (nl05 << 48);
 }
 
 /// 类型形参个数: `Name < A , B >` 里逗号个数 + 1。
@@ -1182,7 +1489,7 @@ fn pt_refuse_num(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let i: u32 = lo;
     while i < hi && pt_kind(t, i) != 4 {
         if pt_kind(t, i) == 1 && pt_num_ovf(unit, t, i) == 1 {
-            let _w: u32 = pt_wfail("fujoc-s: --emit-potato: 有个整数常量的量级超过 u64 —— 参考实现的 `int_lit` 是任意精度, 这一格只到 u64; 与其发一个回绕过的数, 不如点名 (docs/189 S1)\n");
+            let _w: u32 = pt_wfail("--emit-potato: an integer constant is larger than u64 -- the reference implementation's `int_lit` is arbitrary precision and this slot stops at u64; naming it beats emitting a wrapped number");
             return 1;
         }
         i = i + 1;
@@ -1201,8 +1508,55 @@ fn pt_refuse_num(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 /// 两个返回值打成一个 u64: 语言的函数没有元组, 而这是本文件里唯一需要"同时回传
 /// 游标与 token 位置"的地方(递归渲染必须知道吃到哪了)。参考实现里也有这个形状
 /// (`declare` 返回 `(n << 32) | o`)。
+/// `(` 的配对右括号下标（不配对 -> 走到 EOF）。
+fn pt_paren(src: ptr, t: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while pt_kind(t, j) != 4 {
+        if pt_tis(src, t, j, "(") {
+            d = d + 1;
+        }
+        if pt_tis(src, t, j, ")") {
+            d = d - 1;
+            if d == 0 {
+                return j;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
 fn pt_ty(out: ptr, o: u32, src: ptr, t: ptr, i: u32) -> u64 {
     let j: u32 = i;
+    // 函数类型 `(A,B) -> C`（`docs/348`）：形态对象里类型就是**字符串**，参考实现拼出来的
+    // 那一串是 `(A,B)->C` —— 逗号后与 `->` 两侧**都没有空格**。`()` 后面没有 `->` 才是
+    // unit，它照原来的路（单 token）走。
+    if pt_tis(src, t, j, "(") {
+        let pc: u32 = pt_paren(src, t, j);
+        if pt_tis(src, t, pc + 1, "-") && pt_tis(src, t, pc + 2, ">") {
+            o = pt_str(out, o, "(");
+            let fk: u32 = j + 1;
+            let ffirst: u32 = 1;
+            while fk < pc && pt_kind(t, fk) != 4 {
+                if ffirst == 0 {
+                    o = pt_str(out, o, ",");
+                }
+                ffirst = 0;
+                let rp: u64 = pt_ty(out, o, src, t, fk);
+                o = (rp % 4294967296) as u32;
+                fk = (rp / 4294967296) as u32;
+                if pt_tis(src, t, fk, ",") {
+                    fk = fk + 1;
+                }
+            }
+            o = pt_str(out, o, ")->");
+            let rr: u64 = pt_ty(out, o, src, t, pc + 3);
+            o = (rr % 4294967296) as u32;
+            fk = (rr / 4294967296) as u32;
+            return (fk as u64) * 4294967296 + (o as u64);
+        }
+    }
     if pt_tis(src, t, j, "mut") && pt_tis(src, t, j + 1, "[") {
         o = pt_str(out, o, "mut [");
         let r0: u64 = pt_ty(out, o, src, t, j + 2);
@@ -1281,12 +1635,40 @@ const PT_GLPMX: u32 = 64;
 const PT_GLRNG: u32 = 114192;       // 本函数"开着纪元的循环体"范围: 32 × 8 {at, end}
 const PT_GLRMX: u32 = 32;
 const PT_GLSCR: u32 = 114448;       // `l1_ptr_only_at` 的 `out`（它要写"最后一次用处"）
+// `docs/210` §7 那次放宽的**安全名表**（`[count, name_tok…]`，与 codegen 的 `CG_SAFE` 同形）。
+// 由 codegen 的 **`compute_safe`** 填（potato `use codegen`，两边共用同一支扫描 ⇒ 同一集合）。
+const PT_GLSAFE: u32 = 114456;
+/// 首参是 `ptr` 的函数名 token 表: `[count, name_tok_1, …]`，最多 1024 条。
+/// E4 的调用点普查用它；超容量是**点名的失败**（`loment/lspe/lspe.lomt` 的 `lspe_engine` 回 1）。
+const PT_PTRFIRST: u32 = 151264;
+/// E3/E4 的十个计数 + pass 的四个 + bounds 的两个：
+/// free_t/free_p, alive_t/alive_p, init_t/init_p, excl_t/excl_p, call_t/call_p,
+/// pass_sites/passed_sites/guard_covered/index_covered, bounds_t/bounds_covered
+/// （各 4 字节，共 16 个；`bounds` 是 LMS g1 内联界检查，`#1021`）。
+const PT_L3CNT: u32 = 155364;
+/// `lspe pass` 的块表：`[count, open, close, sites, pad] × 64`（每块 16 字节）。
+const PT_PASS: u32 = 155428;
+/// E9 域检查器（`docs/306`–`308`）：声明表 `[name_tok, lo, hi, flags] × 64`
+/// + 五个计数 `[域总数, 字面量 guard, 循环 guard, guard 总数, 撤销域数]`。
+const PT_DOMTAB: u32 = 156452;
+const PT_DOMCNT: u32 = 157476;
+/// E11 效应站点（`docs/341` A2c）：效应名表 `[name_tok, open, close, pad] × 64`、
+/// 函数表 `[name_tok, flags, decl_lo, decl_hi, inf_lo, inf_hi, body_open, body_close] × 512`、
+/// 调用边表 `[caller, callee] × 16384`，以及六个计数
+/// `[效应数, 函数数, 调用数, 有行且盖住的函数数, 无行函数数, 盖住的调用数]`。
+const PT_EFFTAB: u32 = 157496;
+const PT_EFFMAX: u32 = 64;
+const PT_FNTAB: u32 = 158520;
+const PT_FNMAX: u32 = 512;
+const PT_CALLTAB: u32 = 174904;
+const PT_CALLMAX: u32 = 16384;
+const PT_EFFCNT: u32 = 305976;
 const PT_TN: u32 = 46760;          // 收进池子的类型串条数（= 映射表条数）
 const PT_TCUR: u32 = 46764;        // 池子游标
 const PT_TMAX: u32 = 128;
 const PT_TSTRIDE: u32 = 64;
 const PT_TBUF_SZ: u32 = 256;
-const PT_SC_BYTES: u64 = 114456;
+const PT_SC_BYTES: u64 = 306040;    // 安全名表 + … + E9 域表 + E11 效应表/函数表/调用边表
 
 /// 一个类型串在池子里的位置（`i` 是池子下标）。
 fn pt_tkey(sc: ptr, i: u32) -> u32 {
@@ -1613,11 +1995,14 @@ fn pt_cnt_params(unit: ptr, t: ptr, lp: u32) -> u32 {
     let n: u32 = 1;
     let j: u32 = lp + 1;
     let d: u32 = 0;
+    // **`(` 也要计深**（`docs/348`）：形参类型可以是函数类型 `(u64) -> u64`，它自己带一对
+    // 括号。不数它，第一对 `)` 就被当成形参表的结尾，参数个数直接少算。
     while pt_kind(t, j) != 4 && !(pt_tis(unit, t, j, ")") && d == 0) {
-        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") {
+        if pt_tis(unit, t, j, "<") || pt_tis(unit, t, j, "[") || pt_tis(unit, t, j, "(") {
             d = d + 1;
         }
-        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]")) && d > 0 {
+        if (pt_tis(unit, t, j, ">") || pt_tis(unit, t, j, "]") || pt_tis(unit, t, j, ")"))
+                && d > 0 {
             d = d - 1;
         }
         if d == 0 && pt_tis(unit, t, j, ",") {
@@ -1663,6 +2048,9 @@ fn pt_params(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lp: u32, n: u32, its:
             let rq: u64 = pt_tymq(sc, out, o, unit, t, j + 2);
             o = (rq % 4294967296) as u32;
             j = (rq / 4294967296) as u32;
+            if pt_tis(unit, t, j, "in") && pt_kind(t, j + 1) == 0 {
+                j = j + 2;   // docs/313：值的空间标签（`in SPACE`）
+            }
         } else if has_ty == 2 {
             let rq2: u64 = pt_tymq(sc, out, o, unit, t, its);
             o = (rq2 % 4294967296) as u32;
@@ -1745,12 +2133,67 @@ fn pt_gc(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
             }
         } else if d == 0 && pt_tis(unit, t, i, "choose")
                 && (pt_tis(unit, t, i + 1, "gc_manual") || pt_tis(unit, t, i + 1, "gc_auto")
-                || pt_tis(unit, t, i + 1, "gc_auto_alpha")) {
+                || pt_tis(unit, t, i + 1, "gc_auto_alpha")
+                || pt_tis(unit, t, i + 1, "no_gc")) {
             return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
         }
         i = i + 1;
     }
     return pt_qs(out, o, "gc_manual");
+}
+
+/// 本单元是不是**默认的手动档**（没写 `choose gc` 也算）—— `gc_control.manual_collector`
+/// 的交叉不变量要它（`docs/309`）。扫描口径与 `pt_gc` 同。
+fn pt_gc_is_manual(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "gc_manual") || pt_tis(unit, t, i + 1, "gc_auto")
+                    || pt_tis(unit, t, i + 1, "gc_auto_alpha")
+                    || pt_tis(unit, t, i + 1, "no_gc")) {
+            if pt_tis(unit, t, i + 1, "gc_manual") {
+                return 1;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// `lgc` 的四种站点计数（`docs/309`，Potato v21）：回打包
+/// `pauses | resumes<<16 | windows<<32 | timed_windows<<48`。
+///
+/// **窗口** = `lgc start` 后面紧跟 `{` 或 `(`；`timed_windows` 只数带 `(` 的。
+/// 与参考实现 `_count_gc_control` 走同一份 token 形状（那边看 AST，这边看 token）。
+fn pt_lgc_counts(unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
+    let np: u64 = 0;
+    let nr: u64 = 0;
+    let nw: u64 = 0;
+    let nt: u64 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_tis(unit, t, i, "lgc") && pt_kind(t, i + 1) == 0 {
+            if pt_tis(unit, t, i + 1, "end") {
+                np = np + 1;
+                if pt_tis(unit, t, i + 2, "{") {
+                    nw = nw + 1;              // 短暂暂停也是一个窗口（docs/309）
+                }
+            }
+            if pt_tis(unit, t, i + 1, "start") {
+                if pt_tis(unit, t, i + 2, "(") {
+                    nt = nt + 1;
+                    nw = nw + 1;
+                } else if pt_tis(unit, t, i + 2, "{") {
+                    nw = nw + 1;
+                } else {
+                    nr = nr + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return np | (nr << 16) | (nw << 32) | (nt << 48);
 }
 
 /// **运行期在不在**（`docs/175` §3.6, v9）。与 `pt_gc` 同形、同一个理由：开关声明已被
@@ -1779,10 +2222,1411 @@ fn pt_runtime(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "no_runtime");
 }
 
-/// `capabilities`。形状是**定长**的(检查器也是照这个形状读的):
-/// `capability NAME : SPACE [ LO .. HI ] (revocable)?`
-/// 即 NAME=i+1, `:`=i+2, SPACE=i+3, `[`=i+4, LO=i+5, `..`=i+6,i+7, HI=i+8, `]`=i+9,
-/// `revocable`=i+10(可选)。lo/hi 是**解出来的数**(参考实现 `int_lit()`), 所以走 `pt_num`。
+/// `port`（`docs/222` §4, v11）：`sealed` / `hosted`。与 `pt_runtime` **同形** ——
+/// 只认那两个词，默认 `sealed`（与参考实现的 `CORE_DIMS["port"]` / `CORE_DEFAULTS["port"]`
+/// 是同一张表；加一维两边一起动）。
+fn pt_port(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "sealed") || pt_tis(unit, t, i + 1, "hosted")) {
+            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        }
+        i = i + 1;
+    }
+    return pt_qs(out, o, "sealed");
+}
+
+/// `vm`（`docs/231`, v13）：`vm` / `no_vm`。与 `pt_runtime` / `pt_port` **同形** ——
+/// 只认那两个词，默认 `no_vm`（与参考实现的 `CORE_DIMS["vm"]` / `CORE_DEFAULTS["vm"]`
+/// 是同一张表；加一维两边一起动）。
+///
+/// ⚠ 发行版里这一档是**编译错误**（渠道闸，`docs/231` §2），所以发行版发的对象里
+/// 它**恒为** `no_vm` —— 但这一层不判渠道：它只把源码里写的那个词如实抄进对象。
+fn pt_vm(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "vm") || pt_tis(unit, t, i + 1, "no_vm")) {
+            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        }
+        i = i + 1;
+    }
+    return pt_qs(out, o, "no_vm");
+}
+
+/// `lifetime`（`docs/299`, v22）：`lifetime_no` / `lifetime_auto` / `lifetime_manual`。
+/// 与 `pt_vm` **同形**，唯一的区别是**默认值随版次走**（与参考实现的
+/// `core_default("lifetime", profile)` 同一条）：`tur2026.1` / `tur2026.2`（prof < 2）
+/// 默认 `lifetime_no`，`tur2026.3` 起默认 `lifetime_auto`。
+/// `fp` 那一格（`docs/348`）：本单元写没写 `choose fp`。默认 `no_fp`。
+fn pt_fp(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "fp") || pt_tis(unit, t, i + 1, "no_fp")) {
+            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        }
+        i = i + 1;
+    }
+    return pt_qs(out, o, "no_fp");
+}
+
+fn pt_lifetime(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32,
+               prof: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && (pt_tis(unit, t, i + 1, "lifetime_no")
+                    || pt_tis(unit, t, i + 1, "lifetime_auto")
+                    || pt_tis(unit, t, i + 1, "lifetime_manual")) {
+            return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
+        }
+        i = i + 1;
+    }
+    if prof < 2 {
+        return pt_qs(out, o, "lifetime_no");
+    }
+    return pt_qs(out, o, "lifetime_auto");
+}
+
+/// `lms`（`docs/253`, v15）：`lms_close` / `lms_open`。与 `pt_vm` **同形** ——
+/// 只认那两个词，默认 `lms_close`（与参考实现的 `CORE_DIMS["lms"]` / `CORE_DEFAULTS["lms"]`
+/// 是同一张表；加一维两边一起动）。
+///
+/// ⚠ **取值带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
+/// 单独太泛。⚠ **它不引入运行期组件**（`docs/253` §11.2），所以它**不与 `no_runtime`
+/// 冲突** —— 这一层不判冲突（那是校验器的事），只把源码里写的那个词如实抄进对象。
+/// `lms` 档的**序号**：1 full / 2 forensic / 3 daily / 4 manage_only / 0 没写。
+/// 与参考实现的 `LMS_TIERS` 同一张表（加一档两边一起动）。
+fn pt_lms_val(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose") {
+            if pt_tis(unit, t, i + 1, "lms_full") {
+                return 1;
+            }
+            if pt_tis(unit, t, i + 1, "lms_forensic_admin") {
+                return 2;
+            }
+            if pt_tis(unit, t, i + 1, "lms_daily_admin") {
+                return 3;
+            }
+            if pt_tis(unit, t, i + 1, "lms_manage_only_admin") {
+                return 4;
+            }
+            if pt_tis(unit, t, i + 1, "lms_close_admin") {
+                return 5;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// `lms`（`docs/253` §11.3，2026-10-18 改判）：**四个档名**，默认 `lms_full`。
+/// 与参考实现的 `CORE_DIMS["lms"]` / `CORE_DEFAULTS["lms"]` 是同一张表。
+///
+/// ⚠ **方向与别的维相反**：默认是满的，写档是**降级**。非满档一律带 `_admin`
+/// （`docs/262` §10.1 的仓级规则）。⚠ 它**不与 `no_runtime` 冲突**（§11.2）。
+fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let v: u32 = pt_lms_val(unit, t, lo, hi);
+    if v == 2 {
+        return pt_qs(out, o, "lms_forensic_admin");
+    }
+    if v == 3 {
+        return pt_qs(out, o, "lms_daily_admin");
+    }
+    if v == 4 {
+        return pt_qs(out, o, "lms_manage_only_admin");
+    }
+    if v == 5 {
+        return pt_qs(out, o, "lms_close_admin");
+    }
+    return pt_qs(out, o, "lms_full");
+}
+
+/// **实际开着哪几级**（v17，`docs/253` §11.4）：档铺初值，显式 `choose lms_x` /
+/// `choose close lms_x` 覆盖 —— 与参考实现 `_lms_level` 同一条叠加规则。
+///
+/// 位序就是 `LMS_TOGGLES` 的次序：check / manage / guard / reject / crash /
+/// restart / seed。默认满档 = 127。
+fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let v: u32 = pt_lms_val(unit, t, lo, hi);
+    // 满档 127；法医 1+2+3+4 = 15；日常 1+3+4 = 13；只要管理器 = 2。
+    let m: u32 = 127;
+    if v == 2 {
+        m = 15;
+    }
+    if v == 3 {
+        m = 13;
+    }
+    if v == 4 {
+        m = 2;
+    }
+    if v == 5 {
+        // 七级全关（用户 2026-11-10）。
+        // 「O FUCK WHAT A PUSSY, CLOSE THAT FUCKING LMS」
+        m = 0;
+    }
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        let k: u32 = pt_kind(t, i);
+        if k == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose") {
+            // ⚠ `set choose <名字>` 是**定义**，不是取值 —— 与参考实现同一处跳过。
+            let isdef: u32 = 0;
+            if i > 0 {
+                if pt_tis(unit, t, i - 1, "set") {
+                    isdef = 1;
+                }
+            }
+            if isdef == 0 {
+                let neg: u32 = 0;
+                let j: u32 = i + 1;
+                if pt_tis(unit, t, i + 1, "close") {
+                    neg = 1;
+                    j = i + 2;
+                }
+                let bit: u32 = 0;
+                if pt_tis(unit, t, j, "lms_check") {
+                    bit = 1;
+                }
+                if pt_tis(unit, t, j, "lms_manage") {
+                    bit = 2;
+                }
+                if pt_tis(unit, t, j, "lms_guard") {
+                    bit = 4;
+                }
+                if pt_tis(unit, t, j, "lms_reject") {
+                    bit = 8;
+                }
+                if pt_tis(unit, t, j, "lms_crash") {
+                    bit = 16;
+                }
+                if pt_tis(unit, t, j, "lms_restart") {
+                    bit = 32;
+                }
+                if pt_tis(unit, t, j, "lms_seed") {
+                    bit = 64;
+                }
+                if bit != 0 {
+                    if neg == 1 {
+                        m = m & (127 - bit);
+                    } else {
+                        m = m | bit;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+/// 把 `lms_mask` 逐个印成**布尔**，键序 = 七级的次序（参考实现是同一张 `LMS_TOGGLES`）。
+fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+    o = pt_str(out, o, "{\n");
+    let names: u32 = 0;
+    while names < 7 {
+        let bit: u32 = 1 << names;
+        let v: u32 = 0;
+        if m & bit != 0 {
+            v = 1;
+        }
+        if names == 0 {
+            o = pt_key(out, o, 2, "lms_check");
+        }
+        if names == 1 {
+            o = pt_key(out, o, 2, "lms_manage");
+        }
+        if names == 2 {
+            o = pt_key(out, o, 2, "lms_guard");
+        }
+        if names == 3 {
+            o = pt_key(out, o, 2, "lms_reject");
+        }
+        if names == 4 {
+            o = pt_key(out, o, 2, "lms_crash");
+        }
+        if names == 5 {
+            o = pt_key(out, o, 2, "lms_restart");
+        }
+        if names == 6 {
+            o = pt_key(out, o, 2, "lms_seed");
+        }
+        o = pt_bool(out, o, v);
+        if names < 6 {
+            o = pt_str(out, o, ",\n");
+        } else {
+            o = pt_str(out, o, "\n");
+        }
+        names = names + 1;
+    }
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
+/// v18（`docs/253` §11.2.1，#1023）：七级的**运行期预算**。**必填**，紧跟在
+/// `lms_levels` 之后 —— ⚠ **次序是判据**：参考实现那边 `"lms_budgets"` 紧跟在
+/// `"lms_levels"` 之后，两串字节逐字节比。
+fn pt_lms_budgets(out: ptr, o: u32) -> u32 {
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "lms_check");
+    o = pt_qs(out, o, "none");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_manage");
+    o = pt_qs(out, o, "none");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_guard");
+    o = pt_qs(out, o, "instructions");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_reject");
+    o = pt_qs(out, o, "instructions");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_crash");
+    o = pt_qs(out, o, "instructions");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_restart");
+    o = pt_qs(out, o, "outside");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "lms_seed");
+    o = pt_qs(out, o, "none");
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
+// ---------------------------------------------------------------- E11 效应站点（`docs/341` A2c）
+//
+// 参考实现的站点来自 `loment/lspe/effects.py`。能**编译通过**的源里可达的只有三种：
+// `effect_decl`（每个 `effect`）、`row`（每个 `fn`）、`row_call`（每个本单元调用点）。
+// `perform` / `handle` / `resume` 在 A2 是 E023（拒编），到不了发射这一层。
+//
+// 证据与判决跟着级别走（`docs/341` §11）：有 `effects` 行且盖住推断 ⇒ `Typed`
+// （L1 起认）；没写行 ⇒ `Syntactic`（恒认）；调用点 ⇒ `Interproc`（L2 起认）。
+// 所以这里只存**事实**，级别截断留给 `pt_lspe` —— 与参考实现 `ledger.py` 同一条分界。
+
+fn pt_eff_p(unit: ptr, t: ptr, i: u32, ch: u32) -> bool {
+    if pt_kind(t, i) != 3 {
+        return false;
+    }
+    return (load8(unit, pt_off(t, i)) as u32) == ch;
+}
+
+/// 括号配对（只数同一种括号，与参考实现 `_match` 同形）。返回闭括号下标或 `PT_NONE`。
+fn pt_eff_match(unit: ptr, t: ptr, open: u32, hi: u32, oc: u32, cc: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = open;
+    while j < hi {
+        if pt_kind(t, j) == 3 {
+            let c: u32 = load8(unit, pt_off(t, j)) as u32;
+            if c == oc {
+                d = d + 1;
+            }
+            if c == cc {
+                if d > 0 {
+                    d = d - 1;
+                }
+                if d == 0 {
+                    return j;
+                }
+            }
+        }
+        j = j + 1;
+    }
+    return PT_NONE;
+}
+
+fn pt_eff_inspan(sc: ptr, i: u32, ne: u32) -> u32 {
+    let m: u32 = 0;
+    while m < ne {
+        let o: u32 = load32(sc, PT_EFFTAB + m * 16 + 4);
+        let c: u32 = load32(sc, PT_EFFTAB + m * 16 + 8);
+        if o <= i && i <= c {
+            return 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+/// `choose lspe_effects_true|false`：只认**深度 0**、`choose` 后面紧跟槽词，
+/// `set choose` 是定义不是取值（与参考实现 `_prescan_slot` 同一条）。
+fn pt_eff_on(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i + 1 < hi {
+        if pt_kind(t, i) == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if c == 125 || c == 41 || c == 93 {
+                if d > 0 {
+                    d = d - 1;
+                }
+            }
+        } else if d == 0 && pt_kind(t, i) == 0 && pt_tis(unit, t, i, "choose") {
+            let skip: u32 = 0;
+            if i > lo && pt_kind(t, i - 1) == 0 && pt_tis(unit, t, i - 1, "set") {
+                skip = 1;
+            }
+            if skip == 0 {
+                if pt_tis(unit, t, i + 1, "lspe_effects_true") {
+                    return 1;
+                }
+                if pt_tis(unit, t, i + 1, "lspe_effects_false") {
+                    return 0;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// E11 的三张表与六个计数。**在写对象之前**跑完：超容量是点名的失败。
+/// 返回 0 = 成功；1/2/3 = 效应 / 函数 / 调用边超容量。
+fn pt_eff_census(unit: ptr, t: ptr, sc: ptr, lo: u32, hi: u32) -> u32 {
+    // brk 拿回来的那块不保证干净 —— 六个计数先归零（开关关着时也归零）。
+    let z: u32 = 0;
+    while z < 6 {
+        store32(sc, PT_EFFCNT + z * 4, 0);
+        z = z + 1;
+    }
+    if pt_eff_on(unit, t, lo, hi) == 0 {
+        return 0;
+    }
+    // ---- 1. 效应声明：名字 token + 块范围（参考实现 `_effects`）----
+    let ne: u32 = 0;
+    let i: u32 = lo;
+    while i < hi {
+        let hit: u32 = 0;
+        if i + 2 < hi && pt_kind(t, i) == 0 && pt_tis(unit, t, i, "effect")
+                && pt_kind(t, i + 1) == 0
+                && pt_eff_p(unit, t, i + 2, 123) {
+            let cl: u32 = pt_eff_match(unit, t, i + 2, hi, 123, 125);
+            if cl != PT_NONE {
+                if ne >= PT_EFFMAX {
+                    return 1;
+                }
+                store32(sc, PT_EFFTAB + ne * 16, i + 1);
+                store32(sc, PT_EFFTAB + ne * 16 + 4, i);
+                store32(sc, PT_EFFTAB + ne * 16 + 8, cl);
+                ne = ne + 1;
+                i = cl + 1;
+                hit = 1;
+            }
+        }
+        if hit == 0 {
+            i = i + 1;
+        }
+    }
+    // ---- 2. 函数：名字、声明行、体（参考实现 `_functions`）----
+    let nf: u32 = 0;
+    i = lo;
+    while i < hi {
+        let take: u32 = 0;
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i, "fn")
+                && pt_kind(t, i + 1) == 0 && pt_eff_inspan(sc, i, ne) == 0 {
+            let k: u32 = i + 2;
+            while k < hi && pt_eff_p(unit, t, k, 40) == false {
+                k = k + 1;
+            }
+            if k < hi {
+                let pc: u32 = pt_eff_match(unit, t, k, hi, 40, 41);
+                if pc != PT_NONE {
+                    let d: u32 = 0;
+                    let e: u32 = pc + 1;
+                    let end: u32 = PT_NONE;
+                    while e < hi && end == PT_NONE {
+                        if pt_kind(t, e) == 3 {
+                            let c: u32 = load8(unit, pt_off(t, e)) as u32;
+                            if c == 40 || c == 91 || c == 60 {
+                                d = d + 1;
+                            }
+                            if c == 41 || c == 93 || c == 62 {
+                                if d > 0 {
+                                    d = d - 1;
+                                }
+                            }
+                            if d == 0 && (c == 123 || c == 59) {
+                                end = e;
+                            }
+                        }
+                        if end == PT_NONE {
+                            e = e + 1;
+                        }
+                    }
+                    if end != PT_NONE {
+                        take = 1;
+                        // 行：从右括号之后到块的 `{` / 声明的 `;`，**最后一个** `effects`
+                        // （参考实现 `_row` 就地扫，不建类型视图）。
+                        let has: u32 = 0;
+                        let effi: u32 = 0;
+                        let dd: u32 = 0;
+                        let j: u32 = pc + 1;
+                        while j < end {
+                            if pt_kind(t, j) == 3 {
+                                let c: u32 = load8(unit, pt_off(t, j)) as u32;
+                                if c == 40 || c == 91 || c == 60 {
+                                    dd = dd + 1;
+                                }
+                                if c == 41 || c == 93 || c == 62 {
+                                    if dd > 0 {
+                                        dd = dd - 1;
+                                    }
+                                }
+                            } else if dd == 0 && pt_kind(t, j) == 0
+                                    && pt_tis(unit, t, j, "effects") {
+                                effi = j;
+                                has = 1;
+                            }
+                            j = j + 1;
+                        }
+                        let dl: u32 = 0;
+                        let dh: u32 = 0;
+                        if has == 1 {
+                            j = effi + 1;
+                            while j < end {
+                                if pt_kind(t, j) == 0 {
+                                    let m: u32 = 0;
+                                    while m < ne {
+                                        if lspe_teq(unit, t,
+                                                    load32(sc, PT_EFFTAB + m * 16),
+                                                    j) == 1 {
+                                            if m < 32 {
+                                                dl = dl | ((1 as u32) << m);
+                                            }
+                                            if m >= 32 {
+                                                dh = dh | ((1 as u32) << (m - 32));
+                                            }
+                                        }
+                                        m = m + 1;
+                                    }
+                                }
+                                j = j + 1;
+                            }
+                        }
+                        let bo: u32 = PT_NONE;
+                        let bc: u32 = PT_NONE;
+                        if pt_eff_p(unit, t, end, 123) {
+                            let bcl: u32 = pt_eff_match(unit, t, end, hi, 123, 125);
+                            if bcl != PT_NONE {
+                                bo = end;
+                                bc = bcl;
+                            } else {
+                                take = 0;
+                            }
+                        }
+                        if take == 1 {
+                            if nf >= PT_FNMAX {
+                                return 2;
+                            }
+                            let base: u32 = PT_FNTAB + nf * 32;
+                            store32(sc, base, i + 1);
+                            store32(sc, base + 4, has);
+                            store32(sc, base + 8, dl);
+                            store32(sc, base + 12, dh);
+                            // 推断掩码：先清掉（brk 回来的内存不保证干净）。
+                            store32(sc, base + 16, 0);
+                            store32(sc, base + 20, 0);
+                            store32(sc, base + 24, bo);
+                            store32(sc, base + 28, bc);
+                            nf = nf + 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    // ---- 3. 调用边：本单元里声明过的函数（参考实现 `_calls`）----
+    let nc: u32 = 0;
+    let f: u32 = 0;
+    while f < nf {
+        let base: u32 = PT_FNTAB + f * 32;
+        let bo: u32 = load32(sc, base + 24);
+        let bc: u32 = load32(sc, base + 28);
+        if bo != PT_NONE {
+            let j: u32 = bo + 1;
+            while j < bc {
+                if pt_kind(t, j) == 0 && pt_eff_p(unit, t, j + 1, 40)
+                        && pt_eff_p(unit, t, j - 1, 46) == false {
+                    let g: u32 = 0;
+                    let hit: u32 = 0;
+                    while g < nf && hit == 0 {
+                        if lspe_teq(unit, t,
+                                    load32(sc, PT_FNTAB + g * 32), j) == 1 {
+                            if nc >= PT_CALLMAX {
+                                return 3;
+                            }
+                            store32(sc, PT_CALLTAB + nc * 8, f);
+                            store32(sc, PT_CALLTAB + nc * 8 + 4, g);
+                            nc = nc + 1;
+                            hit = 1;
+                        }
+                        g = g + 1;
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        f = f + 1;
+    }
+    // ---- 4. 行推断的不动点（参考实现：`effective[caller] |= contract(callee)`）----
+    let round: u32 = 0;
+    let changed: u32 = 1;
+    while changed == 1 && round < nf + 2 {
+        changed = 0;
+        let e2: u32 = 0;
+        while e2 < nc {
+            let ci: u32 = load32(sc, PT_CALLTAB + e2 * 8);
+            let cj: u32 = load32(sc, PT_CALLTAB + e2 * 8 + 4);
+            let cb: u32 = PT_FNTAB + cj * 32;
+            let nl: u32 = load32(sc, cb + 8);
+            let nh: u32 = load32(sc, cb + 12);
+            if load32(sc, cb + 4) == 0 {
+                nl = load32(sc, cb + 16);
+                nh = load32(sc, cb + 20);
+            }
+            let ob: u32 = PT_FNTAB + ci * 32;
+            let ol: u32 = load32(sc, ob + 16);
+            let oh: u32 = load32(sc, ob + 20);
+            let al: u32 = ol | nl;
+            let ah: u32 = oh | nh;
+            if al != ol || ah != oh {
+                store32(sc, ob + 16, al);
+                store32(sc, ob + 20, ah);
+                changed = 1;
+            }
+            e2 = e2 + 1;
+        }
+        round = round + 1;
+    }
+    // ---- 5. 六个计数：总数 / 有行且盖住 / 无行 / 盖住的调用 ----
+    let rdo: u32 = 0;
+    let rnd: u32 = 0;
+    f = 0;
+    while f < nf {
+        let base: u32 = PT_FNTAB + f * 32;
+        if load32(sc, base + 4) == 0 {
+            rnd = rnd + 1;
+        } else {
+            let dl: u32 = load32(sc, base + 8);
+            let dh: u32 = load32(sc, base + 12);
+            let il: u32 = load32(sc, base + 16);
+            let ih: u32 = load32(sc, base + 20);
+            if (il & (4294967295 - dl)) == 0
+                    && (ih & (4294967295 - dh)) == 0 {
+                rdo = rdo + 1;
+            }
+        }
+        f = f + 1;
+    }
+    let cok: u32 = 0;
+    let e3: u32 = 0;
+    while e3 < nc {
+        let ci: u32 = load32(sc, PT_CALLTAB + e3 * 8);
+        let cj: u32 = load32(sc, PT_CALLTAB + e3 * 8 + 4);
+        let cb: u32 = PT_FNTAB + cj * 32;
+        let nl: u32 = load32(sc, cb + 8);
+        let nh: u32 = load32(sc, cb + 12);
+        if load32(sc, cb + 4) == 0 {
+            nl = load32(sc, cb + 16);
+            nh = load32(sc, cb + 20);
+        }
+        let ok: u32 = 1;
+        let ob: u32 = PT_FNTAB + ci * 32;
+        if load32(sc, ob + 4) == 1 {
+            let dl: u32 = load32(sc, ob + 8);
+            let dh: u32 = load32(sc, ob + 12);
+            if (nl & (4294967295 - dl)) != 0 || (nh & (4294967295 - dh)) != 0 {
+                ok = 0;
+            }
+        }
+        cok = cok + ok;
+        e3 = e3 + 1;
+    }
+    store32(sc, PT_EFFCNT + 0, ne);
+    store32(sc, PT_EFFCNT + 4, nf);
+    store32(sc, PT_EFFCNT + 8, nc);
+    store32(sc, PT_EFFCNT + 12, rdo);
+    store32(sc, PT_EFFCNT + 16, rnd);
+    store32(sc, PT_EFFCNT + 20, cok);
+    return 0;
+}
+
+/// 驱动器的 **检查之前** 预跑：`check_arena` 的 `desugar_effects` 会把声明与
+/// `effects` 行从**同一个 token 缓冲**里擦掉（`docs/346` A2），而台账要数的正是它们。
+/// 所以这一段必须在擦除之前、由驱动器用一块自己的缓冲跑完，结果再交给 `potato_emit`。
+pub fn eff_scratch_bytes() -> u64 {
+    return PT_SC_BYTES;
+}
+
+pub fn eff_precount(unit: ptr, t: ptr, nt: u32, sc: ptr) -> u32 {
+    let rr: u64 = pt_root_range(unit, t, nt);
+    if rr == PT_NONE as u64 {
+        // 没有 `module` —— `potato_emit` 会用同一条规则点名失败，这里不抢先报。
+        return 0;
+    }
+    let lo: u32 = (rr / 4294967296) as u32;
+    let hi: u32 = (rr % 4294967296) as u32;
+    return pt_eff_census(unit, t, sc, lo, hi);
+}
+
+/// v16（`docs/262`，用户 2026-10-18 定第七维）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
+/// ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
+/// P0 的骨架里计数全 0、不变量 `not_run` —— 这是**明说的未运行**，不是假 `ok`。
+fn pt_lspe_state(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    if lspe_val(unit, t, lo, hi) == 2 {
+        return pt_qs(out, o, "lspe_close_admin");
+    }
+    return pt_qs(out, o, "lspe_open_admin");
+}
+
+/// `sp` 是**回填地址**：把台账的 `sites` 数写在那里，供紧随其后的 `systems`
+/// 索引引用（索引写 `cost` 时不重算一遍普查 —— 两处数的必须是同一个数）。
+/// `wfn` 是单态化实例数：每个实例是一条 `TypeWellFormed`（`#745`）。
+fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
+           sp: ptr, wfn: u32, lvl: u32) -> u32 {
+    let closed: u32 = 0;
+    if lspe_val(unit, t, lo, hi) == 2 {
+        closed = 1;
+    }
+    let gt: u32 = 0;
+    let it: u32 = 0;
+    let ip: u32 = 0;
+    let ft: u32 = 0;
+    let fp: u32 = 0;
+    let alt: u32 = 0;
+    let alp: u32 = 0;
+    let nt: u32 = 0;
+    let np: u32 = 0;
+    let et: u32 = 0;
+    let ep: u32 = 0;
+    let ct: u32 = 0;
+    let cp: u32 = 0;
+    let gcov: u32 = 0;
+    let icov: u32 = 0;
+    let icovp: u32 = 0;
+    let bt: u32 = 0;
+    let bcov: u32 = 0;
+    let psites: u32 = 0;
+    let passed: u32 = 0;
+    // 上下文级别（`#1091`）：证据按级别截断 —— Typed/LocalFlow 从 L1 起，
+    // Interproc 从 L2 起，GlobalInvariant（E5）从 L3 起（`docs/262` §5.6）。
+    let g_ok: u32 = 0;
+    let c_ok: u32 = 0;
+    let wf_prov: u32 = 0;
+    if lvl >= 1 {
+        g_ok = 1;
+    }
+    if lvl >= 2 {
+        c_ok = 1;
+    }
+    // v2（0.1.5.2）：析构器（`#747`）与替换后的良构（`#745`）。
+    let drop_n: u32 = 0;
+    let wf_n: u32 = 0;
+    // E9 域检查器（`docs/306`–`308`）。
+    let dtot: u32 = 0;
+    let dlit: u32 = 0;
+    let dloop: u32 = 0;
+    let dacc: u32 = 0;
+    let drev: u32 = 0;
+    let ddom_prov: u32 = 0;
+    let dloop_prov: u32 = 0;
+    // E11 效应站点（`docs/341` A2c）：事实由 `pt_eff_census` 放进 `PT_EFFCNT`，
+    // 级别截断在这里做（`Typed` 从 L1 起、`Interproc` 从 L2 起）。
+    let eff_t: u32 = 0;
+    let eff_p: u32 = 0;
+    let en: u32 = 0;
+    let ef: u32 = 0;
+    let ec: u32 = 0;
+    let erd: u32 = 0;
+    let ern: u32 = 0;
+    let eck: u32 = 0;
+    let di: u32 = 0;
+    let b3: u32 = 0;
+    let fnd: u32 = 0;
+    let d3: u32 = 0;
+    let k3: u32 = 0;
+    let e3: u32 = 0;
+    let fin3: u32 = 0;
+    let m3: u32 = 0;
+    let has3: u32 = 0;
+    if closed == 0 {
+        gt = lspe_guard_total(unit, t, lo, hi);
+        it = lspe_index_total(unit, t, lo, hi);
+        ip = lspe_index_proved(unit, t, lo, hi, lvl);
+        ft = load32(sc, PT_L3CNT + 0);
+        fp = load32(sc, PT_L3CNT + 4);
+        alt = load32(sc, PT_L3CNT + 8);
+        alp = load32(sc, PT_L3CNT + 12);
+        nt = load32(sc, PT_L3CNT + 16);
+        np = load32(sc, PT_L3CNT + 20);
+        et = load32(sc, PT_L3CNT + 24);
+        ep = load32(sc, PT_L3CNT + 28);
+        ct = load32(sc, PT_L3CNT + 32);
+        cp = load32(sc, PT_L3CNT + 36);
+        psites = load32(sc, PT_L3CNT + 40);
+        passed = load32(sc, PT_L3CNT + 44);
+        gcov = load32(sc, PT_L3CNT + 48);
+        icov = load32(sc, PT_L3CNT + 52);
+        // 只能减"被覆盖**且本来能证**"的那些（`#1080`）：减全部会把非字面量
+        // 覆盖站点算成负贡献，无符号回绕。
+        icovp = lspe_index_covered_proved(unit, t, lo, hi, ptr_add(sc, PT_PASS), lvl);
+        dtot = load32(sc, PT_DOMCNT + 0);
+        dlit = load32(sc, PT_DOMCNT + 4);
+        dloop = load32(sc, PT_DOMCNT + 8);
+        dacc = load32(sc, PT_DOMCNT + 12);
+        drev = load32(sc, PT_DOMCNT + 16);
+        bt = load32(sc, PT_L3CNT + 56);
+        bcov = load32(sc, PT_L3CNT + 60);
+        en = load32(sc, PT_EFFCNT + 0);
+        ef = load32(sc, PT_EFFCNT + 4);
+        ec = load32(sc, PT_EFFCNT + 8);
+        erd = load32(sc, PT_EFFCNT + 12);
+        ern = load32(sc, PT_EFFCNT + 16);
+        eck = load32(sc, PT_EFFCNT + 20);
+        eff_t = en + ef + ec;
+        eff_p = en + ern;
+        if lvl >= 1 {
+            eff_p = eff_p + erd;
+        }
+        if lvl >= 2 {
+            eff_p = eff_p + eck;
+        }
+        // ---- 析构器（`#747`）：`impl Drop for T { … fn drop` 一个一条 ----
+        di = lo;
+        while di < hi {
+            if lspe_kind(t, di) == 0 && lspe_tis(unit, t, di, "impl") == 1
+                    && lspe_kind(t, di + 1) == 0
+                    && lspe_tis(unit, t, di + 1, "Drop") == 1
+                    && lspe_kind(t, di + 2) == 0
+                    && lspe_tis(unit, t, di + 2, "for") == 1
+                    && lspe_kind(t, di + 3) == 0 {
+                b3 = di + 4;
+                fnd = 0;
+                while b3 < hi && fnd == 0 {
+                    if lspe_kind(t, b3) == 3 && lspe_tis(unit, t, b3, "{") == 1 {
+                        fnd = 1;
+                    }
+                    b3 = b3 + 1;
+                }
+                if fnd == 1 {
+                    d3 = 0;
+                    k3 = b3 - 1;
+                    e3 = hi;
+                    fin3 = 0;
+                    while k3 < hi && fin3 == 0 {
+                        if lspe_kind(t, k3) == 3 && lspe_tis(unit, t, k3, "{") == 1 {
+                            d3 = d3 + 1;
+                        }
+                        if lspe_kind(t, k3) == 3 && lspe_tis(unit, t, k3, "}") == 1 {
+                            d3 = d3 - 1;
+                            if d3 == 0 {
+                                e3 = k3;
+                                fin3 = 1;
+                            }
+                        }
+                        k3 = k3 + 1;
+                    }
+                    m3 = b3;
+                    has3 = 0;
+                    while m3 < e3 && has3 == 0 {
+                        if lspe_kind(t, m3) == 0 && lspe_tis(unit, t, m3, "fn") == 1
+                                && lspe_kind(t, m3 + 1) == 0
+                                && lspe_tis(unit, t, m3 + 1, "drop") == 1 {
+                            has3 = 1;
+                        }
+                        m3 = m3 + 1;
+                    }
+                    if has3 == 1 {
+                        drop_n = drop_n + 1;
+                    }
+                }
+            }
+            di = di + 1;
+        }
+        // 单态化实例 = 一次替换 ⇒ 一条 `TypeWellFormed`（`#745`）。
+        wf_n = wfn;
+    }
+    // 域声明用 `Typed`（L0 不认）；字面量 guard 是 `Syntactic`；循环归纳从 L3 起。
+    ddom_prov = dtot * g_ok;
+    dloop_prov = 0;
+    if lvl >= 3 {
+        dloop_prov = dloop;
+    }
+    let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt + drop_n + wf_n
+                     + dtot + dacc + drev + eff_t;
+    store32(sp, 0, nsite);
+    // WF 的证据是 `Typed`：L0 不认（`docs/262` §5.6）；DropHonest 是 `Assumed`，恒认。
+    wf_prov = wf_n * g_ok;
+    // pass 块里的站点不证明：guard / index / bounds 的 proved 要扣掉覆盖数。
+    let nproved: u32 = (gt - gcov) * g_ok + (ip - icovp)
+                       + (fp + alp + np + ep) * g_ok + cp * c_ok
+                       + (bt - bcov) + drop_n + wf_prov
+                       + ddom_prov + dlit + dloop_prov + drev + eff_p;
+    let nund: u32 = nsite - nproved;
+    // 默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条 Assumed 地板（`docs/262` §6）；
+    // `revocable` 域是**设计上**的假设（`docs/146` §3），也进这一格。
+    let assumed: u32 = nund - passed + drev;
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "state");
+    o = pt_lspe_state(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "set_by");
+    if lspe_found(unit, t, lo, hi) == 1 {
+        o = pt_qs(out, o, "source");
+    } else {
+        o = pt_qs(out, o, "default");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "mode");
+    o = pt_qs(out, o, "full");
+    o = pt_str(out, o, ",\n");
+    // AI 检查器（`choose lspe_aicheck_true`）：**开没开**，与 open/close 正交。
+    o = pt_key(out, o, 2, "aicheck");
+    if lspe_aicheck(unit, t, lo, hi) == 1 {
+        o = pt_bool(out, o, 1);
+    } else {
+        o = pt_bool(out, o, 0);
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "level");
+    o = pt_dec(out, o, lvl as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "sites");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "obligations");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "proved");
+    o = pt_dec(out, o, nproved as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "undecided");
+    o = pt_dec(out, o, nund as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "deferred");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "refused");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "floors");
+    o = pt_dec(out, o, (assumed + drop_n + psites) as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "floor_detail");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "assumed");
+    o = pt_dec(out, o, assumed as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "stale_wf");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "budget");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "depth");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "drop_honest");
+    o = pt_dec(out, o, drop_n as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "pass");
+    o = pt_dec(out, o, psites as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "per_kind");
+    if nsite == 0 {
+        o = pt_str(out, o, "{}");
+    } else {
+        o = pt_str(out, o, "{\n");
+        // 键按**字典序**（参考实现 `sorted(per_kind)`）：Alive / Exclusive /
+        // FreeOwnership / GuardHolds / InBounds / Initialized / SummaryContract。
+        let first: u32 = 1;
+        if alt > 0 {
+            o = pt_key(out, o, 3, "Alive");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (alp * g_ok) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, alt as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if drev > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "CapabilityLive");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, drev as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, drev as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if drop_n > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "DropHonest");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, drop_n as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, drop_n as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if eff_t > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "EffectAllowed");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, eff_p as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, eff_t as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if et > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "Exclusive");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (ep * g_ok) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, et as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if ft > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "FreeOwnership");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (fp * g_ok) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, ft as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if gt > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "GuardHolds");
+            o = pt_str(out, o, "\"");
+            // 被 pass 覆盖的站点**不证明**（参考实现 `ledger.py`：`covered_by` 的
+            // 站点求解器给空）。与上面 `nproved` 的口径同一条。
+            o = pt_dec(out, o, ((gt - gcov) * g_ok) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, gt as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if it + bt > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "InBounds");
+            o = pt_str(out, o, "\"");
+            // 下标站点**与** LMS g1 内联界检查（`#1021`）都算 InBounds：
+            // 后者没有自己的语法，但它是热路径上真实存在的那条检查。
+            o = pt_dec(out, o, (ip - icovp + bt - bcov) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, (it + bt) as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if dtot + dacc > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "InDomain");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (ddom_prov + dlit + dloop_prov) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, (dtot + dacc) as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if nt > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "Initialized");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (np * g_ok) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, nt as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if ct > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "SummaryContract");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, (cp * c_ok) as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, ct as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        if wf_n > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "TypeWellFormed");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, wf_prov as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, wf_n as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
+        o = pt_str(out, o, "\n");
+        o = pt_ind(out, o, 2);
+        o = pt_str(out, o, "}");
+    }
+    // 三问的计数（`docs/262` §6 / `#753`）：来源 / 反证 / 对质。
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "interrogations");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "provenance");
+    o = pt_dec(out, o, nproved as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "falsification");
+    // `falsification` 只数**有配对反证探针**的义务（`registry.LSPE_PROBED_OBLIGATIONS`）。
+    // E11 的五种义务还不在其中，所以效应站点不能进这一格（`docs/341` §11）。
+    o = pt_dec(out, o, (nsite - eff_t) as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cross_exam");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}");
+    // 五条不变量（`docs/262` §8）：审计关着时是 `not_run`，不是假 `ok`。
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "invariants");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "i1");
+    if closed == 1 {
+        o = pt_qs(out, o, "not_run");
+    } else {
+        o = pt_qs(out, o, "ok");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i2");
+    if closed == 1 {
+        o = pt_qs(out, o, "not_run");
+    } else {
+        o = pt_qs(out, o, "ok");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i3");
+    if closed == 1 {
+        o = pt_qs(out, o, "not_run");
+    } else {
+        o = pt_qs(out, o, "ok");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i4");
+    if closed == 1 {
+        o = pt_qs(out, o, "not_run");
+    } else {
+        o = pt_qs(out, o, "ok");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "i5");
+    if closed == 1 {
+        o = pt_qs(out, o, "not_run");
+    } else {
+        o = pt_qs(out, o, "ok");
+    }
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}");
+    // `lspe pass` 的收据（`docs/262` §5.16）：id + 跨度 + 理由 + 覆盖站点数。
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "passes");
+    let pcx: u32 = 0;
+    if closed == 0 {
+        pcx = load32(sc, PT_PASS);
+    }
+    // 根单元的起始行（`#1099`）：收据写的是根文件的行号。
+    let lbase: u32 = pt_line_at(unit, pt_off(t, lo));
+    if pcx == 0 {
+        o = pt_str(out, o, "[]");
+    } else {
+        o = pt_str(out, o, "[\n");
+        let ix2: u32 = 0;
+        let s2: u32 = 0;
+        while s2 < pcx {
+            if lspe_span_outer(ptr_add(sc, PT_PASS), s2) == 1 {
+                let b2: u32 = (s2 + 1) * 16;
+                let open: u32 = load32(sc, PT_PASS + b2);
+                let close: u32 = load32(sc, PT_PASS + b2 + 4);
+                o = pt_aelm(out, o, 3, ix2);
+                o = pt_str(out, o, "{\n");
+                o = pt_key(out, o, 4, "id");
+                o = pt_str(out, o, "\"");
+                o = pt_mem(out, o, unit, pt_off(t, lo + 1), pt_tlen(t, lo + 1));
+                o = pt_str(out, o, ":pass:");
+                o = pt_hex8(out, o, lspe_fnv_pass(unit, t, open - 1,
+                                                 lspe_occ(unit, t, ptr_add(sc, PT_PASS), s2)));
+                o = pt_str(out, o, "\"");
+                o = pt_str(out, o, ",\n");
+                // 行号是**根文件**的行号（`#1099`）：依赖的源码排在根前面，
+                // 直接数会把整份收据推到根文件末尾之外。
+                o = pt_key(out, o, 4, "line");
+                o = pt_dec(out, o,
+                           (pt_line_at(unit, pt_off(t, open - 3)) - lbase + 1) as u64);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "end_line");
+                o = pt_dec(out, o,
+                           (pt_line_at(unit, pt_off(t, close)) - lbase + 1) as u64);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "reason");
+                o = pt_q_dec(out, o, unit, pt_off(t, open - 1),
+                             pt_tlen(t, open - 1));
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "sites");
+                o = pt_dec(out, o, load32(sc, PT_PASS + b2 + 8) as u64);
+                o = pt_str(out, o, "\n");
+                o = pt_ind(out, o, 3);
+                o = pt_str(out, o, "}");
+                ix2 = ix2 + 1;
+            }
+            s2 = s2 + 1;
+        }
+        o = pt_str(out, o, "\n");
+        o = pt_ind(out, o, 2);
+        o = pt_str(out, o, "]");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "pass_sites");
+    o = pt_dec(out, o, psites as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "passed_sites");
+    o = pt_dec(out, o, passed as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "pass_ratio");
+    o = pt_str(out, o, "\"");
+    o = pt_dec(out, o, passed as u64);
+    o = pt_str(out, o, "/");
+    o = pt_dec(out, o, nsite as u64);
+    o = pt_str(out, o, "\"");
+    o = pt_str(out, o, ",\n");
+    // LSPC 的开关（`docs/262` §7.6 / `#759`）：关审计 = `off`，并且**写进产物**。
+    o = pt_key(out, o, 2, "lspc");
+    if closed == 1 {
+        o = pt_qs(out, o, "off");
+    } else {
+        o = pt_qs(out, o, "full");
+    }
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "acked");
+    o = pt_dec(out, o, 0 as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
+/// v20（`docs/147` §5 / `#1022`）：**系统索引**。六个系统各一条
+/// `{state, detail, cost}`，次序与参考实现同一张 `SYSTEM_KEYS`（gc / runtime /
+/// port / vm / lms / lspe）。
+///
+/// `detail` **只写字段名** —— 索引不许成为第二份数字；`cost` 从明细现算：
+/// `gc` 是 `gc_ladder.total_sites`、`lms` 是 `lms_levels` 里为真的级数、
+/// `lspe` 是台账的 `sites`（`pt_lspe` 回填在 `PT_GLSCR`）。没有明细的那三个
+/// （`runtime` / `port` / `vm`）`detail` 与 `cost` 都写 `null`。
+fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
+              gl_tot: u32) -> u32 {
+    o = pt_str(out, o, "{\n");
+    // ---- gc
+    o = pt_key(out, o, 2, "gc");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_gc(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_qs(out, o, "gc_ladder");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 4, "sites");
+    o = pt_dec(out, o, gl_tot as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 3);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- runtime
+    o = pt_key(out, o, 2, "runtime");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_runtime(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_str(out, o, "null");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "null\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- port
+    o = pt_key(out, o, 2, "port");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_port(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_str(out, o, "null");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "null\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- vm
+    o = pt_key(out, o, 2, "vm");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_vm(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_str(out, o, "null");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "null\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- lms：cost 是**开着的级数**（`lms_levels` 里为真的那七格）
+    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+    let cnt: u32 = 0;
+    let b: u32 = 0;
+    while b < 7 {
+        if (m & (1 << b)) != 0 {
+            cnt = cnt + 1;
+        }
+        b = b + 1;
+    }
+    o = pt_key(out, o, 2, "lms");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_lms(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_qs(out, o, "lms_levels");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 4, "levels");
+    o = pt_dec(out, o, cnt as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 3);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "},\n");
+    // ---- lspe：state 取台账自己的 state（顶层 `lspe` 是个对象）
+    o = pt_key(out, o, 2, "lspe");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 3, "state");
+    o = pt_lspe_state(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "detail");
+    o = pt_qs(out, o, "lspe");
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 3, "cost");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 4, "sites");
+    o = pt_dec(out, o, load32(sc, PT_GLSCR) as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 3);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 2);
+    o = pt_str(out, o, "}\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    return o;
+}
+
+/// `capabilities`。形状是**动态**的（`docs/306` §2、§5）：
+/// `capability NAME : SPACE [ LO|() .. HI|() ] (LAW ( N ))? (revocable)?`。
+/// `()` 占两个 token，`LAW(N)` 占四个。无界那一侧的 `lo`/`hi` 按参考实现发 **0**。
+/// 键的顺序与参考实现一致：name / domain / revocable / shape? / law? / param?。
 fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32 {
     let ix: u32 = 0;
     let d: u32 = 0;
@@ -1798,8 +3642,56 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
                 d = d - 1;
             }
         } else if d == 0 && pt_tis(unit, t, i, "capability") {
+            // 边界：`()` 那一侧无界。
+            let lof: u32 = 0;
+            let hif: u32 = 0;
+            let lot: u32 = i + 5;
+            let j: u32 = i + 5;
+            if pt_tis(unit, t, j, "(") {
+                lof = 1;
+                j = j + 2;
+            } else {
+                j = j + 1;
+            }
+            j = j + 2;                            // '..'
+            let hit: u32 = j;
+            if pt_tis(unit, t, j, "(") {
+                hif = 1;
+                j = j + 2;
+            } else {
+                j = j + 1;
+            }
+            j = j + 1;                            // ']'
+            let law: u32 = 0;
+            let part: u32 = 0;
+            if pt_tis(unit, t, j, "danger") || pt_tis(unit, t, j, "adaptive")
+                    || pt_tis(unit, t, j, "flow") {
+                if pt_tis(unit, t, j, "danger") { law = 1; }
+                if pt_tis(unit, t, j, "adaptive") { law = 10; }
+                if pt_tis(unit, t, j, "flow") { law = 13; }
+                j = j + 1;
+            } else if pt_tis(unit, t, j, "epoch") || pt_tis(unit, t, j, "far")
+                    || pt_tis(unit, t, j, "sliding") || pt_tis(unit, t, j, "decaying")
+                    || pt_tis(unit, t, j, "growing") || pt_tis(unit, t, j, "consumed")
+                    || pt_tis(unit, t, j, "cyclic") || pt_tis(unit, t, j, "generational")
+                    || pt_tis(unit, t, j, "subject") || pt_tis(unit, t, j, "witnessed")
+                    || pt_tis(unit, t, j, "reachable") {
+                if pt_tis(unit, t, j, "epoch") { law = 2; }
+                if pt_tis(unit, t, j, "far") { law = 3; }
+                if pt_tis(unit, t, j, "sliding") { law = 4; }
+                if pt_tis(unit, t, j, "decaying") { law = 5; }
+                if pt_tis(unit, t, j, "growing") { law = 6; }
+                if pt_tis(unit, t, j, "consumed") { law = 7; }
+                if pt_tis(unit, t, j, "cyclic") { law = 8; }
+                if pt_tis(unit, t, j, "generational") { law = 9; }
+                if pt_tis(unit, t, j, "subject") { law = 11; }
+                if pt_tis(unit, t, j, "witnessed") { law = 12; }
+                if pt_tis(unit, t, j, "reachable") { law = 14; }
+                part = j + 2;
+                j = j + 4;                        // LAW ( N )
+            }
             let rev: u32 = 0;
-            if pt_tis(unit, t, i + 10, "revocable") {
+            if pt_tis(unit, t, j, "revocable") {
                 rev = 1;
             }
             o = pt_aelm(out, o, 2, ix);
@@ -1813,15 +3705,61 @@ fn pt_caps(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, n: u32) -> u32
             o = pt_q(out, o, unit, pt_off(t, i + 3), pt_tlen(t, i + 3));
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 4, "lo");
-            o = pt_num(out, o, unit, t, i + 5);
+            if lof == 1 {
+                o = pt_dec(out, o, 0);
+            } else {
+                o = pt_num(out, o, unit, t, lot);
+            }
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 4, "hi");
-            o = pt_num(out, o, unit, t, i + 8);
+            if hif == 1 {
+                o = pt_dec(out, o, 4294967295);
+            } else {
+                o = pt_num(out, o, unit, t, hit);
+            }
             o = pt_str(out, o, "\n");
             o = pt_ind(out, o, 3);
             o = pt_str(out, o, "},\n");
             o = pt_key(out, o, 3, "revocable");
             o = pt_bool(out, o, rev);
+            if lof == 1 || hif == 1 {
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "shape");
+                o = pt_str(out, o, "{\n");
+                o = pt_key(out, o, 4, "lo_inf");
+                o = pt_bool(out, o, lof);
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 4, "hi_inf");
+                o = pt_bool(out, o, hif);
+                o = pt_str(out, o, "\n");
+                o = pt_ind(out, o, 3);
+                o = pt_str(out, o, "}");
+            }
+            if law != 0 {
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "law");
+                if law == 1 { o = pt_qs(out, o, "danger"); }
+                if law == 2 { o = pt_qs(out, o, "epoch"); }
+                if law == 3 { o = pt_qs(out, o, "far"); }
+                if law == 4 { o = pt_qs(out, o, "sliding"); }
+                if law == 5 { o = pt_qs(out, o, "decaying"); }
+                if law == 6 { o = pt_qs(out, o, "growing"); }
+                if law == 7 { o = pt_qs(out, o, "consumed"); }
+                if law == 8 { o = pt_qs(out, o, "cyclic"); }
+                if law == 9 { o = pt_qs(out, o, "generational"); }
+                if law == 10 { o = pt_qs(out, o, "adaptive"); }
+                if law == 11 { o = pt_qs(out, o, "subject"); }
+                if law == 12 { o = pt_qs(out, o, "witnessed"); }
+                if law == 13 { o = pt_qs(out, o, "flow"); }
+                if law == 14 { o = pt_qs(out, o, "reachable"); }
+                o = pt_str(out, o, ",\n");
+                o = pt_key(out, o, 3, "param");
+                if law == 1 || law == 10 || law == 13 {
+                    o = pt_dec(out, o, 0);
+                } else {
+                    o = pt_num(out, o, unit, t, part);
+                }
+            }
             o = pt_str(out, o, "\n");
             o = pt_ind(out, o, 2);
             o = pt_str(out, o, "}");
@@ -1878,7 +3816,14 @@ fn pt_consts(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32, n: 
             o = pt_str(out, o, ",\n");
             o = pt_key(out, o, 3, "value");
             // 类型后面是 `=`, 值在它后面(`int_lit` 允许前面有 `-`)
-            o = pt_num(out, o, unit, t, (rc / 4294967296) as u32 + 1);
+            let vt: u32 = (rc / 4294967296) as u32 + 1;
+            if pt_kind(t, vt) == 2 {
+                // `docs/342`：字符串常量的值是**解码后的字符串**（与参考实现
+                // `json.dumps(c.value)` 同一份字节）。
+                o = pt_q_dec(out, o, unit, pt_off(t, vt), pt_tlen(t, vt));
+            } else {
+                o = pt_num(out, o, unit, t, vt);
+            }
             o = pt_str(out, o, "\n");
             o = pt_ind(out, o, 2);
             o = pt_str(out, o, "}");
@@ -2204,6 +4149,14 @@ fn pt_functions(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32, 
             if ft != PT_NONE {
                 its = ft + 1;
             }
+        } else if d == 0 && pt_tis(unit, t, i, "register")
+                && (pt_kind(t, i + 1) == 0 || pt_kind(t, i + 1) == 2)
+                && pt_tis(unit, t, i + 2, "{") {
+            // 与 `pt_cnt_fn` 那一处**同一条规则**：`register <名字> { <那个函数> }` 的壳
+            // 是透明的，跳过它让块里的函数按顶层收（`docs/223` 形态 A）。
+            // **两处必须一起改** —— 只改一处的话，条数与实际发出的条数对不上
+            // （`pt_aopen` 会按错的条数写数组头）。
+            i = i + 2;
         } else if pt_tis(unit, t, i, "fn")
                 && (d == 0 || (d == 1 && its != PT_NONE)) {
             let skip: u32 = 0;
@@ -2499,6 +4452,32 @@ fn pt_inst_find(sc: ptr, noff: u32, nlen: u32) -> u32 {
 fn pt_ty_sub(out: ptr, o: u32, unit: ptr, t: ptr, i: u32,
              lt: u32, ntp: u32, ags: ptr) -> u64 {
     let j: u32 = i;
+    // 函数类型 `(A,B) -> C`（`docs/348`）：与 `pt_ty` 同形，只是形参里也要做类型替换。
+    if pt_tis(unit, t, j, "(") {
+        let pc: u32 = pt_paren(unit, t, j);
+        if pt_tis(unit, t, pc + 1, "-") && pt_tis(unit, t, pc + 2, ">") {
+            o = pt_str(out, o, "(");
+            let fk: u32 = j + 1;
+            let ffirst: u32 = 1;
+            while fk < pc && pt_kind(t, fk) != 4 {
+                if ffirst == 0 {
+                    o = pt_str(out, o, ",");
+                }
+                ffirst = 0;
+                let rp: u64 = pt_ty_sub(out, o, unit, t, fk, lt, ntp, ags);
+                o = (rp % 4294967296) as u32;
+                fk = (rp / 4294967296) as u32;
+                if pt_tis(unit, t, fk, ",") {
+                    fk = fk + 1;
+                }
+            }
+            o = pt_str(out, o, ")->");
+            let rr: u64 = pt_ty_sub(out, o, unit, t, pc + 3, lt, ntp, ags);
+            o = (rr % 4294967296) as u32;
+            fk = (rr / 4294967296) as u32;
+            return (fk as u64) * 4294967296 + (o as u64);
+        }
+    }
     // 钩子①: 名字位置上如果是类型形参 -> 换成实参的类型（形参在 lt+1, lt+3, …）
     if pt_kind(t, j) == 0 && !pt_tis(unit, t, j, "mut") {
         let k: u32 = 0;
@@ -2564,18 +4543,24 @@ fn pt_ty_subm(sc: ptr, out: ptr, o: u32, unit: ptr, t: ptr, i: u32,
     return ((r / 4294967296) as u64) * 4294967296 + (ne as u64);
 }
 
-/// 局部变量表：压一条。满了**不写**（调用方在进函数前先查 `PT_EN < PT_EMAX` 再走，
-/// 所以这里是"到不了"的那一支 —— 本语言没有裸 `return;`，所以写成 if/else）。
-fn pt_env_put(sc: ptr, name_tok: u32, ts: u32, te: u32, d: u32) {
+/// 局部变量表：压一条。返回 0 = 收下；1 = 表满（`PT_EMAX`）。
+///
+/// **满了一定要有人说话**（`FujoJTOP/loment#774`）：原先这里是一个**静默的 `if`** ——
+/// 第 1537 个局部变量起就不进表，而调用方还在往后走；后面的名字解析于是落成"没这个
+/// 名字"，产物看起来正常、其实少了一半。现在把"满"变成一个返回值，由 `pt_mono_body` /
+/// `pt_mono_one` 一路传到 `potato_emit`（那边有一句点名的 `pt_wfail`）。
+fn pt_env_put(sc: ptr, name_tok: u32, ts: u32, te: u32, d: u32) -> u32 {
     let n: u32 = load32(sc, PT_EN);
-    if n < PT_EMAX {
-        let e: u32 = PT_ENV + n * 16;
-        store32(sc, e + EV_NAME, name_tok);
-        store32(sc, e + EV_TS, ts);
-        store32(sc, e + EV_TE, te);
-        store32(sc, e + EV_D, d);
-        store32(sc, PT_EN, n + 1);
+    if n >= PT_EMAX {
+        return 1;
     }
+    let e: u32 = PT_ENV + n * 16;
+    store32(sc, e + EV_NAME, name_tok);
+    store32(sc, e + EV_TS, ts);
+    store32(sc, e + EV_TE, te);
+    store32(sc, e + EV_D, d);
+    store32(sc, PT_EN, n + 1);
+    return 0;
 }
 
 /// 局部变量表：按名字令牌**从后往前**查（最近的 `let` 赢，与作用域语义一致）。
@@ -2781,7 +4766,7 @@ fn pt_arg_ty(sc: ptr, unit: ptr, t: ptr, i: u32, hi: u32) -> u64 {
     // `K as T`：K 只要求"个值" —— **字面量也算**（`outer(1 as u32, 2 as u32)` 那种形状）。
     // 参考实现按表达式的类型推，不管操作数是标识符还是字面量；这一格原先只认 kind 0，
     // 于是 `1 as u32` 落到"实参形态超出这一节"上 —— 直到 R4 这一轮才撞出来
-    // （`native_chain.lomt` 的 `main` 就是那么写的，而它以前排在 `REFUSED` 里，碰不到）。
+    // （`native_chain.lomt` 的 `chain_main` 就是那么写的，而它以前排在 `REFUSED` 里，碰不到）。
     if (pt_kind(t, j) == 0 || pt_kind(t, j) == 1) && pt_kind(t, j + 1) == 0
             && pt_tis(unit, t, j + 1, "as") {
         let ts: u32 = j + 2;
@@ -2825,6 +4810,14 @@ fn pt_ty_end(unit: ptr, t: ptr, i: u32, hi: u32) -> u32 {
             j = j + 1;
         }
         return j;
+    }
+    // 函数类型 `(A,B) -> C`（`docs/348`）：`)` 后面的 `-> R` 也属于这个类型。
+    if pt_tis(unit, t, j, "(") {
+        let pc: u32 = pt_paren(unit, t, j);
+        if pt_tis(unit, t, pc + 1, "-") && pt_tis(unit, t, pc + 2, ">") {
+            return pt_ty_end(unit, t, pc + 3, hi);
+        }
+        return pc + 1;
     }
     j = j + 1;
     if pt_tis(unit, t, j, "<") {
@@ -2878,6 +4871,51 @@ fn pt_gfn_scan(sc: ptr, unit: ptr, t: ptr, nt: u32) -> u32 {
         i = i + 1;
     }
     store32(sc, PT_NG, n);
+    return 0;
+}
+
+/// `flomtc`（`docs/350`）：本单元写没写 `choose flomtc_true`。与 `pt_fp` 同形，
+/// 只回答"开没开"，不往产物里写任何东西（它不进 Potato 的顶层维度）。
+fn pt_flomtc(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let d: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 3 {
+            let c: u32 = load8(unit, pt_off(t, i)) as u32;
+            if c == 123 || c == 40 || c == 91 {
+                d = d + 1;
+            }
+            if (c == 125 || c == 41 || c == 93) && d > 0 {
+                d = d - 1;
+            }
+        } else if d == 0 && pt_tis(unit, t, i, "choose")
+                && pt_tis(unit, t, i + 1, "flomtc_true") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 有没有**调用**泛型函数（声明名后紧跟 `(`，且不是声明本身）。
+/// 只是 `flomtc_true` 的**前置门**：1 = 照旧走 `pt_mono_all`（多走不误）；
+/// 0 = 没有调用点，造不出实例，跳过与走一遍产物相同。NG 是个位数，扫一遍 token 就够。
+fn pt_mono_used(sc: ptr, unit: ptr, t: ptr, nt: u32) -> u32 {
+    let n: u32 = load32(sc, PT_NG);
+    let i: u32 = 0;
+    while i < nt && pt_kind(t, i) != 4 {
+        if pt_kind(t, i) == 0 && pt_tis(unit, t, i + 1, "(") {
+            let k: u32 = 0;
+            while k < n {
+                let d: u32 = load32(sc, PT_GFN + k * 4);
+                if d != i && pt_same(unit, t, d, i) == 1 {
+                    return 1;
+                }
+                k = k + 1;
+            }
+        }
+        i = i + 1;
+    }
     return 0;
 }
 
@@ -3113,7 +5151,9 @@ fn pt_mono_body(sc: ptr, unit: ptr, t: ptr, nt: u32, brc: u32, body_end: u32) ->
             if pt_tis(unit, t, j, "let") && pt_kind(t, j + 1) == 0 && pt_tis(unit, t, j + 2, ":") {
                 let ts: u32 = j + 3;
                 let te: u32 = pt_ty_end(unit, t, ts, nt);
-                pt_env_put(sc, j + 1, ts, te, d);
+                if pt_env_put(sc, j + 1, ts, te, d) == 1 {
+                    return 3;              // 局部变量表满（`PT_EMAX`）—— 点名拒
+                }
             } else if pt_kind(t, j + 1) == 3 && pt_tis(unit, t, j + 1, "(") {
                 let decl: u32 = pt_gfn_find(sc, unit, t, j);
                 if decl != PT_NONE {
@@ -3212,14 +5252,16 @@ fn pt_mono_one(sc: ptr, unit: ptr, t: ptr, nt: u32, lp: u32, brc: u32, be: u32,
             if r == 0 {
                 return 2;                  // 换不出来：点名拒（宁拒勿猜）
             }
-            pt_env_put(sc, j, (r / 4294967296) as u32, (r % 4294967296) as u32, d);
+            if pt_env_put(sc, j, (r / 4294967296) as u32, (r % 4294967296) as u32, d) == 1 {
+                return 3;                  // 形参表满（`PT_EMAX`）—— 点名拒
+            }
             j = te;
         }
         j = j + 1;
     }
     let mrc: u32 = pt_mono_body(sc, unit, t, nt, brc, be);
     if mrc != 0 {
-        return 1;
+        return mrc;                        // 1 = 子集外；3 = 局部变量表满（`PT_EMAX`）
     }
     store32(sc, PT_EN, 0);                 // 每个函数一张新表（与参考实现同口径）
     return 0;
@@ -4463,14 +6505,19 @@ fn pt_l0_rec(sc: ptr, buf: ptr, n: u32, i: u32) -> u64 {
             let rn: u64 = pt_l0_word(buf, n, z);
             let rt: u64 = pt_l0_word(buf, n, pt_l0_skip(buf, n, pt_l0_nx(rn)) + 1);
             let ro: u64 = pt_l0_int(buf, n, pt_l0_skip(buf, n, pt_l0_nx(rt)) + 1);
-            if nf < PT_FMAX {
-                let fe: u32 = PT_FTAB + nf * 20;
-                store32(sc, fe + 0, pt_l0_off(rn));
-                store32(sc, fe + 4, pt_l0_len(rn));
-                store32(sc, fe + 8, pt_l0_off(rt));
-                store32(sc, fe + 12, pt_l0_len(rt));
-                store32(sc, fe + 16, (ro % 4294967296) as u32);
+            // **字段表满了就拒**（`FujoJTOP/loment#774`）：原先这里是 `if nf < PT_FMAX`
+            // 静默丢，而 `nf` 照样加一 —— 于是 `pt_l0_emit_one` 拿着一个**大于表长**的
+            // 条数往后读，把 `PT_FTAB` 后面的字节当成字段名/偏移。17 个字段的 `record`
+            // 实测发出的是一个名字与尺寸都错的 `layouts` 条目（判据里那份是逐字节比的）。
+            if nf >= PT_FMAX {
+                return (kk as u64) * 4294967296;   // 低 32 位 0 = "解析不了"，调用方点名拒
             }
+            let fe: u32 = PT_FTAB + nf * 20;
+            store32(sc, fe + 0, pt_l0_off(rn));
+            store32(sc, fe + 4, pt_l0_len(rn));
+            store32(sc, fe + 8, pt_l0_off(rt));
+            store32(sc, fe + 12, pt_l0_len(rt));
+            store32(sc, fe + 16, (ro % 4294967296) as u32);
             nf = nf + 1;
             kk = pt_l0_nx(ro);
         }
@@ -4677,10 +6724,11 @@ fn pt_layouts(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) ->
 ///
 /// 键的顺序与参考实现**逐字对齐**(`emit_potato` 那个字面量 dict 的顺序): 对象是拿
 /// 字节比的, 顺序也在比较面里。
-pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
+pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
+                   lvl: u32, prof: u32, effc: ptr) -> u32 {
     let rr: u64 = pt_root_range(unit, t, nt);
     if rr == PT_NONE as u64 {
-        return pt_wfail("fujoc-s: --emit-potato: 单元里一个 `module` 都没有 (参考实现的前门也是这一条)\n");
+        return pt_wfail("--emit-potato: the unit declares no `module` at all (the reference implementation's front door has the same rule)");
     }
     let lo: u32 = (rr / 4294967296) as u32;
     let hi: u32 = (rr % 4294967296) as u32;
@@ -4713,9 +6761,45 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // clang 与 Python 链接器都拒）。所以失败判定在 u64 上做（brk 返回 0 = 失败）。
     let scv: u64 = pt_alloc(PT_SC_BYTES);
     if scv == 0 {
-        return pt_wfail("fujoc-s: --emit-potato: brk 失败 (单态化工作区)\n");
+        return pt_wfail("--emit-potato: out of memory (brk failed: monomorphisation workspace)");
     }
     let sc: ptr = scv as ptr;
+    // **跨函数 deref-only 安全表**（`docs/210` §7）—— codegen 的 `compute_safe`（potato
+    // `use codegen`）。与 codegen 那边**同一支扫描**，于是 gc_ladder 四层与发射路径一致。
+    let _sft: u32 = compute_safe(unit, t, ptr_add(sc, PT_GLSAFE));
+    // 带 `lspe pass` 的函数是 `Unchecked` 摘要（`#786` 第 3 条）：从安全表里摘掉，
+    // 调用点因此保持 UNDECIDED。此时 `t` 是**原流**（头还在），正好看得见旁路。
+    let _sn: u32 = lspe_drop_unchecked(unit, t, ptr_add(sc, PT_GLSAFE));
+    // E3/E4 的站点普查**在写对象之前**做完 —— 超容量是点名的失败（`pt_wfail`），
+    // 不能在一半对象已经写出去之后再说。
+    let lrc: u32 = lspe_engine(unit, t, lo, hi, pt_lms_mask(unit, t, lo, hi),
+                               ptr_add(sc, PT_GLSAFE),
+                               ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
+                               ptr_add(sc, PT_PASS));
+    if lrc == 1 {
+        return pt_wfail("--emit-potato: more functions with a pointer first parameter than this section takes (1024)");
+    }
+    if lrc == 2 {
+        return pt_wfail("--emit-potato: more `lspe pass` blocks than this section takes (64)");
+    }
+    // E9 域检查器（`docs/306`–`308`）：同样**在写对象之前**跑完，超容量点名失败。
+    if lspe_domain(unit, t, lo, hi, ptr_add(sc, PT_DOMTAB),
+                   ptr_add(sc, PT_DOMCNT)) == 1 {
+        return pt_wfail("--emit-potato: more domain declarations than this section takes (64)");
+    }
+    // E11 效应站点（`docs/341` A2c）：**计数是驱动器在检查之前预跑的**
+    // （`eff_precount`）—— `check_arena` 会把 `effect` 声明与 `effects` 行擦掉，
+    // 走到这里已经看不见它们了。把那段结果搬进本函数的工作区，`pt_lspe` 只读这里。
+    let eav: u64 = effc as u64;
+    let eq: u32 = 0;
+    while eq < 6 {
+        let ev: u32 = 0;
+        if eav != 0 {
+            ev = load32(effc, PT_EFFCNT + eq * 4);
+        }
+        store32(sc, PT_EFFCNT + eq * 4, ev);
+        eq = eq + 1;
+    }
     store32(sc, PT_N, 0);
     store32(sc, PT_PC, 0);
     store32(sc, PT_EN, 0);
@@ -4727,33 +6811,45 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     store32(sc, PT_TN, 0);
     store32(sc, PT_TCUR, 0);
     if pt_gfn_scan(sc, unit, t, nt) == 1 {
-        return pt_wfail("fujoc-s: --emit-potato: 泛型函数声明超出这一节 (impl 块里的泛型方法 / 超过 16 个)\n");
+        return pt_wfail("--emit-potato: more generic function declarations than this section takes (generic methods inside an `impl` block, or more than 16)");
     }
     if load32(sc, PT_NG) > 0 {
-        let mrc: u32 = pt_mono_all(sc, unit, t, nt);
+        // `flomtc_true` 的快路径（`docs/350`）：没有泛型**调用点**时，`pt_mono_all`
+        // 只是白走一遍所有函数体；跳过它，产物逐字节相同（实例数是 0）。
+        let mrc: u32 = 0;
+        if pt_flomtc(unit, t, lo, hi) == 1 && pt_mono_used(sc, unit, t, nt) == 0 {
+            mrc = 0;
+        } else {
+            mrc = pt_mono_all(sc, unit, t, nt);
+        }
+        if mrc == 3 {
+            // 局部变量表满（`PT_EMAX`，`FujoJTOP/loment#774`）。原先第 1537 个局部变量
+            // 起就被静默丢掉，产物看起来正常、其实少了一半的名字。
+            return pt_wfail("--emit-potato: more than 1536 locals or parameters in one function (PT_EMAX)");
+        }
         if mrc == 2 {
-            return pt_wfail("fujoc-s: --emit-potato: 实例的形参类型换不出来 (形参类型里**提到**了类型形参而不是裸的 —— 比如 `p: Pair<T>`; 这一格只换裸类型形参 `a: T`)\n");
+            return pt_wfail("--emit-potato: an instance's parameter types cannot be substituted (the parameter type *mentions* a type parameter instead of being the bare one -- e.g. `p: Pair<T>`; this slot substitutes bare type parameters only, `a: T`)");
         }
         if mrc == 1 {
-            return pt_wfail("fujoc-s: --emit-potato: 泛型调用点的实参形态超出这一节 (只收标识符、`x as T`、以及 `p.a` 字段访问; `p[0]` / `f(x)` 还没做)\n");
+            return pt_wfail("--emit-potato: the shape of a generic call site is outside this section (only identifiers, `x as T` and the field access `p.a`; `p[0]` / `f(x)` are not done yet)");
         }
     }
     // ---- 单态化（M7）：收类型串 → 建映射表（实例名）。**也在计数之前** —— 实例要追加进
     // `types` / `enums` / `instances` 三格，而"追加几条"由映射表决定。
     if pt_collect(sc, unit, t, 0, nt) == 0 {
-        return pt_wfail("fujoc-s: --emit-potato: 类型串池满了 (128 条 / 每条 64 字节) —— 抬高 PT_TMAX / PT_TSTRIDE\n");
+        return pt_wfail("--emit-potato: the type string pool is full (128 entries of 64 bytes) -- raise PT_TMAX / PT_TSTRIDE");
     }
     pt_sort_pool(sc);
     if pt_tmap_build(sc, unit, t, nt) == 1 {
-        return pt_wfail("fujoc-s: --emit-potato: 泛型实参的形状这一格不收 —— 收的是基类型名与嵌套泛型（`Outer<Inner<u32>>`，命名见 docs/147 §2「命名层」); 数组/切片/指针当实参（`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`）**没有名字规则**，而且**后端**（`native M23`: struct 字段暂只支持标量）先把它们挡住了 —— 所以现在没有东西需要那个名字\n");
+        return pt_wfail("--emit-potato: this shape of generic argument is not taken -- the section takes base type names and nested generics (`Outer<Inner<u32>>`); arrays, slices and pointers as arguments (`Box<[u8; 4]>` / `Box<[u32]>` / `Box<*mut u8>`) have no naming rule, and the backend blocks them first anyway (struct fields take scalars only)");
     }
     // ---- M-L0: `layouts`（要读文件 —— 解析不了、或超了 64 KiB 读缓冲, 都**点名拒**）
     if pt_lay_check(sc, unit, t, lo, hi) == 1 {
-        return pt_wfail("fujoc-s: --emit-potato: 这个单元用的某份 L0 布局 (`.lom`) 解析不了 —— 这一格只做 `record` 那一支 (`layout(packed, size=N, endian=…)` + `字段 : 类型 @偏移`)\n");
+        return pt_wfail("--emit-potato: one of the L0 layouts (`.lom`) this unit uses cannot be parsed -- this section does the `record` arm only (`layout(packed, size=N, endian=...)` plus `field : type @offset`) and takes at most 16 fields per record (PT_FMAX)");
     }
     let nly: u32 = pt_lay_cnt(sc, unit, t, lo, hi);
     if nly == PT_NONE {
-        return pt_wfail("fujoc-s: --emit-potato: 某份 L0 布局 (`.lom`) 超过 64 KiB 读缓冲 —— 与其截断后少发几条 `layouts`, 不如点名\n");
+        return pt_wfail("--emit-potato: one of the L0 layouts (`.lom`) is larger than the 64 KiB read buffer -- naming it beats truncating it and emitting fewer `layouts`");
     }
     let nti_st: u32 = pt_cnt_inst(sc, unit, t, nt, 1);
     let nti_en: u32 = pt_cnt_inst(sc, unit, t, nt, 2);
@@ -4771,7 +6867,9 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // 数的就是"这个名字被调用了没有", 不判类型、不判危险。与参考实现的 `_count_boundary`
     // 是同一组数（`loment_cli_test` 另拿参考实现的**真词法器**对过 `loment stat` 那一份）。
     let nbd_sys: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "syscall4")
-                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6");
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall7")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "print");
     let nbd_ptr: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "ptr_add")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "ptr_sub")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "str_ptr");
@@ -4792,12 +6890,36 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // v10 = v9 + **GC 的组成**（`docs/210` §3/§5）：四层梯各领走几个 `alloc` 站点。
     let ngl_tot: u32 = pt_gl_total(unit, t, lo, hi);
     let ngl_pk: u64 = pt_gl_all(sc, unit, t, lo, hi);
+    if (ngl_pk >> 63) == 1 {
+        return pt_wfail("--emit-potato: more than 32 loop bodies that carry an allocation -- raise PT_GLRMX");
+    }
     // 三个份额**先落成 u32** —— 混用 u32/u64 的减法会发出类型不匹配的 IR（实测被 clang 拒）。
     let ngl_a: u32 = (ngl_pk & 65535) as u32;
     let ngl_b: u32 = ((ngl_pk >> 16) & 65535) as u32;
     let ngl_c: u32 = ((ngl_pk >> 32) & 65535) as u32;
+    // v19 = v18 + `gc_ladder.l0_5`（`docs/210` §2.10）：L0.5 的栈区接走的站点。
+    let ngl_d: u32 = ((ngl_pk >> 48) & 65535) as u32;
+    // v12 = v11 + **面的组成**（`docs/224`）：机调用站点按面分一分。
+    let nsf_file: u32 = pt_surf_total(unit, t, lo, hi, 1);
+    let nsf_mem: u32 = pt_surf_total(unit, t, lo, hi, 2);
+    let nsf_net: u32 = pt_surf_total(unit, t, lo, hi, 3);
+    let nsf_proc: u32 = pt_surf_total(unit, t, lo, hi, 4);
+    let nsf_other: u32 = pt_surf_total(unit, t, lo, hi, 0);
+    let nsf_tot: u32 = nsf_file + nsf_mem + nsf_net + nsf_proc + nsf_other;
+    // v14 = v13 + **联网站点的宽度组成**（`docs/237`）：四档各领走几个联网站点。
+    // 与 `surfaces` 数的是**同一批站点**（`nsf_net`），只是分的粗细不同 —— 那条交叉
+    // 不变量由两份校验器判。
+    let nlw0: u32 = pt_rung_total(unit, t, lo, hi, 0);
+    let nlw1: u32 = pt_rung_total(unit, t, lo, hi, 1);
+    let nlw2: u32 = pt_rung_total(unit, t, lo, hi, 2);
+    let nlw3: u32 = pt_rung_total(unit, t, lo, hi, 3);
+    let nlw_tot: u32 = nlw0 + nlw1 + nlw2 + nlw3;
+    // v15 = v14 + **内存安全档**（`docs/253` §11.3，2026-10-18 改成档名）。
+    // v17 = v16 + **实际开着哪几级** `lms_levels`（同一次改判）。
+    // 它在**最后** —— 与前面几维同形，且"这份产物在哪一档上"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
-    o = pt_qs(out, o, "v10");
+    // v20 = v19 + **系统索引** `systems`（`docs/147` §5 / `#1022`）。
+    o = pt_qs(out, o, "v23");
     o = pt_str(out, o, ",\n");
     // `unit` 是**根**那份源的 `module` 名 —— 依赖在前, 所以它是根那个标记后面的名字
     // (不是第 1 个 token: 那是第一个依赖的名字)。
@@ -4826,6 +6948,54 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     // **运行期在不在**（`docs/175` §3.6, v9）。取值只说"有没有"，不说"里面装了什么"。
     o = pt_key(out, o, 1, "runtime");
     o = pt_runtime(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // **对外端口在不在**（`docs/222` §4, v11）。与 `mode`/`gc`/`runtime` 同一条纪律 ——
+    // **必填**，所以"这份产物通不通着世界"是**不读源码可判的**。
+    o = pt_key(out, o, 1, "port");
+    o = pt_port(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v13（`docs/231`）：执行模型。**必填**，所以它在最后 —— 与前面几维同形。
+    // ⚠ **次序是判据**：参考实现那边 `"vm"` 紧跟在 `"port"` 之后，两串字节逐字节比。
+    o = pt_key(out, o, 1, "vm");
+    o = pt_vm(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v15（`docs/253`）：内存安全。**必填**，紧跟在 `vm` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"lms"` 紧跟在 `"vm"` 之后，两串字节逐字节比。
+    o = pt_key(out, o, 1, "lms");
+    o = pt_lms(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v17（`docs/253` §11.4）：**实际开着哪几级**。档名说"想要哪一档"，显式开关可以
+    // 覆盖它 —— 于是两者**可以不一致**，而这一格记的是**最后**的结果。
+    // ⚠ **次序是判据**：参考实现那边 `"lms_levels"` 紧跟在 `"lms"` 之后。
+    o = pt_key(out, o, 1, "lms_levels");
+    o = pt_lms_levels(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v18（`docs/253` §11.2.1，#1023）：七级的**运行期预算**。紧跟在 `lms_levels` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"lms_budgets"` 紧跟在 `"lms_levels"` 之后。
+    o = pt_key(out, o, 1, "lms_budgets");
+    o = pt_lms_budgets(out, o);
+    o = pt_str(out, o, ",\n");
+    // v16（`docs/262`）：LSPE 台账。**必填**，紧跟在 `lms` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"lspe"` 紧跟在 `"lms"` 之后，两串字节逐字节比。
+    o = pt_key(out, o, 1, "lspe");
+    // `PT_GLSCR` 是回填地址：`systems.lspe.cost` 要引台账的 `sites`，
+    // 而它在 `pt_lspe` 里边才算得出 —— 那块内存在 gc 梯子算完之后就空着了。
+    o = pt_lspe(out, o, sc, unit, t, lo, hi, ptr_add(sc, PT_GLSCR), nins, lvl);
+    o = pt_str(out, o, ",\n");
+    // v22（`docs/299`）：**生命周期档**，紧跟在 `lspe` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"lifetime"` 紧跟在 `"lspe"` 之后。
+    o = pt_key(out, o, 1, "lifetime");
+    o = pt_lifetime(out, o, unit, t, lo, hi, prof);
+    o = pt_str(out, o, ",\n");
+    // v23（`docs/348`）：**间接分派**，紧跟在 `lifetime` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"fp"` 紧跟在 `"lifetime"` 之后。
+    o = pt_key(out, o, 1, "fp");
+    o = pt_fp(out, o, unit, t, lo, hi);
+    o = pt_str(out, o, ",\n");
+    // v20（`docs/147` §5 / `#1022`）：**系统索引**，紧跟在 `lspe` 之后 ——
+    // ⚠ **次序是判据**：参考实现那边 `"systems"` 紧跟在 `"lspe"` 之后。
+    o = pt_key(out, o, 1, "systems");
+    o = pt_systems(out, o, sc, unit, t, lo, hi, ngl_tot);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "switches");
     o = pt_aopen(out, o, ndf);
@@ -4938,6 +7108,9 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_key(out, o, 2, "l0");
     o = pt_dec(out, o, ngl_a as u64);
     o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "l0_5");
+    o = pt_dec(out, o, ngl_d as u64);
+    o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "l1");
     o = pt_dec(out, o, ngl_b as u64);
     o = pt_str(out, o, ",\n");
@@ -4945,10 +7118,100 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_dec(out, o, ngl_c as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "l3");
-    o = pt_dec(out, o, (ngl_tot - (ngl_a + ngl_b + ngl_c)) as u64);
+    o = pt_dec(out, o, (ngl_tot - (ngl_a + ngl_d + ngl_b + ngl_c)) as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 2, "total_sites");
     o = pt_dec(out, o, ngl_tot as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **GC 的时间控制**（v21，`docs/309`）：`lgc` 的暂停/恢复/窗口计数。
+    let lgcpk: u64 = pt_lgc_counts(unit, t, lo, hi);
+    let lgcnp: u32 = (lgcpk & 65535) as u32;
+    let lgcnr: u32 = ((lgcpk >> 16) & 65535) as u32;
+    let lgcnw: u32 = ((lgcpk >> 32) & 65535) as u32;
+    let lgcnd: u32 = ((lgcpk >> 48) & 65535) as u32;
+    let lgcmc: u32 = 0;
+    if pt_gc_is_manual(unit, t, lo, hi) == 1 && (lgcnp + lgcnr + lgcnw) > 0 {
+        lgcmc = 1;
+    }
+    o = pt_key(out, o, 1, "gc_control");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "pauses");
+    o = pt_dec(out, o, lgcnp as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "resumes");
+    o = pt_dec(out, o, lgcnr as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "windows");
+    o = pt_dec(out, o, lgcnw as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "timed_windows");
+    o = pt_dec(out, o, lgcnd as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "manual_collector");
+    if lgcmc == 1 {
+        o = pt_str(out, o, "true\n");
+    } else {
+        o = pt_str(out, o, "false\n");
+    }
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **面的组成**（`docs/224`, v12）—— 与 `boundary`/`gc_ladder` 同形；**键按面名的字母序、
+    // 只写非零**（`file` < `mem` < `net` < `other` < `proc` < `total_sites`，
+    // 与参考实现的 `sorted(counts)` 同序），所以最后那个逗号只在"写过至少一个"时补。
+    o = pt_key(out, o, 1, "surfaces");
+    o = pt_str(out, o, "{\n");
+    let sf_first: u32 = 1;
+    if nsf_file > 0 {
+        o = pt_surf_one(out, o, sf_first, "file", nsf_file);
+        sf_first = 0;
+    }
+    if nsf_mem > 0 {
+        o = pt_surf_one(out, o, sf_first, "mem", nsf_mem);
+        sf_first = 0;
+    }
+    if nsf_net > 0 {
+        o = pt_surf_one(out, o, sf_first, "net", nsf_net);
+        sf_first = 0;
+    }
+    if nsf_other > 0 {
+        o = pt_surf_one(out, o, sf_first, "other", nsf_other);
+        sf_first = 0;
+    }
+    if nsf_proc > 0 {
+        o = pt_surf_one(out, o, sf_first, "proc", nsf_proc);
+        sf_first = 0;
+    }
+    if sf_first == 0 {
+        o = pt_str(out, o, ",\n");
+    }
+    o = pt_key(out, o, 2, "total_sites");
+    o = pt_dec(out, o, nsf_tot as u64);
+    o = pt_str(out, o, "\n");
+    o = pt_ind(out, o, 1);
+    o = pt_str(out, o, "}");
+    o = pt_str(out, o, ",\n");
+    // **联网站点的宽度组成**（`docs/237`, v14）—— 与 `gc_ladder` 同形：四档恒在（哪怕为 0），
+    // 键的集合固定，读者与校验器都不用猜。
+    o = pt_key(out, o, 1, "net_ladder");
+    o = pt_str(out, o, "{\n");
+    o = pt_key(out, o, 2, "w0");
+    o = pt_dec(out, o, nlw0 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "w1");
+    o = pt_dec(out, o, nlw1 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "w2");
+    o = pt_dec(out, o, nlw2 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "w3");
+    o = pt_dec(out, o, nlw3 as u64);
+    o = pt_str(out, o, ",\n");
+    o = pt_key(out, o, 2, "total_net");
+    o = pt_dec(out, o, nlw_tot as u64);
     o = pt_str(out, o, "\n");
     o = pt_ind(out, o, 1);
     o = pt_str(out, o, "}");

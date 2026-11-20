@@ -1,0 +1,15 @@
+// `#265`：10 个参数干净、**11 个就死**。这里是最小化到 11 的那一只，而且**要调它**。
+// 函数体必须写成 `return a1;`：只写 `a1` 是**非法 Loment**（参考实现会报 `期望 ;`），
+// 那样这只见证量的就不是参数的墙，而是我自己写错了。
+module eleven_params
+
+fn f(a1: i32, a2: i32, a3: i32, a4: i32, a5: i32, a6: i32, a7: i32, a8: i32,
+     a9: i32, a10: i32, a11: i32) -> i32 {
+    return a1;
+}
+
+fn _start() {
+    let r: i32 = f(1 as i32, 2 as i32, 3 as i32, 4 as i32, 5 as i32, 6 as i32,
+                   7 as i32, 8 as i32, 9 as i32, 10 as i32, 11 as i32);
+    syscall4(60, r as u64, 0, 0);
+}

@@ -1,5 +1,5 @@
 <!-- translated-from: docs/148-loment-toolchain.md -->
-<!-- source-sha256: 4b2198957cd4d696cd5181283d7e91d3d5409e58c6f115dcc82a76b410525680 -->
+<!-- source-sha256: 60a9bd5a78572511c68cc73870944203df82671e007b0e21b757d569e407f830 -->
 
 # 148 · The Loment toolchain (P6, M55–M66)
 
@@ -17,6 +17,17 @@
 ## 0.1 Syntax highlighting (`editors/vscode/syntaxes/`)
 
 Two TextMate grammars: `loment.tmLanguage.json` (`.lomt`) and `lom.tmLanguage.json` (`.lom`).
+**2026-10-12 added seven more**: `loment-<canonical>.tmLanguage.json` (c / cpp / java / csharp / go /
+python / natural) — used when a source's head says `choose write grammar <alias>`, and they carry only two
+rules (recognise that line + `include` the host grammar `source.c` / `source.python` / …). Design and
+rationale: `docs/235`. The same day the main grammar was brought up to the language surface of the time:
+the `choose write grammar` declaration, `set choose` / `choose` / `addin` / `command` / `foruse` /
+`register` (**recognised by shape, not by word** — those words are not reserved, so bare-keyword rules
+would also colour `let set: u32`), the core-dimension values, and the `syscall7` builtin. Four entries
+that are **not** builtins were removed (`load16/load32/store16/store32` — ordinary functions in
+`loment/examples/bytes.lomt`) along with two that are **not** types (`usize`/`isize`; `-> usize` really
+does report "return type usize is not declared").
+
 On 2026-09-11 there was a "thorough" sweep: **using the same engine as VS Code** (TextMate + Oniguruma), the
 grammar was run into a scope stream and checked token by token, closing these blind spots:
 
@@ -231,7 +242,7 @@ Sample (`toolchain.lomt`, N=2e6, local machine):
 
 `tools/loment_diag.py` pattern-classifies compiler messages; each of the 20 error classes has a stable error code
 (E001–E020) and an actionable suggestion; the test uses 13 counterexample snippets to assert that **every one is
-classified** (no E999) and carries a suggestion.
+classified** (no E0999) and carries a suggestion.
 
 Two disciplines directly tied to "the classification table is trustworthy":
 
@@ -243,7 +254,7 @@ Two disciplines directly tied to "the classification table is trustworthy":
   E015's `重复初始化` [duplicate initialisation]).
 - `test_m64_all_reference_messages_are_classified` uses `ast` to extract **all** the `errs.append` message
   templates in `lomentc.py` (81 of them) and classifies each one — if the classification table misses one, that
-  rule becomes E999 on both sides in the "self-hosted vs reference" code-set comparison and is dropped, and **the
+  rule becomes E0999 on both sides in the "self-hosted vs reference" code-set comparison and is dropped, and **the
   gap disappears silently**.
 
 ## 10b. M85 rule-parity comparison

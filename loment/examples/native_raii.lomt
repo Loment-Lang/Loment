@@ -4,6 +4,7 @@
 // M20: inb/outb -> core::arch::asm! (x86 端口 I/O; 仅 Rust 路径, 运行需特权级)。
 
 module native_raii
+choose runtime
 
 struct Guard {
     id: u32,

@@ -27,6 +27,7 @@ from pathlib import Path
 _T = f"/tmp/loment-{os.getpid()}-"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 TESTS: list[tuple[str, object]] = []
@@ -45,11 +46,18 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True, text=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True, text=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -57,6 +65,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -87,6 +97,7 @@ def _lom_str(s: str) -> str:
 
 PROBE_TMPL = '''// loment/build/json_probe.lomt — JSON 库的探针 (由 tools/loment_json_test.py 生成)
 module json_probe
+choose runtime
 
 use "loment/lib/json.lomt"
 
@@ -202,7 +213,7 @@ def _run(elf: Path, td: Path) -> str:
     script = (f"rm -f {_T}json_probe.bin && cp {_wsl_path(elf)} {_T}json_probe.bin && "
               f"chmod +x {_T}json_probe.bin && "
               f"{_T}json_probe.bin > {_wsl_path(got)}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     assert r.stdout.strip() == "0", f"探针退出码 {r.stdout!r}"
     # 按**原始字节**读: read_text 会把 \r\n 归一成 \n, 那样"解码出的 CR"就看不出来了
@@ -251,6 +262,7 @@ def test_json_decoding_and_lookup():
     probe.parent.mkdir(parents=True, exist_ok=True)
     p0, p2, p5 = PAYLOADS[0], PAYLOADS[2], PAYLOADS[5]
     src = f'''module json_lookup
+choose runtime
 
 use "loment/lib/json.lomt"
 
@@ -466,7 +478,7 @@ def test_json_check_matches_loment_twin():
         binn = f"{_T}jsoncheck.bin"
         script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} > {_wsl_path(got)}; echo -n $?")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, text=True, timeout=300, shell=False)
         assert rr.stdout.strip() == "0", f"孪生退出码 {rr.stdout!r}"
         # 按**原始字节**读: read_text 会把 \r\n 归一成 \n, 那样解码出的 CR 就看不出来了
@@ -496,7 +508,7 @@ def test_json_twin_selfhost_compiles():
         binn = f"{_T}jsoncheck_s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomjsoncheck.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomjsoncheck.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
@@ -504,16 +516,7 @@ def test_json_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_json_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_json_test")
 
 
 if __name__ == "__main__":

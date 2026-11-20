@@ -64,6 +64,7 @@ pub const IO_STDERR: i64 = 2;
 const IOI_SYS_READ: u64 = 0;
 const IOI_SYS_WRITE: u64 = 1;
 const IOI_SYS_CLOSE: u64 = 3;
+const IOI_SYS_LSEEK: u64 = 8;
 const IOI_SYS_BRK: u64 = 12;
 const IOI_SYS_EXIT: u64 = 60;
 const IOI_SYS_OPENAT: u64 = 257;
@@ -152,6 +153,15 @@ pub fn io_open_wo(path: ptr) -> i64 {
 
 pub fn io_close(fd: i64) -> i64 {
     return syscall4(IOI_SYS_CLOSE, fd as u64, 0, 0);
+}
+
+/// `lseek` —— 文件描述符的读写位置。`whence`：0 = 文件头、1 = 当前位置、2 = 文件尾
+/// （libc 的 `SEEK_SET` / `SEEK_CUR` / `SEEK_END`）。`ftell` 就是 `io_seek(fd, 0, 1)`。
+///
+/// 为什么在这里补：宿主那张 LibL 脸上的 `fseek` / `ftell` 要它，而本模块原先只有
+/// 顺序的 `io_read_all` / `io_write_all`（"从头读到尾"那种用法不需要定位）。
+pub fn io_seek(fd: i64, off: i64, whence: u32) -> i64 {
+    return syscall4(IOI_SYS_LSEEK, fd as u64, off as u64, whence as u64);
 }
 
 /// 打开只读, 路径是**编译期字面量**, NUL 由本函数补进调用方给的 scr

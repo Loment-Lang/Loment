@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -28,8 +29,21 @@ DEFAULT_OUT = ROOT / "loment" / "build" / "loment-vscode.vsix"
 
 # 打进 VSIX 的目录/文件 (相对 editors/vscode); node_modules 是运行时依赖, 必须带
 INCLUDE_DIRS = ("src", "syntaxes", "node_modules")
-INCLUDE_FILES = ("package.json", "language-configuration.json", "README.md")
+INCLUDE_FILES = ("package.json", "language-configuration.json",
+                 "language-configuration-python.json", "README.md",
+                 # 发布到商店那两件（vsce 要 `icon` 指到的文件在包里，
+                 # `LICENSE` 是 MIT / Apache-2.0 双许可正文 —— vsce 只找**扩展目录**这一份）
+                 "LICENSE", "loment-icon.png")
 SKIP_NAMES = (".map", ".ts", ".md.bak")
+
+#: 必须进 `capabilities.untrustedWorkspaces.restrictedConfigurations` 的设置 (#166)。
+#: 前六个是 issue 点名的"命令 + 参数"; 后两个是**同一类** —— `serverPath` / `dapScript`
+#: 的取值最终会变成 `python <那个路径>`（或 `wsl -e python3 <那个路径>`），
+#: 于是工作区改它一个字段就等于换掉"要跑哪个程序"，与改 command 是同一件事。
+MUST_RESTRICT = ("loment.serverCommand", "loment.serverArgs",
+                 "loment.toolCommand", "loment.toolArgs",
+                 "loment.dapCommand", "loment.dapArgs",
+                 "loment.serverPath", "loment.dapScript")
 
 CONTENT_TYPES = """<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -105,6 +119,36 @@ def check() -> list[str]:
     for c in pkg.get("contributes", {}).get("commands", []):
         if not c.get("command") or not c.get("title"):
             bad.append(f"命令缺 command/title: {c}")
+    # 商店发布那两件：`icon` 指到的文件要在，`LICENSE` 要在扩展目录里（vsce 只看这一份）
+    if pkg.get("icon") and not (EXT / str(pkg["icon"])).is_file():
+        bad.append(f"icon 指的文件不存在: {pkg['icon']}")
+    if not (EXT / "LICENSE").is_file():
+        bad.append("扩展目录里没有 LICENSE（vsce 只找这一份；仓根那份它看不见）")
+    # 语言引用的 `configuration` 必须**存在**且**在打包清单里** —— 少一样都是"装上去才发现";
+    # 2026-10-12 加第二份配置 (python 写法的注释记号是 `#`, 不是 `//`) 时补的这条。
+    for lang in pkg.get("contributes", {}).get("languages", []):
+        conf = lang.get("configuration")
+        if not conf:
+            continue
+        if not (EXT / str(conf)).is_file():
+            bad.append(f"语言 {lang.get('id')} 的 configuration 不存在: {conf}")
+        elif Path(str(conf)).name not in INCLUDE_FILES:
+            bad.append(f"语言 {lang.get('id')} 的 configuration 不在打包清单里: {conf}")
+    # 未受信工作区的声明 (#166): 工作区能覆盖的"命令 + 参数"设置必须列进
+    # `restrictedConfigurations`, 否则 Restricted Mode 下它们照旧生效。
+    cap = pkg.get("capabilities", {}).get("untrustedWorkspaces")
+    if not cap:
+        bad.append("缺 capabilities.untrustedWorkspaces (#166)")
+    else:
+        props = set(pkg.get("contributes", {}).get("configuration", {})
+                    .get("properties", {}))
+        restricted = set(cap.get("restrictedConfigurations", []))
+        missing = sorted(s for s in MUST_RESTRICT if s not in restricted)
+        if missing:
+            bad.append(f"这些设置没进 restrictedConfigurations: {missing}")
+        unknown = sorted(r for r in restricted if r not in props)
+        if unknown:
+            bad.append(f"restrictedConfigurations 里有不存在的设置: {unknown}")
     if not (EXT / "node_modules" / "vscode-languageclient" / "package.json").is_file():
         bad.append("缺 node_modules/vscode-languageclient（先跑 npm install --omit=dev）")
     return bad
@@ -223,6 +267,60 @@ def fix_registration(entries: list, ident: str, dest: Path) -> tuple[list, int]:
     return entries, n
 
 
+def stale_dirs(extdir: Path, ident: str, dest: Path) -> list[Path]:
+    """`extensions/` 里**同一个 ident 的旧副本**（不含 `dest` 自己）。
+
+    **为什么要专门认它们**：那个目录下每个带 `package.json` 的文件夹都会被扫成一个扩展，
+    所以同 ident 两份 = 同一份扩展装了两遍（各自认 `.lomt`、各自被登记）。版本号一变，
+    旧目录名就不再等于 `dest` —— 2026-10-12 从 0.1.0 升到 0.2.0 时撞上的就是这个：
+    `--install` 当时只挪 `dest`，0.1.0 原地不动、跟着一起被扫进去。
+    """
+    if not extdir.is_dir():
+        return []
+    return sorted(p for p in extdir.glob(f"{ident}-*")
+                  if p.is_dir() and p.name != dest.name)
+
+
+def renamed_publisher_dirs(extdir: Path, pkg: dict, dest: Path) -> list[Path]:
+    """**同名、不同发布者**的其它扩展目录 —— 只报给 `doctor()`，**绝不自动删**。
+
+    与 `stale_dirs` 不是一个类别：那个按**当前的 ident**（`<发布者>.<名>`）glob，
+    而换了发布者之后 ident **整个变了**（`fujojtop.loment` → `hooyan2022.loment`），
+    旧目录根本不在它匹配范围里。2026-10-13 实测撞到：磁盘上两份都声明 `.lomt`/`.lom`，
+    而 `--doctor` 只看得见症状（"别人也认 .lomt"），看不见那是**自己**的旧目录。
+
+    ## 为什么只报不删（这一条是被判据逼出来的）
+
+    判据 `test_vscode_install_sweeps_renamed_publisher` 第一版正是让 `--install` 把它们
+    一并挪走的，条件是"`name` 相同、`publisher` 不同" —— 而那个条件**分不开**这两种东西：
+
+    * 你自己换发布者留下的旧目录；
+    * **别人的扩展，恰好也叫 `loment`**。
+
+    清单里没有任何字段能把这两者分开（名字就是唯一的联系），所以自动删就可能删掉别人的扩展
+    —— 那是**不可逆地动别人的东西**。改成：这里只把它们**认出来**，由 `doctor()` 点名，
+    处置交给人（自己换过就删；不是自己的，那就是它在跟你抢 `.lomt`，二选一）。
+    """
+    out: list[Path] = []
+    if not extdir.is_dir():
+        return out
+    name = str(pkg.get("name", ""))
+    ours = str(pkg.get("publisher", "")).lower()
+    if not name:
+        return out
+    for d in sorted(extdir.glob(f"*.{name}-*")):
+        if not d.is_dir() or d.name == dest.name:
+            continue
+        try:
+            other = json.loads((d / "package.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if (str(other.get("name", "")) == name
+                and str(other.get("publisher", "")).lower() != ours):
+            out.append(d)
+    return out
+
+
 def doctor() -> list[str]:
     """体检 VS Code **已安装副本**: 语法高亮出问题时, 90% 的原因在这四件事上。
 
@@ -257,8 +355,12 @@ def doctor() -> list[str]:
             entries = json.loads(idx.read_text(encoding="utf-8"))
             hit = [e for e in entries if (e.get("identifier") or {}).get("id") == ident]
             if not hit:
-                out.append(f"扩展在磁盘上但 extensions.json 里没有 {ident} 的登记 —— "
-                           f"用 `python tools/vscode_ext.py --install` 重装")
+                out.append(
+                    f"扩展在磁盘上但 extensions.json 里没有 {ident} 的登记 —— "
+                    f"**退出 VS Code 再打开**：它启动时重扫 `extensions/`，会把这份登记上。"
+                    f"（`--install` 只**改写已有**条目：那条登记里有 VS Code 自己写的 uuid 与元数据，"
+                    f"我们不替它造 —— 换发布者之后 ident 整个变了，就会走到这一格。"
+                    f"2026-10-13 实测。）")
             else:
                 loc = hit[0].get("location") or {}
                 p = str(loc.get("fsPath") or loc.get("path") or "")
@@ -275,6 +377,17 @@ def doctor() -> list[str]:
             out.append(f"extensions.json 读不了: {e}")
     else:
         out.append("找不到 extensions.json")
+    # 同 ident 的旧版本目录还在 —— **上面"抢语言 id"那个循环看不见它**（它跳过
+    # `startswith(ident)` 的目录），所以这里单独认一遍。
+    for old in renamed_publisher_dirs(extdir, pkg, inst):
+        out.append(f"{old.name} 与本次装的是**同名不同发布者**（现在是 {inst.name}）—— "
+                   f"两份都声明 `.lomt`/`.lom`，会互相抢。**处置由人定**：扩展清单里没有字段"
+                   f"能分开「你自己换过发布者留下的」与「别人的同名扩展」——是你自己换的就删掉"
+                   f"那个目录（`--install` **不会**替你删）；不是你的，那就是它在跟你抢 `.lomt`。")
+    for old in stale_dirs(extdir, ident, inst):
+        out.append(f"{old.name} 也还在 extensions/ 里（装的是 {inst.name}）—— "
+                   f"同 ident 两份都会被扫成一个扩展，抢同一份 `.lomt` 关联"
+                   f"（`--install` 会把旧的挪走）")
     # 抢语言 id
     for other in sorted(extdir.glob("*/package.json")):
         if other.parent.name.startswith(ident):
@@ -318,6 +431,11 @@ def install(vsix: Path) -> list[str]:
     extdir.mkdir(parents=True, exist_ok=True)
     stash = Path(tempfile.mkdtemp(prefix="loment-vscode-"))     # **在 extensions/ 外面**
     try:
+        # **同 ident 的旧副本（版本号变了那些）一并挪走** —— 只挪 `dest` 是不够的，见
+        # `stale_dirs` 的注释（2026-10-12 升级时撞到）。挪到 `extensions/` **外面**的
+        # 临时目录，与下面 dest 那条同一处理由：留在这里会被当成扩展扫进去。
+        for old in stale_dirs(extdir, ident, dest):
+            shutil.move(str(old), str(stash / old.name))
         if dest.exists():
             shutil.move(str(dest), str(stash / dest.name))
         dest.mkdir(parents=True)
@@ -350,6 +468,58 @@ def install(vsix: Path) -> list[str]:
     return out
 
 
+def log_roots() -> list[Path]:
+    """本机 VS Code 写日志的目录（稳定版 / Insiders），环境变量可覆盖。"""
+    out: list[Path] = []
+    override = os.environ.get("LOMENT_VSCODE_LOGS")
+    if override:
+        out.append(Path(override))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        out.extend([Path(appdata) / "Code" / "logs",
+                    Path(appdata) / "Code - Insiders" / "logs"])
+    return [p for p in out if p.is_dir()]
+
+
+def collect_logs(sessions: int = 3) -> list[str]:
+    """把最近 N 次 VS Code 会话里**与 Loment 有关**的日志行打出来。
+
+    VS Code 把扩展的输出通道落成 `window*/exthost/<ident>/Loment.log`，把扩展宿主的
+    异常落成 `window*/exthost/exthost.log` / `renderer.log`。`showErrorMessage` 只弹窗、
+    不写日志 —— 所以扩展在弹之前会先 `out().error(...)`（2026-11-04 起），这条才看得见。
+
+    这不是"猜"：只按文件与关键字取原文，行首带来源路径，方便直接引用。
+    """
+    roots = log_roots()
+    if not roots:
+        return ["找不到 VS Code 日志目录（可设 LOMENT_VSCODE_LOGS=<logs 目录>）"]
+    lines: list[str] = []
+    seen = 0
+    for root in roots:
+        for session in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
+            if seen >= sessions:
+                break
+            hits: list[tuple[Path, list[str]]] = []
+            for pat in ("window*/exthost/*/Loment.log", "window*/exthost/exthost.log",
+                        "window*/renderer.log", "window*/main.log", "window*/tasks.log"):
+                for p in session.glob(pat):
+                    try:
+                        text = p.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        continue
+                    keep = [ln for ln in text.splitlines()
+                            if "loment" in ln.lower() or p.name == "Loment.log"]
+                    if keep:
+                        hits.append((p, keep[-80:]))
+            if hits:
+                seen += 1
+                lines.append(f"### 会话 {session.name}")
+                for p, keep in hits:
+                    lines.append(f"--- {p}")
+                    lines.extend("  " + ln for ln in keep)
+    return lines or ["最近几次会话里没有 Loment 相关日志（先打开一个 .lomt 再跑一次）"]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="vscode_ext", description="Loment VS Code 扩展打包")
     ap.add_argument("--check", action="store_true")
@@ -359,7 +529,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="重打包并侧载进本机 VS Code (然后 Developer: Reload Window)")
     ap.add_argument("--doctor", action="store_true",
                     help="体检 VS Code 里已装的副本 (语法高亮出问题先跑这个)")
+    ap.add_argument("--logs", nargs="?", const=3, type=int, metavar="N",
+                    help="打印最近 N 次 VS Code 会话里与 Loment 有关的日志（默认 3）")
     a = ap.parse_args(argv)
+    if a.logs:
+        print("\n".join(collect_logs(a.logs)))
+        return 0
     if a.doctor:
         bad = doctor()
         for b in bad:

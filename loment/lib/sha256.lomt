@@ -9,6 +9,7 @@
 //   s 指向至少 1024 字节的状态块 (布局见下面的 SH_*), dig 32 字节, hex64 64 字节。
 
 module sha256
+choose runtime
 
 // 小端 32 位读写来自 std 核的 mem (原先直接调 load32/store32, 却谁也不 use ——
 // 靠消费者碰巧把 examples/bytes.lomt 拉进同一个单元才编得过。见 mem.lomt 的说明。)

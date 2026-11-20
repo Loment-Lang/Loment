@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
 
@@ -182,7 +183,7 @@ def test_m75_debugger_symbolizer():
 @test
 def test_m70_interrupt_handler_ir_shape():
     """M70: 中断处理函数的 IR 形状 (x86_intrcc + byval 帧) —— IDT 安装归内核侧。"""
-    src = ("module m\ninterrupt fn timer_isr() {\n    let t: u32 = 1;\n"
+    src = ("module m\nchoose runtime\ninterrupt fn timer_isr() {\n    let t: u32 = 1;\n"
            "    store8(alloc(1), 0, t as u8);\n}\n")
     mod = lomentc.Parser(__import__("lomc").lex(src), src).parse()
     ll = lomentc.emit_llvm(mod, ROOT)
@@ -238,16 +239,7 @@ def test_m67_m78_boot_programs():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_p7_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_p7_test")
 
 
 if __name__ == "__main__":

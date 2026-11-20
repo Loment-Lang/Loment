@@ -39,9 +39,10 @@
 里已有的那套一致 —— 各门的工具链路径也**从那些模块里取**（`_clang` / `_have_gpp` /
 `_javac` / `_go` / `_python` / `_wsl`），一处真源。
 
-**Rust 那一门不同类**：它是**原生读法**（用户 2026-09-22：「rust 语法是 Loment 基础语法，
-不需要翻译」），前门只把声明那一行抹成空白。所以它的对照侧要**多抹一行**：`module <名>`
-—— 原生读法要求源里就写着它，而它在真 Rust 里是语法错。
+**Tur 那一门不同类**：它是本语言的**原生语法**（用户 2026-11-03：「Tur 从 Rust 直接修改」），
+前门只把声明那一行抹成空白。所以它的对照侧要**多抹一行**：`module <名>` —— 原生读法要求
+源里就写着它，而它在真 Rust 里是语法错。抹完之后剩下的正文仍然落在 Rust 的交集里，
+所以对照组照旧用 `rustc`。
 
 用法: python tools/loment_multisyntax_projects_test.py
 无某个工具链时那一门 SKIP（**可见地**跳过，不是静默绿）。
@@ -56,15 +57,23 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf       # noqa: E402
 import lomentc      # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 EX = ROOT / "loment" / "examples" / "multisyntax-projects"
 
 #: 每一门至少要有一个项目。**规模本身是一条判据**（`docs/179` §5 那条纪律：
 #: 有人明确要过的规模，就该有东西看着它）—— 删掉一门会让这一条红。
-GRAMMARS = ("c", "cpp", "java", "python", "go", "rust")
+GRAMMARS = ("c", "cpp", "java", "python", "go", "tur")
 
 #: 模块最少要有多少个函数。**"大型项目"是个可数的要求**，不是形容词：
 #: 少了它就退化成夹具，而夹具撞不出整项目才撞得到的东西（`docs/179` §8 那条教训）。
@@ -83,7 +92,7 @@ FUNC_RE = {
                        r"(?:int|void|bool|long)\s+\w+\s*\("),
     "go": re.compile(r"(?m)^func\s+\w+\s*\("),
     "python": re.compile(r"(?m)^def\s+\w+\s*\("),
-    "rust": re.compile(r"(?m)^pub\s+fn\s+\w+"),
+    "tur": re.compile(r"(?m)^pub\s+fn\s+\w+"),
 }
 
 TESTS: list = []
@@ -104,7 +113,7 @@ def _wsl_path(p: Path) -> str:
 def _run_elf(exe: Path) -> int:
     """在 WSL 里跑那个自举出来的 ELF，读退出码。"""
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=600, shell=False)
     return int((r.stdout or "").strip() or -1)
 
@@ -142,7 +151,7 @@ def _control_source(proj: Path, grammar: str) -> str:
 
     抹两样：
       * `choose write grammar <语法>` —— 它是**读法**，不是那份源的一部分（`docs/188` §1）；
-      * （只有 `rust` 那一门）`module <名>` —— 原生读法要求源里写着它，
+      * （只有 `tur` 那一门）`module <名>` —— 原生读法要求源里写着它，
         而真 Rust 里它是语法错。**这一条不对称是实测出来的**：
             $ python tools/lomentc.py --check x.lomt   # 只有声明、没有 module
             [ERR] 3:1: 期望 module（文件必须以 module 开头），得到 'pub'
@@ -150,13 +159,22 @@ def _control_source(proj: Path, grammar: str) -> str:
     text = _module_of(proj).read_text(encoding="utf-8")
     lines = text.split("\n")
     lines[0] = _blank_line(lines[0])            # `choose write grammar <语法>`
-    if grammar == "rust":
+    # **核心 `choose` 行也要抹掉**（`docs/227`）：与 `choose write grammar` 同一条理由 ——
+    # 它是 **Loment 层**的声明（`docs/182` §1.3 的"核心语法硬写法"），不是那一门语法的一部分。
+    # 抹的时机与前端**同一处**（`potato_from._take_core_choose`）：不抹的话这一行会被当成
+    # 那门语言的语法喂给真编译器 —— 实测 clang 报 `unknown type name 'choose'`。
+    _CORE = ("std", "no_std", "gc_manual", "gc_auto", "gc_auto_alpha", "runtime", "no_runtime")
+    for _k, _ln in enumerate(lines):
+        _head = _ln.strip().rstrip(";").split()
+        if len(_head) == 2 and _head[0] == "choose" and _head[1] in _CORE:
+            lines[_k] = _blank_line(_ln)
+    if grammar == "tur":
         # 声明之后**第一处非空行**应当是 `module <名>` —— 原生读法要求源里写着它
         # （另五门的模块名是翻译器从文件名造的，所以那五份里**不该**有这一行）
         i = next((k for k, ln in enumerate(lines[1:], start=1) if ln.strip()), None)
-        assert i is not None, f"{proj}: `grammar rust` 的模块里找不到 `module <名>`"
+        assert i is not None, f"{proj}: `grammar tur` 的模块里找不到 `module <名>`"
         assert lines[i].lstrip().startswith("module "), (
-            f"{proj}: `grammar rust` 的模块第二处非空行该是 `module <名>`，"
+            f"{proj}: `grammar tur` 的模块第二处非空行该是 `module <名>`，"
             f"得到 {lines[i]!r}")
         lines[i] = _blank_line(lines[i])        # 它在真 Rust 里是语法错
     return "\n".join(lines)
@@ -221,7 +239,7 @@ def _control_cpp(proj: Path, td: Path) -> int:
     f.write_text(src, encoding="utf-8", newline="\n")
     exe = td / "side.bin"
     cmd = ("g++ " + " ".join(T._FLAGS) + f" -o {_wsl_path(exe)} {_wsl_path(f)}")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", cmd],
                        capture_output=True, text=True, timeout=900, shell=False)
     assert r.returncode == 0, f"C++ 编译失败: {(r.stdout + r.stderr)[-400:]}"
     return T._run(exe)
@@ -286,7 +304,7 @@ def _control_rust(proj: Path, td: Path) -> int:
     rustc = shutil.which("rustc") or str(Path.home() / ".cargo" / "bin" / "rustc.exe")
     if not Path(rustc).exists() and not shutil.which("rustc"):
         raise _Skip("无 rustc")
-    src = _control_source(proj, "rust") + \
+    src = _control_source(proj, "tur") + \
         "\nfn main() { std::process::exit(entry() % 256); }\n"
     f = td / "side.rs"
     f.write_text(src, encoding="utf-8", newline="\n")
@@ -303,7 +321,7 @@ class _Skip(Exception):
 
 
 _CONTROL = {"c": _control_c, "cpp": _control_cpp, "java": _control_java,
-            "go": _control_go, "python": _control_python, "rust": _control_rust}
+            "go": _control_go, "python": _control_python, "tur": _control_rust}
 
 
 # ------------------------------------------------------------------ 判据
@@ -422,30 +440,37 @@ def test_the_grammar_decl_is_what_selects_the_reading():
         else:
             raise AssertionError("同一段 C 声明成 natural 竟然也读得过去 —— 声明没起作用")
 
-        # **原生拼法**：声明成 `rust` 走的是"抹掉声明那一行"那条路，产物是**生成物以外**
+        # **原生拼法**：声明成 `tur` 走的是"抹掉声明那一行"那条路，产物是**生成物以外**
         # 的东西（包头 `// 由 tools/lomt_from.py …` 是翻译那一支才有的）
         c = td / "c.lomt"
-        c.write_text("choose write grammar rust\nmodule m\n\npub fn g() -> i32 {\n"
+        c.write_text("choose write grammar tur\nmodule m\n\npub fn g() -> i32 {\n"
                      "    return 2;\n}\n", encoding="utf-8", newline="\n")
         fu_c = potato_from.front_door(c)
         assert (fu_c.grammar, fu_c.translated) == ("loment", False), (fu_c.grammar, fu_c.translated)
         assert "pub fn g() -> i32" in fu_c.source and "从 Potato" not in fu_c.source, (
-            "`grammar rust` 该走**原生读法**（用户 2026-09-22：rust 语法是 Loment 基础语法），"
+            "`grammar tur` 该走**原生读法**（用户 2026-11-03：Tur 是本语言的原生语法），"
             "而不是被当外国模块翻一遍")
-    print("      同一段内容：声明 c 收下并翻译、声明 natural 响亮地拒、声明 rust 走原生读法")
+
+        # **`rust` 不再是原生语法**（用户 2026-11-03："rust 和其他几种语法一样"）：
+        # 声明成 rust 的完整程序必须走 `from_rust` 那条**表层语法**路 ——
+        # 它只抽接口、不抓正文，所以这里会被拒，而**不是**按原生读法收下。
+        d = td / "d.lomt"
+        d.write_text("choose write grammar rust\nmodule m\n\npub fn g() -> i32 {\n"
+                      "    return 2;\n}\n", encoding="utf-8", newline="\n")
+        try:
+            fu_d = potato_from.front_door(d)
+        except Exception as e:                                     # noqa: BLE001
+            assert type(e).__name__ in ("NotRepresentable", "FrontDoorRefused"), (
+                f"`grammar rust` 该按表层语法的既有失败模式被拒，得到 {type(e).__name__}: {e}")
+        else:
+            assert fu_d.translated is True, (
+                "`grammar rust` 竟然走了原生读法 —— 它已退回表层语法（用户 2026-11-03）")
+    print("      同一段内容：声明 c 收下并翻译、声明 natural 响亮地拒、"
+          "声明 tur 走原生读法、声明 rust 走表层语法")
 
 
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_multisyntax_projects_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_multisyntax_projects_test")
 
 
 if __name__ == "__main__":

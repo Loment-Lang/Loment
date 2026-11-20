@@ -133,9 +133,15 @@ CPP = Dialect(
     coerce_int_to_bool=True,
     coerce_bool_to_int=True,
     int_default="i32",
+    # C++ 的整型转换规则与 C 同源（**寻常算术转换**）—— 见 `Dialect.usual_arith`
+    # 与 `tools/ctrans.py` 那一处（`#123` / `#125` / `#133`）。
+    usual_arith=True,
     safe_suffix="_cpp",
     #: 顶层常量**不收**（与 C 一致）：`potato_from` 那边也没有 C++ 的常量收集。
     const_words=frozenset(),
+    #: 函数内的 `static` 是**静态存储期**，丢掉会改程序的数 —— 见 `Dialect.local_storage`。
+    #: 与 C 同一条。
+    local_storage=frozenset({"static"}),
 )
 
 

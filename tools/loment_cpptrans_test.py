@@ -51,6 +51,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import cpptrans    # noqa: E402
 import ctrans      # noqa: E402
 import lomelf      # noqa: E402
@@ -75,11 +76,18 @@ def test(fn):
     return fn
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -87,6 +95,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -94,7 +104,7 @@ def _have_gpp() -> bool:
     if not _wsl():
         return False
     try:
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", "command -v g++"],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", "command -v g++"],
                            capture_output=True, text=True, timeout=120)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
@@ -103,7 +113,7 @@ def _have_gpp() -> bool:
 
 def _run(exe: Path) -> int:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     return int(r.stdout.strip() or -1)
 
@@ -134,7 +144,7 @@ def _build_cpp(td: Path, src: str) -> Path:
     (td / "cpp_side.cpp").write_text(src + _CPP_ENTRY, encoding="utf-8", newline="\n")
     exe = td / "cpp_side.bin"
     cmd = ("g++ " + " ".join(_FLAGS) + f" -o {_wsl_path(exe)} {_wsl_path(td / 'cpp_side.cpp')}")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", cmd],
                        capture_output=True, text=True, timeout=600, shell=False)
     assert r.returncode == 0, f"C++ 编译失败: {(r.stdout + r.stderr)[-500:]}"
     return exe
@@ -183,6 +193,49 @@ def test_translation_runs_same_as_gpp():
         f"**翻译出来的 Loment 与 g++ 编的 C++ 结果不同**: {l_rc} != {cpp_rc}。\n"
         f"  （两个都对不上 {WANT_RC} 的话是语料问题；只有一边对不上就是翻译翻错了）")
     print(f"      g++ -> {cpp_rc}，翻译成 Loment -> {l_rc}（相等）")
+
+
+@test
+def test_shadowing_declaration_reads_the_outer_name_in_its_initializer():
+    """**遮蔽 + 初值引用被遮蔽的那个名**（`#234`，`grammar cpp` 那一半）。
+
+    块里 `int x = x + 100;` 要发成 `let x__1: i32 = (x + 100);` —— 右边那个 `x` 是
+    **外层**那个。共享核原先先 `decl_bind` 再发初值，于是右边也跟着改名，产物是一条
+    **自引用**声明（`let x__1: i32 = (x__1 + 100);`），check 报"使用未声明的变量
+    x__1"。这一条与 C 那门同一处（`trans_core.py`），两边各钉一次。
+    """
+    src = ("int entry() {\n"
+           "    int x = 10;\n"
+           "    if (x > 0) {\n"
+           "        int x = x + 100;\n"
+           "        if (x > 100) {\n"
+           "            x = 7;\n"
+           "        }\n"
+           "    }\n"
+           "    return x;\n"
+           "}\n")
+    out = cpptrans.translate(src)
+    assert "let x__1: i32 = (x + 100);" in out, out
+    assert "x__1 + 100" not in out, f"初值读到了刚改名的那个（自引用）:\n{out}"
+
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        doc, rep = potato_from.from_cpp(src, "nest.cpp", "strict")
+        assert not rep.skipped, rep.skipped[:3]
+        if _have_gpp():
+            cpp_rc = _run(_build_cpp(td, src))
+            l_rc = _run(_build_loment(td, doc))
+            assert cpp_rc == 10, f"g++ 那边就不对: {cpp_rc} != 10"
+            assert l_rc == cpp_rc, f"译文与 g++ 不同: {l_rc} != {cpp_rc}"
+            print(f"      遮蔽 + 自引用初值：g++ -> {cpp_rc}，翻译 -> {l_rc}（相等）")
+        else:
+            text, _ = lomt_from.emit_lomt(doc, impl=True)
+            p = td / "nest.lomt"
+            p.write_text(text + _L_ENTRY, encoding="utf-8", newline="\n")
+            mod = lomentc.load(p)
+            deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+            assert not lomentc.check(mod, deps=deps), "翻译出来的 Loment 检查不过"
+            print("      遮蔽 + 自引用初值：产物可检查（无 g++，未跑数值）")
 
 
 @test
@@ -302,16 +355,7 @@ def test_out_of_subset_is_loud():
 
 
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_cpptrans_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_cpptrans_test")
 
 
 if __name__ == "__main__":

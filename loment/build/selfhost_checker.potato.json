@@ -1,11 +1,20 @@
 {
-  "potato": "v2",
+  "potato": "v13",
   "unit": "checker",
   "language": "loment",
+  "grammar": "loment",
   "mode": "std",
+  "gc": "gc_manual",
+  "runtime": "runtime",
+  "port": "sealed",
+  "vm": "no_vm",
+  "switches": [],
+  "dialects": [],
+  "bodies": [],
   "imports": [
     "bytes",
-    "lexer"
+    "lexer",
+    "switches"
   ],
   "capabilities": [],
   "functions": [
@@ -406,6 +415,74 @@
         }
       ],
       "ret": "bool"
+    },
+    {
+      "name": "chk_core_dim",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_rt_site",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "later_line",
+      "params": [
+        {
+          "name": "a",
+          "type": "u32"
+        },
+        {
+          "name": "b",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_core_val",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "k",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
     },
     {
       "name": "same",
@@ -930,6 +1007,78 @@
         },
         {
           "name": "o",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_slice_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "off",
+          "type": "u32"
+        },
+        {
+          "name": "len",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_num_is_net",
+      "params": [
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_excl_net",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "exs",
+          "type": "ptr"
+        },
+        {
+          "name": "nexs",
+          "type": "u32"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
+      "name": "chk_syscall_net",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "i",
           "type": "u32"
         }
       ],
@@ -2462,6 +2611,108 @@
       "ret": "u32"
     },
     {
+      "name": "cmd_span_is",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "u32"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        },
+        {
+          "name": "s",
+          "type": "str"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "cmd_reserved",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "u32"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "cmd_name_ok",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "p",
+          "type": "u32"
+        },
+        {
+          "name": "n",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "cmd_main_sig_ok",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "itok",
+          "type": "u32"
+        }
+      ],
+      "ret": "bool"
+    },
+    {
+      "name": "chk_command",
+      "params": [
+        {
+          "name": "src",
+          "type": "ptr"
+        },
+        {
+          "name": "t",
+          "type": "ptr"
+        },
+        {
+          "name": "out",
+          "type": "ptr"
+        },
+        {
+          "name": "o",
+          "type": "u32"
+        },
+        {
+          "name": "scr",
+          "type": "ptr"
+        }
+      ],
+      "ret": "u32"
+    },
+    {
       "name": "chk_arena_syms",
       "params": [],
       "ret": "u32"
@@ -2504,6 +2755,11 @@
   ],
   "layouts": [],
   "consts": [
+    {
+      "name": "LOMENT_CHANNEL",
+      "type": "u32",
+      "value": 0
+    },
     {
       "name": "K_FN",
       "type": "u32",
@@ -2625,6 +2881,11 @@
       "value": 22
     },
     {
+      "name": "E_EXCL",
+      "type": "u32",
+      "value": 5
+    },
+    {
       "name": "TY_KIND_SHIFT",
       "type": "u32",
       "value": 28
@@ -2663,6 +2924,21 @@
       "name": "TY_SLICE",
       "type": "u32",
       "value": 4
+    },
+    {
+      "name": "E_CMD_DECL",
+      "type": "u32",
+      "value": 24
+    },
+    {
+      "name": "E_CMD_ENTRY",
+      "type": "u32",
+      "value": 25
+    },
+    {
+      "name": "E_CMD_BODY",
+      "type": "u32",
+      "value": 26
     }
   ],
   "enums": [],
@@ -2688,5 +2964,22 @@
   ],
   "instances": [],
   "guards": 0,
+  "boundary": {
+    "extern_declared": 0,
+    "extern_calls": 0,
+    "syscalls": 0,
+    "ptr_transforms": 2,
+    "total_sites": 2
+  },
+  "gc_ladder": {
+    "l0": 0,
+    "l1": 0,
+    "l2": 0,
+    "l3": 0,
+    "total_sites": 0
+  },
+  "surfaces": {
+    "total_sites": 0
+  },
   "excluded": []
 }

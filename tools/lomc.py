@@ -74,7 +74,14 @@ class Tok:
 
 
 _PUNCT = "{}()[]:;=@,.+-*/%<>!&|^?"
-_ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\"}
+#: 字符串转义表。**2026-10-16 补上 `\r` 与 `\0`**（`#33` / `#36`）：
+#: `\r` 原先不在表里，于是走"未知转义"那条兜底，**反斜杠被吃掉**、值变成字母 `r` —— 用户写
+#: 回车得到一个 r，而且编译器什么都不说。`\0` 仓库自己在用（`loment/lib/proc.lomt` 的
+#: `"/bin/sh\0"`），却一直靠同一条静默兜底在跑。
+#:
+#: 表外的转义**是错误**（见 `lex` 里那个 `raise`），不再"取原字符" —— 那条兜底正是这两个
+#: issue 的共同成因：`"\x41"` 曾经静默变成 `x41` 三个字符。
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", '"': '"', "\\": "\\"}
 
 
 def _starts_ext_block(toks: list, depth: int, declared: set) -> bool:
@@ -122,14 +129,24 @@ def lex(text: str) -> list[Tok]:
             j = text.find("*/", i + 2)
             if j < 0:
                 raise LomError(line, col, "未闭合的块注释")
-            line += text[i:j].count("\n")
+            seg = text[i:j + 2]
+            nl = seg.count("\n")
+            if nl:                      # 跨行: 列回到最后那个换行之后 (#708)
+                line += nl
+                col = len(seg) - seg.rfind("\n")
+            else:                       # 单行: 列前进整个注释的长度 (#708)
+                col += len(seg)
             i = j + 2
             continue
         if c == '"':
             j, buf = i + 1, []
             while j < n and text[j] != '"':
                 if text[j] == "\\" and j + 1 < n:
-                    buf.append(_ESCAPES.get(text[j + 1], text[j + 1]))
+                    c2 = text[j + 1]
+                    if c2 not in _ESCAPES:
+                        raise LomError(line, col + (j - i),
+                                       f"未知转义 \\{c2} —— 只认 \\n \\t \\r \\0 \\\\ \\\"")
+                    buf.append(_ESCAPES[c2])
                     j += 2
                 else:
                     buf.append(text[j])
@@ -137,7 +154,17 @@ def lex(text: str) -> list[Tok]:
             if j >= n:
                 raise LomError(line, col, "未闭合的字符串")
             toks.append(Tok("string", "".join(buf), line, col, i, j + 1 - i))
-            i, col = j + 1, col + (j + 1 - i)
+            # **字符串里的换行也要走行号**（`#481`）：原来只把列往前推，`line` 停在
+            # 开引号那一行 —— 之后的每一条诊断都比真实位置**少**掉字符串里的换行数。
+            # 一个多行字符串（开引号与闭引号之间夹着换行）之后，`let x: u32 = true;`
+            # 报在第 4 行而不是第 5 行，用户看到的 caret 落在 `b";` 上。
+            _nl = text.count("\n", i, j + 1)
+            if _nl:
+                line += _nl
+                col = (j + 1) - text.rfind("\n", i, j + 1)
+            else:
+                col += j + 1 - i
+            i = j + 1
             continue
         m = re.match(r"0[xX][0-9A-Fa-f]+|\d+", text[i:])
         if m:

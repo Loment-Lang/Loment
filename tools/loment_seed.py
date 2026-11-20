@@ -14,6 +14,18 @@
 #   python tools/loment_seed.py --script-ok  纯静态: 启动脚本无第三方语言/无 CRLF
 # 退出码: 0 = 一致/成功 / 1 = 有差异或失败 / 2 = 环境缺失。
 
+# ---------------------------------------------------------------------------
+# HOLY SHIT, WHAT OF SHIT
+#
+# 上面那几行看着平平无奇，直到你知道它把什么冻进了仓库：一份 **6 MB 的 LLVM IR 文本**
+# （`loment/build/selfhost_driver.ll`）—— 它是"用 Loment 写的编译器"编译自己得到的产物。
+# 整条工具链从它起步：clang → stage1 → stage2 → 定点，**不需要 Python**（docs/159）。
+#
+# 而 `--check` 要求它与参考实现**逐字节相同**：两份互相独立的编译器，发射出来的文本
+# 一个空格都不能差（docs/158 §5）。把"自举的起点"变成一件可复现、可提交、可核对的
+# 工件 —— 这是我认为这门语言最逆天的地方。
+# ---------------------------------------------------------------------------
+
 from __future__ import annotations
 
 import argparse
@@ -27,20 +39,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 ENTRY = ROOT / "loment" / "selfhost" / "driver.lomt"
 SCRIPT = ROOT / "loment" / "bootstrap.sh"
 SH_REL = "loment/bootstrap.sh"
 
 
-def reference_ir() -> str:
-    """参考实现为自举驱动发射的单元 IR —— 种子应与它逐字符相同。"""
-    mod = lomentc.load(ENTRY)
-    deps = lomentc.resolve_deps(mod, ROOT, ENTRY.parent, entry=ENTRY)
-    errs = lomentc.check(mod, deps=deps)
-    if errs:
-        raise SystemExit(f"[ERR] driver.lomt 自己检查不过: {errs[0]}")
-    return lomentc.emit_llvm(mod, ROOT, deps)
+#: ---- 渠道注入（`docs/231` §2.3）------------------------------------------
+#:
+#: 发行版种子 = 把自举侧那一行渠道常量翻成 `1` 之后**重算**的种子。**只改这一行、
+#: 只在这一个文件里** —— 于是"包里的树除这一行之外与仓库逐字节相同"仍是一条可判的话。
+#:
+#: 钩子放在这里、不放进 `lomentc.load()`：那是**编译器**，不该知道"打包"这件事。
+#: `lomentc.load` 内部是**调用时才** `from potato_from import front_door`，
+#: 所以换掉 `potato_from.front_door` 就够 —— 编译器一个字节都不用碰。
+CHANNEL_FILE = "loment/selfhost/checker.lomt"
+CHANNEL_LINE_DEV = "pub const LOMENT_CHANNEL: u32 = 0;"
+CHANNEL_LINE_RELEASE = "pub const LOMENT_CHANNEL: u32 = 1;"
+
+
+def _front_door_for(channel: str):
+    """按渠道包一层 `front_door`；`dev` 就是原来那个。"""
+    import potato_from  # noqa: PLC0415
+
+    orig = potato_from.front_door
+    if channel == "dev":
+        return orig
+    want = (ROOT / CHANNEL_FILE).resolve()
+
+    def patched(path):
+        fu = orig(path)
+        if Path(path).resolve() == want:
+            if CHANNEL_LINE_DEV not in fu.source:
+                raise SystemExit(
+                    f"[ERR] 渠道注入点漂了：{CHANNEL_FILE} 里找不到 `{CHANNEL_LINE_DEV}` —— "
+                    "改了那一行的写法就要同时改这里（`docs/231` §2.3）")
+            fu.source = fu.source.replace(CHANNEL_LINE_DEV, CHANNEL_LINE_RELEASE, 1)
+        return fu
+
+    return patched
+
+
+def reference_ir(channel: str = "dev") -> str:
+    """参考实现为自举驱动发射的单元 IR —— 种子应与它逐字符相同。
+
+    `channel="release"` 时先做 §2.3 那一步注入，算出来的就是**发行版种子**。
+    """
+    import potato_from  # noqa: PLC0415
+
+    orig = potato_from.front_door
+    potato_from.front_door = _front_door_for(channel)
+    try:
+        mod = lomentc.load(ENTRY)
+        deps = lomentc.resolve_deps(mod, ROOT, ENTRY.parent, entry=ENTRY)
+        errs = lomentc.check(mod, deps=deps)
+        if errs:
+            raise SystemExit(f"[ERR] driver.lomt 自己检查不过: {errs[0]}")
+        return lomentc.emit_llvm(mod, ROOT, deps)
+    finally:
+        potato_from.front_door = orig
 
 
 def check() -> int:
@@ -115,13 +179,18 @@ def bootstrap() -> int:
         print(f"[ERR] 缺 {SCRIPT.relative_to(ROOT)}")
         return 2
     if shutil.which("wsl"):
-        cmd = ["wsl", "-e", "sh", SH_REL]
+        cmd = [*_WSLCMD, "sh", SH_REL]
     elif shutil.which("sh"):
         cmd = ["sh", SH_REL]
     else:
         print("[ERR] 既无 wsl 也无 sh")
         return 2
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900,
+    # 900 -> 1800（2026-11-09）：种子到 5.63 MB 之后，三阶段定点在 CI 的
+    # ubuntu runner 上撞了 15 分钟。这里有**两个**慢步骤（stage1 与 stage2 各编一遍
+    # driver.lomt），而它们是定点判据本身，不能抽掉。1800 是**存活护栏**，不是性能
+    # 指标：真挂死仍然会在半小时内报出来。本机同树实测 5.71 MB / 7 分 14 秒（434s），
+    # 与"CI 比本机慢一倍多"对得上 —— 抬上限是修那个过时的数，不是掩盖变慢。
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
                        shell=False, cwd=str(ROOT))
     sys.stdout.write(r.stdout)
     if r.returncode:

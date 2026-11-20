@@ -62,9 +62,16 @@ So:
 
 - **A pull request that modifies anything under `lom/` is detected automatically.** Every pull
   request runs a job named `lom/ 禁区` (`.github/workflows/gate.yml`, job `lom-door`). It reads the
-  pull request's changed-file list and **fails** if anything under `lom/` is in it. No human has to
-  agree with it, and there is no review that overrides it — there is no way to evaluate the change
-  from inside this repository alone, because the half it would break is not here.
+  pull request's changed-file list and **fails** if any file under `lom/` is **modified, deleted or
+  renamed** in it. No human has to agree with it, and there is no review that overrides it — there
+  is no way to evaluate the change from inside this repository alone, because the half it would
+  break is not here.
+- **Adding a new file under `lom/` is not a modification and is not blocked** (2026-10-11). The
+  door is about the contracts that already exist: their other half is in another repository and
+  cannot be re-checked from here. A new file touches none of them. The job lists new `lom/` files
+  in its summary instead of failing — so the reviewer sees them — and the file is expected to
+  arrive with its own criteria. Once something depends on it, changing *it* is back under the door,
+  because by then it has a counterpart too.
 - **Make that check required and it is a hard door**, because a failing required check cannot be
   merged. Turning it into one is a repository setting rather than a file in this tree; if you find
   it is not enforced when you open a pull request, say so in an issue — a door that is described
@@ -121,8 +128,39 @@ which older clangs do not know; on clang 18 the `--debug` criteria fail with
 clang 18, which is why the CI workflow installs LLVM 19 explicitly.)
 
 Before writing much Loment, read `.claude/skills/loment/SKILL.md`. It is the language guide —
-syntax, builtins, the E001–E023 codes, and the traps that cost the most time — and it ships with
+syntax, builtins, the E001–E027 codes, and the traps that cost the most time — and it ships with
 the toolchain (`loment skill --print`).
+
+## The development kit
+
+Changing the language itself has three chores that are not obvious from the tree: which environment
+the gate judges in, which command runs it, and whether the self-hosted bootstrap is working or hung.
+`tools/loment_dev.py` and `.devcontainer/` exist for those three and for nothing else.
+
+**The environment is the CI image.** Every gate job runs in `ghcr.io/loment-lang/loment-ci`, built
+from [.github/ci/Dockerfile](.github/ci/Dockerfile) — Ubuntu 24.04, LLVM 19, Python 3, rustc, Go,
+JDK, Node 20, `gh`, gdb, QEMU. [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)
+uses the same image digest, so "it fails for me but not on CI" stops being an environment question:
+open the checkout in VS Code and choose **Reopen in Container**, or start a Codespace. The image is
+amd64 only, and it is public so a fork can pull it. On first create the container marks the
+workspace as a safe git directory and runs the doctor below.
+
+Three commands cover the rest:
+
+```
+python3 tools/loment_dev.py doctor      # what this checkout is missing, and how to fix it
+python3 tools/loment_dev.py gate        # = python3 tools/ci.py --static-only -j <cores>
+python3 tools/loment_dev.py bootstrap   # = sh loment/bootstrap.sh (through WSL on Windows)
+```
+
+`doctor` names the missing component and the command that fixes it, and separates the ones that
+stop the gate from the ones that only make some criteria skip. `gate` sets `PYTHONUTF8=1` for its
+child processes — without it a Windows checkout decodes their output as GBK and reports failures
+that have nothing to do with your change. `bootstrap` goes through `wsl -e bash -lc` on Windows and
+states the expected 12–14 minutes before it starts, because a run with no output is not a hung run.
+
+Design notes, what was and was not actually verified, and the criteria that keep the two sides from
+drifting: [docs/302-lomentwork.md](docs/302-lomentwork.md).
 
 ## Run the gate before you open a pull request
 
@@ -198,38 +236,53 @@ together.
 
 ### Generated files get their own commit
 
-Several tracked files are produced from others: the self-host seed
-(`loment/build/selfhost_driver.ll`), `loment/tools/surface_data.lomt`,
-`loment/build/release-manifest.json`, `loment/build/SHA256SUMS`, `docs/manual/`. Put them in a
-**separate commit whose message says it is only generated output**, so a reviewer can look at the
-hand-written change by itself. The seed has been 93% of a diff's lines — which is precisely the
-problem that separation solves.
+Several tracked files are produced from others. They split in two, and the split is the point:
 
-**You normally do not have to produce them yourself** (since 2026-09-24). The `manifest` workflow
-recomputes all five on every push to a branch — in the order their inputs require — and pushes the
-result back as a `[生成物] …` commit of its own. Let it, even when you could run the commands:
-it works on a clean checkout of exactly one commit, which is what the manifest *describes*, while
-a regeneration on your machine globs your **working tree** and will happily bake in whatever a
-concurrent session has left uncommitted.
+* **Tied to your change** — the self-host seed `loment/build/selfhost_driver.ll` (it follows
+  `loment/selfhost/*.lomt`) and `loment/tools/surface_data.lomt` (the builtin/diagnostic table).
+  The `manifest` workflow recomputes these two on every push to a branch and pushes them back as
+  its own `[生成物] …` commit. Put them in a **separate commit whose message says it is only
+  generated output**, so a reviewer can look at the hand-written change by itself — the seed has
+  been 93% of a diff's lines, which is precisely what that separation solves.
+* **Tied to the whole tree** — `loment/build/release-manifest.json`, `loment/build/SHA256SUMS`
+  and `docs/manual/`. **Do not produce these, and CI will not produce them on your branch.**
+  Their every line belongs to some other file, so a pull request that carries them collides with
+  every other open pull request that carries them too: two people adding different docs write
+  *adjacent lines of the same ledger* (the `docs/` entries are one contiguous run) and git's
+  merge context is three lines. They are recomputed **on `main`, after every merge**, by a job
+  that runs alongside the gate and pushes the result straight to `main`. Background, the
+  measurement, and the alternatives that were rejected:
+  [docs/254](docs/254-the-artifacts-are-not-a-shared-register.md).
 
-Do it by hand in three cases only:
+The two that stay yours change exactly when the source they are derived from changes — so a
+conflict on them is a real overlap between two changes, not an artefact of a shared file.
 
-* a **fork** pull request whose head touched `tools/`, or one that was opened without "Allow edits
-  by maintainers" — the workflow will not run an untrusted generator with a write token;
-* you want to see the result before you push;
-* the workflow is down.
-
-`loment_release.GLOBS` is the list of inputs; it includes `tools/*.py`, `loment/tools/*.lomt`,
-`loment/lib/*.lomt` and `docs/*.md`. **The order below is required** — each command feeds a file
-that the ones after it hash:
+If you do need to regenerate by hand, the order is required, because each command feeds a file the
+ones after it hash:
 
 ```
 python tools/loment_seed.py --emit
 python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
+```
+
+Those are the two your branch carries. To reproduce the whole-tree three (usually only worth it to
+see them before `main` does), continue with:
+
+```
 python tools/loment_manual.py --emit docs/manual
 python tools/loment_release.py --emit
 python tools/loment_release.py --checksums loment/build/SHA256SUMS
 ```
+
+Reasons to do any of this by hand: a **fork** pull request whose head touched `tools/`, or one
+opened without "Allow edits by maintainers" — the workflow will not run an untrusted generator with
+a write token; you want to see the result before you push; the workflow is down. Otherwise let the
+workflow do it: it works on a clean checkout of exactly one commit, which is what the manifest
+*describes*, while a regeneration on your machine globs your **working tree** and will happily bake
+in whatever a concurrent session has left uncommitted.
+
+`loment_release.GLOBS` is the list of inputs; it includes `tools/*.py`, `loment/tools/*.lomt`,
+`loment/lib/*.lomt` and `docs/*.md`.
 
 The seed is regenerated, never hand-merged — and note that `--emit` is not `--bootstrap`: the
 first re-derives the file from the reference implementation (seconds, no clang), the second runs
@@ -245,6 +298,14 @@ never a line to relax quietly.
 
 Reasoning that should outlive the thread goes in `docs/NNN-kebab-name.md`, using the next free
 number. `docs/manual/` is generated: change the generator, not the output.
+
+**Two lines working at once often pick the same number** — that is not a mistake either of you
+made, it is the convention meeting parallelism. `python tools/loment_docs.py --next` prints the
+next free number; `--check` reports collisions; and `--fix` renumbers the doc **you added** (and
+nothing already on the base) onto the next free number, renaming the file, the `# NNN ·` heading
+and any full-path `docs/NNN-slug` references. A CI job runs `--fix` on every push, and
+`loment_docs_test` fails on any collision that is not in its (shrinking) baseline — so a collision
+is normally fixed before it lands, and can never land twice.
 
 ### Displaying Loment
 
@@ -288,4 +349,6 @@ or you only want it to keep going — that is the whole ask. Thank you.
 
 ## Licence
 
-MIT ([LICENSE](LICENSE)). Contributions are accepted under it.
+Loment is dual-licensed under **MIT OR Apache-2.0** ([LICENSE-MIT](LICENSE-MIT),
+[LICENSE-APACHE](LICENSE-APACHE)), at your option. Contributions are accepted under the same
+dual license, without any additional terms or conditions.

@@ -4,7 +4,7 @@
 把它们接起来。
 
 ```
-   C（链接腿）        Python（运行期腿）     Java（运行期腿）        Loment
+   C（翻译腿）        Python（运行期腿）     Java（运行期腿）        Loment
    ──────────        ──────────────        ──────────────        ──────
    装帧 / 拆帧   ->   判策略等级       ->   走状态机         ->   合起来 + 打印
    01-c/pack.lomt    02-python/policy.lomt  03-java/Machine.lomt  main.lomt
@@ -20,7 +20,7 @@ frame=459752 level=2 state=2        （退出码 200）
 
 | 段 | 语言 | 为什么这一段归它 |
 |---|---|---|
-| 装帧 / 拆帧 | **C** | 位运算 —— C 那一族的主场；也正好把**链接腿**走完（真编 `.o`、真链、真按 ABI 调） |
+| 装帧 / 拆帧 | **C** | 位运算 —— C 那一族的主场；也正好把**翻译腿**走完（`--impl` 把 C 写法翻成真 `pub fn`，**不起 clang、不链 `.o`**） |
 | 阈值判级 | **Python** | 阈值天然是**配置**；写成模块级常量，换阈值不用碰 Loment 那一侧 |
 | 状态迁移 | **Java** | 这一类东西在 Java 那一族里通常写成带常量与静态方法的类 —— 保持那个形状 |
 
@@ -29,8 +29,12 @@ frame=459752 level=2 state=2        （退出码 200）
 
 ## 两条腿（`docs/173` §2）—— 以及它们之间为什么只能传字节
 
-* **C 走链接腿**：`lomt_from` 从 `01-c/pack.lomt` 生成**接口单元**（`pub extern fn`），
-  实现在编好的 `.o` 里，链进来。传的是**真的按 C ABI 传参**。
+* **C 走翻译腿**（`docs/188` §3）：`lomt_from --impl` 把 `01-c/pack.lomt` **翻成真
+  `pub fn`** —— **不起 clang、不链 `.o`**。一份 C 写法写的单元**就是 Loment**，
+  不是"实现在外面"的外国函数。
+  > **2026-10-09 更正**：这里原来说的是"生成**接口单元**（`pub extern fn`）、实现在
+  > 编好的 `.o` 里、链进来" —— 那是 **2026-09-18 之前的旧模型**，实现与
+  > `loment_multilang_test` 的夹具当天就改了，README 没跟上（`docs/211` 记了这条）。
 * **Python / Java 走运行期腿**：它们不导出 C ABI（是解释器 / JVM），所以
   `loment/lib/proc.lomt` 起一个进程，把 **stdout 读回来**。
 
@@ -51,8 +55,9 @@ python tools/loment_multilang_test.py
 ```
 
 判据 `loment_multilang_test` 会**物化**这三份外源语法（`pack.lomt` → `pack.c`、
-`policy.lomt` → `policy.py`、`Machine.lomt` → `Machine.java`），调各自的编译器，
-把 C 的目标文件链进 Loment，跑，比对 stdout 与退出码。
+`policy.lomt` → `policy.py`、`Machine.lomt` → `Machine.java`），跑，比对 stdout 与退出码。
+**C 那一段在物化之后走的是翻译**（`--impl` 出真 `pub fn`，**不起 clang、不链 `.o`**），
+Python / Java 那两段才起各自的运行期。
 
 **单一真源是那三份 `.lomt`** —— 物化出来的副本全在临时目录里，谁都不该去手改
 （手改必然与 `.lomt` 漂，判据里有一条专门钉这个）。
@@ -61,7 +66,8 @@ python tools/loment_multilang_test.py
 
 夹具现在替 **S2**（`docs/183` §8.2 的 `foruse` / `command`）做了两件本该属于编译器的事：
 
-1. **把 `.lomt` 里的外源语法物化成目标语言要的形状**，再调它的编译器；
+1. **把 `.lomt` 里的外源语法物化成目标语言要的形状**，再起它的运行期
+   （Python / Java 那两段）—— C 那一段是**翻译**掉的，不起编译器；
 2. **找到目标语言的运行时并摆到进程能看见的地方** —— `proc_sh` exec 的是
    `/bin/sh -c <命令>` 而**不传环境**（`loment/lib/proc.lomt:120` 是
    `execve(path, argv, NULL)`），所以自建 JDK 不在子进程的 `PATH` 上，

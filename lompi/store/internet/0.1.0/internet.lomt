@@ -1,0 +1,35 @@
+// internet/internet.lomt — 包入口 (互联网库)
+//
+// `use internet` 指的是**包内与包同名的那个模块** (docs/168 判据
+// `test_multi_file_package_survives_materialize`: 包名与入口文件名必须一致), 所以这个
+// 文件必须叫 `internet.lomt` 且 `module internet`。它自己不做任何事 —— 作用是把包内
+// 全部模块拉进**同一个单元**。
+//
+// ---------------------------------------------------------------- 怎么用
+//
+// **按模块取, 别 `use internet`。** 名字形式能直接命中包内模块: `use ip` / `use http` /
+// `use tcp` 都是一条 use 就够 (解析这一层见 `lomentc.resolve_name`)。
+// 门面为什么不要用: 它把 7 个模块拼进同一个单元, 代价与 std 门面那条一样 (编译时间按
+// 模块数涨)。留着是给"我确实全都要"用的, 也是**平名字唯一性**那条判据的语料。
+//
+// 模块之间的依赖方向是单向的 (顺着读就是方向):
+//     ip / uri / http / dns   —— 纯逻辑, 一个系统调用都不发
+//     sock                    —— socket 原语 (常量 / 地址 / 建关 / 超时)
+//     tcp / udp               —— 依赖 sock
+// 所以裸机/无宿主的消费者只取 `ip`/`uri`/`http`/`dns` 时, 不会把 socket 拖进来。
+//
+// 边界**如实**记在各自的文件头里, 最要紧的两条: 没有解析器 (DNS 只做报文), 没有 TLS
+// (`https://` 依旧不认)。
+
+module internet
+
+// 纯逻辑那一层 (自下而上: 谁都不依赖谁)
+use "ip.lomt"
+use "uri.lomt"
+use "http.lomt"
+use "dns.lomt"
+
+// 宿主那一层
+use "sock.lomt"
+use "tcp.lomt"
+use "udp.lomt"

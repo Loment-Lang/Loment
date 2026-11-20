@@ -1,0 +1,330 @@
+// std/poly1305.lomt — Poly1305 一次性认证器 (RFC 8439 §2.5)
+//
+// 为什么标准库需要它: 它是 ChaCha20 的搭档 —— 两者合起来就是
+// ChaCha20-Poly1305 AEAD, TLS 1.3 的必选项之一。单独看, 它是一个只用
+// 加/乘/取的 128 位 MAC: 没有查表、没有分支、常数时间。
+//
+// 算法:
+//   r = key[0..16] 按位与掩码 (clamp, 去掉低位与高位里"太整齐"的部分)
+//   s = key[16..32]
+//   对每个 16 字节块 m: h = ((h + m + 2^(8*块长)) * r) mod (2^130 - 5)
+//   标签 = (h + s) mod 2^128, 小端 16 字节
+//
+// 为什么用 26 位肢体: 语言没有 u128; 26 位 × 26 位 = 52 位, 五个乘积相加
+// 也不到 2^58 —— 全部落在 u64 里, 进位链每段只用一次。
+//
+// 布局 (调用方给 st, 80 字节):
+//   [0..20)   h, 5 个 26 位肢体 (u32)
+//   [20..40)  r, 5 个 26 位肢体 (u32)
+//   [40..56)  s, 4 个 32 位字
+//   [56..72)  当前未满 16 字节的块缓冲
+//   [72..76)  缓冲已用字节数
+//
+// 边界: 只做 Poly1305 本体; AEAD 的组帧 (pad16 / 长度尾) 在 `aead.lomt`。
+// 命名: 公开 poly_*, 内部 po_*。自检 test_poly1305_*。
+
+module poly1305
+
+use "mem.lomt"
+
+const PO_H: u32 = 0;
+const PO_R: u32 = 20;
+const PO_S: u32 = 40;
+const PO_BUF: u32 = 56;
+const PO_USED: u32 = 72;
+const PO_ST: u32 = 80;
+
+const PO_M26: u64 = 67108863;
+const PO_M32: u64 = 4294967295;
+
+/// 状态字节数 (调用方 `alloc` 这么大一块)。
+pub fn poly_state_bytes() -> u32 {
+    return PO_ST;
+}
+
+fn po_bufptr(st: ptr) -> ptr {
+    return ((st as u64) + (PO_BUF as u64)) as ptr;
+}
+
+fn po_h(st: ptr, i: u32) -> u64 {
+    return mem_load32(st, PO_H + 4 * i) as u64;
+}
+
+fn po_set_h(st: ptr, i: u32, v: u64) {
+    mem_store32(st, PO_H + 4 * i, v as u32);
+}
+
+fn po_r(st: ptr, i: u32) -> u64 {
+    return mem_load32(st, PO_R + 4 * i) as u64;
+}
+
+/// 处理一个 16 字节块。`hibit` 是全块时的 2^24 (即 2^128 相对 2^104 的位),
+/// 最后那个不满的块传 0。
+fn po_block(st: ptr, b: ptr, hibit: u64) {
+    let h0: u64 = po_h(st, 0) + ((mem_load32(b, 0) as u64) & PO_M26);
+    let h1: u64 = po_h(st, 1) + (((mem_load32(b, 3) as u64) >> 2) & PO_M26);
+    let h2: u64 = po_h(st, 2) + (((mem_load32(b, 6) as u64) >> 4) & PO_M26);
+    let h3: u64 = po_h(st, 3) + (((mem_load32(b, 9) as u64) >> 6) & PO_M26);
+    let h4: u64 = po_h(st, 4) + (((mem_load32(b, 12) as u64) >> 8) | hibit);
+    let r0: u64 = po_r(st, 0);
+    let r1: u64 = po_r(st, 1);
+    let r2: u64 = po_r(st, 2);
+    let r3: u64 = po_r(st, 3);
+    let r4: u64 = po_r(st, 4);
+    let r1_5: u64 = r1 * 5;
+    let r2_5: u64 = r2 * 5;
+    let r3_5: u64 = r3 * 5;
+    let r4_5: u64 = r4 * 5;
+    let d0: u64 = h0 * r0 + h1 * r4_5 + h2 * r3_5 + h3 * r2_5 + h4 * r1_5;
+    let d1: u64 = h0 * r1 + h1 * r0 + h2 * r4_5 + h3 * r3_5 + h4 * r2_5;
+    let d2: u64 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * r4_5 + h4 * r3_5;
+    let d3: u64 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * r4_5;
+    let d4: u64 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+    let c: u64 = d0 >> 26;
+    let n0: u64 = d0 & PO_M26;
+    let e1: u64 = d1 + c;
+    c = e1 >> 26;
+    let n1: u64 = e1 & PO_M26;
+    let e2: u64 = d2 + c;
+    c = e2 >> 26;
+    let n2: u64 = e2 & PO_M26;
+    let e3: u64 = d3 + c;
+    c = e3 >> 26;
+    let n3: u64 = e3 & PO_M26;
+    let e4: u64 = d4 + c;
+    c = e4 >> 26;
+    let n4: u64 = e4 & PO_M26;
+    let f0: u64 = n0 + c * 5;
+    c = f0 >> 26;
+    let m0: u64 = f0 & PO_M26;
+    let m1: u64 = n1 + c;
+    po_set_h(st, 0, m0);
+    po_set_h(st, 1, m1);
+    po_set_h(st, 2, n2);
+    po_set_h(st, 3, n3);
+    po_set_h(st, 4, n4);
+}
+
+/// 设一次性密钥 (32 字节)。返回 1。
+pub fn poly_setup(st: ptr, key: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 5 {
+        po_set_h(st, i, 0 as u64);
+        i = i + 1;
+    }
+    let t0: u32 = mem_load32(key, 0);
+    let t1: u32 = mem_load32(key, 4);
+    let t2: u32 = mem_load32(key, 8);
+    let t3: u32 = mem_load32(key, 12);
+    mem_store32(st, PO_R + 0, t0 & 67108863);
+    mem_store32(st, PO_R + 4, ((t0 >> 26) | (t1 << 6)) & 67108611);
+    mem_store32(st, PO_R + 8, ((t1 >> 20) | (t2 << 12)) & 67092735);
+    mem_store32(st, PO_R + 12, ((t2 >> 14) | (t3 << 18)) & 66076671);
+    mem_store32(st, PO_R + 16, (t3 >> 8) & 1048575);
+    i = 0;
+    while i < 4 {
+        mem_store32(st, PO_S + 4 * i, mem_load32(key, 16 + 4 * i));
+        i = i + 1;
+    }
+    mem_store32(st, PO_USED, 0);
+    return 1;
+}
+
+/// 追加任意长度的一段消息 (可以分多次调用, 结果与一次调用相同)。返回 `n`。
+pub fn poly_update(st: ptr, m: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        let used: u32 = mem_load32(st, PO_USED);
+        store8(st, PO_BUF + used, load8(m, i) as u8);
+        used = used + 1;
+        mem_store32(st, PO_USED, used);
+        if used == 16 {
+            po_block(st, po_bufptr(st), 16777216 as u64);
+            mem_store32(st, PO_USED, 0);
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+/// 收尾, 写 16 字节标签。返回 16。
+pub fn poly_final(st: ptr, tag: ptr) -> u32 {
+    let used: u32 = mem_load32(st, PO_USED);
+    if used > 0 {
+        store8(st, PO_BUF + used, 1 as u8);
+        let z: u32 = used + 1;
+        while z < 16 {
+            store8(st, PO_BUF + z, 0 as u8);
+            z = z + 1;
+        }
+        po_block(st, po_bufptr(st), 0 as u64);
+        mem_store32(st, PO_USED, 0);
+    }
+    let h0a: u64 = po_h(st, 0);
+    let h1a: u64 = po_h(st, 1);
+    let h2a: u64 = po_h(st, 2);
+    let h3a: u64 = po_h(st, 3);
+    let h4a: u64 = po_h(st, 4);
+    let c: u64 = h1a >> 26;
+    let h1: u64 = h1a & PO_M26;
+    let e2: u64 = h2a + c;
+    let c2: u64 = e2 >> 26;
+    let h2: u64 = e2 & PO_M26;
+    let e3: u64 = h3a + c2;
+    let c3: u64 = e3 >> 26;
+    let h3: u64 = e3 & PO_M26;
+    let e4: u64 = h4a + c3;
+    let c4: u64 = e4 >> 26;
+    let h4: u64 = e4 & PO_M26;
+    let e0: u64 = h0a + c4 * 5;
+    let c0: u64 = e0 >> 26;
+    let h0: u64 = e0 & PO_M26;
+    let h1b: u64 = h1 + c0;
+    // h + 5; 若越过 2^130 就取这个值 (= h - (2^130 - 5)), 否则保留 h。
+    let t0: u64 = h0 + 5;
+    let k0: u64 = t0 >> 26;
+    let u0: u64 = t0 & PO_M26;
+    let t1: u64 = h1b + k0;
+    let k1: u64 = t1 >> 26;
+    let u1: u64 = t1 & PO_M26;
+    let t2: u64 = h2 + k1;
+    let k2: u64 = t2 >> 26;
+    let u2: u64 = t2 & PO_M26;
+    let t3: u64 = h3 + k2;
+    let k3: u64 = t3 >> 26;
+    let u3: u64 = t3 & PO_M26;
+    let t4: u64 = h4 + k3;
+    let carry: u64 = t4 >> 26;
+    let u4: u64 = t4 & PO_M26;
+    let mask: u64 = (0 as u64) - carry;
+    let notmask: u64 = (18446744073709551615 as u64) - mask;
+    let r0: u64 = (u0 & mask) | (h0 & notmask);
+    let r1: u64 = (u1 & mask) | (h1b & notmask);
+    let r2: u64 = (u2 & mask) | (h2 & notmask);
+    let r3: u64 = (u3 & mask) | (h3 & notmask);
+    let r4: u64 = (u4 & mask) | (h4 & notmask);
+    let f0: u64 = (r0 | (r1 << 26)) & PO_M32;
+    let f1: u64 = ((r1 >> 6) | (r2 << 20)) & PO_M32;
+    let f2: u64 = ((r2 >> 12) | (r3 << 14)) & PO_M32;
+    let f3: u64 = ((r3 >> 18) | (r4 << 8)) & PO_M32;
+    let a0: u64 = f0 + (mem_load32(st, PO_S + 0) as u64);
+    let w0: u64 = a0 & PO_M32;
+    let c1: u64 = a0 >> 32;
+    let a1: u64 = f1 + (mem_load32(st, PO_S + 4) as u64) + c1;
+    let w1: u64 = a1 & PO_M32;
+    let c2b: u64 = a1 >> 32;
+    let a2: u64 = f2 + (mem_load32(st, PO_S + 8) as u64) + c2b;
+    let w2: u64 = a2 & PO_M32;
+    let c3b: u64 = a2 >> 32;
+    let a3: u64 = f3 + (mem_load32(st, PO_S + 12) as u64) + c3b;
+    let w3: u64 = a3 & PO_M32;
+    mem_store32(tag, 0, w0 as u32);
+    mem_store32(tag, 4, w1 as u32);
+    mem_store32(tag, 8, w2 as u32);
+    mem_store32(tag, 12, w3 as u32);
+    return 16;
+}
+
+/// 一次性算标签。`st` 由 `poly_state_bytes()` 给出。返回 16。
+pub fn poly_tag(key: ptr, m: ptr, n: u32, tag: ptr, st: ptr) -> u32 {
+    let _s: u32 = poly_setup(st, key);
+    let _u: u32 = poly_update(st, m, n);
+    return poly_final(st, tag);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn po_hv(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 0;
+}
+
+fn po_hexeq(p: ptr, s: str) -> bool {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = po_hv(str_byte(s, 2 * i));
+        let lo: u32 = po_hv(str_byte(s, 2 * i + 1));
+        if load8(p, i) != ((hi << 4) | lo) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn po_put_hex(p: ptr, pos0: u32, s: str) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = po_hv(str_byte(s, 2 * i));
+        let lo: u32 = po_hv(str_byte(s, 2 * i + 1));
+        store8(p, pos, ((hi << 4) | lo) as u8);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn po_put_str(p: ptr, pos0: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let pos: u32 = pos0;
+    let i: u32 = 0;
+    while i < n {
+        store8(p, pos, str_byte(s, i) as u8);
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn test_poly1305_rfc8439() -> bool {
+    let key: ptr = alloc(32);
+    let msg: ptr = alloc(64);
+    let tag: ptr = alloc(16);
+    let st: ptr = alloc(PO_ST);
+    let _k: u32 = po_put_hex(key, 0, "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b");
+    let n: u32 = po_put_str(msg, 0, "Cryptographic Forum Research Group");
+    let _t: u32 = poly_tag(key, msg, n, tag, st);
+    return po_hexeq(tag, "a8061dc1305136c6c22b8baf0c0127a9");
+}
+
+fn test_poly1305_empty_is_s() -> bool {
+    let key: ptr = alloc(32);
+    let msg: ptr = alloc(1);
+    let tag: ptr = alloc(16);
+    let st: ptr = alloc(PO_ST);
+    let _k: u32 = po_put_hex(key, 0, "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b");
+    let _t: u32 = poly_tag(key, msg, 0, tag, st);
+    return po_hexeq(tag, "0103808afb0db2fd4abff6af4149f51b");
+}
+
+fn test_poly1305_chunking_is_invisible() -> bool {
+    let key: ptr = alloc(32);
+    let msg: ptr = alloc(64);
+    let t1: ptr = alloc(16);
+    let t2: ptr = alloc(16);
+    let st: ptr = alloc(PO_ST);
+    let _k: u32 = po_put_hex(key, 0, "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b");
+    let n: u32 = po_put_str(msg, 0, "Cryptographic Forum Research Group");
+    let _a: u32 = poly_tag(key, msg, n, t1, st);
+    let _s: u32 = poly_setup(st, key);
+    let _u1: u32 = poly_update(st, msg, 7);
+    let _u2: u32 = poly_update(st, ((msg as u64) + 7) as ptr, 11);
+    let _u3: u32 = poly_update(st, ((msg as u64) + 18) as ptr, n - 18);
+    let _f: u32 = poly_final(st, t2);
+    let i: u32 = 0;
+    while i < 16 {
+        if load8(t1, i) != load8(t2, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}

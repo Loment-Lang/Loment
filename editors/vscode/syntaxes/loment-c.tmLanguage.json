@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Loment (C surface grammar)",
+  "scopeName": "source.loment.c",
+  "comment": "一份 Loment 源，文件头写了 `choose write grammar c` —— 正文是 C 写法、语义仍是 Loment（docs/188）。上色借宿主的 `source.c`（由 C/C++ 扩展提供）；宿主没装时只有声明那一行着色。",
+  "patterns": [
+    { "include": "source.loment#grammar-decl" },
+    { "include": "source.c" }
+  ]
+}

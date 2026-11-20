@@ -1,0 +1,19 @@
+# Paths that decide whether the rest of the tree is allowed to land (#421).
+#
+# Branch protection must require a review from a code owner for these paths, and must
+# require the branch to be up to date before merging. The review requirement lives in
+# repository settings, not in this file — see SECURITY.md, "Release and CI integrity".
+#
+# The gate judges the PR; nothing may let a PR rewrite the judge without a second person
+# signing off. `.github/` covers the workflows and the three budget/baseline files.
+
+/.github/                  @FujoJTOP
+/.github/workflows/        @FujoJTOP
+/.github/gate-baseline.txt @FujoJTOP
+/.github/gate-floors.txt   @FujoJTOP
+/.github/gate-skips.txt    @FujoJTOP
+/tools/ci.py               @FujoJTOP
+/tools/loment_suite.py     @FujoJTOP
+/tools/loment_dist.py      @FujoJTOP
+/tools/loment_sign.py      @FujoJTOP
+/install.sh                @FujoJTOP

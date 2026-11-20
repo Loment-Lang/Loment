@@ -1,0 +1,208 @@
+// os/calendar.lomt — 公历日期算术: 年月日 <-> 距 1970-01-01 的天数
+//
+// 为什么需要它: 时间戳是"秒"，而人要看的是"2026-11-09 是本季度第几天、星期几、
+// 上一个月的最后一天是几号"。这中间的换算是**公历**的一套规则：闰年（能被 4 整除，
+// 但整百年要能被 400 整除）、月长（2 月随闰年变）、纪元（1970 之前是负数天数）。
+// 自己按"能被 4 整除就是闰年"写，2100 年会错一天；按 if 链算月长，写错一个分支
+// 只在那一个月出错 —— 两种都是**静默**的。
+//
+// 做法: 用 Howard Hinnant 的 `days_from_civil` / `civil_from_days`（以 400 年为一个
+// "纪元"，闰年规则变成纪元内的整除，没有 if 链）。它有一个**单一公式**的好处：
+// 正负年份、跨纪元、闰年全都走同一条路径，没有分支就没有漏掉的分支。
+//
+// 覆盖: 天数换算（正反）、星期、闰年、月长、`YYYY-MM-DD` 文本。
+//
+// 边界（刻意划的）:
+//   * 只做**公历**（格里高利历），1582 年以前的儒略历不区分；
+//   * 不做时区与夏令时 —— 那是"墙上时间"的事，在 `os/time`；
+//   * 不做 ISO 周编号与季度（调用方拿天数自己算更省事）；
+//   * 自检只验纯算术（这一整个模块都是纯算术）。
+//
+// 命名: 公开 cal_*, 内部 calq_*。自检 test_calendar_*。
+
+module civildate
+
+fn calq_st64(p: ptr, v: i64) -> u32 {
+    let u: u64 = v as u64;
+    let b: u32 = 0;
+    while b < 8 {
+        store8(p, b, ((u >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return 8;
+}
+
+fn calq_ld64(p: ptr) -> i64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v as i64;
+}
+
+fn calq_digits(v: i64, width: u32, out: ptr, cap: u32, pos0: u32) -> u32 {
+    let pos: u32 = pos0;
+    let left: u32 = width;
+    let div: i64 = 1;
+    let k: u32 = 1;
+    while k < width {
+        div = div * 10;
+        k = k + 1;
+    }
+    while left > 0 {
+        let d: i64 = v / div;
+        if pos < cap {
+            store8(out, pos, (48 + (d % 10) as u32) as u8);
+        }
+        pos = pos + 1;
+        v = v - d * div;
+        div = div / 10;
+        left = left - 1;
+    }
+    return pos;
+}
+
+// ---------------------------------------------------------------- 纯算术
+
+/// 闰年: 能被 4 整除，整百年要能被 400 整除。
+pub fn cal_is_leap(y: i64) -> bool {
+    if y % 4 != 0 {
+        return false;
+    }
+    if y % 100 != 0 {
+        return true;
+    }
+    return y % 400 == 0;
+}
+
+/// 这个月有几天。非法月份返回 0（不猜）。
+pub fn cal_days_in_month(y: i64, m: i64) -> i64 {
+    if m == 2 {
+        if cal_is_leap(y) {
+            return 29;
+        }
+        return 28;
+    }
+    if m == 4 || m == 6 || m == 9 || m == 11 {
+        return 30;
+    }
+    if m >= 1 && m <= 12 {
+        return 31;
+    }
+    return 0;
+}
+
+/// 公历日期 -> 距 1970-01-01 的天数（1970-01-01 是 0，之前是负数）。
+pub fn cal_days_from_civil(y0: i64, m: i64, d: i64) -> i64 {
+    let y: i64 = y0;
+    if m <= 2 {
+        y = y - 1;
+    }
+    let era: i64 = 0;
+    if y >= 0 {
+        era = y / 400;
+    } else {
+        era = (y - 399) / 400;
+    }
+    let yoe: i64 = y - era * 400;
+    let mp: i64 = 0;
+    if m > 2 {
+        mp = m - 3;
+    } else {
+        mp = m + 9;
+    }
+    let doy: i64 = (153 * mp + 2) / 5 + d - 1;
+    let doe: i64 = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/// 天数 -> 公历日期。三个结果写进 `yp` / `mp` / `dp`（各 8 字节 i64）。返回 24。
+pub fn cal_civil_from_days(z0: i64, yp: ptr, mp: ptr, dp: ptr) -> u32 {
+    let z: i64 = z0 + 719468;
+    let era: i64 = 0;
+    if z >= 0 {
+        era = z / 146097;
+    } else {
+        era = (z - 146096) / 146097;
+    }
+    let doe: i64 = z - era * 146097;
+    let yoe: i64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y0: i64 = yoe + era * 400;
+    let doy: i64 = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mpx: i64 = (5 * doy + 2) / 153;
+    let d: i64 = doy - (153 * mpx + 2) / 5 + 1;
+    let m0: i64 = 0;
+    if mpx < 10 {
+        m0 = mpx + 3;
+    } else {
+        m0 = mpx - 9;
+    }
+    let y: i64 = y0;
+    if m0 <= 2 {
+        y = y0 + 1;
+    }
+    let _a: u32 = calq_st64(yp, y);
+    let _b: u32 = calq_st64(mp, m0);
+    let _c: u32 = calq_st64(dp, d);
+    return 24;
+}
+
+/// 星期几: 0 = 周日 … 6 = 周六。1970-01-01 是周四。
+pub fn cal_weekday(z: i64) -> i64 {
+    let r: i64 = (z + 4) % 7;
+    if r < 0 {
+        r = r + 7;
+    }
+    return r;
+}
+
+/// `YYYY-MM-DD`（年补到 4 位，月/日补到 2 位）。返回写入长度。
+pub fn cal_ymd_text(y: i64, m: i64, d: i64, out: ptr, cap: u32) -> u32 {
+    let pos: u32 = calq_digits(y, 4, out, cap, 0);
+    if pos < cap {
+        store8(out, pos, 45 as u8);
+    }
+    pos = pos + 1;
+    pos = calq_digits(m, 2, out, cap, pos);
+    if pos < cap {
+        store8(out, pos, 45 as u8);
+    }
+    pos = pos + 1;
+    return calq_digits(d, 2, out, cap, pos);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_calendar_epoch() -> bool {
+    return cal_days_from_civil(1970, 1, 1) == 0
+        && cal_days_from_civil(1970, 1, 2) == 1
+        && cal_days_from_civil(1969, 12, 31) == 0 - 1;
+}
+
+fn test_calendar_leap_day() -> bool {
+    // 2024-02-29 距 1970-01-01 是 19782 天 —— 闰日必须在那一天。
+    return cal_days_from_civil(2024, 2, 29) == 19782;
+}
+
+fn test_calendar_roundtrip() -> bool {
+    let y: ptr = alloc(8);
+    let m: ptr = alloc(8);
+    let d: ptr = alloc(8);
+    let _a: u32 = cal_civil_from_days(19782, y, m, d);
+    let yy: i64 = calq_ld64(y);
+    let mm: i64 = calq_ld64(m);
+    let dd: i64 = calq_ld64(d);
+    return yy == 2024 && mm == 2 && dd == 29;
+}
+
+fn test_calendar_weekday() -> bool {
+    return cal_weekday(0) == 4 && cal_weekday(1) == 5 && cal_weekday(0 - 1) == 3;
+}
+
+fn test_calendar_month_lengths() -> bool {
+    return cal_days_in_month(2024, 2) == 29 && cal_days_in_month(2100, 2) == 28
+        && cal_days_in_month(2000, 2) == 29 && cal_days_in_month(2024, 4) == 30
+        && cal_days_in_month(2024, 12) == 31 && cal_days_in_month(2024, 13) == 0;
+}

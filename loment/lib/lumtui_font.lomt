@@ -1,4 +1,5 @@
 module lumtui_font
+choose runtime
 
 // lumtui_font.lomt — **任意字体**: 直接读 SFNT (TTF), 自己做光栅化。
 //

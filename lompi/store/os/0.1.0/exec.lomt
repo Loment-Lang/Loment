@@ -1,0 +1,208 @@
+// os/exec.lomt — 执行一个程序: argv 向量怎么拼、`execve`、按 PATH 找
+//
+// 为什么需要它: `execve` 不给"一行命令"，它要的是**两个以 NULL 结尾的指针数组**
+// （argv 与 envp），每个指针指向一条 C 串。真实世界的错都在这块内存的构造上：
+// 数组少一个 NULL → 内核继续读栈上的垃圾；argv[0] 写成路径 → 程序看到的"自己的名字"
+// 变成 `/usr/bin/ls`，于是它的 usage 提示跟着变。
+//
+// 覆盖: 向量初始化 / 追加 / 收尾（写 NULL）、`execve`、按 `PATH` 冒号分段找可执行文件
+// （`access(X_OK)`）、"带 `/` 就不搜索"的 `execvp` 语义。
+//
+// **`execve` 成功不返回** —— 返回就说明失败。所以这一层的成功路径没有返回值可给：
+// 所有返回值都是错误码。这也是判据只测纯逻辑的原因（真去 exec 一个程序会把测试进程
+// 换掉）。
+//
+// 不做的: 不解析 shebang（内核做）、不做 `system(3)` 那种走 shell 的调用（那要多一层
+// 引号规则，属于应用层）、不做 `posix_spawn` 的文件动作链。
+//
+// 命名: 公开 ex_*, 内部 exq_*。自检 test_exec_*。
+
+module exec
+
+pub const EX_OK: i64 = 0;
+pub const EX_ERR: i64 = -1;
+/// `access` 的权限模式位（X_OK）。
+pub const EX_X_OK: u32 = 1;
+
+const EXQ_SYS_EXECVE: u64 = 59;
+const EXQ_SYS_ACCESS: u64 = 21;
+
+fn exq_st64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 8;
+}
+
+fn exq_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+/// C 串长度（不含 NUL），最多看到 cap。
+fn exq_clen(p: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cap && load8(p, i) != 0 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn exq_put(out: ptr, cap: u32, pos: u32, b: u32) -> u32 {
+    if pos < cap {
+        store8(out, pos, b as u8);
+    }
+    return pos + 1;
+}
+
+/// 向量初始化: 把 cap_slots 个指针槽清零。返回 0（成功）。
+pub fn ex_vec_init(vec: ptr, cap_slots: u32) -> u32 {
+    let i: u32 = 0;
+    while i < cap_slots {
+        exq_st64(vec, i * 8, 0);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 往向量第 count 槽写一个指针，返回新的 count。调用方自己管越界（cap_slots）。
+pub fn ex_vec_push(vec: ptr, count: u32, s_cstr: ptr) -> u32 {
+    exq_st64(vec, count * 8, s_cstr as u64);
+    return count + 1;
+}
+
+/// 收尾: 在第 count 槽写 NULL。返回"含 NULL 的长度"（count + 1）。
+pub fn ex_vec_terminate(vec: ptr, count: u32) -> u32 {
+    exq_st64(vec, count * 8, 0 as u64);
+    return count + 1;
+}
+
+/// 向量里第 i 个指针（越界之外是垃圾 —— 调用方按自己记的 count 走）。
+pub fn ex_vec_at(vec: ptr, i: u32) -> u64 {
+    return exq_ld64(vec, i * 8);
+}
+
+/// `execve(path, argv, envp)`。只在**失败**时返回（负的错误码）。
+pub fn ex_execve(path_cstr: ptr, argv: ptr, envp: ptr) -> i64 {
+    return syscall4(EXQ_SYS_EXECVE, path_cstr as u64, argv as u64, envp as u64);
+}
+
+/// 在 `PATH` 里找可执行文件: 按 `:` 切段，拼 `段/名字`，`access(X_OK)` 试。
+/// 找到就把完整路径写进 out（C 串）并返回长度；找不到返回 0。
+pub fn ex_path_search(name_cstr: ptr, name_len: u32, path: ptr, path_len: u32,
+                      out: ptr, cap: u32) -> u32 {
+    let i: u32 = 0;
+    let start: u32 = 0;
+    let seg: u32 = 0;
+    let pos: u32 = 0;
+    let k: u32 = 0;
+    let b: u32 = 0;
+    while i <= path_len {
+        b = 0;
+        if i < path_len {
+            b = load8(path, i);
+        }
+        if i == path_len || b == 58 {
+            seg = i - start;
+            if seg > 0 && pos + seg + name_len + 2 <= cap {
+                pos = 0;
+                k = 0;
+                while k < seg {
+                    pos = exq_put(out, cap, pos, load8(path, start + k));
+                    k = k + 1;
+                }
+                if load8(out, pos - 1) != 47 {
+                    pos = exq_put(out, cap, pos, 47);
+                }
+                k = 0;
+                while k < name_len {
+                    pos = exq_put(out, cap, pos, load8(name_cstr, k));
+                    k = k + 1;
+                }
+                if pos < cap {
+                    store8(out, pos, 0 as u8);
+                }
+                // 先落成 i64 再比 0：自举侧对 `调用(...) == 0` 目前直接拿 i64 当 i1
+                // 用（#1539），两边 IR 会分叉；这一行走参考侧的形状。
+                let acc: i64 = syscall4(EXQ_SYS_ACCESS, out as u64, EX_X_OK as u64, 0);
+                if acc == 0 {
+                    return pos;
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 名字里有没有 `/`（`execvp` 的分派规则：有就不搜索 `PATH`）。
+pub fn ex_has_slash(p: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    let got: u32 = 0;
+    while i < n {
+        if load8(p, i) == 47 {
+            got = 1;
+        }
+        i = i + 1;
+    }
+    return got == 1;
+}
+
+/// `execvp` 语义: 名字里带 `/` 就直接 exec；否则在 `PATH` 里找再 exec。
+/// 与 `execve` 一样，只在失败时返回。
+pub fn ex_execvp(name_cstr: ptr, name_len: u32, argv: ptr, envp: ptr,
+                 path: ptr, path_len: u32) -> i64 {
+    let tmp: ptr = alloc(4096);
+    let n: u32 = 0;
+    if ex_has_slash(name_cstr, name_len) {
+        return ex_execve(name_cstr, argv, envp);
+    }
+    n = ex_path_search(name_cstr, name_len, path, path_len, tmp, 4096);
+    if n == 0 {
+        return EX_ERR;
+    }
+    return ex_execve(tmp, argv, envp);
+}
+
+/// 按 `PATH` 找，但**不执行** —— 只把路径交回去（`which` 的形状）。
+pub fn ex_which(name_cstr: ptr, name_len: u32, path: ptr, path_len: u32,
+                out: ptr, cap: u32) -> u32 {
+    return ex_path_search(name_cstr, name_len, path, path_len, out, cap);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_exec_cstr_len() -> bool {
+    let b: ptr = alloc(8);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 98 as u8);
+    store8(b, 2, 0 as u8);
+    return exq_clen(b, 8) == 2;
+}
+
+fn test_exec_vector_push_terminate() -> bool {
+    let v: ptr = alloc(32);
+    let s: ptr = alloc(4);
+    let n0: u32 = ex_vec_init(v, 4);
+    let n1: u32 = ex_vec_push(v, n0, s);
+    let n2: u32 = ex_vec_terminate(v, n1);
+    return n2 == 2 && ex_vec_at(v, 0) == (s as u64) && ex_vec_at(v, 1) == 0;
+}
+
+fn test_exec_slash_detection() -> bool {
+    let a: ptr = alloc(4);
+    let b: ptr = alloc(4);
+    store8(a, 0, 108 as u8);
+    store8(a, 1, 115 as u8);
+    store8(b, 0, 47);
+    store8(b, 1, 108 as u8);
+    return !ex_has_slash(a, 2) && ex_has_slash(b, 2);
+}

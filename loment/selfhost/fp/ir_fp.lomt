@@ -1,0 +1,32 @@
+module ir_fp
+choose fp
+
+// 第九维 `fp`（`docs/348`）的孪生夹具：函数值（裸名字与 `&名字`）、闭包（按值捕获）、
+// 函数类型形参、返回闭包、间接调用 —— 一份覆盖整条链路的最小单元。
+// 两个实现（`tools/lomentc.py` 与 `loment/selfhost/codegen.lomt`）对这份源必须发出
+// **逐字节相同**的 IR，判据在 `tools/loment_p8_test.py` 的 m82 那一格。
+
+fn inc(x: u64) -> u64 {
+    return x + 1;
+}
+
+fn apply(f: (u64) -> u64, v: u64) -> u64 {
+    return f(v);
+}
+
+fn mk(a: u64) -> (u64) -> u64 {
+    return (x: u64) => x + a;
+}
+
+fn _start() {
+    let g: (u64) -> u64 = &inc;
+    let k: u64 = 5;
+    let h: (u64) -> u64 = (x) => x + k;
+    let a: u64 = apply(g, 1);
+    let b: u64 = apply(h, 2);
+    let c: u64 = apply((x: u64) => x * 3, 4);
+    let d: (u64) -> u64 = mk(6);
+    let e: u64 = d(1);
+    let n: u64 = a + b + c + e;
+    syscall4(60, n, 0, 0);
+}

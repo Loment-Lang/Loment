@@ -20,6 +20,7 @@
 // **两条腿之间传不了指针**，所以帧要落成**字节**（`frame.bin`，4 字节小端）给那两段读。
 // 这个边界是这一节的要害，不是实现偷懒：进程桥那一边没有我们的地址空间。
 module multilang
+choose runtime
 
 use bytes                  // `store32`/`load32` 是**库**里的，不是语言内建
 use proc

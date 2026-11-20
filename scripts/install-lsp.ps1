@@ -96,9 +96,16 @@ if (-not $DryRun) {
     if ($LASTEXITCODE -ne 0) { throw "copying stage1 into WSL failed" }
     & wsl -e chmod +x /tmp/loment_install_stage1
     Push-Location $Root
+    # Same trap as scripts/lomc.ps1: PowerShell decodes a native command's stdout with
+    # [Console]::OutputEncoding (GBK here), while stage1 writes UTF-8. The IR carries the
+    # source's comments; decoding them as GBK mangles them and can eat the following
+    # newline, gluing the next `define` onto a comment.
+    $prevEnc = [Console]::OutputEncoding
     try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $ir = & wsl -e /tmp/loment_install_stage1 $Entry
     } finally {
+        [Console]::OutputEncoding = $prevEnc
         Pop-Location
     }
     if ($LASTEXITCODE -ne 0) { throw "stage1 failed to compile the language server" }

@@ -1,0 +1,1429 @@
+// std/regex.lomt — 正则表达式引擎（编译成字节码 + 显式回溯栈 + UTF-8）
+//
+// 为什么要有它: `glob` 只会 `* ? [...]`，`search` 只会"找一段字面量"。而"取出日志里
+// 的时间戳""校验一个标识符""按模式切字段"这类事每天都在发生，没有正则就只能手写
+// 状态机 —— 每写一次就错一次。
+//
+// **支持的语法**:
+//   `.`            任意码位（换行除外；`(?s)` 打开后含换行）
+//   `^` `$`        串首/串尾；`(?m)` 下是行首/行尾
+//   `\A` `\Z` `\z` 绝对串首 / 绝对串尾（`\z` 是别名）
+//   `\b` `\B`      词边界 / 非词边界（词字符 = ASCII 字母数字下划线）
+//   `[...]`        字符类：`^` 取反、`a-z` 范围、开头的 `]` 是字面量
+//   `(...)`        捕获组（`\1`..`\9` 可引用）；`(?:...)` 只分组不捕获
+//   `|`            或
+//   `*` `+` `?`    重复；`{m}` `{m,}` `{m,n}` `{,m}`；每个都可加 `?` 变**惰性**
+//   `(?=...)` `(?!...)`        正/负先行断言
+//   `(?<=...)` `(?<!...)`      正/负后行断言（**变长也支持** —— Python 要求定长，这是超集）
+//   `\d \D \w \W \s \S`        数字 / 词字符 / 空白 及其补集（ASCII 口径）
+//   `\n \r \t \f \v \0` `\xHH` `\uHHHH` 与 `\\ \. \* \+ \? \( \) \[ \] \{ \} \| \^ \$ \-`
+//   开头 `(?i)` `(?m)` `(?s)`   大小写不敏感（ASCII）/ 多行 / dot-all
+//
+// **不做的（如实列）**:
+//   * 命名组 `(?P<name>...)`、`\p{...}`、条件分支、递归、原子组/占有量词、`\G`；
+//   * 作用域内联开关 `(?i:...)`（只认**开头**那一组全局开关）；
+//   * Unicode 大小写折叠（`(?i)` 只折 ASCII A-Z/a-z）；
+//   * `\w` / `\s` 的 Unicode 口径（按 ASCII 判；`\S` 对中文是对的，因为中文不是空白）。
+//
+// **为什么是字节码而不是递归下降**: 递归下降的"原子匹配"只能交出一个终点，于是外层
+// 回退时**进不去内层量词**。实测：`^(?:.+ )?a b` 配 `x a b` —— 内层 `.+ ` 先吃成
+// `x a `，外层再想让它少吃一口就做不到了，整条误判成不匹配。CPython `re` 能过，
+// 而"完整引擎"必须能过。所以这里先把模式**编成指令**，再用一条**显式回溯栈**跑：
+// 每个选择点（`SPLIT`）都把另一条路连位置与捕获撤销点一起压栈，失配就弹。
+//
+// **UTF-8**: 输入与模式都按**码位**匹配，公开接口的下标仍是**字节**下标。
+//
+// **两套入口**: `re_*(pat: str, s: str, ...)` 与 `re_*_mem(pp: ptr, pn, sp: ptr, sn, ...)`。
+// 后者给"字符串住在缓冲区里、构造不出 `str`"的调用方（JSON 解出来的消息、编译器手里的
+// 片段）。内部统一走 ptr+len，`str` 那套只是它的薄壳。
+//
+// **复杂度与护栏**: 回溯引擎最坏是指数的。每条指令扣 1 步预算；用完按"没匹配上"返回。
+// 编译出的程序上限 `RX_PROGN` 条、回溯栈上限 `RX_STKN` 格 —— 越界同样按"没匹配上"返回
+// （**不静默改语义**：返回的就是 no-match）。重复次数因此也受程序容量约束（大 `{n}` 会
+// 编不下 —— 那时返回 no-match，而不是悄悄少重复几次）。
+//
+// 命名: 公开 re_*, 内部 rx_*；自检 test_regex_*。
+
+module regex
+
+use "mem.lomt"
+
+/// 没有匹配（`const` 只吃字面量，所以用函数表达 -1）。
+pub fn re_no() -> i64 {
+    return 0 as i64 - 1;
+}
+/// 重复次数上限（防止 `a*` 配长串把栈/时间吃光；`{n,m}` 的展开也受它约束）。
+pub const RX_MAX_REP: u32 = 1024;
+/// 默认步数预算。
+pub const RX_BUDGET: u32 = 1000000;
+
+// ctx 布局。**每个字段都是手算的字面量**（与其它小工具同一条纪律）。
+const RX_PP: u32 = 0;         // 模式指针 (u64)
+const RX_PL: u32 = 8;         // 模式长度
+const RX_SP: u32 = 16;        // 文本指针 (u64)
+const RX_SL: u32 = 24;        // 文本长度
+const RX_BUD: u32 = 28;       // 剩余步数
+const RX_FL: u32 = 32;        // 开关 (?i)(?m)(?s)
+const RX_CERR: u32 = 36;      // 编译出错 / 程序满 (1)
+const RX_CAPS: u32 = 40;      // 10 组 × (start,end) = 80 字节 -> 40..120
+const RX_LOGL: u32 = 120;     // 撤销日志长度（条）
+const RX_LOG: u32 = 128;      // 每条 (slot, old) 各 u32 -> 256 条 × 8 = 2048 -> 128..2176
+const RX_PLEN: u32 = 2176;    // 编译出的指令条数
+const RX_PROG: u32 = 2184;    // 每条指令 4 个 u32 = 16 B -> 1024 条 × 16 = 16384 -> 2184..18568
+const RX_STK: u32 = 18568;    // 回溯栈：每条 (pc,pos,logmark) = 12 B -> 1024 条 × 12 = 12288
+const RX_PROGN: u32 = 1024;
+const RX_STKN: u32 = 1024;
+const RX_SCR: u32 = 30856;                   // 16 个占有量词的切点槽（u32）
+const RX_LDEP: u32 = 30920;                  // 编译期占有量词嵌套深度
+
+const F_I: u32 = 1;
+const F_M: u32 = 2;
+const F_S: u32 = 4;
+
+const RX_ERR: u32 = 4294967295;
+const RX_ERR_INDEX: u32 = 4294967295;
+
+// 指令
+const OP_CHAR: u32 = 1;      // a = 码位
+const OP_ANY: u32 = 2;
+const OP_CLASS: u32 = 3;     // a = 类内起点, b = 类内终点（`]` 的下标）
+const OP_SAVE: u32 = 4;      // a = 捕获槽偏移
+const OP_SPLIT: u32 = 5;     // a = 先试的 pc, b = 压栈的 pc
+const OP_JMP: u32 = 6;       // a = 目标 pc
+const OP_BACKREF: u32 = 7;   // a = 组号
+const OP_LOOK: u32 = 8;      // a = kind(0..3), b = 子程序起点, c = 子程序终点（不含）
+const OP_ASSERT: u32 = 9;    // a = kind (0 ^, 1 $, 2 \A, 3 \Z, 4 \b, 5 \B)
+const OP_CAT: u32 = 10;      // a = 类转义字母 (\d\D\w\W\s\S)
+const OP_MATCH: u32 = 11;
+const OP_LOOP: u32 = 13;     // a = 回到的 pc, b = 退出 pc（零宽那一圈）
+const OP_MARK: u32 = 14;     // a = 槽：记下当前回溯栈顶（占有量词的"切点"）
+const OP_CUT: u32 = 15;      // a = 槽：把回溯栈顶切回 mark 处（不回溯）
+
+/// `ctx` 至少要这么多字节。
+pub fn re_ctx_bytes() -> u32 {
+    return 30924;
+}
+
+// ---------------------------------------------------------------- 基础
+
+fn rx_tick(ctx: ptr) -> bool {
+    let b: u32 = mem_load32(ctx, RX_BUD);
+    if b == 0 {
+        return false;
+    }
+    mem_store32(ctx, RX_BUD, b - 1);
+    return true;
+}
+
+fn rx_is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn rx_is_word(c: u32) -> bool {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+}
+
+fn rx_is_space(c: u32) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11;
+}
+
+fn rx_fold(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+fn rx_chr_eq(a: u32, b: u32, fl: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    if (fl & F_I) != 0 {
+        return rx_fold(a) == rx_fold(b);
+    }
+    return false;
+}
+
+fn rx_class_esc(e: u32, c: u32, fl: u32) -> bool {
+    if e == 100 { return rx_is_digit(c); }          // \d
+    if e == 68 { return rx_is_digit(c) == false; }  // \D
+    if e == 119 { return rx_is_word(c); }           // \w
+    if e == 87 { return rx_is_word(c) == false; }   // \W
+    if e == 115 { return rx_is_space(c); }          // \s
+    return rx_is_space(c) == false;                 // \S
+}
+
+fn rx_is_class_escape(e: u32) -> bool {
+    return e == 100 || e == 68 || e == 119 || e == 87 || e == 115 || e == 83;
+}
+
+fn rx_hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 { return c - 48; }
+    if c >= 65 && c <= 70 { return c - 55; }
+    if c >= 97 && c <= 102 { return c - 87; }
+    return RX_ERR;
+}
+
+fn rx_hex(p: ptr, i: u32, n: u32, pe: u32) -> u32 {
+    if i + n > pe {
+        return RX_ERR;
+    }
+    let v: u32 = 0;
+    let k: u32 = 0;
+    let ok: u32 = 1;
+    while k < n && ok == 1 {
+        let d: u32 = rx_hexval(load8(p, i + k));
+        if d == RX_ERR {
+            ok = 0;
+        } else {
+            v = v * 16 + d;
+            k = k + 1;
+        }
+    }
+    if ok == 0 {
+        return RX_ERR;
+    }
+    return v;
+}
+
+/// `p[e]` 是一个转义字母：返回 `(码位 << 32) | 下一个下标`。
+fn rx_esc_cp(p: ptr, e: u32, pe: u32) -> u64 {
+    let c: u32 = load8(p, e);
+    if c == 110 { return (10 as u64) * 4294967296 + ((e + 1) as u64); }  // \n
+    if c == 114 { return (13 as u64) * 4294967296 + ((e + 1) as u64); }  // \r
+    if c == 116 { return (9 as u64) * 4294967296 + ((e + 1) as u64); }   // \t
+    if c == 102 { return (12 as u64) * 4294967296 + ((e + 1) as u64); }  // \f
+    if c == 118 { return (11 as u64) * 4294967296 + ((e + 1) as u64); }  // \v
+    if c == 48 { return ((e + 1) as u64); }                              // \0
+    if c == 98 { return (8 as u64) * 4294967296 + ((e + 1) as u64); }    // 类里的 \b = 退格
+    if c == 120 {                                                       // \xHH
+        let vx: u32 = rx_hex(p, e + 1, 2, pe);
+        if vx == RX_ERR {
+            return (c as u64) * 4294967296 + ((e + 1) as u64);
+        }
+        return (vx as u64) * 4294967296 + ((e + 3) as u64);
+    }
+    if c == 117 {                                                       // \uHHHH
+        let vu: u32 = rx_hex(p, e + 1, 4, pe);
+        if vu == RX_ERR {
+            return (c as u64) * 4294967296 + ((e + 1) as u64);
+        }
+        return (vu as u64) * 4294967296 + ((e + 5) as u64);
+    }
+    return (c as u64) * 4294967296 + ((e + 1) as u64);
+}
+
+// ---------------------------------------------------------------- UTF-8
+
+fn rx_cont(b: u32) -> bool {
+    return (b & 192) == 128;
+}
+
+/// 从 `base[i]` 读一个码位：返回 `(码位 << 32) | 下一个下标`；串尾码位 = 0xFFFFFFFF。
+fn rx_next(base: ptr, i: u32, n: u32) -> u64 {
+    if i >= n {
+        return (4294967295 as u64) * 4294967296 + (i as u64);
+    }
+    let b0: u32 = load8(base, i);
+    if b0 < 128 {
+        return (b0 as u64) * 4294967296 + ((i + 1) as u64);
+    }
+    if (b0 & 224) == 192 && i + 1 < n {
+        let b1: u32 = load8(base, i + 1);
+        if rx_cont(b1) == true {
+            let cp: u32 = ((b0 & 31) << 6) | (b1 & 63);
+            return (cp as u64) * 4294967296 + ((i + 2) as u64);
+        }
+    }
+    if (b0 & 240) == 224 && i + 2 < n {
+        let b1b: u32 = load8(base, i + 1);
+        let b2b: u32 = load8(base, i + 2);
+        if rx_cont(b1b) == true && rx_cont(b2b) == true {
+            let cp2: u32 = ((b0 & 15) << 12) | ((b1b & 63) << 6) | (b2b & 63);
+            return (cp2 as u64) * 4294967296 + ((i + 3) as u64);
+        }
+    }
+    if (b0 & 248) == 240 && i + 3 < n {
+        let b1c: u32 = load8(base, i + 1);
+        let b2c: u32 = load8(base, i + 2);
+        let b3c: u32 = load8(base, i + 3);
+        if rx_cont(b1c) == true && rx_cont(b2c) == true && rx_cont(b3c) == true {
+            let cp3: u32 = ((b0 & 7) << 18) | ((b1c & 63) << 12) | ((b2c & 63) << 6) | (b3c & 63);
+            return (cp3 as u64) * 4294967296 + ((i + 4) as u64);
+        }
+    }
+    return (b0 as u64) * 4294967296 + ((i + 1) as u64);
+}
+
+fn rx_prev_cp(base: ptr, i: u32) -> u32 {
+    if i == 0 {
+        return RX_ERR;
+    }
+    let j: u32 = i - 1;
+    let going: u32 = 1;
+    while going == 1 && j > 0 {
+        if rx_cont(load8(base, j)) == true {
+            j = j - 1;
+        } else {
+            going = 0;
+        }
+    }
+    let d: u64 = rx_next(base, j, i);
+    return (d / 4294967296) as u32;
+}
+
+fn rx_pp(ctx: ptr) -> ptr {
+    return mem_load64(ctx, RX_PP) as ptr;
+}
+
+fn rx_sp(ctx: ptr) -> ptr {
+    return mem_load64(ctx, RX_SP) as ptr;
+}
+
+fn rx_sl(ctx: ptr) -> u32 {
+    return mem_load32(ctx, RX_SL);
+}
+
+// ---------------------------------------------------------------- 捕获 / 撤销
+
+fn rx_mark(ctx: ptr) -> u32 {
+    return mem_load32(ctx, RX_LOGL);
+}
+
+fn rx_set_cap(ctx: ptr, slot: u32, val: u32) {
+    let l: u32 = mem_load32(ctx, RX_LOGL);
+    if l >= 256 {
+        mem_store32(ctx, RX_BUD, 0);
+        return;
+    }
+    let old: u32 = mem_load32(ctx, RX_CAPS + slot);
+    mem_store32(ctx, RX_LOG + l * 8, slot);
+    mem_store32(ctx, RX_LOG + l * 8 + 4, old);
+    mem_store32(ctx, RX_LOGL, l + 1);
+    mem_store32(ctx, RX_CAPS + slot, val);
+}
+
+fn rx_undo(ctx: ptr, mark: u32) {
+    let l: u32 = mem_load32(ctx, RX_LOGL);
+    let going: u32 = 1;
+    while going == 1 && l > mark {
+        l = l - 1;
+        let slot: u32 = mem_load32(ctx, RX_LOG + l * 8);
+        let old: u32 = mem_load32(ctx, RX_LOG + l * 8 + 4);
+        mem_store32(ctx, RX_CAPS + slot, old);
+    }
+    mem_store32(ctx, RX_LOGL, mark);
+}
+
+// ---------------------------------------------------------------- 结构扫描
+
+fn rx_class_end(p: ptr, ps: u32, pe: u32) -> u32 {
+    let i: u32 = ps + 1;
+    if i < pe && load8(p, i) == 94 { // '^'
+        i = i + 1;
+    }
+    if i < pe && load8(p, i) == 93 { // 开头的 `]` 是字面量
+        i = i + 1;
+    }
+    while i < pe {
+        let c: u32 = load8(p, i);
+        if c == 92 && i + 1 < pe {
+            i = i + 2;
+        } else if c == 93 {
+            return i;
+        } else {
+            i = i + 1;
+        }
+    }
+    return RX_ERR_INDEX;
+}
+
+fn rx_group_end(p: ptr, ps: u32, pe: u32) -> u32 {
+    let depth: u32 = 1;
+    let i: u32 = ps + 1;
+    while i < pe {
+        let c: u32 = load8(p, i);
+        if c == 92 && i + 1 < pe {
+            i = i + 2;
+        } else if c == 91 {
+            let ce: u32 = rx_class_end(p, i, pe);
+            if ce == RX_ERR_INDEX {
+                return RX_ERR_INDEX;
+            }
+            i = ce + 1;
+        } else if c == 40 {
+            depth = depth + 1;
+            i = i + 1;
+        } else if c == 41 {
+            depth = depth - 1;
+            if depth == 0 {
+                return i;
+            }
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return RX_ERR_INDEX;
+}
+
+fn rx_alt_at(p: ptr, ps: u32, pe: u32) -> u32 {
+    let depth: u32 = 0;
+    let i: u32 = ps;
+    while i < pe {
+        let c: u32 = load8(p, i);
+        if c == 92 && i + 1 < pe {
+            i = i + 2;
+        } else if c == 91 {
+            let ce: u32 = rx_class_end(p, i, pe);
+            if ce == RX_ERR_INDEX {
+                return RX_ERR_INDEX;
+            }
+            i = ce + 1;
+        } else if c == 40 {
+            depth = depth + 1;
+            i = i + 1;
+        } else if c == 41 {
+            if depth > 0 {
+                depth = depth - 1;
+            }
+            i = i + 1;
+        } else if c == 124 && depth == 0 {
+            return i;
+        } else {
+            i = i + 1;
+        }
+    }
+    return RX_ERR_INDEX;
+}
+
+fn rx_atom_end(p: ptr, ps: u32, pe: u32) -> u32 {
+    if ps >= pe {
+        return RX_ERR_INDEX;
+    }
+    let c: u32 = load8(p, ps);
+    if c == 40 {
+        let ge: u32 = rx_group_end(p, ps, pe);
+        if ge == RX_ERR_INDEX {
+            return RX_ERR_INDEX;
+        }
+        return ge + 1;
+    }
+    if c == 91 {
+        let ce: u32 = rx_class_end(p, ps, pe);
+        if ce == RX_ERR_INDEX {
+            return RX_ERR_INDEX;
+        }
+        return ce + 1;
+    }
+    if c == 92 {
+        if ps + 1 >= pe {
+            return RX_ERR_INDEX;
+        }
+        let e: u32 = load8(p, ps + 1);
+        if e == 120 && ps + 3 < pe {
+            return ps + 4;
+        }
+        if e == 117 && ps + 5 < pe {
+            return ps + 6;
+        }
+        return ps + 2;
+    }
+    let d: u64 = rx_next(p, ps, pe);
+    if (d / 4294967296) as u32 == RX_ERR {
+        return RX_ERR_INDEX;
+    }
+    return (d % 4294967296) as u32;
+}
+
+/// 量词。返回 `next(low 32) | min(32..47) | max(48..63)`；没有量词时 next==qs、min=max=1。
+fn rx_quant(p: ptr, qs: u32, pe: u32) -> u64 {
+    if qs >= pe {
+        return (qs as u64) | ((1 as u64) << 32) | ((1 as u64) << 48);
+    }
+    let c: u32 = load8(p, qs);
+    if c == 42 { // '*'
+        return (((qs + 1) as u64) | ((65535 as u64) << 48));
+    }
+    if c == 43 { // '+'
+        return (((qs + 1) as u64) | ((1 as u64) << 32) | ((65535 as u64) << 48));
+    }
+    if c == 63 { // '?'
+        return (((qs + 1) as u64) | ((0 as u64) << 32) | ((1 as u64) << 48));
+    }
+    if c == 123 { // '{'
+        let i: u32 = qs + 1;
+        let mn: u32 = 0;
+        let nd: u32 = 0;
+        while i < pe && rx_is_digit(load8(p, i)) {
+            mn = mn * 10 + (load8(p, i) - 48);
+            nd = nd + 1;
+            i = i + 1;
+        }
+        if nd == 0 {
+            // `{,m}` / `{,}` 是 Python 认可的写法（下界 0）；别的才当字面量。
+            if i >= pe || load8(p, i) != 44 {
+                return (qs as u64) | ((1 as u64) << 32) | ((1 as u64) << 48);
+            }
+            mn = 0;
+        }
+        let mx: u32 = mn;
+        if i < pe && load8(p, i) == 44 {
+            i = i + 1;
+            if i < pe && load8(p, i) == 125 {
+                mx = 65535;
+            } else {
+                mx = 0;
+                let nd2: u32 = 0;
+                while i < pe && rx_is_digit(load8(p, i)) {
+                    mx = mx * 10 + (load8(p, i) - 48);
+                    nd2 = nd2 + 1;
+                    i = i + 1;
+                }
+                if nd2 == 0 {
+                    return (qs as u64) | ((1 as u64) << 32) | ((1 as u64) << 48);
+                }
+            }
+        }
+        if i >= pe || load8(p, i) != 125 {
+            return (qs as u64) | ((1 as u64) << 32) | ((1 as u64) << 48);
+        }
+        if mx < mn {
+            return (qs as u64) | ((1 as u64) << 32) | ((1 as u64) << 48);
+        }
+        if mn > 65535 {
+            mn = 65535;
+        }
+        if mx > 65535 {
+            mx = 65535;
+        }
+        return (((i + 1) as u64) | ((mn as u64) << 32) | ((mx as u64) << 48));
+    }
+    return (qs as u64) | ((1 as u64) << 32) | ((1 as u64) << 48);
+}
+
+// ---------------------------------------------------------------- 字符类
+
+fn rx_class_ok(p: ptr, cs: u32, ce: u32, c: u32, fl: u32) -> bool {
+    let i: u32 = cs;
+    let neg: u32 = 0;
+    if i < ce && load8(p, i) == 94 {
+        neg = 1;
+        i = i + 1;
+    }
+    let hit: u32 = 0;
+    let first: u32 = 1;
+    while i < ce {
+        let d: u64 = rx_next(p, i, ce);
+        let a: u32 = (d / 4294967296) as u32;
+        let ai: u32 = (d % 4294967296) as u32;
+        if a == RX_ERR {
+            i = ce;
+        } else if a == 92 && ai < ce {
+            let e: u32 = load8(p, ai);
+            if rx_is_class_escape(e) == true {
+                if rx_class_esc(e, c, fl) == true {
+                    hit = 1;
+                }
+                i = ai + 1;
+            } else {
+                let r: u64 = rx_esc_cp(p, ai, ce);
+                let cp: u32 = (r / 4294967296) as u32;
+                if rx_chr_eq(cp, c, fl) == true {
+                    hit = 1;
+                }
+                i = (r % 4294967296) as u32;
+            }
+            first = 0;
+        } else if first == 1 && a == 93 {
+            if rx_chr_eq(93, c, fl) == true {
+                hit = 1;
+            }
+            i = ai;
+            first = 0;
+        } else if ai < ce && load8(p, ai) == 45 && ai + 1 < ce {
+            let d2: u64 = rx_next(p, ai + 1, ce);
+            let hi: u32 = (d2 / 4294967296) as u32;
+            if hi == RX_ERR {
+                if rx_chr_eq(45, c, fl) == true {
+                    hit = 1;
+                }
+                i = ai;
+            } else {
+                if c >= a && c <= hi {
+                    hit = 1;
+                } else if (fl & F_I) != 0 {
+                    let fc: u32 = rx_fold(c);
+                    if fc >= rx_fold(a) && fc <= rx_fold(hi) {
+                        hit = 1;
+                    }
+                }
+                i = (d2 % 4294967296) as u32;
+            }
+            first = 0;
+        } else {
+            if rx_chr_eq(a, c, fl) == true {
+                hit = 1;
+            }
+            i = ai;
+            first = 0;
+        }
+    }
+    if neg == 1 {
+        return hit == 0;
+    }
+    return hit != 0;
+}
+
+fn rx_group_no(p: ptr, upto: u32) -> u32 {
+    let i: u32 = 0;
+    let n: u32 = 0;
+    while i < upto {
+        let c: u32 = load8(p, i);
+        if c == 92 {
+            i = i + 2;
+        } else if c == 91 {
+            let ce: u32 = rx_class_end(p, i, upto);
+            if ce == RX_ERR_INDEX {
+                i = upto;
+            } else {
+                i = ce + 1;
+            }
+        } else if c == 40 {
+            if i + 1 < upto && load8(p, i + 1) == 63 {
+                i = i + 2;
+            } else {
+                n = n + 1;
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return n;
+}
+
+fn rx_word_before(s: ptr, si: u32) -> u32 {
+    let cp: u32 = rx_prev_cp(s, si);
+    if cp == RX_ERR {
+        return 0;
+    }
+    if rx_is_word(cp) == true {
+        return 1;
+    }
+    return 0;
+}
+
+fn rx_word_at(s: ptr, si: u32, sn: u32) -> u32 {
+    let d: u64 = rx_next(s, si, sn);
+    let cp: u32 = (d / 4294967296) as u32;
+    if cp == RX_ERR {
+        return 0;
+    }
+    if rx_is_word(cp) == true {
+        return 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 编译
+
+fn rx_plen(ctx: ptr) -> u32 {
+    return mem_load32(ctx, RX_PLEN);
+}
+
+fn rx_cerr(ctx: ptr) -> u32 {
+    return mem_load32(ctx, RX_CERR);
+}
+
+/// 追加一条指令，返回它的下标；程序满就置错误位并返回 0。
+fn rx_emit(ctx: ptr, op: u32, a: u32, b: u32, c: u32) -> u32 {
+    let n: u32 = rx_plen(ctx);
+    if n >= RX_PROGN || rx_cerr(ctx) != 0 {
+        mem_store32(ctx, RX_CERR, 1);
+        return 0;
+    }
+    let base: u32 = RX_PROG + n * 16;
+    mem_store32(ctx, base, op);
+    mem_store32(ctx, base + 4, a);
+    mem_store32(ctx, base + 8, b);
+    mem_store32(ctx, base + 12, c);
+    mem_store32(ctx, RX_PLEN, n + 1);
+    return n;
+}
+
+fn rx_patch(ctx: ptr, idx: u32, a: u32, b: u32, c: u32) {
+    let base: u32 = RX_PROG + idx * 16;
+    mem_store32(ctx, base + 4, a);
+    mem_store32(ctx, base + 8, b);
+    mem_store32(ctx, base + 12, c);
+}
+
+/// 编译一个原子（**一次**出现）。`as_..ae` 是原子范围。
+fn rx_c_atom(ctx: ptr, as_: u32, ae: u32) {
+    let p: ptr = rx_pp(ctx);
+    let c: u32 = load8(p, as_);
+    if c == 40 {
+        let n1: u32 = as_ + 1;
+        let kind: u32 = 0;
+        let bs: u32 = n1;
+        if n1 < ae && load8(p, n1) == 63 {
+            let n2: u32 = n1 + 1;
+            if n2 >= ae {
+                mem_store32(ctx, RX_CERR, 1);
+                return;
+            }
+            let dk: u32 = load8(p, n2);
+            if dk == 58 {
+                kind = 1;
+                bs = n2 + 1;
+            } else if dk == 61 {
+                kind = 2;
+                bs = n2 + 1;
+            } else if dk == 33 {
+                kind = 3;
+                bs = n2 + 1;
+            } else if dk == 60 && n2 + 1 < ae {
+                let e: u32 = load8(p, n2 + 1);
+                if e == 61 {
+                    kind = 4;
+                    bs = n2 + 2;
+                } else if e == 33 {
+                    kind = 5;
+                    bs = n2 + 2;
+                } else {
+                    mem_store32(ctx, RX_CERR, 1);
+                    return;
+                }
+            } else {
+                mem_store32(ctx, RX_CERR, 1);
+                return;
+            }
+        }
+        let be: u32 = ae - 1;
+        if kind == 0 {
+            let g0: u32 = rx_group_no(p, as_);
+            let slot: u32 = (g0 + 1) * 8;
+            let _s: u32 = rx_emit(ctx, OP_SAVE, slot, 0, 0);
+            rx_c_alt(ctx, bs, be);
+            let _e: u32 = rx_emit(ctx, OP_SAVE, slot + 4, 0, 0);
+            return;
+        }
+        if kind == 1 {
+            rx_c_alt(ctx, bs, be);
+            return;
+        }
+        // 断言：先放 LOOK，跳过子程序；子程序就地编，占 [body_start, body_end)。
+        let lk: u32 = rx_emit(ctx, OP_LOOK, kind - 2, 0, 0);
+        let jp: u32 = rx_emit(ctx, OP_JMP, 0, 0, 0);
+        let body_start: u32 = rx_plen(ctx);
+        rx_c_alt(ctx, bs, be);
+        let _m: u32 = rx_emit(ctx, OP_MATCH, 0, 0, 0);
+        let body_end: u32 = rx_plen(ctx);
+        rx_patch(ctx, lk, kind - 2, body_start, body_end);
+        rx_patch(ctx, jp, body_end, 0, 0);
+        return;
+    }
+    if c == 46 { // '.'
+        let _x1: u32 = rx_emit(ctx, OP_ANY, 0, 0, 0);
+        return;
+    }
+    if c == 94 { // '^'
+        let _x2: u32 = rx_emit(ctx, OP_ASSERT, 0, 0, 0);
+        return;
+    }
+    if c == 36 { // '$'
+        let _x3: u32 = rx_emit(ctx, OP_ASSERT, 1, 0, 0);
+        return;
+    }
+    if c == 91 { // '['
+        let ce: u32 = rx_class_end(p, as_, ae);
+        if ce == RX_ERR_INDEX {
+            mem_store32(ctx, RX_CERR, 1);
+            return;
+        }
+        let _x4: u32 = rx_emit(ctx, OP_CLASS, as_ + 1, ce, 0);
+        return;
+    }
+    if c == 92 {
+        if as_ + 1 >= ae {
+            mem_store32(ctx, RX_CERR, 1);
+            return;
+        }
+        let e: u32 = load8(p, as_ + 1);
+        if rx_is_class_escape(e) == true {
+            let _x5: u32 = rx_emit(ctx, OP_CAT, e, 0, 0);
+            return;
+        }
+        if e == 98 {  // \b
+            let _x6: u32 = rx_emit(ctx, OP_ASSERT, 4, 0, 0);
+            return;
+        }
+        if e == 66 {  // \B
+            let _x7: u32 = rx_emit(ctx, OP_ASSERT, 5, 0, 0);
+            return;
+        }
+        if e == 65 {  // \A
+            let _x8: u32 = rx_emit(ctx, OP_ASSERT, 2, 0, 0);
+            return;
+        }
+        if e == 122 || e == 90 {  // \z / \Z
+            let _x9: u32 = rx_emit(ctx, OP_ASSERT, 3, 0, 0);
+            return;
+        }
+        if e >= 49 && e <= 57 {  // \1..\9
+            let _x10: u32 = rx_emit(ctx, OP_BACKREF, e - 48, 0, 0);
+            return;
+        }
+        let r: u64 = rx_esc_cp(p, as_ + 1, ae);
+        let _x11: u32 = rx_emit(ctx, OP_CHAR, (r / 4294967296) as u32, 0, 0);
+        return;
+    }
+    let d: u64 = rx_next(p, as_, ae);
+    let _x12: u32 = rx_emit(ctx, OP_CHAR, (d / 4294967296) as u32, 0, 0);
+}
+
+/// 编译一个可量化的原子：`{n,m}` 里要按次数重复编译它。
+fn rx_c_quant_atom(ctx: ptr, as_: u32, ae: u32, mn: u32, mx: u32, lazy: u32) {
+    let i: u32 = 0;
+    while i < mn {
+        rx_c_atom(ctx, as_, ae);
+        i = i + 1;
+    }
+    if mx == 65535 {
+        // 无界：`*` + **零宽守卫**（否则 `(a?)*` 会原地打转，靠预算耗尽才停 ——
+        // 那是"返回 no-match"，而 CPython 在这一格给的是匹配）。守卫的起点不另存槽：
+        // `OP_LOOP` 从**回溯栈里**找本轮的那条 SPLIT 记录（`pc == 本循环的 L`）——
+        // 槽值会被上一轮覆盖，回退到更早一轮时就陈旧了（实测 `(a|)*a` 配 `aa`）。
+        let l: u32 = rx_plen(ctx);
+        let sp: u32 = rx_emit(ctx, OP_SPLIT, 0, 0, 0);
+        let bstart: u32 = rx_plen(ctx);
+        rx_c_atom(ctx, as_, ae);
+        let lp: u32 = rx_emit(ctx, OP_LOOP, l, 0, 0);
+        let after: u32 = rx_plen(ctx);
+        rx_patch(ctx, lp, l, after, 0);
+        if lazy == 1 {
+            rx_patch(ctx, sp, after, bstart, 0);
+        } else {
+            rx_patch(ctx, sp, bstart, after, 0);
+        }
+        return;
+    }
+    let k: u32 = mn;
+    while k < mx {
+        // 有限个可选项：SPLIT 跳过这一个（后面的也跟着跳过 —— 语言等价）。
+        let sp2: u32 = rx_emit(ctx, OP_SPLIT, 0, 0, 0);
+        let bstart2: u32 = rx_plen(ctx);
+        rx_c_atom(ctx, as_, ae);
+        let after2: u32 = rx_plen(ctx);
+        if lazy == 1 {
+            rx_patch(ctx, sp2, after2, bstart2, 0);
+        } else {
+            rx_patch(ctx, sp2, bstart2, after2, 0);
+        }
+        k = k + 1;
+    }
+}
+
+fn rx_c_seq(ctx: ptr, ps0: u32, pe: u32) {
+    let p: ptr = rx_pp(ctx);
+    let ps: u32 = ps0;
+    let going: u32 = 1;
+    while going == 1 && ps < pe && rx_cerr(ctx) == 0 {
+        let ae: u32 = rx_atom_end(p, ps, pe);
+        if ae == RX_ERR_INDEX || ae > pe {
+            mem_store32(ctx, RX_CERR, 1);
+            return;
+        }
+        let q: u64 = rx_quant(p, ae, pe);
+        let next: u32 = (q & 4294967295) as u32;
+        if next == ae {
+            rx_c_atom(ctx, ps, ae);
+            ps = ae;
+        } else {
+            let mn: u32 = ((q >> 32) & 65535) as u32;
+            let mx: u32 = ((q >> 48) & 65535) as u32;
+            let lazy: u32 = 0;
+            let nx: u32 = next;
+            if next < pe && load8(p, next) == 63 {
+                lazy = 1;
+                nx = next + 1;
+            }
+            let mm: u32 = mx;
+            if mm != 65535 && mm > RX_MAX_REP {
+                // 有界 `{n,m}` 的展开受上限约束；超了就是"编不下"（不悄悄少重复）。
+                mem_store32(ctx, RX_CERR, 1);
+                return;
+            }
+            // 占有量词（`X*+` / `X{1,2}+`）：Python 3.11 起支持。**不回溯** ——
+            // 编译成"普通量词 + 一个切点"，退出时把这一圈压的回溯项全切掉。
+            let poss: u32 = 0;
+            let nx2: u32 = nx;
+            if nx < pe && load8(p, nx) == 43 { // '+'
+                poss = 1;
+                nx2 = nx + 1;
+            }
+            if poss == 1 && lazy == 1 {
+                mem_store32(ctx, RX_CERR, 1);
+                return;
+            }
+            if poss == 1 {
+                let dep: u32 = mem_load32(ctx, RX_LDEP);
+                if dep >= 16 {
+                    mem_store32(ctx, RX_CERR, 1);
+                    return;
+                }
+                mem_store32(ctx, RX_LDEP, dep + 1);
+                let _mk: u32 = rx_emit(ctx, OP_MARK, dep, 0, 0);
+                rx_c_quant_atom(ctx, ps, ae, mn, mm, lazy);
+                let _ct: u32 = rx_emit(ctx, OP_CUT, dep, 0, 0);
+                mem_store32(ctx, RX_LDEP, dep);
+            } else {
+                rx_c_quant_atom(ctx, ps, ae, mn, mm, lazy);
+            }
+            ps = nx2;
+        }
+    }
+}
+
+fn rx_c_alt(ctx: ptr, ps: u32, pe: u32) {
+    let p: ptr = rx_pp(ctx);
+    let bar: u32 = rx_alt_at(p, ps, pe);
+    if bar == RX_ERR_INDEX {
+        rx_c_seq(ctx, ps, pe);
+        return;
+    }
+    let sp: u32 = rx_emit(ctx, OP_SPLIT, 0, 0, 0);
+    let a1: u32 = rx_plen(ctx);
+    rx_c_seq(ctx, ps, bar);
+    let jp: u32 = rx_emit(ctx, OP_JMP, 0, 0, 0);
+    let b1: u32 = rx_plen(ctx);
+    rx_c_alt(ctx, bar + 1, pe);
+    let end: u32 = rx_plen(ctx);
+    rx_patch(ctx, sp, a1, b1, 0);
+    rx_patch(ctx, jp, end, 0, 0);
+}
+
+/// 开头的 `(?i)` / `(?m)` / `(?s)`：返回 `(开关 << 32) | 正文起点`。
+fn rx_flags(p: ptr, pn: u32) -> u64 {
+    if pn < 4 || load8(p, 0) != 40 || load8(p, 1) != 63 {
+        return 0;
+    }
+    let i: u32 = 2;
+    let fl: u32 = 0;
+    let ok: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 && i < pn {
+        let c: u32 = load8(p, i);
+        if c == 105 {
+            fl = fl | F_I;
+            ok = 1;
+            i = i + 1;
+        } else if c == 109 {
+            fl = fl | F_M;
+            ok = 1;
+            i = i + 1;
+        } else if c == 115 {
+            fl = fl | F_S;
+            ok = 1;
+            i = i + 1;
+        } else if c == 41 && ok == 1 {
+            going = 0;
+        } else {
+            ok = 0;
+            going = 0;
+        }
+    }
+    if ok == 1 && i < pn && load8(p, i) == 41 {
+        return (fl as u64) * 4294967296 + ((i + 1) as u64);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- VM
+
+/// 跑一次：从 `pc0`（通常是 0）起，返回匹配结束下标或 -1。`target` 不是 0xFFFFFFFF 时
+/// 要求 MATCH 正好停在它（后行断言用）。`sbase` 是这次用的回溯栈基址（嵌套调用往上叠）。
+fn rx_run(ctx: ptr, pc0: u32, pos0: u32, target: u32, sbase: u32) -> i64 {
+    let pp: ptr = rx_pp(ctx);
+    let sp: ptr = rx_sp(ctx);
+    let sn: u32 = rx_sl(ctx);
+    let fl: u32 = mem_load32(ctx, RX_FL);
+    let pc: u32 = pc0;
+    let pos: u32 = pos0;
+    let st: u32 = sbase;
+    let going: u32 = 1;
+    while going == 1 {
+        if !rx_tick(ctx) {
+            return re_no();
+        }
+        let base: u32 = RX_PROG + pc * 16;
+        let op: u32 = mem_load32(ctx, base);
+        let a: u32 = mem_load32(ctx, base + 4);
+        let b: u32 = mem_load32(ctx, base + 8);
+        let c: u32 = mem_load32(ctx, base + 12);
+        let fail: u32 = 0;
+        let npc: u32 = pc + 1;
+        let npos: u32 = pos;
+        if op == OP_MATCH {
+            if target == RX_ERR || pos == target {
+                return pos as i64;
+            } else {
+                fail = 1;
+            }
+        } else if fail == 0 && op == OP_JMP {
+            npc = a;
+        } else if fail == 0 && op == OP_SPLIT {
+            if st >= RX_STKN {
+                return re_no();
+            }
+            mem_store32(ctx, RX_STK + st * 12, b);
+            mem_store32(ctx, RX_STK + st * 12 + 4, pos);
+            mem_store32(ctx, RX_STK + st * 12 + 8, rx_mark(ctx));
+            st = st + 1;
+            npc = a;
+        } else if fail == 0 && op == OP_SAVE {
+            rx_set_cap(ctx, a, pos);
+        } else if fail == 0 && op == OP_MARK {
+            mem_store32(ctx, RX_SCR + a * 4, st);
+        } else if fail == 0 && op == OP_CUT {
+            let sv: u32 = mem_load32(ctx, RX_SCR + a * 4);
+            if sv < st {
+                st = sv;
+            }
+        } else if fail == 0 && op == OP_LOOP {
+            // 从栈顶往下找**本轮**的那条 SPLIT —— SPLIT 压栈的是它的**另一条路**
+            // （`pc == 本循环的 after`，也就是 LOOP 的 `b`）；它的 pos 就是进入这一圈
+            // 时的位置。跟当前 pos 一样 = 这一圈什么都没吃 -> 退出循环。
+            let lk: u32 = st;
+            let gpos: u32 = RX_ERR;
+            let gf: u32 = 0;
+            let go3: u32 = 1;
+            while go3 == 1 && lk > sbase {
+                lk = lk - 1;
+                if mem_load32(ctx, RX_STK + lk * 12) == b {
+                    gpos = mem_load32(ctx, RX_STK + lk * 12 + 4);
+                    gf = 1;
+                    go3 = 0;
+                }
+            }
+            if gf == 1 && pos == gpos {
+                npc = b;
+            } else {
+                npc = a;
+            }
+        } else if fail == 0 && op == OP_CHAR {
+            let d: u64 = rx_next(sp, pos, sn);
+            let cp: u32 = (d / 4294967296) as u32;
+            if cp == RX_ERR {
+                fail = 1;
+            } else if cp == a {
+                npos = (d % 4294967296) as u32;
+            } else if (fl & F_I) != 0 && rx_fold(cp) == rx_fold(a) {
+                npos = (d % 4294967296) as u32;
+            } else {
+                fail = 1;
+            }
+        } else if fail == 0 && op == OP_ANY {
+            let d2: u64 = rx_next(sp, pos, sn);
+            let cp2: u32 = (d2 / 4294967296) as u32;
+            if cp2 == RX_ERR || (cp2 == 10 && (fl & F_S) == 0) {
+                fail = 1;
+            } else {
+                npos = (d2 % 4294967296) as u32;
+            }
+        } else if fail == 0 && op == OP_CLASS {
+            let d3: u64 = rx_next(sp, pos, sn);
+            let cp3: u32 = (d3 / 4294967296) as u32;
+            if cp3 == RX_ERR || rx_class_ok(pp, a, b, cp3, fl) == false {
+                fail = 1;
+            } else {
+                npos = (d3 % 4294967296) as u32;
+            }
+        } else if fail == 0 && op == OP_CAT {
+            let d4: u64 = rx_next(sp, pos, sn);
+            let cp4: u32 = (d4 / 4294967296) as u32;
+            if cp4 == RX_ERR || rx_class_esc(a, cp4, fl) == false {
+                fail = 1;
+            } else {
+                npos = (d4 % 4294967296) as u32;
+            }
+        } else if fail == 0 && op == OP_BACKREF {
+            let cs: u32 = mem_load32(ctx, RX_CAPS + a * 8);
+            let ce: u32 = mem_load32(ctx, RX_CAPS + a * 8 + 4);
+            if cs == RX_ERR || ce == RX_ERR || ce < cs {
+                fail = 1;
+            } else {
+                let len: u32 = ce - cs;
+                if pos + len > sn {
+                    fail = 1;
+                } else {
+                    let k: u32 = 0;
+                    let same: u32 = 1;
+                    while k < len && same == 1 {
+                        let bb: u32 = load8(sp, cs + k);
+                        let b2: u32 = load8(sp, pos + k);
+                        if rx_chr_eq(bb, b2, fl) == false {
+                            same = 0;
+                        } else {
+                            k = k + 1;
+                        }
+                    }
+                    if same == 0 {
+                        fail = 1;
+                    } else {
+                        npos = pos + len;
+                    }
+                }
+            }
+        } else if fail == 0 && op == OP_ASSERT {
+            if a == 0 { // ^
+                if (fl & F_M) != 0 {
+                    if pos != 0 && rx_prev_cp(sp, pos) != 10 {
+                        fail = 1;
+                    }
+                } else if pos != 0 {
+                    fail = 1;
+                }
+            } else if a == 1 { // $
+                if (fl & F_M) != 0 {
+                    if pos != sn && (rx_next(sp, pos, sn) / 4294967296) as u32 != 10 {
+                        fail = 1;
+                    }
+                } else if pos != sn {
+                    let dz: u64 = rx_next(sp, pos, sn);
+                    if (dz / 4294967296) as u32 != 10 || (dz % 4294967296) as u32 != sn {
+                        fail = 1;
+                    }
+                }
+            } else if a == 2 { // \A
+                if pos != 0 {
+                    fail = 1;
+                }
+            } else if a == 3 { // \Z
+                if pos != sn {
+                    fail = 1;
+                }
+            } else if a == 4 { // \b
+                if rx_word_before(sp, pos) == rx_word_at(sp, pos, sn) {
+                    fail = 1;
+                }
+            } else { // \B
+                if rx_word_before(sp, pos) != rx_word_at(sp, pos, sn) {
+                    fail = 1;
+                }
+            }
+        } else if fail == 0 && op == OP_LOOK {
+            let m0: u32 = rx_mark(ctx);
+            let hit: u32 = 0;
+            if a < 2 {
+                let r: i64 = rx_run(ctx, b, pos, RX_ERR, st);
+                if r >= 0 {
+                    hit = 1;
+                }
+            } else {
+                let p0: u32 = 0;
+                let go2: u32 = 1;
+                while go2 == 1 && p0 <= pos {
+                    rx_undo(ctx, m0);
+                    let r2: i64 = rx_run(ctx, b, p0, pos, st);
+                    if r2 >= 0 {
+                        hit = 1;
+                        go2 = 0;
+                    } else {
+                        p0 = p0 + 1;
+                    }
+                }
+            }
+            let neg: u32 = 0;
+            if a == 1 || a == 3 {
+                neg = 1;
+            }
+            if neg == 1 {
+                rx_undo(ctx, m0);
+                if hit == 1 {
+                    fail = 1;
+                }
+            } else if hit == 0 {
+                rx_undo(ctx, m0);
+                fail = 1;
+            }
+        } else {
+            fail = 1;
+        }
+        if going == 1 {
+            if fail == 0 {
+                pc = npc;
+                pos = npos;
+            } else {
+                if st == sbase {
+                    return re_no();
+                }
+                st = st - 1;
+                pc = mem_load32(ctx, RX_STK + st * 12);
+                pos = mem_load32(ctx, RX_STK + st * 12 + 4);
+                rx_undo(ctx, mem_load32(ctx, RX_STK + st * 12 + 8));
+            }
+        }
+    }
+    return re_no();
+}
+
+/// 设好指针 + 编好程序；返回程序长度（0 = 编译失败）。
+fn rx_prepare(ctx: ptr, pp: ptr, pn: u32, sp: ptr, sn: u32) -> u32 {
+    mem_store64(ctx, RX_PP, pp as u64);
+    mem_store32(ctx, RX_PL, pn);
+    mem_store64(ctx, RX_SP, sp as u64);
+    mem_store32(ctx, RX_SL, sn);
+    let pf: u64 = rx_flags(pp, pn);
+    mem_store32(ctx, RX_FL, (pf / 4294967296) as u32);
+    let body: u32 = (pf % 4294967296) as u32;
+    mem_store32(ctx, RX_CERR, 0);
+    mem_store32(ctx, RX_PLEN, 0);
+    rx_c_alt(ctx, body, pn);
+    let _m: u32 = rx_emit(ctx, OP_MATCH, 0, 0, 0);
+    if rx_cerr(ctx) != 0 {
+        return 0;
+    }
+    return rx_plen(ctx);
+}
+
+/// 一次尝试：重置捕获/预算，跑 VM。
+fn rx_try(ctx: ptr, at: u32, budget: u32) -> i64 {
+    mem_store32(ctx, RX_BUD, budget);
+    mem_store32(ctx, RX_LOGL, 0);
+    let g: u32 = 0;
+    while g < 20 {
+        mem_store32(ctx, RX_CAPS + g * 4, RX_ERR);
+        g = g + 1;
+    }
+    let r: i64 = rx_run(ctx, 0, at, RX_ERR, 0);
+    if r >= 0 {
+        mem_store32(ctx, RX_CAPS, at);
+        mem_store32(ctx, RX_CAPS + 4, r as u32);
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------- 对外
+
+/// 缓冲区入口：`pp[0..pn)` 是模式，`sp[0..sn)` 是文本；返回结束下标或 -1。
+pub fn re_match_mem(pp: ptr, pn: u32, sp: ptr, sn: u32, at: u32, ctx: ptr, budget: u32) -> i64 {
+    if at > sn {
+        return re_no();
+    }
+    if rx_prepare(ctx, pp, pn, sp, sn) == 0 {
+        return re_no();
+    }
+    return rx_try(ctx, at, budget);
+}
+
+/// 缓冲区入口的 `search`：返回第一个匹配的起点或 -1。
+pub fn re_search_mem(pp: ptr, pn: u32, sp: ptr, sn: u32, from: u32, ctx: ptr) -> i64 {
+    if from > sn {
+        return re_no();
+    }
+    if rx_prepare(ctx, pp, pn, sp, sn) == 0 {
+        return re_no();
+    }
+    let fl: u32 = mem_load32(ctx, RX_FL);
+    let pf: u64 = rx_flags(pp, pn);
+    let body: u32 = (pf % 4294967296) as u32;
+    // **整条**模式锚定在串首时才只在 0 处试一次。顶层有 `|` 就不行 ——
+    // `^a|b` 的第二个分支没锚，Python 在任意位置都能起匹配（实测过的假阴性）。
+    if (fl & F_M) == 0 && body < pn && load8(pp, body) == 94
+            && rx_alt_at(pp, body, pn) == RX_ERR_INDEX {
+        if from != 0 {
+            return re_no();
+        }
+        let ra: i64 = rx_try(ctx, 0, RX_BUDGET);
+        if ra >= 0 {
+            return 0;
+        }
+        return re_no();
+    }
+    let i: u32 = from;
+    // 起点只能落在**码位边界**上：UTF-8 续字节（0x80..0xBF）不是合法的起点，
+    // 否则 `\S{2}` 能在汉字中间切出两个"字节匹配"来（Python 按字符，不会）。
+    while i < sn && rx_cont(load8(sp, i)) == true {
+        i = i + 1;
+    }
+    let going: u32 = 1;
+    while going == 1 && i <= sn {
+        let r: i64 = rx_try(ctx, i, RX_BUDGET);
+        if r >= 0 {
+            return i as i64;
+        }
+        i = i + 1;
+        while i < sn && rx_cont(load8(sp, i)) == true {
+            i = i + 1;
+        }
+    }
+    return re_no();
+}
+
+/// `str` 入口：从 `at` 起能不能匹配；返回结束下标，没有返回 -1。
+pub fn re_match_at(pat: str, s: str, at: u32, ctx: ptr) -> i64 {
+    return re_match_at_budget(pat, s, at, ctx, RX_BUDGET);
+}
+
+pub fn re_match_at_budget(pat: str, s: str, at: u32, ctx: ptr, budget: u32) -> i64 {
+    return re_match_mem(str_ptr(pat), str_len(pat), str_ptr(s), str_len(s), at, ctx, budget);
+}
+
+/// 整个串必须匹配（`^...$` 的语义，不必自己写锚点）。
+pub fn re_match(pat: str, s: str, ctx: ptr) -> bool {
+    let sn: u32 = str_len(s);
+    let r: i64 = re_match_at(pat, s, 0, ctx);
+    return r >= 0 && (r as u32) == sn;
+}
+
+/// 从 `from` 起找第一个匹配的**起点**；没有返回 -1。
+pub fn re_search_from(pat: str, s: str, from: u32, ctx: ptr) -> i64 {
+    return re_search_mem(str_ptr(pat), str_len(pat), str_ptr(s), str_len(s), from, ctx);
+}
+
+pub fn re_search(pat: str, s: str, ctx: ptr) -> i64 {
+    return re_search_from(pat, s, 0, ctx);
+}
+
+/// 第 `g` 组捕获的起点（字节下标）；没有捕获 / 没参与匹配返回 -1。第 0 组 = 整个匹配。
+pub fn re_cap_start(ctx: ptr, g: u32) -> i64 {
+    if g > 9 {
+        return re_no();
+    }
+    let v: u32 = mem_load32(ctx, RX_CAPS + g * 8);
+    if v == RX_ERR {
+        return re_no();
+    }
+    return v as i64;
+}
+
+pub fn re_cap_end(ctx: ptr, g: u32) -> i64 {
+    if g > 9 {
+        return re_no();
+    }
+    let v: u32 = mem_load32(ctx, RX_CAPS + g * 8 + 4);
+    if v == RX_ERR {
+        return re_no();
+    }
+    return v as i64;
+}
+
+// ---------------------------------------------------------------- 自检
+//
+// **一个 ctx 跑完全部**：每份 ctx 是 `re_ctx_bytes()`（~30 KiB），而 bump 堆只有
+// 64 KiB —— 一个自检分配一份、八九个就把堆撑爆（症状是 alloc 的边界检查走
+// `__loment_abort`，看起来像"测试崩了"）。
+
+fn rx_check_literal(c: ptr) -> bool {
+    return re_match("abc", "abc", c) && !re_match("abc", "abd", c)
+        && !re_match("abc", "xabc", c);
+}
+
+fn rx_check_classes(c: ptr) -> bool {
+    return re_match("[a-c]+", "abcabc", c) && !re_match("[a-c]+", "abcd", c)
+        && re_match("[^0-9]+", "abc", c) && !re_match("[^0-9]+", "ab1", c)
+        && re_match("\\d{3}", "123", c) && !re_match("\\d{3}", "12", c)
+        && re_match("\\w+", "a_1", c) && re_match("\\s", " ", c);
+}
+
+fn rx_check_alternation(c: ptr) -> bool {
+    return re_match("(ab|cd)+", "abcdab", c) && !re_match("(ab|cd)+", "abcx", c)
+        && re_match("a(b|c)*d", "abcbcd", c);
+}
+
+fn rx_check_quantifiers(c: ptr) -> bool {
+    return re_match("a*", "", c) && re_match("a+", "aaaa", c)
+        && !re_match("a+", "", c) && re_match("ab?c", "ac", c)
+        && re_match("a{2,4}", "aaa", c) && !re_match("a{2,4}", "a", c)
+        && re_match("a{2,}", "aaaaaa", c) && re_match("a{3}", "aaa", c)
+        && !re_match("a{3}", "aa", c) && re_match("a{,3}", "aaa", c);
+}
+
+fn rx_check_search(c: ptr) -> bool {
+    let s: str = "xx hello yy";
+    let i: i64 = re_search("hello", s, c);
+    return i == 3 && re_search("^hello", s, c) == re_no()
+        && re_match("^xx.*yy$", s, c);
+}
+
+fn rx_check_lazy(c: ptr) -> bool {
+    let ls: i64 = re_search("(<.+?>)(<.+?>)", "<a><b>", c);
+    let lz: i64 = re_cap_end(c, 1);
+    let gs: i64 = re_search("(<.+>)(.*)", "<a><b>", c);
+    let gz: i64 = re_cap_end(c, 1);
+    return ls == 0 && lz == 3 && gs == 0 && gz == 6
+        && re_match("a+?$", "aaa", c) && re_match("a{2,3}?$", "aaa", c);
+}
+
+fn rx_check_lookaround(c: ptr) -> bool {
+    return re_match("foo(?=bar)bar", "foobar", c) && !re_match("foo(?=bar)baz", "foobaz", c)
+        && re_match("foo(?!bar)baz", "foobaz", c) && !re_match("foo(?!bar)bar", "foobar", c)
+        && re_search("(?<=foo)bar", "foobar", c) == 3
+        && re_search("(?<=foo)bar", "bazbar", c) == re_no()
+        && re_search("(?<!foo)bar", "bazbar", c) == 3
+        && re_search("(?<!foo)bar", "foobar", c) == re_no();
+}
+
+fn rx_check_captures(c: ptr) -> bool {
+    let ok: bool = re_match("(a+)(b+)\\1", "aabbaa", c);
+    let g1s: i64 = re_cap_start(c, 1);
+    let g1e: i64 = re_cap_end(c, 1);
+    let g2e: i64 = re_cap_end(c, 2);
+    return ok && g1s == 0 && g1e == 2 && g2e == 4
+        && re_match("(\\w+)@(\\w+)", "ab@cd", c)
+        && re_match("(a)(b)?\\1", "aa", c);
+}
+
+fn rx_check_possessive(c: ptr) -> bool {
+    // 占有量词不回溯：`a*+a` 在 CPython 里是**不匹配**，`a*a` 才匹配。
+    return re_match("a*+", "aaa", c) && re_match("a*a", "aaa", c)
+        && re_search("a*+a", "aaa", c) == re_no()
+        && re_search("a[ab]*+b", "aab", c) == re_no()
+        && re_match(" ?+", " ", c)
+        && re_search(" ?+", "a a", c) == 0 && re_cap_end(c, 0) == 0;
+}
+
+fn rx_check_zero_width(c: ptr) -> bool {
+    // 空匹配的循环不能原地打转；CPython 在这里是"匹配"。
+    return re_match("(a?)*", "aaa", c) && re_match("(a*)*", "aaa", c)
+        && re_match("(a|)*", "aaa", c) && re_match("(a?)*c", "aaac", c)
+        && re_match("(|a)*", "", c) && re_match("(a?b?)*", "abab", c);
+}
+
+fn rx_check_nested(c: ptr) -> bool {
+    // 递归下降那一版过不了的那一格：外层回退要能进内层量词。
+    return re_match("^(?:.+ )?a b", "x a b", c)
+        && re_match("^(?:.+ )?实参期望 .+", "x 实参期望 x", c)
+        && re_match("^(?:.+) ?a", "x a", c)
+        && !re_match("^(?:.+ )?a b", "x a c", c);
+}
+
+fn rx_check_utf8(c: ptr) -> bool {
+    return re_match("类型 .+ 不匹配", "类型 u32 不匹配", c)
+        && re_match("变量[^，]+未声明", "变量名很长的东西未声明", c)
+        && !re_match("变量[^，]+未声明", "变量名，未声明", c)
+        && re_match("..", "中文", c);
+}
+
+fn rx_check_flags(c: ptr) -> bool {
+    return re_match("(?i)abc", "ABC", c) && !re_match("abc", "ABC", c)
+        && re_match("(?s)a.b", "a\nb", c) && !re_match("a.b", "a\nb", c)
+        && re_search("(?m)^b$", "a\nb\nc", c) == 2;
+}
+
+fn rx_check_word(c: ptr) -> bool {
+    return re_search("\\bcat\\b", "a cat here", c) == 2
+        && re_search("\\bcat\\b", "scatter", c) == re_no()
+        && re_search("\\Bcat", "scatter", c) == 1;
+}
+
+fn test_regex_all() -> bool {
+    let c: ptr = alloc(re_ctx_bytes());
+    return rx_check_literal(c) && rx_check_classes(c) && rx_check_alternation(c)
+        && rx_check_quantifiers(c) && rx_check_search(c) && rx_check_lazy(c)
+        && rx_check_lookaround(c) && rx_check_captures(c) && rx_check_zero_width(c)
+        && rx_check_possessive(c) && rx_check_nested(c)
+        && rx_check_utf8(c) && rx_check_flags(c) && rx_check_word(c);
+}

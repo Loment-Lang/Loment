@@ -24,6 +24,7 @@
 // 而 SHA 到处都是宽算术。
 
 module lpi_sha
+choose runtime
 
 use "lpi_dir.lomt"
 

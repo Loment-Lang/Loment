@@ -47,7 +47,48 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 开着时照报、未定义的开关、同名两次。**前两条正是"`choose` 从承诺变发明"的证据**:
 # 在此之前它什么都不驱动, 现在它真的决定一段代码编不编进去。
 # 每补完一批就**往上调** —— 只调低是放松门禁, 等于隐瞒缺口。
-BUDGET = 76
+# 2026-10-09 `runtime` 维**兑现**（`docs/227`）: **92/92**。两条 —— 默认档（`no_runtime`）
+# 下，`/` 与 `alloc` 各一条。这一维从此不再是"只声明"：它成了一句**保证**，而保证要有
+# 可证伪的判据，所以它必须进这张表（两个实现各判一次才叫等价）。
+#
+# 2026-10-10 `register`（`docs/223` 形态 A）进语言: **86/86**。五条 —— 撞官方名、
+# 与 `_start` 并存、签名不对、有声明没体（新触发）、有体没声明（原样）。块那种写法与
+# 函数那种写法**判成同一批码**，这正是"形态 A 编译到形态 B"要看见的东西。
+# 2026-10-10 `choose hosted`（`docs/222` §4，第四维 `port`）落地: **90/90**。四条 ——
+# 按维写两次、同维两个取值、`hosted` × `no_std`、`hosted` × `gc_auto_alpha`。
+# （`hosted` × `gc_manual` / `gc_auto` 是**合法档**，不进这张负例表，由 `potato_test`
+# 的 `v11-hosted-gc_manual` 合法样本守着。）
+# **这一条当场抓到一个真分歧**：冲突说明里写了"悬垂"两个字，撞上 E012 的关键词分类器 ——
+# 参考实现把那条冲突归成 E012、自举归成 E022。改写措辞之后两边一致。
+# 2026-10-14 真线程 `thread_spawn`（M84, `docs/245`）落地: **102/104**。五条 ——
+# 入口不是字面量、入口在本单元里查不到、入口形参不是一个、元数不对、实参类型不对。
+# 这一族是"**直接调用**买到的东西"（入口是编译期的名字），所以三条语义都判得了。
+# 2026-10-15 LMS 第 1 级检查器 `E028`（`docs/253` §5.1，字面量下标越过定长数组的界）：
+# 两套实现都补齐 ⇒ **103/105**。这一条**只有这张表抓得住** —— 孪生判据
+# (`loment_p8_test` / `loment_potato_emit_test`) 的语料里没有一个用 `lms_open`，
+# 所以"参考侧拒、自举侧不拒"在那两条判据下照样绿。
+# ⚠ 补这一条时**当场抓到一个真 bug**：加 `lms` 那一维时自举侧 `chk_core_dim` 的
+# "不是核心维"哨兵没跟着从 5 挪到 6，于是 `choose lms_open` 被当成**未定义的开关**
+# 报 E022 —— 码是错的、理由也是错的，而别的判据全绿。**这就是这张表存在的理由。**
+# 2026-10-15 同日 `E029`（用完再放）也补齐 ⇒ **104/106**。两条各一个探针，两边码集相等。
+# 2026-10-20（`#786` `lspe pass`）：新增一条"旁路不吞检查"的探针 ⇒ **126/126**。
+# 2026-11-08 借用生命周期（`docs/299` 第八维 `lifetime`）自举侧落地：五条 ——
+# 悬垂（经调用，E012）、无引用形参（E041）、auto 档写区域标记（E041）、
+# `free` 时仍被借（E041）、存下来的 `&mut` 独家（E007）⇒ **133/133**。
+# 2026-11-09 对象代（`docs/320` S1）：两条 —— 非 revision 域上读代、revision 守卫
+# 缺第二实参 ⇒ **135/135**。
+# 2026-11-13 代数效应（`docs/346` A2a/A2b）：六条 —— 默认关时 `effect` 是 E019；
+# 打开时 `perform` 是 E0217、`extern … effects` 是 E0218、重复效应 E0219、重复操作
+# E0220、行里未声明效应 E0221 ⇒ **141/141**。这一批是"自举侧真的认了
+# `lspe_effects_true`"的独立证词：孪生判据只比产物，码集分叉只有这里看得见。
+#
+# 2026-11-12 第九维 `fp`（`docs/348`）：八条（函数值 / 闭包 / 间接调用那三组）。
+# 与效应那批合流后 **149/149**。
+#
+# 2026-11-17 A3a：`effects-runtime-perform` 挪进 `_AHEAD`（参考侧领先自举侧），
+# 预算 149 -> 148。这一条**不是**被删掉：`_AHEAD` 里仍然逐条跑、逐条断言
+# （自举侧还是 E0217、参考侧不再是）。A3b 把它挪回来，预算跟着回去。
+BUDGET = 149
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -91,6 +132,13 @@ _CASES: list[tuple[str, str]] = [
     ("cap-lo-gt-hi", "module m\n\ncapability c : space[5..2]\n"),
     ("cap-unknown-guard",
      "module m\n\nfn f() -> u32 {\n    guard nope(0);\n    return 1;\n}\n"),
+    # `docs/320` S1：对象代只对 `revision` 域有意义；守卫必须带代。
+    ("cap-revision-regular",
+     "module m\n\ncapability c : disk[0..4]\n\n"
+     "fn f(i: u32) -> u64 {\n    let g: u64 = generation c(i);\n    return g;\n}\n"),
+    ("cap-revision-guard-no-gen",
+     "module m\n\ncapability c : disk[0..4] revision\n\n"
+     "fn f(i: u32) -> u32 {\n    guard c(i);\n    return 1;\n}\n"),
     # ---- 调用 (E002 / E003 / E001) ----------------------------------------
     ("call-unknown-fn", "module m\n\nfn f() -> u32 {\n    return g(1);\n}\n"),
     ("call-arity", "module m\n\nfn g(a: u32) -> u32 {\n    return a;\n}\n\nfn f() -> u32 {\n    return g(1, 2);\n}\n"),
@@ -193,6 +241,35 @@ _CASES: list[tuple[str, str]] = [
     # 我自己管" —— 它是合法档，**不该**报错。套件只收负例，所以这里放的是该报的
     # 那一对；合法的那一对由 `potato_test` 的 `v9-runtime-on` 合法样本守着。
     ("choose-no-runtime-gc-auto", "module m\n\nchoose no_runtime\nchoose gc_auto\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- `runtime` 维**兑现**（`docs/227`，2026-10-09）--------------------------------
+    # 这一维从"只声明"变成"有保证"：`no_runtime`（默认）说"产物里没有运行期"，于是凡是
+    # 会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。两条负例各钉一边 ——
+    # 一条走**分配**（`alloc` 拖进分配器 + 堆全局）。除法那条 2026-11-09 撤了
+    # （`docs/324`）：整数除法发的是裸 `udiv`/`sdiv`，产物里不多一个 `@__loment_*`。
+    ("choose-no-runtime-panic", "module m\n\nfn f() -> u32 {\n    panic(1);\n    return 0;\n}\n"),
+    ("choose-no-runtime-alloc", "module m\n\nchoose no_runtime\n\nfn f() -> u32 {\n    let p: ptr = alloc(8);\n    return 0;\n}\n"),
+    # ---- 第四维 `port`（`docs/222` §4）--------------------------------------
+    # 与前面三维同一套：按维一次、取值只有两个、与两个档**定义上矛盾**。
+    ("choose-port-twice", "module m\n\nchoose sealed\nchoose sealed\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-port-two-values", "module m\n\nchoose sealed\nchoose hosted\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # `no_std` 说"底下没有东西"、`hosted` 说"往下链东西" —— 定义上矛盾。
+    ("choose-hosted-no-std", "module m\n\nchoose no_std\nchoose hosted\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # 混合档的 L2 是前沿回卷，而外部库把指针放进它自己的结构里（`docs/219` §6.1）。
+    ("choose-hosted-gc-alpha", "module m\n\nchoose hosted\nchoose gc_auto_alpha\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **有一条不冲突的配对必须记着**：`hosted` + `gc_manual` / `gc_auto` = "要对外、
+    # 但内存我自己管" —— 合法档，**不该**报错。这套件只收负例，所以合法的那一对由
+    # `potato_test` 的 `v11-hosted-gc_manual` 合法样本守着，这里不重复。
+    # ---- 第五维 `vm`（`docs/231`）------------------------------------------
+    # 与前四维同一套：按维一次、取值只有两个。**但这一维没有冲突用例** ——
+    # `vm` 与 `runtime` 今天确实合不来（VM 要用运行期），那条由 `docs/227` 那条**既有的**
+    # 检查接住（它读源码里用没用到运行期构造），不是一条写进 `CORE_CONFLICTS` 的冲突。
+    ("choose-vm-twice", "module m\n\nchoose vm\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-vm-two-values", "module m\n\nchoose vm\nchoose no_vm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # 取值只有两个 —— 拼错的词与 `choose fast` 同一条路（未定义的开关）。
+    ("choose-vm-bad-value", "module m\n\nchoose vm_x\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **渠道闸不在这里测**：这套件跑在仓库里，两边都是 dev 通道，`choose vm` 是**合法**的。
+    # "发行版拒"只能靠**打包侧端到端**（照 `docs/202`"真装真跑"）—— 见 `docs/231` §5 判据 D。
+    # 合法的那一对（dev + `choose vm`）由 `potato_test` 的 v13 正例守着，这里不重复。
     # ---- 开关 (docs/182 §1) -------------------------------------------------
     # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
     # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：
@@ -206,6 +283,281 @@ _CASES: list[tuple[str, str]] = [
     ("switch-undef", "module m\n\nchoose nope\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     ("switch-dup", "module m\n\nset choose feat {\n}\n\nchoose feat\nchoose close feat\n\n"
                    "fn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- 控制流: 非 () 的函数可能从末尾掉出去 (E027, `#22`) --------------
+    # 这张表只收负例(参考实现必须报错, 否则记 NOPY) —— 所以合法的收尾不在这里,
+    # 它们由 `loment_p8_test` 的正例钉子管。
+    # 自举侧 2026-10-17 补上了这条(`checker.lomt` 的 `chk_falls`)，两条从 MISSING 变
+    # EQUAL，预算随之从 104 抬到 121。
+    ("falloff-if", "module m\n\nfn pick(x: u32) -> u32 {\n    if x > 0 {\n        return 1;\n    }\n}\n"),
+    ("falloff-match-arm", "module m\n\nenum E {\n    A,\n    B,\n}\n\nfn pick(e: E) -> u32 {\n    match e {\n        E::A => {\n            return 1;\n        }\n        _ => {\n            let v: u32 = 2;\n        }\n    }\n}\n"),
+    # ---- 命令声明 (E024/E025/E026, docs/223) --------------------------------
+    # 这五条是**检查器**规则（只看这一个单元）。第六条"库不许声明命令"是**装载器**规则
+    # —— 它要两个单元（入口 + 被 use 的那个），装不进这张表，与 `choose` 那第三条
+    # 同一个落点：棘轮由 `loment_p8_test` 的驱动闸门承担，预算里不算它。
+    ("cmd-bad-name",
+     "module m\n\npub fn loment_command() -> str { return \"a/b\"; }\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-reserved-name",
+     "module m\n\npub fn loment_command() -> str { return \"version\"; }\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-bad-shape",
+     "module m\n\npub fn loment_command() -> str {\n"
+     "    let s: str = \"x\";\n    return s;\n}\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-two-entries",
+     "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
+     "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\n"
+     "pub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    ("cmd-body-no-decl",
+     "module m\n\npub fn command_main(argv: ptr, argc: u32) -> u32 {\n    return 0;\n}\n"),
+    # ---- `register`（形态 A，`docs/223` §2 第 3 步）--------------------------------
+    # 与上面那五条**同一批码**，只是换了一种写法：名字由**语法**给出（不再从函数体里扫
+    # 字符串），块里是这条命令的条目。两种写法在两边都必须判成同一个码。
+    ("reg-reserved-name",
+     "module m\n\nregister version {\n"
+     "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-two-entries",
+     "module m\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n\nregister mcmd {\n"
+     "    pub fn command_main(argv: ptr, argc: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-bad-signature",
+     "module m\n\nregister mcmd {\n"
+     "    pub fn command_main(a: u32, b: u32) -> u32 {\n        return 0;\n    }\n}\n"),
+    ("reg-no-main",
+     "module m\n\nregister mcmd {\n"
+     "    pub fn helper() -> u32 {\n        return 0;\n    }\n}\n"),
+    # 反向那一半（声明在、体不在）也要成对 —— 它原先要等到**链接**才炸。
+    ("cmd-decl-no-body",
+     "module m\n\npub fn loment_command() -> str { return \"mcmd\"; }\n\n"
+     "fn helper() -> u32 {\n    return 0;\n}\n"),
+    # ---- excluded 的**行为轴** (E005, `docs/218` §7 第 2 件 / `docs/227` §3) --------
+    # 这一族钉的是"**名字之外**的那一半"：M41 比的是空间名（`excluded "usb"` 对
+    # `capability … : usb[…]`），它**从不看行为**，所以"声明不碰网络、代码里在调 socket"
+    # 是它看不见的。两种写法（`network` / `net`）各一条 —— 参考实现认两个，自举版也得认。
+    ("excl-net-socket",
+     "module m\n\nexcluded \"network: 本单元不申请任何 net 能力\"\n\n"
+     "fn f() -> i64 {\n    return syscall6(41, 2, 1, 0, 0, 0);\n}\n"),
+    ("excl-net-bind",
+     "module m\n\nexcluded \"net: 不碰网络\"\n\n"
+     "fn f() -> i64 {\n    return syscall6(49, 3, 0, 16, 0, 0);\n}\n"),
+    # ---- 真线程 `thread_spawn` (M84, `docs/245`) -----------------------------------
+    # 这一族是"**直接调用**买到的东西"：入口是编译期的名字，于是**三条**都能在编译期判 ——
+    # 是字面量、本单元里真有这个函数、形参恰好一个。两侧各写一遍（参考 `_walk_expr` 的
+    # 内建分支 / 自举 `chk_tex_atom_call` + `chk_lookup_lit_name`），所以在这里成对钉。
+    # **除了 arity 那条，全用满四个实参** —— 元数不对时两侧走的是不同的分支（参考只在
+    # `else` 里做那三条检查，自举是"元数先报、检查照做"），要钉的是那三条本身，不是叠加。
+    ("thread-entry-not-literal",
+     "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f(s: str) -> i64 {\n    return thread_spawn(s, 0, 1, 2);\n}\n"),
+    ("thread-entry-unknown",
+     "module m\n\nfn f() -> i64 {\n    return thread_spawn(\"nope\", 0, 1, 2);\n}\n"),
+    ("thread-entry-two-params",
+     "module m\n\nfn worker(a: u64, b: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0, 1, 2);\n}\n"),
+    ("thread-arity",
+     "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", 0, 1);\n}\n"),
+    ("thread-arg-type",
+     "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
+     "fn f() -> i64 {\n    return thread_spawn(\"worker\", true, 1, 2);\n}\n"),
+    # ---- LMS 第 1 级检查器 (E028) ------------------------------------------
+    # `docs/253` §5.1：`lms` 开着时，**字面量下标越过定长数组的界**是编译期的一个诊断。
+    # ⚠ **这一条为什么必须进这张表**：孪生判据**看不见**这个分歧 ——
+    # `loment_p8_test` / `loment_potato_emit_test` 的语料里没有一个用 LMS 那一维，
+    # 所以"参考侧拒、自举侧不拒"在那两条判据下**照样绿**（孪生只证一致，不证对）。
+    # 只有这张表会让同一个探针**两边各跑一遍、比码集**。
+    # ⚠ 2026-10-18（0.1.5.1）：取值从 `lms_open` 换成**档名**，默认是 `lms_full`。
+    ("lms-e028-literal-index-over-a-fixed-array",
+     "module m\n\nchoose lms_full\n\nfn f() -> u32 {\n"
+     "    let a: [u32; 4] = [1, 2, 3, 4];\n    let x: u32 = a[10];\n    return x;\n}\n"),
+    # E029 那条现在**默认就发**（满档 ⇒ 第 1 级开着），所以探针不写档 ——
+    # 这正好顺带钉住"默认 = 满档"这件事。
+    ("lms-e029-use-after-free",
+     "module m\n\nchoose runtime\n\nfn f() -> u32 {\n"
+     "    let p: ptr = alloc(8);\n    free(p);\n"
+     "    let x: u32 = load8(p, 0);\n    return x;\n}\n"),
+    # `lspe pass` 只跳过**审计**，不跳过**检查**（`docs/262` §5.16 / `#786` 硬规则）。
+    # 同一个 E029 探针包进旁路块：两边都还得报 E029。自举侧尤其容易错 —— 拆平发生在
+    # **检查之前**，一旦拆错了（把块体丢了）这条会变成 NOPY/DIFF。
+    ("lspe-pass-does-not-swallow-lms-e029",
+     "module m\n\nchoose runtime\n\nfn f() -> u32 {\n"
+     "    let p: ptr = alloc(8);\n    free(p);\n"
+     "    lspe pass \"manual lifetime proof\" {\n"
+     "        let x: u32 = load8(p, 0);\n"
+     "    }\n"
+     "    return x;\n}\n"),
+    # ---- 语句起点的"这不是表达式" (issue #49) ---------------------------------
+    # `@` 在**词法上是合法 punct**（L0 的布局语法用它），L1 里却不是任何表达式的开头。
+    # 参考实现自 2026-09-09 起就报 E019；自举侧原先**一条都不报** —— 编译通过、退出码 0、
+    # 什么都不说（实测 0.1.4.5 发布版同）。两侧在这条上一直分叉，补一条探针钉住它。
+    ("stmt-not-expression",
+     "module m\n\nfn f() -> i64 {\n    @;\n    return 0;\n}\n"),
+    ("expr-not-expression",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = @ 1;\n    return v;\n}\n"),
+    # ---- 0.1.4.6 的一批"自举侧说得不对或不说"的探针 -------------------------------
+    # 分诊（2026-10-15，已发布 0.1.4.5 对照参考实现）：这几条在已发布编译器上要么给错码、
+    # 要么一声不吭，而参考侧都报得出来。本判据的分工就是把这类分叉**量成 MISSING**，
+    # 而不是靠人一条条去比对。
+    # 注意：`let x = 1;`（#7）与 `let a: f64 = 1.0;`（#323）也量过，是 **DIFF** ——
+    # 自举报 E002、参考报 E019。DIFF 是"假阳性/口径漂移"那一档，必须为 0，所以这两条
+    # **不能**进这份表；它们记在各自的 issue 上，修好（变成 EQUAL）再收进来。
+    # **钉 Tur 1**：默认版次已是最新（`docs/312`），循环里的 `break;` 在那里是语法。
+    # 这条探针要测的仍是「Tur 1 里 `break` 不是关键字、是个未声明的名字」。
+    ("break-not-a-name",
+     "choose write grammar tur2026.1\n"
+     "module m\n\nfn f() -> u32 {\n    let i: u32 = 0;\n    while i < 3 {\n        break;\n    }\n    return i;\n}\n"),
+    ("undeclared-in-return",
+     "module m\n\nfn f() -> u32 {\n    return undefined_thing;\n}\n"),
+    # `let x = 1;`（#7）与 `let a: f64 = 1.0;`（#323）—— 这两条原先量出来是 DIFF / EXTRA：
+    # 参考实现**解析错就中止**，检查器不中止，于是它把下游的伤也报出来（`x` 的类型槽去解
+    # 下一个 token、`f64` 不是类型），码集永远多一个。补的**不是**一条条检查，是
+    # `chk_syntax_prepass` 那道**中止语义**（进了语法错就不再跑任何检查趟）。
+    ("let-without-type",
+     "module m\n\nfn f() -> u32 {\n    let x = 1;\n    return x;\n}\n"),
+    ("f64-in-annotation",
+     "module m\n\nfn f() -> u32 {\n    let a: f64 = 1.0;\n    return 0;\n}\n"),
+    # `#323` 的另一半：**类型位上的未知名**是 E030，两侧都要是。上面那条压根到不了类型表
+    # （`1.0` 里的 `.` 在解析期就被拒成 E019）；这两条才量到 E030 本身。
+    # 第二条尤其要紧：在 `check_type` 补上 `[` 的递归之前，自举侧**一条都不报** ——
+    # 数组/切片的元素类型从来没被检查过，也就是**静默放行一个不存在的类型**。
+    ("unknown-type-let",
+     "module m\n\nfn f() -> u32 {\n    let a: f64 = 0;\n    return 0;\n}\n"),
+    ("unknown-type-array-element",
+     "module m\n\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n    return 0;\n}\n"),
+    # `#33` / `#36`：字符串里的**未知转义**。参考实现在词法期就拒（E019）；自举词法器没有
+    # 失败通道，所以同一件事落在 `chk_syntax_prepass` —— 两边的**码**必须一样。
+    # `#289`: two integer operands with no common type. The reference names the pair and says
+    # which `as` to write; the self-host reports E001 at the operator. Same code, and the
+    # widening half is pinned by `lomentc_test::test_mixed_width_arithmetic_has_a_common_type`.
+    ("mixed-width-no-common",
+     "module m\n\nfn bad(a: u32, b: i32) -> u32 { return a + b; }\n"),
+    ("unknown-string-escape",
+     "module m\n\nfn f() -> u32 {\n    let s: str = \"a\\qb\";\n    return 0;\n}\n"),
+    # `#48`：`loment check` 对**编不过**的源退出 0、零输出。两条都是"自举侧没有解析器，
+    # 于是这种语法错在它眼里根本不存在"：块没闭合、语句之间少一个 `;`。参考实现在解析期
+    # 各报一条 E019，自举侧原先**一条都不报** —— 于是 check 说"没事"。
+    ("unclosed-brace",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = 1;\n"),
+    ("missing-semicolon",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = 1\n    let w: u32 = 2;\n"
+     "    return v;\n}\n"),
+    ("bin-literal",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
+    # ---- 自举侧"死给你看"的两条 (issue #335 / #44) --------------------------------
+    # 裸 `return;` 参考实现报 E019；自举侧原先**段错误、零输出**。
+    # **钉 Tur 1**：2026.2 起裸 `return;` 是合法写法，而默认已是最新版次（`docs/312`）。
+    ("bare-return",
+     "choose write grammar tur2026.1\nmodule m\n\nfn f() {\n    return;\n}\n"),
+    # 深层嵌套参考实现报 E023（源码太深，上限 64 层）；自举侧原先走到 codegen 才把栈用穿
+    # —— 也是段错误。**表达式要包一层括号**，否则后面的用例会被并进这个元组。
+    ("deep-nesting",
+     ("module m\n\nfn f() -> u32 {\n    let x: u32 = 1;\n"
+      + "".join("    if x > 0 {\n" for _ in range(100))
+      + "".join("    }\n" for _ in range(100))
+      + "    return x;\n}\n")),
+    # ---- LSPE（`docs/262`）：第七维的错误面 --------------------------------
+    # 参考与自举对"同名核心维写两遍"必须给同一个码。这几条是"新维真的进了
+    # `chk_core_dim` 与 `sw_is_core` 两处"的独立证词 —— 漏一处时，症状是
+    # `choose lspe_*` 被当成**开关**去查开关表（码对、理由错），孪生判据看不见。
+    ("lspe-duplicate-open",
+     "module m\n\nchoose lspe_open_admin\nchoose lspe_open_admin\n\n"
+     "fn f() -> u32 {\n    return 1;\n}\n"),
+    ("lspe-duplicate-mixed",
+     "module m\n\nchoose lspe_open_admin\nchoose lspe_close_admin\n\n"
+     "fn f() -> u32 {\n    return 1;\n}\n"),
+    ("lspe-unknown-value",
+     "module m\n\nchoose lspe\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("lspe-duplicate-close",
+     "module m\n\nchoose lspe_close_admin\nchoose lspe_close_admin\n\n"
+     "fn f() -> u32 {\n    return 1;\n}\n"),
+    # ---- GC 时间控制（docs/309, Tur 2026.3）------------------------------
+    ("lgc-no-gc", "choose write grammar tur2026.3\nmodule m\nchoose no_gc\n"
+     "fn f() { lgc end; }\n"),
+    ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
+     "fn f() { lgc start(2 + 3) { } }\n"),
+    # ---- 借用生命周期（docs/299，第八维 `lifetime`）--------------------------
+    # 这五条是"借用从**声明**走到**判据**"的证据：只有参考实现收不算落地，
+    # 自举侧必须给出**同一组码**。每一条都对应 `docs/299` §8 的一条 v1 语义。
+    ("lifetime-dangle-via-call",
+     "module m\n\nfn id(p: &u32) -> &u32 {\n    return p;\n}\n\n"
+     "fn f(p: &u32) -> &u32 {\n    let x: u32 = 1;\n    return id(&x);\n}\n"),
+    ("lifetime-no-refparam",
+     "module m\n\nfn f(x: u32) -> &u32 {\n    return &x;\n}\n"),
+    ("lifetime-marker-in-auto",
+     "module m\n\nfn f(a: &u32) -> &a u32 {\n    return a;\n}\n"),
+    ("lifetime-free-while-borrowed",
+     "module m\nchoose runtime\n\nfn f(p: ptr) -> u32 {\n    let r: &ptr = &p;\n"
+     "    free(p);\n    return 0;\n}\n"),
+    ("lifetime-stored-mut-alias",
+     "module m\n\nstruct V {\n    a: u32,\n}\n\nfn f(v: V) -> u32 {\n"
+     "    let m: &mut V = &mut v;\n    let s: &V = &v;\n    return s.a;\n}\n"),
+    # `#1565`：切片上的区域标记（`&a [u32]`）与别处同一个档：`lifetime_auto` 下是 E041。
+    # 这条钉住"标记的档位检查对切片也生效"—— 两侧都要报同一个码。
+    ("lifetime-slice-marker-in-auto",
+     "module m\n\nfn pick(a: &[u32], b: &[u32]) -> &a [u32] {\n    return a;\n}\n"),
+
+    # 2026-11-12 第九维 `fp`（`docs/348`）：函数值 / 闭包 / 间接调用。七条 ——
+    # 默认档 `no_fp` 的三个入口（函数名当值、闭包字面量、间接调用）、`extern fn` 不能
+    # 当函数值、闭包形参推不出来、捕获类型不是一格宽、按借捕获的闭包不能返回。
+    # 前三条是"`choose` 从承诺变发明"的第二处：**没写 `fp` 这三个构造一个都进不去**，
+    # 写了才整条链路放行 —— 而这条分界两个实现各判一次才算等价。
+    ("fp-needs-choose-value",
+     "module m\n\nfn inc(x: u64) -> u64 {\n    return x + 1;\n}\n\n"
+     "fn main() -> u32 {\n    let f: (u64) -> u64 = inc;\n    return 0;\n}\n"),
+    ("fp-needs-choose-lambda",
+     "module m\n\nfn main() -> u32 {\n"
+     "    let f: (u64) -> u64 = (x: u64) => x;\n    return 0;\n}\n"),
+    ("fp-needs-choose-call",
+     "module m\n\nfn inc(x: u64) -> u64 {\n    return x + 1;\n}\n\n"
+     "fn main() -> u32 {\n    let f: (u64) -> u64 = inc;\n    return f(1) as u32;\n}\n"),
+    ("fp-extern-is-not-a-value",
+     "module m\nchoose fp\n\nextern fn puts(p: ptr) -> u32;\n\n"
+     "fn main() -> u32 {\n    let f: (ptr) -> u32 = puts;\n    return 0;\n}\n"),
+    ("fp-lambda-param-undetermined",
+     "module m\nchoose fp\n\nfn main() -> u32 {\n"
+     "    let a: [(u64) -> u64; 2] = [(x) => x, (y) => y];\n    return 0;\n}\n"),
+    ("fp-capture-not-word-sized",
+     "module m\nchoose fp\n\nfn main() -> u32 {\n    let s: str = \"x\";\n"
+     "    let f: () -> u32 = () => str_len(s);\n    return f();\n}\n"),
+    # 闭包形参的标注写了个不存在的类型：参考实现报"未知类型"（E030），并且因为
+    # 那个类型参与了签名，`let` 那一条也会跟着报（E001）。
+    ("fp-lambda-param-unknown-type",
+     "module m\nchoose fp\n\nfn main() -> u32 {\n"
+     "    let f: (u64) -> u64 = (x: Foo) => x;\n    return 0;\n}\n"),
+    ("fp-return-by-ref-capture",
+     "module m\nchoose fp\nchoose lifetime_manual\n\n"
+     "fn mk(p: ptr) -> (u64) -> &ptr {\n    return (x: u64) => &p;\n}\n"),
+
+    # ---- 代数效应（`docs/346` A2/A2b）---------------------------------------
+    # 默认关：`effect` 是未知顶层关键字（E019）。打开：声明与行擦除，运行期构造 E0217 /
+    # E0218；行里的未声明效应 E0221；重复声明 E0219 / E0220。两侧必须给同一组**数字**。
+    ("effects-off-keyword",
+     "module m\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "fn f() -> u32 {\n    return 0;\n}\n"),
+    ("effects-row-unknown",
+     "module m\nchoose lspe_effects_true\n\n"
+     "fn f(x: u32) -> u32 effects Nope {\n    return x;\n}\n"),
+    ("effects-duplicate-decl",
+     "module m\nchoose lspe_effects_true\n\n"
+     "effect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "effect Log {\n    fn flush() -> ();\n}\n"),
+    ("effects-duplicate-op",
+     "module m\nchoose lspe_effects_true\n\n"
+     "effect Log {\n    fn write(v: u32) -> ();\n    fn write(v: u32) -> ();\n}\n"),
+    ("effects-extern-row",
+     "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "extern fn c_puts(p: ptr) -> i32 effects Log;\n"),
+
+]
+
+#: **参考实现领先于自举侧**的那些规则。A3a（`docs/341` §7.3）把参考侧的有效 `perform`
+#: 从 E0217 换成了真正的语义（内联），自举侧要等 A3b 才跟上。这几条**仍然跑**：
+#: 自举侧必须还是 E0217，参考侧必须不再是 —— 一侧悄悄变了就红。
+#: 它们不计进 `EQUAL` 预算；A3b 把它们挪回 `_CASES`。
+_AHEAD: list[tuple[str, str, int]] = [
+    ("effects-runtime-perform",
+     "module m\nchoose lspe_effects_true\n\neffect Log {\n    fn write(v: u32) -> ();\n}\n\n"
+     "fn f(x: u32) -> u32 {\n    let y: u32 = perform Log.write(x);\n    return y;\n}\n",
+     217),
 ]
 
 
@@ -213,7 +565,14 @@ def _report(rid: str, src: str, exe: Path, td: str) -> tuple[str, str, list[int]
     """跑一条案例, 返回 (status, 明细, py 码, loment 码)。"""
     f = Path(td) / f"case_{rid}.lomt"
     f.write_text(src, encoding="utf-8", newline="\n")
-    py_msgs = lomentc.check(lomentc.load(f))
+    try:
+        py_msgs = lomentc.check(lomentc.load(f))
+    except lomentc.LomError as e:
+        # **解析期**的错误是**抛**出来的，不是回一张消息表 —— 原先这里只接了后者，于是任何
+        # 在 `load()` 就失败的探针会把整套判据崩掉，而不是记一条结果。E019 这一族恰恰全在
+        # 解析期，所以此前一条探针都没有（`stmt-not-expression` 是第一条）。
+        # `str(LomError)` 就是分类器吃的 `行:列: 文本`（`lomc.LomError.__init__`）。
+        py_msgs = [str(e)]
     py = H._classify_codes(py_msgs)
     lo, detail = H._loment_codes(exe, f)
     if not py:
@@ -227,7 +586,7 @@ def _report(rid: str, src: str, exe: Path, td: str) -> tuple[str, str, list[int]
         st = "EXTRA"
     else:
         st = "DIFF"
-    unclass = [m for m in py_msgs if H.loment_diag.classify(m)[0] == "E999"]
+    unclass = [m for m in py_msgs if H.loment_diag.classify(m)[0] == "E0999"]
     det = f"py={sorted(sp)} loment={sorted(lo)}"
     if unclass:
         det += " | 未分类: " + unclass[0][:60]
@@ -259,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     counts: dict[str, int] = {}
     gaps: list[tuple[str, str]] = []
+    ahead_bad = 0
     with tempfile.TemporaryDirectory() as td:
         exe = H._build_checker(td)
         for rid, src in cases:
@@ -270,6 +630,14 @@ def main(argv: list[str] | None = None) -> int:
                 gaps.append((rid, det))
             if not gaps_only or st != "EQUAL":
                 print(f"  {st:8s} {rid:28s} {det}")
+        # 参考实现领先的那几条：两侧的形状必须各自**仍然**成立（见 `_AHEAD`）。
+        for rid, src, code in _AHEAD:
+            _st, det, py, lo = _report(rid, src, exe, td)
+            if set(lo) != {code} or code in set(py):
+                ahead_bad += 1
+                gaps.append((rid, f"AHEAD 关系变了（自举侧应只剩 {code}、参考侧不再有）: {det}"))
+            if not gaps_only:
+                print(f"  {'AHEAD':8s} {rid:28s} {det}")
     total = sum(counts.values())
     eq = counts.get("EQUAL", 0)
     extra = counts.get("EXTRA", 0)
@@ -286,8 +654,9 @@ def main(argv: list[str] | None = None) -> int:
     if only is not None:
         return 0 if eq == 1 else 1
     bad: list[str] = []
-    if extra or drift or nopy:
-        bad.append(f"假阳性 {extra} / 口径漂移 {drift} / 探针失效 {nopy} (必须为 0)")
+    if extra or drift or nopy or ahead_bad:
+        bad.append(f"假阳性 {extra} / 口径漂移 {drift} / 探针失效 {nopy} / "
+                   f"AHEAD 关系变了 {ahead_bad} (必须为 0)")
     if eq < BUDGET:
         bad.append(f"等价规则 {eq} < 预算 {BUDGET} (回退; 补完一批才把 BUDGET 往上调)")
     if bad:

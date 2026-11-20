@@ -1,0 +1,279 @@
+// system/bpf.lomt — eBPF: 系统调用命令、map/程序类型、指令编码
+//
+// 为什么系统工具需要它: 一个 eBPF 程序不是"编译出来的二进制"，而是一串 **8 字节
+// 指令**交给 `bpf()` 系统调用。每条指令把 opcode / 两个 4 位寄存器号 / 16 位偏移 /
+// 32 位立即数塞进 8 个字节 —— 编码错一位就是另一条指令，装载器多半只回一句
+// `EINVAL`，不告诉你是哪条。把编码与名字表放在库里，排查时能先把字节翻译回意图。
+//
+// 覆盖:
+//   * `bpf()` 的命令号（MAP_CREATE … PROG_TEST_RUN）；
+//   * map 类型（HASH / ARRAY / LPM_TRIE …）与程序类型（SOCKET_FILTER / XDP …）；
+//   * 指令编码 `bp_code(cls, src, op)` 与 8 字节打包 / 解码；
+//   * `BPF_LD | BPF_DW | BPF_IMM` 的 64 位立即数（占两条指令）。
+//
+// 不做: 属性块（`union bpf_attr` 各命令的结构不同，版本间还在长）的具体布局、
+// map 内容读写、程序校验器的语义。这一层只管**指令与名字**。
+//
+// 命名: 公开 bp_*, 内部 bpq_*。自检 test_bpf_*。
+
+module bpf
+
+pub const BP_MAP_CREATE: u32 = 0;
+pub const BP_MAP_LOOKUP_ELEM: u32 = 1;
+pub const BP_MAP_UPDATE_ELEM: u32 = 2;
+pub const BP_MAP_DELETE_ELEM: u32 = 3;
+pub const BP_MAP_GET_NEXT_KEY: u32 = 4;
+pub const BP_PROG_LOAD: u32 = 5;
+pub const BP_OBJ_PIN: u32 = 6;
+pub const BP_OBJ_GET: u32 = 7;
+pub const BP_PROG_ATTACH: u32 = 8;
+pub const BP_PROG_DETACH: u32 = 9;
+pub const BP_PROG_TEST_RUN: u32 = 10;
+
+pub const BP_MAP_TYPE_HASH: u32 = 1;
+pub const BP_MAP_TYPE_ARRAY: u32 = 2;
+pub const BP_MAP_TYPE_PROG_ARRAY: u32 = 3;
+pub const BP_MAP_TYPE_PERF_EVENT_ARRAY: u32 = 4;
+pub const BP_MAP_TYPE_PERCPU_HASH: u32 = 5;
+pub const BP_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
+pub const BP_MAP_TYPE_STACK_TRACE: u32 = 7;
+pub const BP_MAP_TYPE_LRU_HASH: u32 = 9;
+pub const BP_MAP_TYPE_LRU_PERCPU_HASH: u32 = 10;
+pub const BP_MAP_TYPE_LPM_TRIE: u32 = 11;
+pub const BP_MAP_TYPE_ARRAY_OF_MAPS: u32 = 12;
+
+pub const BP_PROG_TYPE_SOCKET_FILTER: u32 = 1;
+pub const BP_PROG_TYPE_KPROBE: u32 = 2;
+pub const BP_PROG_TYPE_SCHED_CLS: u32 = 3;
+pub const BP_PROG_TYPE_SCHED_ACT: u32 = 4;
+pub const BP_PROG_TYPE_TRACEPOINT: u32 = 5;
+pub const BP_PROG_TYPE_XDP: u32 = 6;
+pub const BP_PROG_TYPE_PERF_EVENT: u32 = 7;
+pub const BP_PROG_TYPE_CGROUP_SKB: u32 = 8;
+pub const BP_PROG_TYPE_CGROUP_SOCK: u32 = 9;
+
+/// 指令类别（opcode 的高 3 位）。
+pub const BP_CLASS_LD: u32 = 0;
+pub const BP_CLASS_LDX: u32 = 1;
+pub const BP_CLASS_ST: u32 = 2;
+pub const BP_CLASS_STX: u32 = 3;
+pub const BP_CLASS_ALU: u32 = 4;
+pub const BP_CLASS_JMP: u32 = 5;
+pub const BP_CLASS_JMP32: u32 = 6;
+pub const BP_CLASS_ALU64: u32 = 7;
+
+/// 操作数来源（`src`）：`K` 用立即数，`X` 用寄存器。
+pub const BP_SRC_K: u32 = 0;
+pub const BP_SRC_X: u32 = 8;
+
+pub const BP_OP_ADD: u32 = 0;
+pub const BP_OP_SUB: u32 = 16;
+pub const BP_OP_MUL: u32 = 32;
+pub const BP_OP_DIV: u32 = 48;
+pub const BP_OP_OR: u32 = 64;
+pub const BP_OP_AND: u32 = 80;
+pub const BP_OP_LSH: u32 = 96;
+pub const BP_OP_RSH: u32 = 112;
+pub const BP_OP_NEG: u32 = 128;
+pub const BP_OP_MOD: u32 = 144;
+pub const BP_OP_XOR: u32 = 160;
+pub const BP_OP_MOV: u32 = 176;
+pub const BP_OP_ARSH: u32 = 192;
+
+/// 指令的字节数。
+pub const BP_INSN_BYTES: u32 = 8;
+/// `BPF_LD | BPF_DW | BPF_IMM` —— 64 位立即数装载，占两条指令。
+pub const BP_LD_IMM64: u32 = 24;
+
+fn bpq_st32(p: ptr, off: u32, v: u32) -> u32 {
+    let b: u32 = 0;
+    while b < 4 {
+        store8(p, off + b, ((v >> (8 * b)) & 255) as u8);
+        b = b + 1;
+    }
+    return off + 4;
+}
+
+fn bpq_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn bpq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 拷一个 C 串进 16 字节的名字缓冲：内核看的是 `char map_name[BPF_OBJ_NAME_LEN]`，
+/// 名字**必须** NUL 结尾，长度上限 15 —— 超了就静默截断。
+pub fn bp_name(buf: ptr, cap: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n && i + 1 < cap {
+        store8(buf, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    while i < cap {
+        store8(buf, i, 0 as u8);
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 一条指令的 opcode：`(cls << 5) | (src << 3) | op`。
+pub fn bp_code(cls: u32, src: u32, op: u32) -> u32 {
+    return (cls << 5) | (src << 3) | op;
+}
+
+/// 打包一条 8 字节指令：code u8(0) | regs u8(1) | off i16(2) | imm i32(4)。
+/// `regs` 是 `(src << 4) | dst`。
+pub fn bp_insn_pack(buf: ptr, code: u32, dst: u32, src: u32, off: i64, imm: i64) -> u32 {
+    store8(buf, 0, (code & 255) as u8);
+    store8(buf, 1, (((src & 15) << 4) | (dst & 15)) as u8);
+    store8(buf, 2, (off & 255) as u8);
+    store8(buf, 3, ((off >> 8) & 255) as u8);
+    let _e: u32 = bpq_st32(buf, 4, (imm & 4294967295) as u32);
+    return BP_INSN_BYTES;
+}
+
+/// 打包 `BPF_LD | BPF_DW | BPF_IMM`：两条指令拼一个 64 位立即数（低 32 位在前）。
+pub fn bp_insn_ld_imm64(buf: ptr, dst: u32, imm: u64) -> u32 {
+    store8(buf, 0, BP_LD_IMM64 as u8);
+    store8(buf, 1, dst as u8);
+    store8(buf, 2, 0 as u8);
+    store8(buf, 3, 0 as u8);
+    let _lo: u32 = bpq_st32(buf, 4, (imm & 4294967295) as u32);
+    store8(buf, 8, 0 as u8);
+    store8(buf, 9, 0 as u8);
+    store8(buf, 10, 0 as u8);
+    store8(buf, 11, 0 as u8);
+    let _hi: u32 = bpq_st32(buf, 12, (imm >> 32) as u32);
+    return BP_INSN_BYTES * 2;
+}
+
+pub fn bp_insn_code(buf: ptr) -> u32 {
+    return load8(buf, 0) as u32;
+}
+
+pub fn bp_insn_dst(buf: ptr) -> u32 {
+    return (load8(buf, 1) as u32) & 15;
+}
+
+pub fn bp_insn_src(buf: ptr) -> u32 {
+    return (load8(buf, 1) as u32) >> 4;
+}
+
+/// 偏移按 i16 符号扩展。
+pub fn bp_insn_off(buf: ptr) -> i64 {
+    let u: u32 = (load8(buf, 2) as u32) | ((load8(buf, 3) as u32) << 8);
+    if u >= 32768 {
+        return (u as i64) - 65536;
+    }
+    return u as i64;
+}
+
+/// 立即数按 i32 符号扩展。
+pub fn bp_insn_imm(buf: ptr) -> i64 {
+    let u: u32 = bpq_ld32(buf, 4);
+    if u >= 2147483648 {
+        return (u as i64) - 4294967296;
+    }
+    return u as i64;
+}
+
+/// `bpf(cmd, &attr, size)`。
+pub fn bp_syscall(cmd: u32, attr: ptr, size: u32) -> i64 {
+    return syscall4(321, cmd as u64, attr as u64, size as u64);
+}
+
+pub fn bp_command_name(cmd: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if cmd == BP_MAP_CREATE { s = "MAP_CREATE"; }
+    else if cmd == BP_MAP_LOOKUP_ELEM { s = "MAP_LOOKUP_ELEM"; }
+    else if cmd == BP_MAP_UPDATE_ELEM { s = "MAP_UPDATE_ELEM"; }
+    else if cmd == BP_MAP_DELETE_ELEM { s = "MAP_DELETE_ELEM"; }
+    else if cmd == BP_MAP_GET_NEXT_KEY { s = "MAP_GET_NEXT_KEY"; }
+    else if cmd == BP_PROG_LOAD { s = "PROG_LOAD"; }
+    else if cmd == BP_OBJ_PIN { s = "OBJ_PIN"; }
+    else if cmd == BP_OBJ_GET { s = "OBJ_GET"; }
+    else if cmd == BP_PROG_ATTACH { s = "PROG_ATTACH"; }
+    else if cmd == BP_PROG_DETACH { s = "PROG_DETACH"; }
+    else if cmd == BP_PROG_TEST_RUN { s = "PROG_TEST_RUN"; }
+    return bpq_put(out, cap, 0, s);
+}
+
+pub fn bp_map_type_name(t: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if t == BP_MAP_TYPE_HASH { s = "HASH"; }
+    else if t == BP_MAP_TYPE_ARRAY { s = "ARRAY"; }
+    else if t == BP_MAP_TYPE_PROG_ARRAY { s = "PROG_ARRAY"; }
+    else if t == BP_MAP_TYPE_PERF_EVENT_ARRAY { s = "PERF_EVENT_ARRAY"; }
+    else if t == BP_MAP_TYPE_LRU_HASH { s = "LRU_HASH"; }
+    else if t == BP_MAP_TYPE_LPM_TRIE { s = "LPM_TRIE"; }
+    return bpq_put(out, cap, 0, s);
+}
+
+pub fn bp_prog_type_name(t: u32, out: ptr, cap: u32) -> u32 {
+    let s: str = "unknown";
+    if t == BP_PROG_TYPE_SOCKET_FILTER { s = "SOCKET_FILTER"; }
+    else if t == BP_PROG_TYPE_KPROBE { s = "KPROBE"; }
+    else if t == BP_PROG_TYPE_SCHED_CLS { s = "SCHED_CLS"; }
+    else if t == BP_PROG_TYPE_TRACEPOINT { s = "TRACEPOINT"; }
+    else if t == BP_PROG_TYPE_XDP { s = "XDP"; }
+    else if t == BP_PROG_TYPE_PERF_EVENT { s = "PERF_EVENT"; }
+    else if t == BP_PROG_TYPE_CGROUP_SKB { s = "CGROUP_SKB"; }
+    return bpq_put(out, cap, 0, s);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_bpf_code() -> bool {
+    // ALU64 | X | ADD = (7 << 5) | (8 << 3) | 0 = 288
+    return bp_code(BP_CLASS_ALU64, BP_SRC_X, BP_OP_ADD) == 288
+        && bp_code(BP_CLASS_ALU64, BP_SRC_K, BP_OP_MOV) == 240
+        && bp_code(BP_CLASS_JMP, BP_SRC_K, 16) == 160;
+}
+
+fn test_bpf_insn_roundtrip() -> bool {
+    let b: ptr = alloc(8);
+    let _n: u32 = bp_insn_pack(b, bp_code(BP_CLASS_ALU64, BP_SRC_K, BP_OP_MOV),
+                               6, 0, 0 as i64, 1 as i64);
+    return bp_insn_code(b) == 240 && bp_insn_dst(b) == 6 && bp_insn_src(b) == 0
+        && bp_insn_off(b) == 0 && bp_insn_imm(b) == (1 as i64)
+        && load8(b, 2) == 0 && load8(b, 5) == 0;
+}
+
+fn test_bpf_insn_negative() -> bool {
+    // 负的 off / imm 要符号扩展回负数（跳转与 -1 立即数都靠这个）。
+    let b: ptr = alloc(8);
+    let _n: u32 = bp_insn_pack(b, 5, 0, 0, 0 as i64 - 2 as i64, 0 as i64 - 1 as i64);
+    return bp_insn_off(b) == (0 as i64 - 2 as i64)
+        && bp_insn_imm(b) == (0 as i64 - 1 as i64);
+}
+
+fn test_bpf_ld_imm64() -> bool {
+    let b: ptr = alloc(16);
+    let _n: u32 = bp_insn_ld_imm64(b, 3, 1099511627777);
+    return bp_insn_code(b) == 24 && bp_insn_dst(b) == 3
+        && bpq_ld32(b, 4) == 1 && bpq_ld32(b, 12) == 256;
+}
+
+fn test_bpf_name() -> bool {
+    let b: ptr = alloc(16);
+    let n: u32 = bp_name(b, 16, "xdp_lo");
+    return n == 16 && load8(b, 0) == 120 && load8(b, 5) == 111 && load8(b, 6) == 0;
+}

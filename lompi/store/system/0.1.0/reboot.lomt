@@ -1,0 +1,126 @@
+// system/reboot.lomt — `reboot(2)` 的两个魔数与动作号
+//
+// 为什么系统工具需要它: 重启、关机、挂起都只有一条系统调用 (`reboot(2)`, 编号 169),
+// 而它**要求**前两个实参是固定的两个魔数 —— 写错任何一位内核直接返回 EINVAL, 什么
+// 都不会发生, 也什么都不会说。第三个实参才是"做什么": 重启、停机、断电、开/关
+// Ctrl-Alt-Del。这几个十六进制数在代码里就是纯魔数, 给出名字是为了让调用点读得懂,
+// 也是为了不在两个地方各抄一份、抄出两种值。
+//
+// 注意两个容易记反的动作: **CAD_ON 是 0x89ABCDEF, CAD_OFF 才是 0** —— 不是反过来。
+//
+// 覆盖: 两个魔数、RESTART / HALT / POWER_OFF / KEXEC / SW_SUSPEND / CAD_ON / CAD_OFF
+// 七个动作。**不做的**: 权限检查 (要 CAP_SYS_BOOT)、systemd 的 `reboot.target` 之类
+// 的编排层 —— 这一层只把那条系统调用拼对。
+//
+// 命名: 公开 rb_*, 内部 rbq_*。自检 test_reboot_*。
+
+module reboot
+
+/// `reboot(2)` 的第一个魔数 —— 和第二个一起, 用来挡住"把别的调用误当重启"。
+pub const RB_MAGIC1: u64 = 4276215469;
+/// 第二个魔数: 日期 1996-12-19 (0x28121969), 内核自己的记号。
+pub const RB_MAGIC2: u32 = 672274793;
+
+/// 重启。
+pub const RB_RESTART: u32 = 19088743;
+/// 停机 (不切断电源)。
+pub const RB_HALT: u32 = 3454992675;
+/// 断电。
+pub const RB_POWER_OFF: u32 = 1126301404;
+/// 换一个内核 (`kexec`)。
+pub const RB_KEXEC: u32 = 1163412803;
+/// 挂起 (suspend-to-RAM)。
+pub const RB_SW_SUSPEND: u32 = 3489725666;
+/// 打开 Ctrl-Alt-Del 触发重启。
+pub const RB_CAD_ON: u32 = 2309737967;
+/// 关掉 Ctrl-Alt-Del 触发 (动作号就是 0)。
+pub const RB_CAD_OFF: u32 = 0;
+
+const RBQ_SYS_REBOOT: u64 = 169;
+
+fn rbq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+/// 两个魔数都对才会被内核接受 —— 先在本层挡一次, 免得把错误拖到内核。
+pub fn rb_magic_ok(m1: u64, m2: u32) -> bool {
+    return m1 == RB_MAGIC1 && m2 == RB_MAGIC2;
+}
+
+/// 动作号 -> 名字。未知返回 `"unknown"`。
+pub fn rb_command_name(cmd: u32, out: ptr, cap: u32) -> u32 {
+    if cmd == RB_RESTART { return rbq_put(out, cap, 0, "RESTART"); }
+    if cmd == RB_HALT { return rbq_put(out, cap, 0, "HALT"); }
+    if cmd == RB_POWER_OFF { return rbq_put(out, cap, 0, "POWER_OFF"); }
+    if cmd == RB_KEXEC { return rbq_put(out, cap, 0, "KEXEC"); }
+    if cmd == RB_SW_SUSPEND { return rbq_put(out, cap, 0, "SW_SUSPEND"); }
+    if cmd == RB_CAD_ON { return rbq_put(out, cap, 0, "CAD_ON"); }
+    if cmd == RB_CAD_OFF { return rbq_put(out, cap, 0, "CAD_OFF"); }
+    return rbq_put(out, cap, 0, "unknown");
+}
+
+/// `reboot(magic1, magic2, cmd, arg)` —— 六个实参里最后一个是留给 kexec 的。
+pub fn rb_reboot(cmd: u32, arg: u64) -> i64 {
+    return syscall6(RBQ_SYS_REBOOT, RB_MAGIC1, RB_MAGIC2 as u64, cmd as u64, arg, 0);
+}
+
+/// 断电。
+pub fn rb_power_off() -> i64 {
+    return rb_reboot(RB_POWER_OFF, 0);
+}
+
+/// 重启。
+pub fn rb_restart() -> i64 {
+    return rb_reboot(RB_RESTART, 0);
+}
+
+/// 停机 (不切断电源) —— 虚拟机/容器里比断电更常用, 因为宿主要能收回电源。
+pub fn rb_halt() -> i64 {
+    return rb_reboot(RB_HALT, 0);
+}
+
+/// 挂起。`arg` 是留给将来扩展的实参, 现在内核只接受 0。
+pub fn rb_suspend() -> i64 {
+    return rb_reboot(RB_SW_SUSPEND, 0);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_reboot_magic() -> bool {
+    return rb_magic_ok(RB_MAGIC1, RB_MAGIC2)
+        && !rb_magic_ok(RB_MAGIC1, 0)
+        && !rb_magic_ok(0, RB_MAGIC2);
+}
+
+fn test_reboot_names() -> bool {
+    let o: ptr = alloc(16);
+    let n: u32 = rb_command_name(RB_POWER_OFF, o, 16);
+    let want: str = "POWER_OFF";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_reboot_cad_is_not_inverted() -> bool {
+    // 这一对最容易被记反: CAD_ON 是那个大数, CAD_OFF 是 0。
+    return RB_CAD_ON == 2309737967 && RB_CAD_OFF == 0
+        && rb_command_name(0, alloc(16), 16) == 7;
+}

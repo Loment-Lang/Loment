@@ -27,9 +27,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +42,9 @@ EX = ROOT / "loment" / "examples"
 COVERED = (
     "bootprobe.lomt",
     "bytes.lomt",
+    # ---- 命令单元（`docs/223`）：两种写法各一份，形式对象与参考实现逐字节比
+    "cmd_hello.lomt",           # 形态 B：`pub fn loment_command()` + `command_main`
+    "register_hello.lomt",      # 形态 A：`register <名字> { … }`
     "mathutil.lomt",
     "native.lomt",
     "native_agg.lomt",
@@ -113,6 +118,9 @@ EXTRA_COVERED = (
     # 自举侧自己的 IR 单元：`[u8; N]` / 切片 / 大段 const 都有
     "loment/selfhost/ir_mem.lomt",
     "loment/selfhost/ir_for.lomt",
+    # 第九维 `fp`（`docs/348`）：函数类型的**渲染**（`(A,B)->C` 无空格）与
+    # 闭包/包装函数在形态对象里的样子 —— 别的语料一份都没有函数类型。
+    "loment/selfhost/fp/ir_fp.lomt",
     "loment/tools/lomsyscalls.lomt",
     # ---- 带依赖的库与工具（`imports` 那一格在真实规模上的样子）
     "lompi/store/host/0.1.0/fs.lomt",       # 一个依赖
@@ -133,13 +141,17 @@ EXTRA_COVERED = (
     # 两个实现数出来的**组成**才真的被比过。别的语料全是 `gc_manual`，那里三个数恒为 0 ——
     # 只比那些，"自举侧重推四层"这件事从没被验过。
     "loment/examples/gc_ladder/main.lomt",
+    # **联网的四档宽度各来一站**（`net_ladder`, `docs/237`）—— 与上一份同一个道理：树里
+    # 别处**一处联网站点都没有**（`docs/218` §1④ 实测 0 处），只有这一份能让四个数都非零，
+    # 于是"两张号表（面与宽度档）在两个实现里数得一样"才真的被比过。
+    "loment/examples/net_ladder/main.lomt",
 )
 
 #: 语料之外单独点的拒绝轴：`comefor` 与外部代码块都由**驱动器**拒（那不是这一格的判断，
 #: 但必须是"点名拒绝"而不是"发个壳出去"）。
 EXTRA_REFUSED = {
     "loment/comefor/def_dialect.lomt": "comefor",
-    "loment/extblock/evil.lomt": "外部代码块",
+    "loment/extblock/evil.lomt": "external code blocks",
     # `choose write grammar python` 那种源：自举侧的前门本来就收不了（docs/188 §7.1），
     # 与这一格无关，但"收不了"也要看得见。
     "loment/lib/lumtui_math.lomt": "grammar",
@@ -147,7 +159,9 @@ EXTRA_REFUSED = {
     # 值得记：**先问这东西能不能存在，再吵它叫什么** —— 它**没有名字规则**（`Box_[u32]` 不是
     # 标识符），但更前面的是**后端 M23**（struct 字段暂只支持标量）挡着，`Box<ptr>` 就证明了
     # 这条：名字没问题，IR 照样拒。两个实现现在都**点名拒**。
-    "loment/examples/arg_shape/main.lomt": "泛型实参的形状",
+    # 2026-11-09 起自举侧**更早**就拒：检查器的 `chk_span_arg`（E41）在静态检查里点名，
+    # 走不到形式对象那一句 —— 所以这里比的轴是它的话（`docs/299` §9）。
+    "loment/examples/arg_shape/main.lomt": "自举侧还不收",
 }
 
 TESTS: list = []
@@ -299,7 +313,8 @@ def test_non_scalar_generic_arg_refused_by_name():
     1. **参考侧给的是有名字的拒绝**，不是"形式对象自检失败"那种崩（2026-09-23 之前它是后者：
     名字拼成 `Box_[u32]`、被它自己的校验器拒掉）。**内部错误是工具在说自己坏了** —— 修法
     是让它把话说清，不是让人去读自检输出。
-    2. **理由里带着真正的卡点**：后端 `native M23`（struct 字段暂只支持标量）。顺序很重要 ——
+    2. **理由里带着真正的卡点**：结构体的字段类型目前只支持标量（用户看到的是这句话，
+   不是内部里程碑号 —— `#484`）。顺序很重要 ——
     **先问这东西能不能存在，再争它叫什么**：`Box<ptr>` 是证据（名字完全没问题，IR 照样拒）。
     """
     rel = "loment/examples/arg_shape/main.lomt"
@@ -315,8 +330,47 @@ def test_non_scalar_generic_arg_refused_by_name():
     assert got is not None, "参考实现居然发出来了？那这一格要重判"
     assert "形状" in got, f"参考侧的拒绝话里没有那个轴：{got[:200]}"
     assert "自检失败" not in got, f"参考侧又退回**内部错误**了（该是点名拒）：{got[:200]}"
-    assert "M23" in got, f"拒绝话里该带上真正的卡点（后端 M23）：{got[:200]}"
-    print("      Box<[u32]>：参考侧与自举侧都**点名拒**（真正卡点是后端 M23，不是命名）")
+    assert "只支持标量" in got, f"拒绝话里该带上真正的卡点（字段类型只支持标量）：{got[:200]}"
+    print("      Box<[u32]>：参考侧与自举侧都**点名拒**（真正卡点是字段类型只支持标量，不是命名）")
+
+
+@test
+def test_flomtc_true_changes_nothing_but_the_path():
+    """`flomtc`（`docs/350`，第十维）：只换编译路径，**产物逐字节相同**，也不进 Potato。
+
+    两份同一源，只差一行 `choose flomtc_true`：
+
+    * 参考侧 Potato 相同；
+    * 自举 `--emit-potato` 相同，且都等于参考；
+    * Potato 里**没有** `flomtc` 这一格 —— 与 `mode`/`gc` 那种"必填"相反：
+      它说的是**这份产物是怎么被编出来的**，不是这份产物的性质。
+
+    语料带一个**声明了但没调用**的泛型函数：这正是快路径要跳过的形状
+    （跳过 `pt_mono_all` 与参考侧的 deepcopy 都只在这里发生）。
+    """
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    body = ("module flomtc_probe\n{ch}\n"
+            "fn pick<T>(a: T, b: T) -> T {{\n    return a;\n}}\n\n"
+            "fn _start() {{\n}}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        pots = {}
+        for tag, ch in (("off", ""), ("on", "choose flomtc_true")):
+            p = td / f"{tag}.lomt"
+            p.write_text(body.format(ch=ch), encoding="utf-8", newline="\n")
+            mod, deps = lomentc.load_unit(p, ROOT)
+            errs = lomentc.check(mod, deps=deps)
+            assert not errs, f"{tag}: 参考侧检查失败 {errs[:2]}"
+            pots[tag] = lomentc.emit_potato(mod, ROOT, deps)
+            r = _emit_potato_on(stage1, p)
+            assert r.returncode == 0, f"{tag}: 自举拒绝 {r.stderr[-300:]}"
+            assert r.stdout == pots[tag], f"{tag}: 自举与参考不同"
+            assert "flomtc" not in json.loads(pots[tag]), (
+                "flomtc 进了 Potato —— 它是编译路径开关，不是产物性质")
+        assert pots["off"] == pots["on"], "flomtc_true 改变了产物"
+    print("      flomtc_false / flomtc_true：参考与自举两侧逐字节相同")
 
 
 @test
@@ -338,17 +392,231 @@ def test_every_example_is_decided():
           f"{len(REFUSED)} 拒绝 / {len(SKIPPED)} 跳过）")
 
 
+@test
+def test_lspe_ledger_matches_on_guards_and_indices():
+    """E1/E2/E3/E4 四族站点都在场：两侧台账逐字节相同（`docs/262` §8）。
+
+    这份源故意把 E1/E2/E3/E4 的站点都放进去：guard、字面量/非字面量下标、`free`
+    （有可达的用，所以 `Alive` 不证）、未初始化 `let`（赋值后读）、一个 deref-only
+    被调（`Interproc`）、一个泄漏首参的被调（洞），以及一个**带 `lspe pass` 的被调**
+    （摘要 `Unchecked` ⇒ 调用点不证，`#786` 第 3 条）。
+    `Exclusive` 的孪生不在这份夹具里：自举侧前门目前对 `&mut` 实参直接报 E15，
+    到不了台账那一层（那是前门的差，不是普查的差）。
+    """
+    s1 = _stage1()
+    if s1 is None:
+        return
+    src = (
+        "module lspe_q1\n\n"
+        "choose runtime\n"
+        # ⚠ **这份夹具故意含一处"用完再放"**（`free(q)` 之后 `deref(q)`）—— 它要的就是
+        # 那条 `free` 站点上的 LSPE 台账。而 LMS 第 1 级（E029）从 2026-10-18 起
+        # **默认开着**（默认档 `lms_full`），会把这份源直接拒掉。所以这里显式降到
+        # 「只要管理器」那一档：关掉的是那条检查，不是这份夹具要测的东西
+        # （`docs/270` §6 的"逐条改，不放宽"）。
+        "choose lms_manage_only_admin\n\n"
+        "capability d : disk[0..8]\n\n"
+        "fn deref(p: ptr) -> u32 {\n"
+        "    return load8(p, 0);\n"
+        "}\n\n"
+        "fn leak(p: ptr) -> ptr {\n"
+        "    return p;\n"
+        "}\n\n"
+        # 带旁路的被调：摘要变成 `Unchecked`（`#786` 第 3 条），于是 `checked(q)` 那个
+        # 调用点**不证**。这一格两侧必须同样地不给证明（安全表是从 token 流算的，
+        # 自举侧摘表那一步在 `lspe_drop_unchecked`）。
+        "fn checked(p: ptr) -> u32 {\n"
+        "    lspe pass \"caller checked\" {\n"
+        "        return load8(p, 0);\n"
+        "    }\n"
+        "}\n\n"
+        "fn f(a: [u32; 4], i: u32, q: ptr) -> u32 {\n"
+        "    guard d(i);\n"
+        "    let x: u32 = a[0];\n"
+        "    let u: u32;\n"
+        "    u = 3;\n"
+        "    free(q);\n"
+        "    let y: u32 = deref(q);\n"
+        "    let c: ptr = leak(q);\n"
+        "    let z: u32 = checked(q);\n"
+        "    lspe pass \"manual bound check\" {\n"
+        "        let p1: u32 = a[1];\n"
+        "    }\n"
+        "    return a[i] + x + u + y + z + p1;\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lspe_q1.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = _run(s1, str(p))
+        assert r.returncode == 0, r.stderr[-400:]
+        want = _want(str(p))
+    assert r.stdout == want, "LSPE 台账在两侧不一致"
+
+
+@test
+def test_lspe_bounds_sites_match_on_both_implementations():
+    """LMS g1 的内联界检查是两个实现的**同一批** `bounds` 站点（`#1021`）。
+
+    它没有自己的语法：两侧都只能从 token 形状认（`let p: ptr = alloc(<常量>)` 之后的
+    `load8` / `store8`）。这条钉的是"认出来的条数一样"—— 参考侧的数还另有一条判据
+    （`lomentc_test`）与 IR 里的 `icmp ult i32 …, <const>` 对账。
+    """
+    s1 = _stage1()
+    if s1 is None:
+        return
+    src = (
+        "module lspe_bounds\n\n"
+        "choose runtime\n\n"
+        "fn f() -> u32 {\n"
+        "    let p: ptr = alloc(16);\n"
+        "    store8(p, 0, 1);\n"
+        "    let a: u32 = load8(p, 15);\n"
+        "    free(p);\n"
+        "    return a;\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lspe_bounds.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        r = _run(s1, str(p))
+        assert r.returncode == 0, r.stderr[-400:]
+        want = _want(str(p))
+    assert r.stdout == want, "bounds 站点在两侧的台账不一致"
+    lp = json.loads(want)["lspe"]
+    assert lp["per_kind"].get("InBounds") == "2/2", lp
+
+
+@test
+def test_lspe_effect_sites_match_on_both_implementations():
+    """E11 的效应站点在两侧台账里逐字节相同（`docs/341` §11 / A2c）。
+
+    能**编译通过**的效应源里只有三种站点：`effect_decl`（每个 `effect`）、`row`
+    （每个 `fn`）、`row_call`（每个本单元调用点）。`perform` / `handle` / `resume`
+    在这一版是 E023（拒编），到不了发射这一层 —— 与参考实现同一条边界。
+
+    这份夹具把三种都放进去了：声明的行盖住了推断（`g`）、没写行（`h`）、
+    声明的行**盖不住**被调方的行（`f`：行写 `B`，而 `g` 要 `A`）。
+    最后一种让一个 `row` 与一个 `row_call` 同时落在 UNDECIDED 上。级别也一起验：
+    `Typed` 从 L1 起、`Interproc` 从 L2 起（`docs/262` §5.6）。
+    """
+    s1 = _stage1()
+    if s1 is None:
+        return
+    src = (
+        "module lspe_eff\n\n"
+        "choose lspe_effects_true\n\n"
+        "effect A {\n"
+        "    fn a() -> ();\n"
+        "}\n\n"
+        "effect B {\n"
+        "    fn b() -> ();\n"
+        "}\n\n"
+        "fn g(x: u32) -> u32 effects A {\n"
+        "    return x;\n"
+        "}\n\n"
+        "fn h(x: u32) -> u32 {\n"
+        "    let n: u32 = g(x);\n"
+        "    return n;\n"
+        "}\n\n"
+        "fn f(x: u32) -> u32 effects B {\n"
+        "    let n: u32 = g(x);\n"
+        "    return n;\n"
+        "}\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "lspe_eff.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        for lvl, want_counts in ((3, "5/7"), (1, "4/7"), (0, "3/7")):
+            r = subprocess.run([str(s1), str(p), "--emit-potato",
+                                "--lspe-level", str(lvl)], cwd=str(ROOT),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=300, shell=False)
+            assert r.returncode == 0, r.stderr[-400:]
+            mod, deps = lomentc.load_unit(p, ROOT, lspe_level=lvl)
+            want = lomentc.emit_potato(mod, ROOT, deps)
+            assert r.stdout == want, f"lvl {lvl}: 台账在两侧不一致"
+            got = json.loads(want)["lspe"]["per_kind"].get("EffectAllowed")
+            assert got == want_counts, f"lvl {lvl}: EffectAllowed {got} != {want_counts}"
+
+
+#: **从表的大小反推输入**（FujoJTOP/loment#774）。三处容量各配一份**刚好越过**
+#: 边界的最小源：1537 个局部变量（`PT_EMAX = 1536`）、33 个带 `alloc` 的循环
+#: （`PT_GLRMX = 32`）、17 个字段的 `record`（`PT_FMAX = 16`）。
+#:
+#: 这一条判的是 `#774` 要的形状：**不是**"编译成功"，而是**编译器带着一句点名的
+#: 诊断退出**。改之前三份都是"退出码 0 + 一份看起来正常的对象"（17 字段那份的
+#: `layouts` 名字/尺寸都是错的，33 循环那份把第 33 个分配算成 L3 而与参考实现分叉）。
+def _emit_potato_on(stage1: Path, p: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([str(stage1), str(p), "--emit-potato"], cwd=str(ROOT),
+                          capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", shell=False, timeout=300)
+
+
+@test
+def test_capacity_bounds_fail_closed_by_name():
+    """越过三张表的上界时，编译器**点名拒**，不静默截断/写穿（`#774`）。"""
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+
+        # ① 局部变量表：1537 个 `let`。`pt_env_put` 原先静默丢第 1537 个。
+        loc = ("module cap_locals\nchoose runtime\n"
+               "fn g<T>(x: T) -> T { return x; }\n"
+               "fn f() {\n"
+               + "".join(f"    let a{i}: u32 = {i % 100};\n" for i in range(1537))
+               + "}\nfn _start() {\n}\n")
+        p = td / "cap_locals.lomt"
+        p.write_text(loc, encoding="utf-8", newline="\n")
+        r = _emit_potato_on(stage1, p)
+        assert r.returncode != 0, "1537 个局部变量居然编过了 —— `PT_EMAX` 的守卫没落地"
+        assert "1536 locals or parameters" in r.stderr, \
+            f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
+
+        # ② 纪元范围表：33 个各自带 `alloc` 的循环。原先停在 32，剩下那个算 L3。
+        loops = ("module cap_loops\nchoose runtime\nchoose gc_auto_alpha\n"
+                 "fn g<T>(x: T) -> T { return x; }\n"
+                 "fn f(sz: u32) {\n"
+                 + "".join(
+                     f"    let i{i}: u32 = 0;\n"
+                     f"    while i{i} < 3 {{\n"
+                     f"        let b{i}: ptr = alloc(sz);\n"
+                     f"        store8(b{i}, 0, 1 as u8);\n"
+                     f"        i{i} = i{i} + 1;\n"
+                     f"    }}\n"
+                     for i in range(33))
+                 + "}\nfn _start() {\n}\n")
+        p = td / "cap_loops.lomt"
+        p.write_text(loops, encoding="utf-8", newline="\n")
+        r = _emit_potato_on(stage1, p)
+        assert r.returncode != 0, "33 个纪元循环居然编过了 —— `PT_GLRMX` 的守卫没落地"
+        assert "32 loop bodies" in r.stderr, \
+            f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
+
+        # ③ L0 字段表：17 个字段的 `record`。原先 `nf` 越表、读出垃圾，对象里
+        #    名字与尺寸都不对（而退出码是 0）。
+        lp = td / "cap_rec.lom"
+        lp.write_text(
+            "module cap_l0\n"
+            "record R layout(packed, size=76, endian=little) {\n"
+            + "".join(f"  f{i} : u32 @{i * 4}\n" for i in range(17))
+            + "}\n", encoding="utf-8", newline="\n")
+        use = ("module cap_rec\nchoose runtime\n"
+               f'use "{lp.as_posix()}"\n'
+               "fn _start() {\n}\n")
+        p = td / "cap_rec.lomt"
+        p.write_text(use, encoding="utf-8", newline="\n")
+        r = _emit_potato_on(stage1, p)
+        assert r.returncode != 0, "17 字段的 record 居然编过了 —— `PT_FMAX` 的守卫没落地"
+        assert "16 fields" in r.stderr, \
+            f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
+    print("      PT_EMAX / PT_GLRMX / PT_FMAX：越界三份都点名拒")
+
+
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_potato_emit_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_potato_emit_test")
 
 
 if __name__ == "__main__":

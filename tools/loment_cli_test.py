@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 import lomc  # noqa: E402  (边界操作那条判据的**独立**尺子: 参考实现真正的词法器)
@@ -93,6 +95,30 @@ def _names() -> list[str]:
 
 def _no_color() -> list[str]:
     return ["--no-color"]
+
+
+_driver: Path | None = None
+
+
+def _build_driver() -> Path:
+    """把**包里的自举驱动**从种子链出来（本机格式），供 `loment check` 的行为判据用。
+
+    装好的包跑的正是这个种子（`loment/build/selfhost_driver.ll`），不是仓库里的 Python
+    参考实现 —— 所以"用户敲 `loment check` 看到什么"只能拿它量。`loment_dist` 用同一份
+    种子出 PE/ELF（见那里的 `TOOLS`），这里只是不打包。
+    """
+    global _driver
+    if _driver is not None:
+        return _driver
+    seed = (ROOT / "loment" / "build" / "selfhost_driver.ll").read_text(encoding="utf-8")
+    raw = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(seed)[0]
+    assert raw, "链接器产出为空"
+    td = Path(tempfile.mkdtemp(prefix="lomcli-driver-"))
+    exe = td / ("loment-driver.exe" if IS_WIN else "loment-driver")
+    exe.write_bytes(raw)
+    exe.chmod(0o755)
+    _driver = exe
+    return exe
 
 
 # ---------------------------------------------------------------- 构建与入口
@@ -321,8 +347,8 @@ def _boundary_counts(text: str) -> dict[str, int]:
             i += 3
             continue
         i += 1
-    syscalls = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if b.startswith("syscall"))
-    ptrs = sum(calls(b) for b in potato.BOUNDARY_BUILTINS if not b.startswith("syscall"))
+    syscalls = sum(calls(b) for b in potato.BOUNDARY_SYSCALLS)
+    ptrs = sum(calls(b) for b in potato.BOUNDARY_PTR_TRANSFORMS)
     extc = sum(calls(nm) for nm in externs)
     return {"extern fn declared": len(externs), "extern call sites": extc,
             "syscalls": syscalls, "raw ptr transforms": ptrs,
@@ -360,8 +386,8 @@ def test_stat_boundary_counts_match_the_lexer():
     # 边缘 (注释里的名字、字符串里的名字、以它开头的长名字、声明处那个 `(`)
     # 全在 `loment/lex/boundary.lomt` 里, 而它在语料里一次都碰不到。
     fix = ROOT / "loment" / "lex" / "boundary.lomt"
-    pinned = {"extern fn declared": 2, "extern call sites": 3, "syscalls": 3,
-              "raw ptr transforms": 4, "total sites": 10}
+    pinned = {"extern fn declared": 2, "extern call sites": 3, "syscalls": 4,
+              "raw ptr transforms": 4, "total sites": 11}
     got_o = _boundary_counts(fix.read_text(encoding="utf-8"))
     assert got_o == pinned, f"夹具自己的期望值漂了: 词法器数出 {got_o}, 写的是 {pinned}"
     rc, out, err = _run(["stat", str(fix)] + _no_color())
@@ -400,7 +426,7 @@ def test_count_and_fns_on_a_known_file():
     d = Path(tempfile.mkdtemp(prefix="lomcli-cnt-"))
     f = d / "x.lomt"
     f.write_text(
-        "module x\n\nstruct S {\n    a: u32,\n}\n\n"
+        "module x\nchoose runtime\n\nstruct S {\n    a: u32,\n}\n\n"
         "enum E {\n    A,\n}\n\n"
         "fn one() -> u32 {\n    return 1;\n}\n\n"
         "pub fn two(a: u32) -> u32 {\n    return a;\n}\n",
@@ -418,7 +444,7 @@ def test_count_and_fns_on_a_known_file():
 def test_tokens_picks_up_strings_and_comments():
     d = Path(tempfile.mkdtemp(prefix="lomcli-tok-"))
     f = d / "x.lomt"
-    f.write_text('module x\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n    return 1;\n}\n',
+    f.write_text('module x\nchoose runtime\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n    return 1;\n}\n',
                  encoding="utf-8", newline="\n")
     rc, out, _ = _run(["tokens", str(f)] + _no_color())
     assert rc == 0
@@ -465,7 +491,8 @@ def test_new_writes_a_skeleton_that_compiles():
     deps = lomentc.resolve_deps(mod, ROOT, f.parent, entry=f)
     assert not lomentc.check(mod, deps=deps), "生成的骨架检查不过"
     assert lomentc.emit_llvm(mod, ROOT, deps), "生成的骨架发射不出 IR"
-    assert "_start" in f.read_text(encoding="utf-8")
+    text = f.read_text(encoding="utf-8")
+    assert "fn main" in text and "print(" in text, f"骨架不是新的 hello world:\n{text}"
 
 
 @test
@@ -485,6 +512,28 @@ def test_version_reads_share_version():
     assert rc == 0
     assert out.startswith("Loment 0.1.4 Pre2"), out
     assert "commit 0123456" in out
+
+
+@test
+def test_version_reads_tur_edition_from_an_artifact():
+    """`loment version <exe>` 读回产物里的版次（`docs/296` §1.2）。
+
+    **跨块那条要留着**：扫描按 `FILE_CAP` 分块，标记正好压在第一块末尾时，
+    一次 `slurp` 的实现会读不到 —— 那正是可执行文件里最常见的位置分布。
+    """
+    d = Path(tempfile.mkdtemp(prefix="lomcli-tur-"))
+    blob = b"LOMENT-TUR:tur2026.2\0"
+    cases = (("small", b"junk" + blob + b"tail"),
+             ("cross", b"x" * 262140 + blob + b"tail"))
+    for name, raw in cases:
+        p = d / f"{name}.bin"
+        p.write_bytes(raw)
+        rc, out, err = _run(["version", str(p)])
+        assert rc == 0 and out.strip() == "tur edition tur2026.2", (name, rc, out, err)
+    p = d / "none.bin"
+    p.write_bytes(b"no metadata here")
+    rc, _, err = _run(["version", str(p)])
+    assert rc == 1 and "Tur edition metadata" in err, (rc, err)
 
 
 @test
@@ -589,7 +638,10 @@ def test_codes_lists_every_code_in_the_table():
     import loment_diag
     rc, out, _ = _run(["codes"] + _no_color())
     assert rc == 0
-    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER) if f"E{c} " not in out]
+    # 拼法是 `<100 是 E0xx、>=100 是 E0xxx`（`docs/338`，用户 2026-11-10 定）；
+    # 用生成器同一个 `_code_str` 拼，免得这里再抄一遍形状。
+    missing = [c for c in sorted(loment_diag.ASCII_ONE_LINER)
+               if f"{loment_diag._code_str(c)} " not in out]
     assert not missing, f"错误码表里没有 E{missing}"
     # 说明文字也要是表里那一份, 不是另写的
     for c, desc in loment_diag.ASCII_ONE_LINER.items():
@@ -601,16 +653,29 @@ def test_explain_accepts_three_spellings_and_rejects_junk():
     for spelling in ("E4", "e4", "4"):
         rc, out, _ = _run(["explain", spelling] + _no_color())
         assert rc == 0 and "Capability domain" in out, (spelling, out[:120])
+        # **标题与诊断正文同一种拼法**（`#9`）：正文印 `error[E004]`，标题却印 `E4` ——
+        # 用户从正文里抄一个码过来，得到的标题和抄过去的不一样。三种输入拼法指向同一个
+        # 码，所以标题只有一种拼法。
+        assert "  E004" in out, f"{spelling}: 标题没补零: {out[:120]!r}"
     # **上界从真源推导, 不写死**。原先这里写 "E1..E23", 于是每加一个码就得手改这个测试 ——
     # 漏改时的症状是"判据红了但源码没错"; 而更糟的一种改法是把断言放宽, 从此再也不测边界。
     # 真实的契约是"explain 接受到表里最后一个码为止", 那就照它测。
     import loment_diag
-    top = max(loment_diag.ASCII_ONE_LINER)
+    # **只取用户码**（`#773`）：E9xx 是另一段，中间 36..899 是空号 —— 拿 900 当
+    # "上一个码"去试 899 会撞上那条空号，测的就不是边界了。
+    top = max(c for c in loment_diag.ASCII_ONE_LINER
+              if not loment_diag.is_internal_code(c))
     rc, _, err = _run(["explain", f"E{top + 1}"] + _no_color())
     assert rc == 2, err[:120]
     for c in (top, top - 1, top - 2):
         rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
-        assert rc == 0 and f"E{c}" in out, (c, rc, out[:120])
+        # 标题是三位补零的（与 `error[E023]` 一致），所以这里也按那个拼法找。
+        assert rc == 0 and loment_diag._code_str(c) in out, (c, rc, out[:120])
+    # 内部码段也要解释得出来（`#773` 那一条记录会渲染成 `error[E0900]`）。
+    for c in sorted(c for c in loment_diag.ASCII_ONE_LINER
+                    if loment_diag.is_internal_code(c)):
+        rc, out, _ = _run(["explain", f"E{c}"] + _no_color())
+        assert rc == 0 and loment_diag._code_str(c) in out, (c, rc, out[:120])
     rc, _, _ = _run(["explain"] + _no_color())
     assert rc == 2
 
@@ -638,6 +703,122 @@ def test_reference_pages_are_nonempty():
         rc, out, _ = _run([c] + _no_color())
         assert rc == 0, f"{c} 退出 {rc}"
         assert len(out.strip()) > 60, f"{c} 输出太短: {out!r}"
+
+
+@test
+def test_reference_page_columns_never_touch():
+    """首列 ≥10 宽时也必须与说明隔开（`#35`）。
+
+    `termrow` 用 `wpadx(..., 10)` 补空格，而 `wpadx` **只补到** 10 —— 首列本身 10 宽或
+    更宽时一个空格都不写，于是 `* capabilitycapability`、`* program/ABIchoose`、
+    `control flowif / else` 三行粘在一起。修法是**无条件补一个分隔空格**。
+
+    判据取的是**真输出**（起 CLI 打那三页），不是源码里有没有 `wstr` —— 粘住是渲染结果
+    的性质。三行各代表一种宽度（12 / 13 / 12），任何固定的 pad 宽度都救不了全部。
+    """
+    rc, out, _ = _run(["keywords"] + _no_color())
+    assert rc == 0, rc
+    assert "  * capability capability  guard" in out, (
+        f"`* capability`（12 宽）与说明粘住了: {out!r}")
+    assert "  * program/ABI choose  addin" in out, (
+        f"`* program/ABI`（13 宽）与说明粘住了: {out!r}")
+    rc, out, _ = _run(["syntax"] + _no_color())
+    assert rc == 0, rc
+    assert "  control flow if / else if / else" in out, (
+        f"`control flow`（12 宽）与说明粘住了: {out!r}")
+    print("      首列 12/13 宽的三行都与说明隔开")
+
+
+@test
+def test_check_json_reports_an_unresolved_use_name():
+    """`use <名字>` 解析失败时，`--json` 的 `message` 必须说出**那个名字**（`#50`）。
+
+    判据跑的是**包里的自举驱动**（种子链出来的），因为用户敲的 `loment check` 走的是它，
+    不是仓库里的 Python 参考实现。原先结构化那一份只写前缀
+    （"the name import does not resolve, or is ambiguous: "），名字只出现在 stderr ——
+    按 `message` 显示诊断的编辑器看到的是"找不到"，却没说是哪个。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomcli-e18-") as tds:
+        td = Path(tds)
+        src = td / "e18.lomt"
+        src.write_text("module e18\nuse nosuchmod\nfn _start() { syscall4(60,0,0,0); }\n",
+                       encoding="utf-8", newline="\n")
+        d = td / "d.jsonl"
+        r = subprocess.run([str(_build_driver()), str(src), "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        assert r.returncode == 1, (r.returncode, r.stdout[:200], r.stderr[:200])
+        recs = [json.loads(ln) for ln in d.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+    assert len(recs) == 1, recs
+    rec = recs[0]
+    assert rec["code"] == "E018", rec
+    assert rec["line"] == 2, rec
+    assert "nosuchmod" in rec["message"], (
+        f"--json 的消息里没有那个没解析出来的名字: {rec['message']!r}")
+    print("      E018 的 JSON 消息带上了没解析出来的名字")
+
+
+@test
+def test_the_emitter_reports_a_rule_only_it_knows():
+    """**#775**：检查器收下、发射器降不下去的规则，必须出一条结构化诊断，**不是信号**。
+
+    `#775` 的根不是"少了一条检查"，而是**发射器没有报错通道** —— 于是每条"降不下去"
+    的规则只能抄进检查器，否则用户拿到的是 `panic` / SIGILL / 非法 IR。
+    `tools/lomentc.py:4147` 那条注释把这件事写在明面上。
+
+    这条判据挑的规则**只长在自举发射器里**：一次调用的实参超过 20 个（那 20 是
+    `CG_PARAM` 每函数的槽数，`#265` 量的）。Loment **没有**"实参最多 20 个"这条语言
+    规则 —— 参考实现收下、发射器也能发；只有自举发射器降不下去。修之前那里是
+    `panic(20)`：进程被 ILL 打死，`--diag-out` 一个字都不写（实测 rc=0xC000001D）。
+    修之后它走发射器自己的诊断通道，出 **E023**（"这一版还没实现"），带 token 行号。
+
+    这条判据同时钉住三件事：检查器**不该**为了它长出一条新规则（参考侧 check 干净）；
+    记录**是**结构化的（码 + 行 + 消息）；退出码是**普通失败**（1），不是崩溃码。
+    """
+    params = ", ".join(f"a{i}: u32" for i in range(21))
+    args = ", ".join(str(i) for i in range(21))
+    body = " + ".join(f"a{i}" for i in range(21))
+    text = f"""module m275
+fn f({params}) -> u32 {{ return {body}; }}
+fn _start() {{
+    let x: u32 = f({args});
+    syscall4(60, x as u64, 0, 0);
+}}
+"""
+    with tempfile.TemporaryDirectory(prefix="lomcli-775-") as tds:
+        td = Path(tds)
+        src = td / "many.lomt"
+        src.write_text(text, encoding="utf-8", newline="\n")
+        # ① 参考实现的检查器收下它 —— 这条规则**不是**语言规则。
+        sys.path.insert(0, str(ROOT / "tools"))
+        import lomentc  # noqa: E402
+        mod, deps = lomentc.load_unit(src, ROOT)
+        assert not lomentc.check(mod, deps=deps), (
+            "参考检查器拒了 21 个实参 —— 那它就变成一条语言规则了，"
+            "这条判据测的东西也就变了（#775 要的是发射器自己报）")
+        # 参考发射器发得出来（所以这不是"两个实现都不行"）。
+        assert lomentc.emit_llvm(mod, ROOT, deps), "参考发射器也发不出这份单元"
+        # ② 自举驱动：普通失败 + 一条 E023 记录。
+        d = td / "d.jsonl"
+        r = subprocess.run([str(_build_driver()), str(src), "--diag-out", str(d)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", shell=False, timeout=120)
+        recs = ([json.loads(ln) for ln in d.read_text(encoding="utf-8").splitlines()
+                 if ln.strip()] if d.exists() else [])
+    assert r.returncode == 1, (
+        f"自举发射器没有正常报错（rc={r.returncode}，"
+        f"0xC000001D=ILL 就是修前的 panic）: {r.stderr[:300]!r}")
+    assert recs, f"发射器拒绝了却没有写结构化诊断: stderr={r.stderr[:300]!r}"
+    rec = recs[0]
+    assert rec["code"] == "E023", rec
+    assert rec["line"] > 0, f"记录没有指到源码行: {rec}"
+    assert "more than 20 arguments" in rec["message"], (
+        f"消息没说出降不下去的那条规则: {rec['message']!r}")
+    # 人看的那一行也要有（直接跑驱动的人手上没有渲染器）。
+    assert "more than 20 arguments" in r.stderr, (
+        f"只写了 JSONL、没打给人看的那一行: {r.stderr[:300]!r}")
+    print("      #775: 发射器独有的降级规则报成 E023（rc=1，有行号），不再是信号")
 
 
 # ---------------------------------------------------------------- 防漂移
@@ -802,13 +983,17 @@ def test_both_launchers_forward_the_renderer_output_modes():
     # bash: 两处参数扫描（check/ir 一处、build/run 一处）都要认，且都要转交
     assert sh.count("--short|--json) om=$1; shift ;;") == 2, \
         "bash 启动器不是两处参数扫描都认 --short/--json"
-    assert sh.count('"$nc $om"') == 2, "bash 启动器没把输出模式转交给 report_diags"
+    assert sh.count('"$nc $om"') == 3, "bash 启动器没把输出模式转交给 report_diags"
     assert '"$(tool lomenterr)" $rflags "$dfile"' in sh, \
         "renderer 的开关没有一起(word-split)传给 lomenterr"
-    # `--max N` / `--max=N`：两个拼法都要转交，而且**带上它的值**（这个词的两个拼法各一条）
-    assert sh.count('--max) om="$om --max ${2:-}"; shift 2 ;;') == 2, \
-        "bash: --max <N> 没被认/没带上值"
-    assert sh.count('--max=*) om="$om $1"; shift ;;') == 2, "bash: --max=N 那个拼法没被认"
+    # `--max N` / `--max=N`：两个拼法都要转交，而且**带上它的值**（这个词的两个拼法各一条）。
+    # 值先过 `need_max` 再转发（`#659`：缺数值是**启动器**的用法错，不能原样漏给渲染器 ——
+    # 那会让它把诊断文件当成上限、用自己的 usage 顶掉用户的报错）。
+    assert sh.count('--max) maxval=${2:-}; need_max "$maxval"') == 2, \
+        "bash: --max <N> 没被认/没校验/没带上值"
+    assert sh.count('--max=*) maxval=${1#--max=}; need_max "$maxval"') == 2, \
+        "bash: --max=N 那个拼法没被认/没校验"
+    assert sh.count('om="$om --max $maxval"') == 2, "bash: --max 的值没被转交"
 
     # cmd: check 走 :scan_arg、build/run 走 :barg_loop —— 两条路都要认，且都要转交
     assert cmd.count('if /I "%~1"=="--short" goto scan_om') == 1, "cmd: check 不认 --short"
@@ -816,18 +1001,57 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if /I "%~1"=="--short" goto barg_om') == 1, "cmd: build/run 不认 --short"
     assert cmd.count('if /I "%~1"=="--json" goto barg_om') == 1, "cmd: build/run 不认 --json"
     assert ':barg_om' in cmd and ':scan_om' in cmd, "cmd: 两个分支缺一个落点"
-    # 累加式的写法出现在两处：check 那路的 `:scan_om`，与 build/run 那路的 `--max=N` 落点
-    assert cmd.count('set "com=%com% %~1"') == 2, "cmd: 没把这个开关累加进 com"
+    # 累加式的写法出现在三处：check 那路的 `:scan_om`、`--max` 的值（`:scan_max_val`，
+    # 见 `test_both_launchers_honour_diag_out`），与 build/run 那路的 `--max=N` 落点
+    assert cmd.count('set "com=%com% %~1"') == 3, "cmd: 没把这个开关累加进 com"
     assert cmd.count('set "com=%~1"') == 1, "cmd: build/run 那路没记下这个开关"
-    assert cmd.count('"%cnc% %com%"') == 3, \
-        "cmd: 三处 report_diags 调用没有都带上输出模式"
+    # 五处：check/ir 一处、build 的驱动与链接器各一处、run 的驱动与链接器各一处。
+    # 链接器那两处是 `issue #8` 加上的 —— lomelf 现在也有自己的 `--diag-out`，
+    # 写不了产物时它吐一条 E029，由同一个 report_diags 渲染。
+    assert cmd.count('"%cnc% %com%"') == 5, \
+        "cmd: 每处 report_diags 调用都要带上输出模式 (driver ×2 + lomelf ×2 + check ×1)"
     # `--max` 在 cmd 里是**两**个词，而 check 那路是 `for` 扫全命令行 —— 必须记住
     # "下一个词是它的值"并跳过，否则 `--max 0` 会把 `0` 当成源文件名。
     assert cmd.count('if /I "%~1"=="--max" goto scan_max') == 1, "cmd: check 不认 --max"
     assert ':scan_max' in cmd and 'set "cskip=1"' in cmd, "cmd: 没记住 --max 的值那一个词"
     assert cmd.count('if not defined cskip goto scan_arg_go') == 1, \
         "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
-    assert cmd.count('set "com=%com% --max %~2"') == 1, "cmd: build/run 没带上 --max 的值"
+    # 值同样先过数值校验再累加（`#659`；`:barg_max` 用的是校验过的 `%bmax%`）。
+    assert cmd.count('set "com=%com% --max %bmax%"') == 1, "cmd: build/run 没带上 --max 的值"
+    assert cmd.count('for /f "delims=0123456789"') == 2, \
+        "cmd: 两处 --max 的值都没做数值校验（缺值/非数要当启动器的用法错）"
+
+
+@test
+def test_both_launchers_honour_diag_out():
+    """`--diag-out PATH` 要把**驱动**写诊断的位置改到那里（`#13`）。
+
+    它不是一个渲染器开关：`lomenterr` 的用法行让用户敲的正是这条命令，而编辑器吃的
+    `byte_start`/`byte_end` 就在那些 JSON 行里。原先 bash 报 `unknown option` 退 2，
+    cmd 的 check 路把它静默吞掉 —— 两条路都到不了"文件真的出现"。
+
+    顺带钉住 cmd 侧那个**值**：`:scan_max` 只记了 `--max` 本身、把值跳过就丢了，
+    于是 `lomenterr --max d.jsonl` 把诊断文件当成了上限、打自己的用法。
+    """
+    import loment_dist
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    assert sh.count("--diag-out) dout=${2:-}; shift 2 ;;") == 1, \
+        "bash: --diag-out PATH 没被认"
+    assert sh.count("--diag-out=*) dout=${1#--diag-out=}; shift ;;") == 1, \
+        "bash: --diag-out=PATH 没被认"
+    assert '--diag-out "$(to_posix "$dpath")"' in sh, \
+        "bash: 驱动拿到的不是 dpath —— 文件写不到用户要的地方"
+    assert sh.count('report_diags "$dpath"') == 1, "bash: 渲染器读的还不是那一份"
+
+    assert cmd.count('if /I "%~1"=="--diag-out" goto scan_dout') == 1, \
+        "cmd: check 路不认 --diag-out"
+    assert 'set "cdout=%ss:~11%"' in cmd, "cmd: --diag-out=PATH 那个拼法没被认"
+    assert ':scan_max_val' in cmd and ':scan_out_val' in cmd, \
+        "cmd: 两个带值的开关都没把值收下"
+    assert cmd.count('set "dpath=%cdout%"') == 1, "cmd: 驱动写的位置没换成用户的"
+    assert cmd.count('--diag-out "%dpath%"') == 2, \
+        "cmd: ir / check 两条路都要写到 dpath"
 
 
 @test
@@ -888,6 +1112,53 @@ def test_both_launchers_reject_extra_check_files():
     assert 'if defined cbad exit /b 2' in cmd
 
 
+@test
+def test_launchers_refuse_what_they_cannot_honour():
+    """四个"广告了却办不到 / 接受了却丢掉"的开关（`#632` `#633` `#635` `#636`）。
+
+    * **`#632`** Windows 的 PE 链接器拒**每一个** `--link`，而 `.cmd` 的 usage 还在广告
+      它 —— 用户按广告敲，撞的是一句 PE/ELF 的话。修法是**按名拒**并把 usage 里那一格拿掉。
+    * **`#633`** `.cmd` 从不读 IR 头的 `; loment-port: hosted`，于是 `choose hosted` 的单元
+      掉进 PE 链接器，报"没有 `_start`"——指错了问题。两处（build / run）都要认那个标记。
+    * **`#635`** `--link` 的值原先拼成一个字符串再**不加引号展开**，路径里的空格把它劈成
+      两个参数。bash 改成数组；cmd 侧既然 `--link` 被拒，就不再留那条拼接路径。
+    * **`#636`** `run` 接受 `-o` 却把它覆盖成临时路径：**退 0、没有产物**。两个启动器都
+      按名拒。
+
+    cmd 部分只能**静态**判（CI 没有 cmd）；bash 的那两半由 `loment_err_test` 的桩包
+    **真跑**（`test_launcher_refuses_o_on_run` / `test_launcher_keeps_a_link_path_with_spaces`）。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import loment_dist  # noqa: E402
+    sh, cmd = loment_dist.LAUNCHER_SH, loment_dist.LAUNCHER_CMD
+
+    # #632：广告里有 --link、行为里只是累加 —— 两处都得消失，换成一个点名拒绝。
+    usage = cmd.split(":usage", 1)[1].split("exit /b", 1)[0]
+    assert "--link" not in usage, f"Windows usage 还在广告 --link: {usage!r}"
+    assert "--link needs the ELF target" in cmd, "#632: 没有按名拒 --link"
+    assert "%linkargs%" not in cmd, "#635: cmd 还留着拼接后再展开的 linkargs"
+
+    # #633：两处（build / run）都要读标记，且都要有拒绝的落点。
+    assert cmd.count('findstr /b /l /c:"; loment-port: hosted"') == 2, \
+        "#633: build/run 里不是两处都读 `; loment-port: hosted`"
+    assert ":hosted_unit" in cmd and "hosted products need the ELF target" in cmd, \
+        "#633: 没有点名拒绝 hosted 的落点"
+    assert cmd.index('findstr /b /l /c:"; loment-port: hosted"') < cmd.index(":hosted_unit")
+
+    # #635：bash 把 --link 的值放进数组，展开时加引号。
+    assert "linkargs[${#linkargs[@]}]=--link" in sh, "#635: bash 没把 --link 放进数组"
+    assert '"${linkargs[@]}"' in sh, "#635: bash 展开 linkargs 时没加引号"
+    assert not re.search(r"\$linkargs\b", sh), "#635: bash 还留着字符串版 linkargs"
+    assert not re.search(r"\$objs\b", sh), "#635: bash 还留着字符串版 objs"
+
+    # #636：两个启动器都按名拒 `run -o`。
+    assert "-o is for build; run produces no artifact" in sh, "#636: bash 没拒 run -o"
+    assert "-o is for build; run produces no artifact" in cmd, "#636: cmd 没拒 run -o"
+    assert 'if [ "$mode" = run ] && [ -n "$out_set" ]' in sh, "#636: bash 的拒绝没接在解析之后"
+    assert 'if "%bmode%"=="r" goto run_out_refused' in cmd, "#636: cmd 的拒绝没接在 :barg_out"
+    print("      #632/#633/#635/#636: 四个开关都不再被广告/静默接受")
+
+
 # ---------------------------------------------------------------- Loment 版（S1 第十二格）
 
 _TW = f"/tmp/loment-cli-{os.getpid()}-"
@@ -897,10 +1168,10 @@ TWIN = ROOT / "loment" / "tools" / "lomclicheck.lomt"
 _VER_TXT = ("Loment 0.1.4 Pre2 (0.1.4-pre2), commit 0123456\nbuild 2026-09-15\n")
 _TOUR = "module tour\n\nfn _start() {\n    syscall4(60, 0, 0, 0);\n}\n"
 _Y_SRC = "one\nalpha\ntwo\nalpha\nthree\n"
-_C_SRC = ("module x\n\nstruct S {\n    a: u32,\n}\n\nenum E {\n    A,\n}\n\n"
+_C_SRC = ("module x\nchoose runtime\n\nstruct S {\n    a: u32,\n}\n\nenum E {\n    A,\n}\n\n"
           "fn one() -> u32 {\n    return 1;\n}\n\n"
           "pub fn two(a: u32) -> u32 {\n    return a;\n}\n")
-_T_SRC = ('module x\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n'
+_T_SRC = ('module x\nchoose runtime\n\n// 注释\nfn f() -> u32 {\n    let s: str = "ab";\n'
           '    return 1;\n}\n')
 _HI_SRC = "module hi\n"
 _STUBS = ("loment-driver", "loment-lsp", "loment-fmt", "loment-doc",
@@ -946,7 +1217,7 @@ r codes $C --no-color codes
 r ex4 $C --no-color explain E4
 r exe4 $C --no-color explain e4
 r ex4b $C --no-color explain 4
-r ex99 $C --no-color explain E99
+r ex300 $C --no-color explain E300
 r exno $C --no-color explain
 r pgsyntax $C --no-color syntax
 r pgbuiltins $C --no-color builtins
@@ -1023,9 +1294,12 @@ def _cli_fixtures(root: Path) -> None:
         lines.pop()
     _w(root / "want_stat.txt", f"{len(yraw)}\n{len(lines)}\n")
     import loment_diag  # noqa: E402
-    # `explain E99` 那条要一个**表外**的码 —— 表长到 99 就该改这里, 所以先钉住
-    assert max(loment_diag.ASCII_ONE_LINER) < 99, "错误码表到 99 了, 换一个表外的码"
-    _w(root / "codes.txt", "".join(f"E{c} {d}\n"
+    # `explain E300` 那条要一个**表外**的码 —— 表长到 300 就该改这里，所以先钉住。
+    # 用户码现在到 208（`docs/338`），300 既不在用户段也不在 E9xx 内部段。
+    assert 300 not in loment_diag.ASCII_ONE_LINER, "错误码表到 300 了, 换一个表外的码"
+    # 码的拼法跟真源走（`<100` 是 `E0xx`、`>=100` 是 `E0xxx`，`docs/338`）：
+    # `loment codes` 与 `explain` 的标题都印它，夹具照那个拼法写。
+    _w(root / "codes.txt", "".join(f"{loment_diag._code_str(c)} {d}\n"
                                    for c, d in sorted(loment_diag.ASCII_ONE_LINER.items())))
 
 
@@ -1175,7 +1449,7 @@ def _cli_py_report(pkg: Path, red: Path) -> str:
     e_ok = all(run(["--no-color", "explain", s])[1].find("Capability domain") >= 0
                and run(["--no-color", "explain", s])[0] == 0
                for s in ("E4", "e4", "4"))
-    e_hi = run(["--no-color", "explain", "E99"])[0] == 2
+    e_hi = run(["--no-color", "explain", "E300"])[0] == 2
     e_no = run(["--no-color", "explain"])[0] == 2
     rep("test_explain_accepts_three_spellings_and_rejects_junk", e_ok and e_hi and e_no,
         "explain 的三种拼法 / 越界码 / 缺参 有一处不对")
@@ -1221,11 +1495,18 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -1233,6 +1514,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -1291,7 +1574,7 @@ def test_cli_check_matches_loment_twin():
         binn = f"{_TW}chk.bin"
         script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(green)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, text=True, timeout=600, shell=False)
         got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
     assert rr.stdout.strip() == "0", f"孪生该退 0: rc={rr.stdout!r}\n{got[:400]}"
@@ -1320,24 +1603,66 @@ def test_cli_twin_selfhost_compiles():
         binn = f"{_TW}s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomclicheck.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomclicheck.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
     print(f"      种子自举链编译 lomclicheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_l1_commands_refuse_an_l0_layout_file():
+    """`#57`：`check` / `fmt` / `doc` / `build` / `run` 收到 `.lom` 要**点名拒绝**。
+
+    这些命令读的是 L1 源（`.lomt`）。原先它们把 `.lom`（L0 布局，另一门语言）当 L1 源解析：
+    `check` 编出两条 E002、`fmt` 一个字都不打、退出码还是 0 —— 用户照着修不了任何东西。
+    """
+    import loment_dist  # noqa: PLC0415
+    bash = shutil.which("bash")
+    if not bash:
+        print("         (跳过: 没有 bash, 跑不了 POSIX 启动器)")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        t = Path(td)
+        pf = t / "pf"
+        (pf / "bin").mkdir(parents=True)
+        (pf / "share" / "loment").mkdir(parents=True)
+        (pf / "share" / "loment" / "version").write_bytes(b"FAKE" + bytes([10]))
+        lom = pf / "bin" / "loment"
+        lom.write_bytes(loment_dist._subst(loment_dist.LAUNCHER_SH).encode("utf-8"))
+        lom.chmod(0o755)
+        (t / "x.lom").write_bytes(b"layout x {" + bytes([10]) + b"}" + bytes([10]))
+
+        def shp(p: Path) -> str:
+            q = str(p).replace("\\", "/")
+            return f"/{q[0].lower()}{q[2:]}" if len(q) > 2 and q[1] == ":" else q
+
+        env = dict(os.environ)
+        env["PATH"] = f"{shp(pf / 'bin')}:{env.get('PATH', '')}"
+        for cmd in ("check", "fmt", "doc", "build", "run"):
+            r = subprocess.run([bash, shp(lom), cmd, "x.lom"], cwd=str(t), env=env,
+                               capture_output=True, text=True, timeout=60)
+            out = (r.stdout or "") + (r.stderr or "")
+            assert r.returncode == 2, f"{cmd} 没有拒绝 .lom（rc={r.returncode}）: {out[:200]}"
+            assert "L0 layout file" in out, f"{cmd} 的拒绝话没点名 L0：{out[:200]}"
+    print("      check/fmt/doc/build/run 对 .lom 一律 exit 2 并点名 'L0 layout file'")
+
+
+
+
+@test
+def test_the_64_char_entry_is_gone():
+    """爱心彩蛋已移除（2026-11-11 用户裁定）：64 字符参数走普通 unknown 分支。"""
+    cmd = "l" * 64
+    rc, out, err = _run(["--no-color", cmd])
+    text = (out or "") + (err or "")
+    assert rc == 2, f"64 字符参数没有按 unknown 退出 2: rc={rc} {text[:200]}"
+    assert "unknown command" in text, text[:200]
+    print("      64 字符参数走普通 unknown 分支（彩蛋入口已移除）")
+
+
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_cli_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_cli_test")
 
 
 if __name__ == "__main__":

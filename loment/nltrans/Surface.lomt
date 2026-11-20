@@ -4,6 +4,7 @@
 // 源对象: unit=surface language=loment potato=v6
 
 module surface
+choose runtime
 
 // ---- 能力域 (docs/146)
 capability slots : disk[0..4] revocable

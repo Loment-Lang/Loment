@@ -141,11 +141,12 @@ Loment 线收到后会：改 `lom/*.lom` 单源 → 重新生成包装与 spec �
 
 ## 8. 编辑器集成（VS Code 扩展，M56）
 
-Loment 现在有**编辑器宿主**了：`editors/vscode/`（VS Code 扩展，已在本机装为 `fujojtop.loment@0.1.0`）。
+Loment 现在有**编辑器宿主**了：`editors/vscode/`（VS Code 扩展，已在本机装为 `hooyan2022.loment@0.2.0`）。
 
 | 能力 | 谁提供 |
 |---|---|
 | 语法高亮（`.lomt` / `.lom`） | `syntaxes/loment.tmLanguage.json` + `syntaxes/lom.tmLanguage.json` |
+| 语法高亮（七门外门表层语法） | `syntaxes/loment-<规范名>.tmLanguage.json`，借宿主的 `source.c` / `source.python` / …（`docs/235`） |
 | 补全 / 跳转定义 / 诊断 / 格式化 | `tools/loment_lsp.py`（LSP over stdio）；**格式化在服务端做**，扩展不自己起进程 |
 | 生成 LLVM IR / 静态检查 / 跑 `test_*` / 在 FujoOS 里跑 | VS Code 任务 → `lomentc.py` / `loment.py` / `loment_boot.py`（argv 数组，不经 shell） |
 
@@ -155,8 +156,9 @@ Loment 现在有**编辑器宿主**了：`editors/vscode/`（VS Code 扩展，�
 cd editors/vscode && npm install --omit=dev     # 装 vscode-languageclient（离线打包会打进 VSIX）
 python tools/vscode_ext.py --check              # 清单/语法结构校验
 python tools/vscode_ext.py --emit loment/build/loment-vscode.vsix
+python tools/vscode_ext.py --install            # 重打包 + 侧载（本机 `code --install-extension` 起不来）
 code --install-extension loment/build/loment-vscode.vsix --force
-python tools/vscode_ext_test.py                 # 无头验收 5/5（已进门禁 vscode_ext_test）
+python tools/vscode_ext_test.py                 # 无头验收 16/16（已进门禁 vscode_ext_test）
 ```
 
 要点（对内核线也有用）：
@@ -167,9 +169,16 @@ python tools/vscode_ext_test.py                 # 无头验收 5/5（已进门�
   扩展从工作区逐级向上查找，也可用设置 `loment.serverPath` 指定。
 - **安全纪律**：扩展源码里没有 `child_process`（spawn 在 `vscode-languageclient` 内部），
   可执行位置只写字面量 `python`，一切路径走 argv 数组 —— 配置字符串不参与命令构造。
+  **"工作区能覆盖"这件事本身也声明了**（#166）：`capabilities.untrustedWorkspaces` =
+  `{supported:"limited", restrictedConfigurations:[…]}`，把"命令 / 参数 / 会被执行的脚本路径"
+  那八个设置挡住 —— 未受信工作区里 `.vscode/settings.json` 不能再借着它们指向别的程序。
+  落点两处：`vscode_ext_test::test_vscode_hardens_untrusted_workspaces` 与
+  `vscode_ext.check()`（后者保证**每次打包都会看**）。
 - 无头验收覆盖：清单/语法结构 + **每个语法正则都能编译**（防止语法文件静默失效）+
   `server-path.js` 真能找到服务 + 对真实服务做完整 LSP 往返（initialize → didOpen 诊断 →
-  补全 → 跳转 → 格式化 → shutdown）+ 错误路径（未声明变量必须成为诊断）+ VSIX 结构。
+  补全 → 跳转 → 格式化 → shutdown）+ 错误路径（未声明变量必须成为诊断）+ VSIX 结构 +
+  **表层语法声明检测与参考实现逐条对拍**（全仓 769 份源，枚举而非手挑）+
+  **真的开文档看语言 id 换没换**（那一路是事件驱动的，纯模块判据覆盖不到）。
 - 「在编辑器里人工点验三个能力」**还没做**（需要打开一个 `.lomt` 看一眼），所以 `docs/154`
   里 M56 仍记为「部分」。
 

@@ -1,0 +1,765 @@
+// std/ed25519.lomt — Ed25519 签名（RFC 8032，PureEdDSA）
+//
+// 为什么标准库要有它: TLS 证书、SSH 主机密钥、软件发行签名都越来越多地用 Ed25519 ——
+// 公钥 32 字节、签名 64 字节、没有随机数生成器的坑（nonce 由消息与私钥确定性地导出）。
+// 之前 store 里只有哈希与 KDF，没有任何**非对称**原语，"验签"这件事做不了。
+//
+// 实现路线: 与 `x25519.lomt` 同一套 16×16 位肢体（TweetNaCl 的 gf），扩展坐标下的
+// 点加法；标量模 L 的归约用 TweetNaCl 的 modL（32 个 u8 的 L，i64 中间量）。
+// 曲线常数（d、2d、基点 X/Y、sqrt(-1)）不是手抄的：它们由 d = -121665/121666 mod p、
+// y = 4/5、sqrt(-1) 独立推出后逐肢体核对过（见提交说明）。
+//
+// 边界: PureEdDSA（RFC 8032 §5.1，无上下文串）；不做 Ed25519ph/ctx 变体、不做
+// 批量验签、不做密钥派生（seed 就是私钥，公钥由它确定性导出）。
+//
+// 布局: 域元素 = 128 字节；点 = 4 个域元素 = 512 字节。所有内部函数按**基址 + 偏移**
+// 操作（不使用 `ptr_add`，`loment.py test` 的 Rust 翻译不生成 unsafe 块）。
+//
+// 命名: 公开 ed_*, 内部 eq_*。自检 test_ed25519_*（RFC 8032 向量，无系统调用）。
+
+module ed25519
+
+use "mem.lomt"
+use "sha512.lomt"
+
+pub const ED_BYTES: u32 = 32;
+pub const ED_SIG_BYTES: u32 = 64;
+
+const ED_H: u32 = 992;
+const ED_T32: u32 = 1088;
+const ED_X: u32 = 1120;
+const ED_P: u32 = 1632;
+const ED_Q: u32 = 2144;
+const ED_G1: u32 = 2656;
+const ED_G2: u32 = 2784;
+const ED_G3: u32 = 2912;
+const ED_G4: u32 = 3040;
+const ED_G5: u32 = 3168;
+const ED_G6: u32 = 3296;
+const ED_G7: u32 = 3424;
+const ED_G8: u32 = 3552;
+const ED_PROD: u32 = 3680;
+const ED_NUM: u32 = 3936;
+const ED_DEN: u32 = 4064;
+const ED_DEN2: u32 = 4192;
+const ED_DEN4: u32 = 4320;
+const ED_DEN6: u32 = 4448;
+const ED_CHK: u32 = 4576;
+const ED_T: u32 = 4704;
+const ED_CD: u32 = 4832;
+const ED_CD2: u32 = 4960;
+const ED_CX: u32 = 5088;
+const ED_CY: u32 = 5216;
+const ED_CI: u32 = 5344;
+const ED_INVT: u32 = 5472;
+const ED_POWT: u32 = 5600;
+const ED_P2: u32 = 5760;
+const ED_SCRATCH: u32 = 6272;
+
+/// 内部工作区需要的字节数。
+pub fn ed_scratch() -> u32 {
+    return ED_SCRATCH;
+}
+
+// ---------------------------------------------------------------- 域运算
+
+fn eq_get(x: ptr, o: u32, i: u32) -> i64 {
+    return mem_load64(x, o + i * 8) as i64;
+}
+
+fn eq_put(x: ptr, o: u32, i: u32, v: i64) {
+    mem_store64(x, o + i * 8, v as u64);
+}
+
+fn eq_zero(x: ptr, o: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        eq_put(x, o, i, 0 as i64);
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_one(x: ptr, o: u32) -> u32 {
+    eq_zero(x, o);
+    eq_put(x, o, 0, 1 as i64);
+    return 1;
+}
+
+fn eq_copy(x: ptr, dst: u32, src: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        eq_put(x, dst, i, eq_get(x, src, i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_carry(x: ptr, o: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        let v: i64 = eq_get(x, o, i) + (65536 as i64);
+        let c: i64 = v >> 16;
+        let t: i64 = c - (1 as i64);
+        if i < 15 {
+            eq_put(x, o, i + 1, eq_get(x, o, i + 1) + t);
+        } else {
+            eq_put(x, o, 0, eq_get(x, o, 0) + t * (38 as i64));
+        }
+        eq_put(x, o, i, v - (c << 16));
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_sel(x: ptr, p: u32, q: u32, b: u32) -> u32 {
+    let m: i64 = 0 as i64 - (b as i64);
+    let i: u32 = 0;
+    while i < 16 {
+        let t: i64 = m & (eq_get(x, p, i) ^ eq_get(x, q, i));
+        eq_put(x, p, i, eq_get(x, p, i) ^ t);
+        eq_put(x, q, i, eq_get(x, q, i) ^ t);
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_add(x: ptr, o: u32, a: u32, b: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        eq_put(x, o, i, eq_get(x, a, i) + eq_get(x, b, i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_sub(x: ptr, o: u32, a: u32, b: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        eq_put(x, o, i, eq_get(x, a, i) - eq_get(x, b, i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_mul(x: ptr, o: u32, a: u32, b: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 31 {
+        mem_store64(x, ED_PROD + i * 8, 0 as u64);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 16 {
+        let ai: i64 = eq_get(x, a, i);
+        let j: u32 = 0;
+        while j < 16 {
+            let cur: i64 = mem_load64(x, ED_PROD + (i + j) * 8) as i64;
+            mem_store64(x, ED_PROD + (i + j) * 8, (cur + ai * eq_get(x, b, j)) as u64);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < 15 {
+        let lo: i64 = mem_load64(x, ED_PROD + i * 8) as i64;
+        let hi: i64 = mem_load64(x, ED_PROD + (i + 16) * 8) as i64;
+        mem_store64(x, ED_PROD + i * 8, (lo + hi * (38 as i64)) as u64);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 16 {
+        eq_put(x, o, i, mem_load64(x, ED_PROD + i * 8) as i64);
+        i = i + 1;
+    }
+    eq_carry(x, o);
+    eq_carry(x, o);
+    return 1;
+}
+
+fn eq_sq(x: ptr, o: u32, a: u32) -> u32 {
+    return eq_mul(x, o, a, a);
+}
+
+fn eq_inv(x: ptr, o: u32, a: u32) -> u32 {
+    eq_copy(x, ED_INVT, a);
+    let k: i64 = 253 as i64;
+    while k >= 0 {
+        eq_sq(x, ED_INVT, ED_INVT);
+        if k != (2 as i64) && k != (4 as i64) {
+            eq_mul(x, ED_INVT, ED_INVT, a);
+        }
+        k = k - 1;
+    }
+    return eq_copy(x, o, ED_INVT);
+}
+
+fn eq_pow2523(x: ptr, o: u32, a: u32) -> u32 {
+    eq_copy(x, ED_POWT, a);
+    let k: i64 = 250 as i64;
+    while k >= 0 {
+        eq_sq(x, ED_POWT, ED_POWT);
+        if k != (1 as i64) {
+            eq_mul(x, ED_POWT, ED_POWT, a);
+        }
+        k = k - 1;
+    }
+    return eq_copy(x, o, ED_POWT);
+}
+
+/// 压缩（模 p）写到 out + oo。
+fn eq_pack(x: ptr, out: ptr, oo: u32, n: u32) -> u32 {
+    eq_copy(x, ED_T, n);
+    eq_carry(x, ED_T);
+    eq_carry(x, ED_T);
+    eq_carry(x, ED_T);
+    let round: u32 = 0;
+    while round < 2 {
+        eq_put(x, ED_G8, 0, eq_get(x, ED_T, 0) - (65517 as i64));
+        let i: u32 = 1;
+        while i < 15 {
+            let prev: i64 = (eq_get(x, ED_G8, i - 1) >> 16) & (1 as i64);
+            eq_put(x, ED_G8, i, eq_get(x, ED_T, i) - (65535 as i64) - prev);
+            eq_put(x, ED_G8, i - 1, eq_get(x, ED_G8, i - 1) & (65535 as i64));
+            i = i + 1;
+        }
+        let prev15: i64 = (eq_get(x, ED_G8, 14) >> 16) & (1 as i64);
+        eq_put(x, ED_G8, 15, eq_get(x, ED_T, 15) - (32767 as i64) - prev15);
+        let b: u32 = ((eq_get(x, ED_G8, 15) >> 16) & (1 as i64)) as u32;
+        eq_put(x, ED_G8, 14, eq_get(x, ED_G8, 14) & (65535 as i64));
+        eq_sel(x, ED_T, ED_G8, 1 - b);
+        round = round + 1;
+    }
+    let i2: u32 = 0;
+    while i2 < 16 {
+        let v: i64 = eq_get(x, ED_T, i2);
+        store8(out, oo + 2 * i2, (v & (255 as i64)) as u8);
+        store8(out, oo + 2 * i2 + 1, ((v >> 8) & (255 as i64)) as u8);
+        i2 = i2 + 1;
+    }
+    return 1;
+}
+
+fn eq_unpack(x: ptr, o: u32, n: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        let lo: i64 = load8(n, 2 * i) as i64;
+        let hi: i64 = load8(n, 2 * i + 1) as i64;
+        eq_put(x, o, i, lo + (hi << 8));
+        i = i + 1;
+    }
+    eq_put(x, o, 15, eq_get(x, o, 15) & (32767 as i64));
+    return 1;
+}
+
+fn eq_neg(x: ptr, o: u32, a: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 16 {
+        eq_put(x, o, i, (0 as i64) - eq_get(x, a, i));
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn eq_parity(x: ptr, a: u32) -> u32 {
+    eq_pack(x, x, ED_T32, a);
+    return (load8(x, ED_T32) & 1) as u32;
+}
+
+fn eq_eq25519(x: ptr, a: u32, b: u32) -> bool {
+    eq_pack(x, x, ED_T32, a);
+    eq_pack(x, x, ED_H, b);
+    let i: u32 = 0;
+    while i < 32 {
+        if load8(x, ED_T32 + i) != load8(x, ED_H + i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 曲线常数
+
+fn eq_consts(x: ptr) -> u32 {
+    eq_put(x, ED_CD, 0, 30883 as i64);
+    eq_put(x, ED_CD, 1, 4953 as i64);
+    eq_put(x, ED_CD, 2, 19914 as i64);
+    eq_put(x, ED_CD, 3, 30187 as i64);
+    eq_put(x, ED_CD, 4, 55467 as i64);
+    eq_put(x, ED_CD, 5, 16705 as i64);
+    eq_put(x, ED_CD, 6, 2637 as i64);
+    eq_put(x, ED_CD, 7, 112 as i64);
+    eq_put(x, ED_CD, 8, 59544 as i64);
+    eq_put(x, ED_CD, 9, 30585 as i64);
+    eq_put(x, ED_CD, 10, 16505 as i64);
+    eq_put(x, ED_CD, 11, 36039 as i64);
+    eq_put(x, ED_CD, 12, 65139 as i64);
+    eq_put(x, ED_CD, 13, 11119 as i64);
+    eq_put(x, ED_CD, 14, 27886 as i64);
+    eq_put(x, ED_CD, 15, 20995 as i64);
+
+    eq_put(x, ED_CD2, 0, 61785 as i64);
+    eq_put(x, ED_CD2, 1, 9906 as i64);
+    eq_put(x, ED_CD2, 2, 39828 as i64);
+    eq_put(x, ED_CD2, 3, 60374 as i64);
+    eq_put(x, ED_CD2, 4, 45398 as i64);
+    eq_put(x, ED_CD2, 5, 33411 as i64);
+    eq_put(x, ED_CD2, 6, 5274 as i64);
+    eq_put(x, ED_CD2, 7, 224 as i64);
+    eq_put(x, ED_CD2, 8, 53552 as i64);
+    eq_put(x, ED_CD2, 9, 61171 as i64);
+    eq_put(x, ED_CD2, 10, 33010 as i64);
+    eq_put(x, ED_CD2, 11, 6542 as i64);
+    eq_put(x, ED_CD2, 12, 64743 as i64);
+    eq_put(x, ED_CD2, 13, 22239 as i64);
+    eq_put(x, ED_CD2, 14, 55772 as i64);
+    eq_put(x, ED_CD2, 15, 9222 as i64);
+
+    eq_put(x, ED_CX, 0, 54554 as i64);
+    eq_put(x, ED_CX, 1, 36645 as i64);
+    eq_put(x, ED_CX, 2, 11616 as i64);
+    eq_put(x, ED_CX, 3, 51542 as i64);
+    eq_put(x, ED_CX, 4, 42930 as i64);
+    eq_put(x, ED_CX, 5, 38181 as i64);
+    eq_put(x, ED_CX, 6, 51040 as i64);
+    eq_put(x, ED_CX, 7, 26924 as i64);
+    eq_put(x, ED_CX, 8, 56412 as i64);
+    eq_put(x, ED_CX, 9, 64982 as i64);
+    eq_put(x, ED_CX, 10, 57905 as i64);
+    eq_put(x, ED_CX, 11, 49316 as i64);
+    eq_put(x, ED_CX, 12, 21502 as i64);
+    eq_put(x, ED_CX, 13, 52590 as i64);
+    eq_put(x, ED_CX, 14, 14035 as i64);
+    eq_put(x, ED_CX, 15, 8553 as i64);
+
+    eq_put(x, ED_CY, 0, 26200 as i64);
+    eq_put(x, ED_CY, 1, 26214 as i64);
+    eq_put(x, ED_CY, 2, 26214 as i64);
+    eq_put(x, ED_CY, 3, 26214 as i64);
+    eq_put(x, ED_CY, 4, 26214 as i64);
+    eq_put(x, ED_CY, 5, 26214 as i64);
+    eq_put(x, ED_CY, 6, 26214 as i64);
+    eq_put(x, ED_CY, 7, 26214 as i64);
+    eq_put(x, ED_CY, 8, 26214 as i64);
+    eq_put(x, ED_CY, 9, 26214 as i64);
+    eq_put(x, ED_CY, 10, 26214 as i64);
+    eq_put(x, ED_CY, 11, 26214 as i64);
+    eq_put(x, ED_CY, 12, 26214 as i64);
+    eq_put(x, ED_CY, 13, 26214 as i64);
+    eq_put(x, ED_CY, 14, 26214 as i64);
+    eq_put(x, ED_CY, 15, 26214 as i64);
+
+    eq_put(x, ED_CI, 0, 41136 as i64);
+    eq_put(x, ED_CI, 1, 18958 as i64);
+    eq_put(x, ED_CI, 2, 6951 as i64);
+    eq_put(x, ED_CI, 3, 50414 as i64);
+    eq_put(x, ED_CI, 4, 58488 as i64);
+    eq_put(x, ED_CI, 5, 44335 as i64);
+    eq_put(x, ED_CI, 6, 6150 as i64);
+    eq_put(x, ED_CI, 7, 12099 as i64);
+    eq_put(x, ED_CI, 8, 55207 as i64);
+    eq_put(x, ED_CI, 9, 15867 as i64);
+    eq_put(x, ED_CI, 10, 153 as i64);
+    eq_put(x, ED_CI, 11, 11085 as i64);
+    eq_put(x, ED_CI, 12, 57099 as i64);
+    eq_put(x, ED_CI, 13, 20417 as i64);
+    eq_put(x, ED_CI, 14, 9344 as i64);
+    eq_put(x, ED_CI, 15, 11139 as i64);
+
+    return 1;
+}
+
+// ---------------------------------------------------------------- 点运算
+
+/// p = p + q（扩展坐标，四个域元素一组）。
+fn eq_add_points(x: ptr, p: u32, q: u32) -> u32 {
+    eq_sub(x, ED_G1, p + 128, p);
+    eq_sub(x, ED_G2, q + 128, q);
+    eq_mul(x, ED_G1, ED_G1, ED_G2);
+    eq_add(x, ED_G2, p, p + 128);
+    eq_add(x, ED_G3, q, q + 128);
+    eq_mul(x, ED_G2, ED_G2, ED_G3);
+    eq_mul(x, ED_G3, p + 384, q + 384);
+    eq_mul(x, ED_G3, ED_G3, ED_CD2);
+    eq_mul(x, ED_G4, p + 256, q + 256);
+    eq_add(x, ED_G4, ED_G4, ED_G4);
+    eq_sub(x, ED_G5, ED_G2, ED_G1);
+    eq_sub(x, ED_G6, ED_G4, ED_G3);
+    eq_add(x, ED_G7, ED_G4, ED_G3);
+    eq_add(x, ED_G8, ED_G2, ED_G1);
+    eq_mul(x, p, ED_G5, ED_G6);
+    eq_mul(x, p + 128, ED_G8, ED_G7);
+    eq_mul(x, p + 256, ED_G7, ED_G6);
+    eq_mul(x, p + 384, ED_G5, ED_G8);
+    return 1;
+}
+
+fn eq_cswap(x: ptr, p: u32, q: u32, b: u32) -> u32 {
+    eq_sel(x, p, q, b);
+    eq_sel(x, p + 128, q + 128, b);
+    eq_sel(x, p + 256, q + 256, b);
+    eq_sel(x, p + 384, q + 384, b);
+    return 1;
+}
+
+fn eq_scalarmult(x: ptr, p: u32, q: u32, s: ptr) -> u32 {
+    eq_zero(x, p);
+    eq_one(x, p + 128);
+    eq_one(x, p + 256);
+    eq_zero(x, p + 384);
+    let i: i64 = 255 as i64;
+    while i >= 0 {
+        let by: u32 = (i >> 3) as u32;
+        let sh: u32 = (i & (7 as i64)) as u32;
+        let b: u32 = ((load8(s, by) >> sh) & 1) as u32;
+        eq_cswap(x, p, q, b);
+        eq_add_points(x, q, p);
+        eq_add_points(x, p, p);
+        eq_cswap(x, p, q, b);
+        i = i - 1;
+    }
+    return 1;
+}
+
+fn eq_scalarbase(x: ptr, p: u32, s: ptr) -> u32 {
+    eq_copy(x, ED_Q, ED_CX);
+    eq_copy(x, ED_Q + 128, ED_CY);
+    eq_one(x, ED_Q + 256);
+    eq_mul(x, ED_Q + 384, ED_CX, ED_CY);
+    return eq_scalarmult(x, p, ED_Q, s);
+}
+
+fn eq_pack_point(x: ptr, out: ptr, oo: u32, p: u32) -> u32 {
+    eq_inv(x, ED_G7, p + 256);
+    eq_mul(x, ED_G6, p, ED_G7);
+    eq_mul(x, ED_G5, p + 128, ED_G7);
+    eq_pack(x, out, oo, ED_G5);
+    if eq_parity(x, ED_G6) == 1 {
+        store8(out, oo + 31, (load8(out, oo + 31) ^ 128) as u8);
+    }
+    return 1;
+}
+
+/// 解压公钥并取负（TweetNaCl 的 unpackneg）。0 = 成功。
+fn eq_unpackneg(x: ptr, r: u32, pk: ptr) -> u32 {
+    eq_one(x, r + 256);
+    eq_unpack(x, r + 128, pk);
+    eq_sq(x, ED_NUM, r + 128);
+    eq_mul(x, ED_DEN, ED_NUM, ED_CD);
+    eq_sub(x, ED_NUM, ED_NUM, r + 256);
+    eq_add(x, ED_DEN, r + 256, ED_DEN);
+    eq_sq(x, ED_DEN2, ED_DEN);
+    eq_sq(x, ED_DEN4, ED_DEN2);
+    eq_mul(x, ED_DEN6, ED_DEN4, ED_DEN2);
+    eq_mul(x, ED_T, ED_DEN6, ED_NUM);
+    eq_mul(x, ED_T, ED_T, ED_DEN);
+    eq_pow2523(x, ED_T, ED_T);
+    eq_mul(x, ED_T, ED_T, ED_NUM);
+    eq_mul(x, ED_T, ED_T, ED_DEN);
+    eq_mul(x, ED_T, ED_T, ED_DEN);
+    eq_mul(x, r, ED_T, ED_DEN);
+    eq_sq(x, ED_CHK, r);
+    eq_mul(x, ED_CHK, ED_CHK, ED_DEN);
+    if !eq_eq25519(x, ED_CHK, ED_NUM) {
+        eq_mul(x, r, r, ED_CI);
+    }
+    eq_sq(x, ED_CHK, r);
+    eq_mul(x, ED_CHK, ED_CHK, ED_DEN);
+    if !eq_eq25519(x, ED_CHK, ED_NUM) {
+        return 1;
+    }
+    let sign_bit: u32 = ((load8(pk, 31) >> 7) & 1) as u32;
+    if eq_parity(x, r) == sign_bit {
+        eq_neg(x, r, r);
+    }
+    eq_mul(x, r + 384, r, r + 128);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 标量模 L
+
+fn eq_l(i: u32) -> i64 {
+    if i == 0 { return 237 as i64; }
+    if i == 1 { return 211 as i64; }
+    if i == 2 { return 245 as i64; }
+    if i == 3 { return 92 as i64; }
+    if i == 4 { return 26 as i64; }
+    if i == 5 { return 99 as i64; }
+    if i == 6 { return 18 as i64; }
+    if i == 7 { return 88 as i64; }
+    if i == 8 { return 214 as i64; }
+    if i == 9 { return 156 as i64; }
+    if i == 10 { return 247 as i64; }
+    if i == 11 { return 162 as i64; }
+    if i == 12 { return 222 as i64; }
+    if i == 13 { return 249 as i64; }
+    if i == 14 { return 222 as i64; }
+    if i == 15 { return 20 as i64; }
+    if i == 31 { return 16 as i64; }
+    return 0 as i64;
+}
+
+/// x[0..64]（i64）模 L，结果 32 字节写到 out。
+fn eq_modl(x: ptr, out: ptr) -> u32 {
+    let i: i64 = 63 as i64;
+    while i >= 32 {
+        let carry: i64 = 0;
+        let base: i64 = i - 32;
+        let j: i64 = i - 32;
+        while j < i - 12 {
+            let idx: u32 = (j * 8) as u32;
+            let xi: i64 = mem_load64(x, ED_X + (i * 8) as u32) as i64;
+            let v: i64 = (mem_load64(x, ED_X + idx) as i64) + carry
+                - (16 as i64) * xi * eq_l((j - base) as u32);
+            mem_store64(x, ED_X + idx, v as u64);
+            carry = (v + 128) >> 8;
+            mem_store64(x, ED_X + idx, (v - carry * 256) as u64);
+            j = j + 1;
+        }
+        let idx2: u32 = (j * 8) as u32;
+        mem_store64(x, ED_X + idx2,
+                    ((mem_load64(x, ED_X + idx2) as i64) + carry) as u64);
+        mem_store64(x, ED_X + (i * 8) as u32, 0 as u64);
+        i = i - 1;
+    }
+    let c2: i64 = 0;
+    let j2: i64 = 0;
+    while j2 < 32 {
+        let idx3: u32 = (j2 * 8) as u32;
+        let x31: i64 = mem_load64(x, ED_X + 248) as i64;
+        let v2: i64 = (mem_load64(x, ED_X + idx3) as i64) + c2
+            - ((x31 >> 4) * eq_l(j2 as u32));
+        c2 = v2 >> 8;
+        mem_store64(x, ED_X + idx3, (v2 - c2 * 256) as u64);
+        j2 = j2 + 1;
+    }
+    let j3: i64 = 0;
+    while j3 < 32 {
+        let idx4: u32 = (j3 * 8) as u32;
+        mem_store64(x, ED_X + idx4,
+                    ((mem_load64(x, ED_X + idx4) as i64) - c2 * eq_l(j3 as u32)) as u64);
+        j3 = j3 + 1;
+    }
+    let i2: i64 = 0;
+    while i2 < 32 {
+        let idx5: u32 = (i2 * 8) as u32;
+        let lo: i64 = mem_load64(x, ED_X + idx5) as i64;
+        let next: i64 = mem_load64(x, ED_X + idx5 + 8) as i64;
+        mem_store64(x, ED_X + idx5 + 8, (next + (lo >> 8)) as u64);
+        store8(out, i2 as u32, (lo & (255 as i64)) as u8);
+        i2 = i2 + 1;
+    }
+    return 1;
+}
+
+/// 把 64 字节归约成 32 字节标量（就地写到同一缓冲）。
+fn eq_reduce(x: ptr, buf: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < 64 {
+        mem_store64(x, ED_X + i * 8, (load8(buf, i) as u64));
+        i = i + 1;
+    }
+    return eq_modl(x, buf);
+}
+
+// ---------------------------------------------------------------- 公开面
+
+/// 从 32 字节 seed 导出 32 字节公钥。
+pub fn ed_public(seed: ptr, pk: ptr, sc: ptr) -> u32 {
+    let h: ptr = alloc(64);
+    let ctx: ptr = alloc(852);
+    sha512(seed, 0, 32, h, ctx);
+    store8(h, 0, (load8(h, 0) & 248) as u8);
+    store8(h, 31, ((load8(h, 31) & 127) | 64) as u8);
+    eq_consts(sc);
+    eq_scalarbase(sc, ED_P, h);
+    return eq_pack_point(sc, pk, 0, ED_P);
+}
+
+/// 签名：sig = R || S（64 字节）。
+pub fn ed_sign(seed: ptr, msg: ptr, n: u32, sig: ptr, sc: ptr) -> u32 {
+    let pk: ptr = alloc(32);
+    let d: ptr = alloc(64);
+    let r: ptr = alloc(64);
+    let h: ptr = alloc(64);
+    let s32: ptr = alloc(32);
+    let ctx: ptr = alloc(852);
+    eq_consts(sc);
+    ed_public(seed, pk, sc);
+    sha512(seed, 0, 32, d, ctx);
+    store8(d, 0, (load8(d, 0) & 248) as u8);
+    store8(d, 31, ((load8(d, 31) & 127) | 64) as u8);
+
+    sha512_init(ctx);
+    sha512_update(ctx, d, 32, 32);
+    sha512_update(ctx, msg, 0, n);
+    sha512_final(ctx, r);
+    eq_reduce(sc, r);
+
+    eq_scalarbase(sc, ED_P, r);
+    eq_pack_point(sc, sig, 0, ED_P);
+
+    sha512_init(ctx);
+    sha512_update(ctx, sig, 0, 32);
+    sha512_update(ctx, pk, 0, 32);
+    sha512_update(ctx, msg, 0, n);
+    sha512_final(ctx, h);
+    eq_reduce(sc, h);
+
+    let k: u32 = 0;
+    while k < 64 {
+        mem_store64(sc, ED_X + k * 8, 0 as u64);
+        k = k + 1;
+    }
+    k = 0;
+    while k < 32 {
+        mem_store64(sc, ED_X + k * 8, load8(r, k) as u64);
+        k = k + 1;
+    }
+    k = 0;
+    while k < 32 {
+        let hk: i64 = load8(h, k) as i64;
+        let j: u32 = 0;
+        while j < 32 {
+            let didx: u32 = ED_X + (k + j) * 8;
+            let dk: i64 = load8(d, j) as i64;
+            mem_store64(sc, didx, ((mem_load64(sc, didx) as i64) + hk * dk) as u64);
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    eq_modl(sc, s32);
+    k = 0;
+    while k < 32 {
+        store8(sig, 32 + k, load8(s32, k) as u8);
+        k = k + 1;
+    }
+    return 1;
+}
+
+/// 验签：0 = 有效，1 = 无效。
+pub fn ed_verify(pk: ptr, msg: ptr, n: u32, sig: ptr, sc: ptr) -> u32 {
+    let h: ptr = alloc(64);
+    let s32: ptr = alloc(32);
+    let t32: ptr = alloc(32);
+    let ctx: ptr = alloc(852);
+    eq_consts(sc);
+    if eq_unpackneg(sc, ED_Q, pk) != 0 {
+        return 1;
+    }
+    sha512_init(ctx);
+    sha512_update(ctx, sig, 0, 32);
+    sha512_update(ctx, pk, 0, 32);
+    sha512_update(ctx, msg, 0, n);
+    sha512_final(ctx, h);
+    eq_reduce(sc, h);
+
+    eq_scalarmult(sc, ED_P, ED_Q, h);
+    let i: u32 = 0;
+    while i < 32 {
+        store8(s32, i, load8(sig, 32 + i) as u8);
+        i = i + 1;
+    }
+    eq_scalarbase(sc, ED_P2, s32);
+    eq_add_points(sc, ED_P, ED_P2);
+    eq_pack_point(sc, t32, 0, ED_P);
+    i = 0;
+    while i < 32 {
+        if load8(t32, i) != load8(sig, i) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn eq_hex_nib(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48;
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87;
+    }
+    return 0;
+}
+
+fn eq_hex_in(out: ptr, s: str) -> u32 {
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = eq_hex_nib(str_byte(s, 2 * i) as u32);
+        let lo: u32 = eq_hex_nib(str_byte(s, 2 * i + 1) as u32);
+        store8(out, i, (hi * 16 + lo) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn eq_eq_bytes(a: ptr, b: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, i) != load8(b, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_ed25519_public_key() -> bool {
+    let sc: ptr = alloc(ed_scratch());
+    let seed: ptr = alloc(32);
+    let want: ptr = alloc(32);
+    let got: ptr = alloc(32);
+    eq_hex_in(seed, "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+    eq_hex_in(want, "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+    ed_public(seed, got, sc);
+    return eq_eq_bytes(got, want, 32);
+}
+
+fn test_ed25519_sign_vector() -> bool {
+    // RFC 8032 §7.1 test 2: message 0x72.
+    let sc: ptr = alloc(ed_scratch());
+    let seed: ptr = alloc(32);
+    let msg: ptr = alloc(1);
+    let want: ptr = alloc(64);
+    let got: ptr = alloc(64);
+    eq_hex_in(seed, "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+    store8(msg, 0, 114 as u8);
+    eq_hex_in(want, "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00");
+    ed_sign(seed, msg, 1, got, sc);
+    return eq_eq_bytes(got, want, 64);
+}
+
+fn test_ed25519_verify_and_tamper() -> bool {
+    let sc: ptr = alloc(ed_scratch());
+    let seed: ptr = alloc(32);
+    let msg: ptr = alloc(3);
+    let pk: ptr = alloc(32);
+    let sig: ptr = alloc(64);
+    eq_hex_in(seed, "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb");
+    store8(msg, 0, 97 as u8);
+    store8(msg, 1, 98 as u8);
+    store8(msg, 2, 99 as u8);
+    ed_public(seed, pk, sc);
+    ed_sign(seed, msg, 3, sig, sc);
+    if ed_verify(pk, msg, 3, sig, sc) != 0 {
+        return false;
+    }
+    store8(sig, 7, (load8(sig, 7) ^ 1) as u8);
+    return ed_verify(pk, msg, 3, sig, sc) == 1;
+}
+
+fn test_ed25519_empty_message() -> bool {
+    let sc: ptr = alloc(ed_scratch());
+    let seed: ptr = alloc(32);
+    let msg: ptr = alloc(1);
+    let pk: ptr = alloc(32);
+    let sig: ptr = alloc(64);
+    eq_hex_in(seed, "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+    ed_public(seed, pk, sc);
+    ed_sign(seed, msg, 0, sig, sc);
+    return ed_verify(pk, msg, 0, sig, sc) == 0;
+}

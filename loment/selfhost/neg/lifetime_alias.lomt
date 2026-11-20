@@ -1,0 +1,13 @@
+module neg_lifetime_alias
+
+// `docs/299` §3.4：**存下来的** `&mut` 与后来的借用重叠 ⇒ E007（可变借用独占）。
+// 行内的 `f(&mut a, &a)` 由另一条（同码）管；这条判的是跨语句的那种。
+struct V {
+    a: u32,
+}
+
+fn f(v: V) -> u32 {
+    let m: &mut V = &mut v;
+    let s: &V = &v;
+    return s.a;
+}

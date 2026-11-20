@@ -1,0 +1,251 @@
+// system/fanotify.lomt — fanotify: 整个挂载点的文件事件（含权限裁决）
+//
+// 为什么系统工具需要它: inotify 是**逐目录**加监视，而"这个文件系统上谁打开了什么"
+// 在 inotify 里既贵又不全（要递归加 watch，还会漏掉新目录）。fanotify 按**挂载点**
+// 工作：一次 `fanotify_mark` 覆盖整棵树，事件里带 fd 与 pid。它的权限事件
+// （`FAN_OPEN_PERM` 等）甚至是"先问你能不能开、再决定" —— 那是杀毒/审计那一层的
+// 接口，因此它要 `CAP_SYS_ADMIN`，这里只摆常量与结构，不替调用方做权限决定。
+//
+// 事件元数据布局（内核 `struct fanotify_event_metadata`，24 字节）:
+//   event_len u32(0) | vers u8(4) | reserved u8(5) | metadata_len u16(6) |
+//   mask u64(8) | fd i32(16) | pid i32(20)
+// 事件后面可能跟 `FAN_EVENT_INFO_TYPE_*` 的附加信息（文件名、fd 等），按
+// `metadata_len` 跳过 —— **不是**按 `event_len` 直接走下一个。
+//
+// 不做的: `FAN_REPORT_FID` 的 info 记录解析、权限事件的应答（`write` 回一个
+// `fanotify_response`）、`FAN_MARK_FILESYSTEM` 的内核版本差异。
+//
+// 命名: 公开 fan_*, 内部 fn_*。自检 test_fanotify_*。
+
+module fanotify
+
+// ---- 初始化标志
+pub const FAN_CLOEXEC: u32 = 1;
+pub const FAN_NONBLOCK: u32 = 2;
+pub const FAN_CLASS_NOTIF: u32 = 0;
+pub const FAN_CLASS_CONTENT: u32 = 4;
+pub const FAN_CLASS_PRE_CONTENT: u32 = 8;
+pub const FAN_UNLIMITED_QUEUE: u32 = 16;
+pub const FAN_UNLIMITED_MARKS: u32 = 32;
+
+// ---- 事件掩码
+pub const FAN_ACCESS: u64 = 1;
+pub const FAN_MODIFY: u64 = 2;
+pub const FAN_ATTRIB: u64 = 4;
+pub const FAN_CLOSE_WRITE: u64 = 8;
+pub const FAN_CLOSE_NOWRITE: u64 = 16;
+pub const FAN_OPEN: u64 = 32;
+pub const FAN_OPEN_EXEC: u64 = 4096;
+pub const FAN_OPEN_PERM: u64 = 65536;
+pub const FAN_ACCESS_PERM: u64 = 131072;
+pub const FAN_OPEN_EXEC_PERM: u64 = 262144;
+
+/// 元数据头的字节数。
+pub const FAN_META_BYTES: u32 = 24;
+
+const FN_SYS_INIT: u64 = 300;
+const FN_SYS_MARK: u64 = 301;
+
+fn fn_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn fn_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return fn_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+fn fn_ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    let b: u32 = 0;
+    while b < 4 {
+        v = v | ((load8(p, off + b) as u32) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+fn fn_ld64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let b: u32 = 0;
+    while b < 8 {
+        v = v | ((load8(p, off + b) as u64) << (8 * b));
+        b = b + 1;
+    }
+    return v;
+}
+
+/// 初始化标志 -> 名字串。0 返回 `"0"`。
+pub fn fan_flags_text(flags: u32, out: ptr, cap: u32) -> u32 {
+    if flags == 0 {
+        return fn_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (flags & FAN_CLOEXEC) != 0 {
+        pos = fn_put(out, cap, pos, "FAN_CLOEXEC");
+    }
+    if (flags & FAN_NONBLOCK) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_NONBLOCK");
+    }
+    if (flags & FAN_CLASS_CONTENT) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_CLASS_CONTENT");
+    }
+    if (flags & FAN_CLASS_PRE_CONTENT) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_CLASS_PRE_CONTENT");
+    }
+    if (flags & FAN_UNLIMITED_QUEUE) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_UNLIMITED_QUEUE");
+    }
+    if (flags & FAN_UNLIMITED_MARKS) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_UNLIMITED_MARKS");
+    }
+    return pos;
+}
+
+/// 事件掩码 -> 名字串。0 返回 `"0"`。
+pub fn fan_mask_text(mask: u64, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return fn_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & FAN_ACCESS) != 0 {
+        pos = fn_put(out, cap, pos, "FAN_ACCESS");
+    }
+    if (mask & FAN_MODIFY) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_MODIFY");
+    }
+    if (mask & FAN_ATTRIB) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_ATTRIB");
+    }
+    if (mask & FAN_CLOSE_WRITE) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_CLOSE_WRITE");
+    }
+    if (mask & FAN_CLOSE_NOWRITE) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_CLOSE_NOWRITE");
+    }
+    if (mask & FAN_OPEN) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_OPEN");
+    }
+    if (mask & FAN_OPEN_EXEC) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_OPEN_EXEC");
+    }
+    if (mask & FAN_OPEN_PERM) != 0 {
+        pos = fn_sep(out, cap, pos);
+        pos = fn_put(out, cap, pos, "FAN_OPEN_PERM");
+    }
+    return pos;
+}
+
+/// `fanotify_init(flags, event_f_flags)` —— 通常要 `CAP_SYS_ADMIN`。
+pub fn fan_init(flags: u32, event_f_flags: u32) -> i64 {
+    return syscall4(FN_SYS_INIT, flags as u64, event_f_flags as u64, 0);
+}
+
+/// `fanotify_mark(fd, flags, mask, path)` —— path 是 C 串，可以为 0（配合 `AT_FDCWD`）。
+pub fn fan_mark(fd: u64, flags: u32, mask: u64, path: ptr) -> i64 {
+    return syscall7(FN_SYS_MARK, fd, flags as u64, mask, path as u64, 0, 0);
+}
+
+/// 元数据里的 event_len（整条事件的长度）。
+pub fn fan_ev_len(meta: ptr) -> u32 {
+    return fn_ld32(meta, 0);
+}
+
+/// 元数据版本（今天是 3）。
+pub fn fan_ev_vers(meta: ptr) -> u32 {
+    return load8(meta, 4) as u32;
+}
+
+/// 元数据头的实际长度 —— 下一个 info 记录从 `metadata_len` 开始。
+pub fn fan_ev_metadata_len(meta: ptr) -> u32 {
+    let lo: u32 = load8(meta, 6) as u32;
+    let hi: u32 = load8(meta, 7) as u32;
+    return lo | (hi << 8);
+}
+
+/// 事件掩码（u64）。
+pub fn fan_ev_mask(meta: ptr) -> u64 {
+    return fn_ld64(meta, 8);
+}
+
+/// 事件带的对象 fd（i32 的位；-1 是 `FAN_NOFD`）。
+pub fn fan_ev_fd(meta: ptr) -> u32 {
+    return fn_ld32(meta, 16);
+}
+
+/// 触发事件的 pid。
+pub fn fan_ev_pid(meta: ptr) -> u32 {
+    return fn_ld32(meta, 20);
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_fanotify_mask_text() -> bool {
+    let o: ptr = alloc(128);
+    let n: u32 = fan_mask_text(40, o, 128);
+    let want: str = "FAN_CLOSE_WRITE|FAN_OPEN";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn test_fanotify_meta() -> bool {
+    let m: ptr = alloc(24);
+    store8(m, 0, 48 as u8);
+    store8(m, 4, 3 as u8);
+    store8(m, 6, 24 as u8);
+    store8(m, 8, 32 as u8);
+    store8(m, 16, 5 as u8);
+    store8(m, 20, 7 as u8);
+    return fan_ev_len(m) == 48 && fan_ev_vers(m) == 3
+        && fan_ev_metadata_len(m) == 24 && fan_ev_mask(m) == 32
+        && fan_ev_fd(m) == 5 && fan_ev_pid(m) == 7;
+}
+
+fn test_fanotify_flags() -> bool {
+    let o: ptr = alloc(96);
+    let n: u32 = fan_flags_text(5, o, 96);
+    let want: str = "FAN_CLOEXEC|FAN_CLASS_CONTENT";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return FAN_META_BYTES == 24;
+}

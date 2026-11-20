@@ -15,6 +15,7 @@
 // 命名: 公开 dir_*, 自检 test_dir_*。
 
 module lpi_dir
+choose runtime
 
 use "lpi_txt.lomt"
 

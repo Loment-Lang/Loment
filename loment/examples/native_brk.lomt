@@ -12,6 +12,7 @@
 // `inttoptr`。带 syscall 的完整驱动在 loment/selfhost/driver.lomt。
 
 module native_brk
+choose runtime
 
 /// 指针 -> 整数 (M67)。
 fn ptr_to_int(p: ptr) -> u64 {

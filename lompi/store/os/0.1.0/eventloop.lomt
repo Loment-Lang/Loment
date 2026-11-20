@@ -1,0 +1,453 @@
+// os/eventloop.lomt — 把 epoll / timerfd / eventfd / signalfd 拼成一个事件循环
+//
+// 为什么需要它: `system` 包里那四个模块各管一段 —— epoll 等 fd、timerfd 报超时、
+// eventfd 做唤醒、signalfd 把信号变成文件描述符。写一个真实服务要同时等它们，
+// 而"谁先到、超时怎么算、被信号打断重不重来"这套调度是每个程序都要重写一遍的
+// 二十行。这一层就是那二十行，加上一层**固定的**事件记录格式。
+//
+// 为什么没有回调: 本语言今天没有函数指针（`os/thread.lomt` 头部同一条限制）。
+// 一个"注册回调"的事件循环写不出来 —— 所以 `el_wait` 把事件**交回**调用方，
+// 由调用方按 `tag` 自己分派。这不是权宜之计：静态调用图因此保持可见，与
+// `thread_spawn` 的取舍是同一条。
+//
+// 事件记录（16 字节，调用方自己给缓冲）:
+//   mask u32 @0   —— EL_* 位（读取/写就绪/错误/挂断）
+//   tag  u32 @4   —— 调用方在 el_add_fd/el_add_timer 时给的标签（低 32 位）
+//   fd   i64 @8   —— 事件来自哪个描述符
+// `tag` 只保留低 32 位：epoll 的 data 字段一共 64 位，低 32 位放 fd、高 32 位放
+// tag，这是唯一能既不丢 fd 又带标签的装法（fd 在 Linux 上就是 int）。
+//
+// 唤醒: `el_wake` 往内部 eventfd 写一个计数；`el_wait` 读到它时**顺手读空**，
+// 并返回一条 `mask = EL_WRITE, tag = EL_WAKE_TAG` 的事件 —— 否则水平触发的
+// eventfd 会让下一轮立刻再醒一次。
+//
+// 定时器: 一个循环只有一个 timerfd。它到期后**必须由调用方读走**（`el_take_timer`），
+// 否则同样会一直就绪。`period_ms == 0` 是一次性定时器。
+//
+// 边界: 号是 x86-64 Linux 的；不装信号处理器（只用 signalfd，且信号得先被
+// `os/sigwait` 那层屏蔽掉）；不做 fd 生命周期管理（关 fd 前先 `el_del_fd`）。
+//
+// 命名: 公开 el_*, 内部 elq_*。自检 test_eventloop_*。
+
+module eventloop
+
+use epoll
+use timerfd
+use eventfd
+use signalfd
+
+/// 可读（对应 `EPOLLIN`）。
+pub const EL_READ: u32 = 1;
+/// 可写（对应 `EPOLLOUT`）。
+pub const EL_WRITE: u32 = 4;
+/// 出错（对应 `EPOLLERR`）。
+pub const EL_ERR: u32 = 8;
+/// 挂断（对应 `EPOLLHUP` / `EPOLLRDHUP`）。
+pub const EL_HUP: u32 = 16;
+
+/// 一条事件记录的字节数。
+pub const EL_EV_BYTES: u32 = 16;
+/// 内部唤醒 fd 的标签。
+pub const EL_WAKE_TAG: u32 = 4294967295;
+
+const ELQ_SYS_CLOSE: u64 = 3;
+
+fn elq_st32(p: ptr, o: u32, v: u32) -> u32 {
+    let i: u32 = 0;
+    while i < 4 {
+        store8(p, o + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 4;
+}
+
+fn elq_ld32(p: ptr, o: u32) -> u32 {
+    let v: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        v = v | ((load8(p, o + i) as u32) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn elq_st64(p: ptr, o: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, o + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 8;
+}
+
+fn elq_ld64(p: ptr, o: u32) -> u64 {
+    let v: u64 = 0 as u64;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, o + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn elq_put(out: ptr, cap: u32, pos: u32, s: str) -> u32 {
+    let p: u32 = pos;
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        if p < cap {
+            store8(out, p, str_byte(s, i) as u8);
+        }
+        p = p + 1;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn elq_sep(out: ptr, cap: u32, pos: u32) -> u32 {
+    if pos > 0 {
+        return elq_put(out, cap, pos, "|");
+    }
+    return pos;
+}
+
+/// EL_* 事件位 -> `EPOLL*` 事件位。
+pub fn el_to_ep(mask: u32) -> u32 {
+    let ep: u32 = 0;
+    if (mask & EL_READ) != 0 {
+        ep = ep | EP_IN;
+    }
+    if (mask & EL_WRITE) != 0 {
+        ep = ep | EP_OUT;
+    }
+    if (mask & EL_ERR) != 0 {
+        ep = ep | EP_ERR;
+    }
+    if (mask & EL_HUP) != 0 {
+        ep = ep | EP_HUP;
+    }
+    return ep;
+}
+
+/// `EPOLL*` 事件位 -> EL_* 事件位；`EPOLLRDHUP` 归到 `EL_HUP`。
+pub fn el_from_ep(ep: u32) -> u32 {
+    let mask: u32 = 0;
+    if (ep & EP_IN) != 0 {
+        mask = mask | EL_READ;
+    }
+    if (ep & EP_OUT) != 0 {
+        mask = mask | EL_WRITE;
+    }
+    if (ep & EP_ERR) != 0 {
+        mask = mask | EL_ERR;
+    }
+    if (ep & EP_HUP) != 0 {
+        mask = mask | EL_HUP;
+    }
+    if (ep & EP_RDHUP) != 0 {
+        mask = mask | EL_HUP;
+    }
+    return mask;
+}
+
+/// 事件位 -> `read|write|err|hup`；0 渲染成 `"0"`。
+pub fn el_mask_text(mask: u32, out: ptr, cap: u32) -> u32 {
+    if mask == 0 {
+        return elq_put(out, cap, 0, "0");
+    }
+    let pos: u32 = 0;
+    if (mask & EL_READ) != 0 {
+        pos = elq_put(out, cap, pos, "read");
+    }
+    if (mask & EL_WRITE) != 0 {
+        pos = elq_sep(out, cap, pos);
+        pos = elq_put(out, cap, pos, "write");
+    }
+    if (mask & EL_ERR) != 0 {
+        pos = elq_sep(out, cap, pos);
+        pos = elq_put(out, cap, pos, "err");
+    }
+    if (mask & EL_HUP) != 0 {
+        pos = elq_sep(out, cap, pos);
+        pos = elq_put(out, cap, pos, "hup");
+    }
+    return pos;
+}
+
+/// 一条事件记录里的 mask。
+pub fn el_ev_mask(ev: ptr) -> u32 {
+    return elq_ld32(ev, 0);
+}
+
+/// 一条事件记录里的 tag（低 32 位）。
+pub fn el_ev_tag(ev: ptr) -> u32 {
+    return elq_ld32(ev, 4);
+}
+
+/// 一条事件记录里的 fd。
+pub fn el_ev_fd(ev: ptr) -> i64 {
+    return elq_ld64(ev, 8) as i64;
+}
+
+/// 状态缓冲的字节数。
+pub fn el_state_bytes() -> u32 {
+    return 32;
+}
+
+fn elq_st_state(sc: ptr, epfd: i64, wakefd: i64, timer: i64, running: u32) {
+    elq_st64(sc, 0, epfd as u64);
+    elq_st64(sc, 8, wakefd as u64);
+    elq_st64(sc, 16, timer as u64);
+    elq_st32(sc, 24, running);
+    elq_st32(sc, 28, 0);
+}
+
+fn elq_epfd(sc: ptr) -> i64 {
+    return elq_ld64(sc, 0) as i64;
+}
+
+fn elq_wakefd(sc: ptr) -> i64 {
+    return elq_ld64(sc, 8) as i64;
+}
+
+fn elq_timerfd(sc: ptr) -> i64 {
+    return elq_ld64(sc, 16) as i64;
+}
+
+fn elq_running(sc: ptr) -> u32 {
+    return elq_ld32(sc, 24);
+}
+
+/// 建立循环：一个 epoll fd + 一个内部唤醒 eventfd。返回 epfd（负数即失败）。
+pub fn el_open(sc: ptr) -> i64 {
+    let epfd: i64 = ep_create1(EP_CLOEXEC);
+    if epfd < (0 as i64) {
+        return epfd;
+    }
+    let wfd: i64 = ef_create(0, EF_CLOEXEC | EF_NONBLOCK);
+    if wfd < (0 as i64) {
+        let _c: i64 = syscall4(ELQ_SYS_CLOSE, epfd as u64, 0, 0);
+        return wfd;
+    }
+    elq_st_state(sc, epfd, wfd, 0 as i64, 1);
+    let ev: ptr = alloc(EP_EV_BYTES);
+    let _s: u32 = ep_ev_set(ev, EP_IN, (wfd as u64) & (4294967295 as u64));
+    let rc: i64 = ep_ctl(epfd as u64, EP_CTL_ADD, wfd as u64, ev);
+    if rc < (0 as i64) {
+        let _c1: i64 = syscall4(ELQ_SYS_CLOSE, wfd as u64, 0, 0);
+        let _c2: i64 = syscall4(ELQ_SYS_CLOSE, epfd as u64, 0, 0);
+        return rc;
+    }
+    return epfd;
+}
+
+/// 登记一个 fd 到循环里（`tag` 只保留低 32 位）。
+pub fn el_add_fd(sc: ptr, fd: i64, mask: u32, tag: u64) -> i64 {
+    let ev: ptr = alloc(EP_EV_BYTES);
+    let data: u64 = ((tag & (4294967295 as u64)) << 32) | ((fd as u64) & (4294967295 as u64));
+    let _s: u32 = ep_ev_set(ev, el_to_ep(mask), data);
+    return ep_ctl(elq_epfd(sc) as u64, EP_CTL_ADD, fd as u64, ev);
+}
+
+/// 改一个已登记 fd 的兴趣位与标签。
+pub fn el_mod_fd(sc: ptr, fd: i64, mask: u32, tag: u64) -> i64 {
+    let ev: ptr = alloc(EP_EV_BYTES);
+    let data: u64 = ((tag & (4294967295 as u64)) << 32) | ((fd as u64) & (4294967295 as u64));
+    let _s: u32 = ep_ev_set(ev, el_to_ep(mask), data);
+    return ep_ctl(elq_epfd(sc) as u64, EP_CTL_MOD, fd as u64, ev);
+}
+
+/// 从循环里摘掉一个 fd。
+pub fn el_del_fd(sc: ptr, fd: i64) -> i64 {
+    // DEL 时内核不看事件内容，但签名要一个 ptr —— 给一块零缓冲，别传整型 0。
+    let ev: ptr = alloc(EP_EV_BYTES);
+    let _z: u32 = ep_ev_set(ev, 0, 0 as u64);
+    return ep_ctl(elq_epfd(sc) as u64, EP_CTL_DEL, fd as u64, ev);
+}
+
+/// 给循环装一个定时器（一个循环只有一个）。`period_ms == 0` 是一次性。
+pub fn el_add_timer(sc: ptr, first_ms: u64, period_ms: u64, tag: u64) -> i64 {
+    let tfd: i64 = elq_timerfd(sc);
+    let fd: i64 = 0 as i64;
+    if tfd > (0 as i64) {
+        fd = tfd;
+    } else {
+        let made: i64 = tf_create(1 as u32, TF_CLOEXEC | TF_NONBLOCK);
+        if made < (0 as i64) {
+            return made;
+        }
+        fd = made;
+        elq_st64(sc, 16, made as u64);
+    }
+    let spec: ptr = alloc(TF_SPEC_BYTES);
+    let isec: u64 = period_ms / (1000 as u64);
+    let insec: u64 = (period_ms % (1000 as u64)) * (1000000 as u64);
+    let vsec: u64 = first_ms / (1000 as u64);
+    let vnsec: u64 = (first_ms % (1000 as u64)) * (1000000 as u64);
+    let _sp: u32 = tf_spec_set(spec, isec, insec, vsec, vnsec);
+    let arm: i64 = tf_settime(fd as u64, 0, spec);
+    if arm < (0 as i64) {
+        return arm;
+    }
+    let ev: ptr = alloc(EP_EV_BYTES);
+    let data: u64 = ((tag & (4294967295 as u64)) << 32) | ((fd as u64) & (4294967295 as u64));
+    let _s: u32 = ep_ev_set(ev, EP_IN, data);
+    let add: i64 = ep_ctl(elq_epfd(sc) as u64, EP_CTL_ADD, fd as u64, ev);
+    if add == (0 as i64) {
+        return fd;
+    }
+    let mrc: i64 = ep_ctl(elq_epfd(sc) as u64, EP_CTL_MOD, fd as u64, ev);
+    if mrc < (0 as i64) {
+        return mrc;
+    }
+    return fd;
+}
+
+/// 读走定时器的到期次数。**看到定时器 fd 的事件就要调它**，否则一直就绪。
+pub fn el_take_timer(sc: ptr) -> u64 {
+    let tfd: i64 = elq_timerfd(sc);
+    if tfd <= (0 as i64) {
+        return 0 as u64;
+    }
+    return tf_take_expirations(tfd as u64);
+}
+
+/// 把一个信号集变成 signalfd 并登记（信号得先被屏蔽，见 `os/sigwait`）。
+/// 返回 signalfd 的 fd，或负的 errno。
+pub fn el_add_signals(sc: ptr, set: ptr, tag: u64) -> i64 {
+    let none: u64 = 18446744073709551615;
+    let fd: i64 = sfd_create(none, set, SFD_CLOEXEC | SFD_NONBLOCK);
+    if fd < (0 as i64) {
+        return fd;
+    }
+    let rc: i64 = el_add_fd(sc, fd, EL_READ, tag);
+    if rc < (0 as i64) {
+        let _c: i64 = syscall4(ELQ_SYS_CLOSE, fd as u64, 0, 0);
+        return rc;
+    }
+    return fd;
+}
+
+/// 从 signalfd 读一条 siginfo，返回信号号（0 表示读失败）。
+pub fn el_take_signal(fd: i64, info: ptr) -> u32 {
+    let rc: i64 = sfd_read(fd as u64, info);
+    if rc < (0 as i64) {
+        return 0;
+    }
+    return sfd_info_signo(info);
+}
+
+/// 唤醒一个阻塞在 `el_wait` 的循环。
+pub fn el_wake(sc: ptr) -> i64 {
+    return ef_write(elq_wakefd(sc) as u64, 1 as u64);
+}
+
+/// 等一轮事件：`epoll_wait` + 翻译成 16 字节记录。返回事件条数或负 errno。
+///
+/// `ep_buf` 是给内核的项目缓冲（`maxev * 12` 字节）；`out` 是调用方的记录缓冲
+/// （`maxev * 16` 字节）。内部唤醒 fd 的事件会被读空并作为一条
+/// `EL_WRITE / EL_WAKE_TAG` 记录交回。
+pub fn el_wait(sc: ptr, out: ptr, maxev: u32, timeout_ms: i64, ep_buf: ptr) -> i64 {
+    if elq_running(sc) == 0 {
+        return 0;
+    }
+    let n: i64 = ep_wait(elq_epfd(sc) as u64, ep_buf, maxev, timeout_ms);
+    if n <= (0 as i64) {
+        return n;
+    }
+    let wfd: i64 = elq_wakefd(sc);
+    let count: i64 = n;
+    let i: i64 = 0;
+    let j: i64 = 0;
+    while i < count {
+        let raw: ptr = ptr_add(ep_buf, (i as u32) * EP_EV_BYTES);
+        let epmask: u32 = ep_ev_events(raw);
+        let data: u64 = ep_ev_data(raw);
+        let fd: i64 = (data & (4294967295 as u64)) as i64;
+        let tag: u32 = ((data >> 32) & (4294967295 as u64)) as u32;
+        let rec: ptr = ptr_add(out, (j as u32) * EL_EV_BYTES);
+        if fd == wfd {
+            let sink: ptr = alloc(EF_BYTES);
+            let _r: i64 = ef_read(wfd as u64, sink);
+            let _m: u32 = elq_st32(rec, 0, EL_WRITE);
+            let _t: u32 = elq_st32(rec, 4, EL_WAKE_TAG);
+            let _f: u32 = elq_st64(rec, 8, fd as u64);
+            j = j + 1;
+        } else {
+            let _m: u32 = elq_st32(rec, 0, el_from_ep(epmask));
+            let _t: u32 = elq_st32(rec, 4, tag);
+            let _f: u32 = elq_st64(rec, 8, fd as u64);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return j;
+}
+
+/// 让 `el_wait` 下一轮立即返回 0（配合 `el_wake` 从别的线程停循环）。
+pub fn el_stop(sc: ptr) -> i64 {
+    elq_st32(sc, 24, 0);
+    return el_wake(sc);
+}
+
+/// 关掉循环的所有 fd（定时器有才关）。
+pub fn el_close(sc: ptr) -> i64 {
+    let tfd: i64 = elq_timerfd(sc);
+    if tfd > (0 as i64) {
+        let _c0: i64 = syscall4(ELQ_SYS_CLOSE, tfd as u64, 0, 0);
+        elq_st64(sc, 16, 0 as u64);
+    }
+    let wfd: i64 = elq_wakefd(sc);
+    if wfd > (0 as i64) {
+        let _c1: i64 = syscall4(ELQ_SYS_CLOSE, wfd as u64, 0, 0);
+        elq_st64(sc, 8, 0 as u64);
+    }
+    let epfd: i64 = elq_epfd(sc);
+    if epfd > (0 as i64) {
+        let _c2: i64 = syscall4(ELQ_SYS_CLOSE, epfd as u64, 0, 0);
+        elq_st64(sc, 0, 0 as u64);
+    }
+    elq_st32(sc, 24, 0);
+    return 0;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_eventloop_mask_roundtrip() -> bool {
+    let ep: u32 = el_to_ep(EL_READ | EL_WRITE);
+    let back: u32 = el_from_ep(ep);
+    return ep == (EP_IN | EP_OUT) && back == (EL_READ | EL_WRITE);
+}
+
+fn test_eventloop_rdhup_is_hup() -> bool {
+    let m: u32 = el_from_ep(EP_RDHUP);
+    return m == EL_HUP;
+}
+
+fn test_eventloop_record() -> bool {
+    let rec: ptr = alloc(EL_EV_BYTES);
+    let _m: u32 = elq_st32(rec, 0, EL_READ | EL_ERR);
+    let _t: u32 = elq_st32(rec, 4, 4000000000 as u32);
+    let _f: u32 = elq_st64(rec, 8, 7 as u64);
+    return el_ev_mask(rec) == (EL_READ | EL_ERR)
+        && el_ev_tag(rec) == (4000000000 as u32)
+        && el_ev_fd(rec) == (7 as i64);
+}
+
+fn test_eventloop_text() -> bool {
+    let o: ptr = alloc(48);
+    let n: u32 = el_mask_text(EL_READ | EL_WRITE, o, 48);
+    let want: str = "read|write";
+    if n != str_len(want) {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(o, i) != str_byte(want, i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    let z: u32 = el_mask_text(0, o, 48);
+    return z == 1 && load8(o, 0) == 48 && el_state_bytes() == 32;
+}

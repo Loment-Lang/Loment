@@ -1,0 +1,30 @@
+module ex
+
+choose runtime
+
+use num
+
+fn print_dec(v: u32) {
+    let b: ptr = alloc(16);
+    let n: u32 = num_to_dec(b, v);
+    syscall4(1, 1, b as u64, n as u64);
+}
+
+fn print_nl() {
+    syscall4(1, 1, str_ptr("
+") as u64, str_len("
+") as u64);
+}
+
+struct Point {
+    x: u32,
+    y: u32,
+}
+
+fn _start() {
+    let p: Point = Point { x: 3, y: 4 };
+    p.x = 38;
+    print_dec(p.x + p.y);
+    print_nl();
+    syscall4(60, 0, 0, 0);
+}

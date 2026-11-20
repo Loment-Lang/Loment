@@ -1,0 +1,127 @@
+// os/tty.lomt — 终端: 是不是 tty、多大、进原始模式
+//
+// 为什么需要它: 一个命令行程序有三件事离不开终端, 而三件都不是普通文件 I/O:
+//   * **"我是不是连在终端上"** (`isatty`) —— 决定要不要上色 / 要不要画进度条。
+//     管道里跑的时候输出应当是干净的, 这一条就是那个判断。
+//   * **终端多大** (`TIOCGWINSZ`) —— 折行、分页、画表格全靠它。列数**不是**常量。
+//   * **原始模式** —— 想读一个键就返回 (而不是等回车), 就得关掉 `ICANON` 与 `ECHO`。
+//     关掉了**必须能还原** —— 一个忘了还原的程序会把用户的终端留在坏状态里, 所以这里
+//     把"存下来"和"还原"做成一进一出的一对。
+//
+// 结构体 (x86-64 Linux 内核的那份, 不是 glibc 的):
+//   termios 36 字节: iflag u32(0) | oflag u32(4) | cflag u32(8) | lflag u32(12) |
+//                    line u8(16) | cc[19](17..35) —— `VMIN` 在 cc 第 6 位 (偏移 23),
+//                    `VTIME` 在第 5 位 (偏移 22)。**36 是内核的大小**: glibc 那份 60 字节,
+//                    多出来的是它自己的包装字段, `TCGETS` 一个字节都不写 (issue #701 —
+//                    填 0xAA 之后只有 0..35 变了)。
+//   winsize 8 字节: row u16(0) | col u16(2) | xpixel u16(4) | ypixel u16(6)。
+//
+// 边界: 号是 x86-64 Linux 的; PE 上没有 ioctl, 这几个函数在那边一律失败。
+// 自检只验纯逻辑 (原始模式的位运算与 winsize 取值) —— 理由见 user.lomt 头。
+//
+// 命名: 公开 tty_*, 内部 ttyp_。
+
+module tty
+
+/// `ioctl` 的号 (x86-64 Linux)。
+pub const TTY_TCGETS: u64 = 21505;
+pub const TTY_TCSETS: u64 = 21506;
+pub const TTY_TIOCGWINSZ: u64 = 21523;
+
+/// `termios.c_lflag` 的位。
+pub const TTY_ISIG: u32 = 1;
+pub const TTY_ICANON: u32 = 2;
+pub const TTY_ECHO: u32 = 8;
+
+/// `termios` / `winsize` 的字节数 (termios 是**内核的** 36 字节, 不是 glibc 的 60)。
+pub const TTY_TERMIOS_BYTES: u32 = 36;
+pub const TTY_WINSIZE_BYTES: u32 = 8;
+
+const TTY_CC_VMIN: u32 = 23;
+const TTY_CC_VTIME: u32 = 22;
+const TTY_LFLAG_OFF: u32 = 12;
+const TTY_SYS_IOCTL: u64 = 16;
+
+/// `isatty`: 对 fd 做一次 `TCGETS`, 成功就是 tty。返回 1/0。
+pub fn tty_isatty(fd: u64, scratch: ptr) -> u32 {
+    let r: i64 = syscall4(TTY_SYS_IOCTL, fd, TTY_TCGETS, scratch as u64);
+    if r == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 终端大小写进 ws (8 字节)。
+pub fn tty_winsize(fd: u64, ws: ptr) -> i64 {
+    return syscall4(TTY_SYS_IOCTL, fd, TTY_TIOCGWINSZ, ws as u64);
+}
+
+/// 列数 (winsize 偏移 2 的 u16, 小端)。
+pub fn tty_cols(ws: ptr) -> u32 {
+    return load8(ws, 2) | (load8(ws, 3) << 8);
+}
+
+/// 行数 (winsize 偏移 0 的 u16)。
+pub fn tty_rows(ws: ptr) -> u32 {
+    return load8(ws, 0) | (load8(ws, 1) << 8);
+}
+
+/// 取属性 (`TCGETS`) 写进 t (36 字节)。
+pub fn tty_get_attr(fd: u64, t: ptr) -> i64 {
+    return syscall4(TTY_SYS_IOCTL, fd, TTY_TCGETS, t as u64);
+}
+
+/// 设属性 (`TCSETS`)。
+pub fn tty_set_attr(fd: u64, t: ptr) -> i64 {
+    return syscall4(TTY_SYS_IOCTL, fd, TTY_TCSETS, t as u64);
+}
+
+/// **纯逻辑**: 从 saved (上次 `tty_get_attr` 拿到的) 造一份原始模式到 raw, 返回 raw 的字节数。
+/// 关掉 `ICANON | ECHO | ISIG`, 并把 `VMIN=1` / `VTIME=0` (读一个字节就返回)。
+/// 不碰 fd —— 所以这一步可以在没有终端的地方测。
+pub fn tty_raw_into(saved: ptr, raw: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < TTY_TERMIOS_BYTES {
+        store8(raw, i, load8(saved, i) as u8);
+        i = i + 1;
+    }
+    let lflag: u32 = load8(raw, TTY_LFLAG_OFF)
+                  | (load8(raw, TTY_LFLAG_OFF + 1) << 8)
+                  | (load8(raw, TTY_LFLAG_OFF + 2) << 16)
+                  | (load8(raw, TTY_LFLAG_OFF + 3) << 24);
+    let cleared: u32 = lflag & (4294967295 - (TTY_ICANON | TTY_ECHO | TTY_ISIG));
+    store8(raw, TTY_LFLAG_OFF, cleared as u8);
+    store8(raw, TTY_LFLAG_OFF + 1, (cleared >> 8) as u8);
+    store8(raw, TTY_LFLAG_OFF + 2, (cleared >> 16) as u8);
+    store8(raw, TTY_LFLAG_OFF + 3, (cleared >> 24) as u8);
+    store8(raw, TTY_CC_VMIN, 1 as u8);
+    store8(raw, TTY_CC_VTIME, 0 as u8);
+    return TTY_TERMIOS_BYTES;
+}
+
+// ---------------------------------------------------------------- 自检
+
+fn test_tty_raw_clears_flags() -> bool {
+    let saved: ptr = alloc(64);
+    let raw: ptr = alloc(64);
+    let i: u32 = 0;
+    while i < 64 {
+        store8(saved, i, 0 as u8);
+        i = i + 1;
+    }
+    // lflag = ICANON | ECHO | ISIG | 0x400 (一个不该被动的位)
+    store8(saved, 12, 11 as u8);
+    store8(saved, 13, 4 as u8);
+    let n: u32 = tty_raw_into(saved, raw);
+    return n == 36 && load8(raw, 12) == 0 && load8(raw, 13) == 4
+        && load8(raw, TTY_CC_VMIN) == 1 && load8(raw, TTY_CC_VTIME) == 0;
+}
+
+fn test_tty_winsize_fields() -> bool {
+    let ws: ptr = alloc(8);
+    store8(ws, 0, 40 as u8);
+    store8(ws, 1, 0 as u8);
+    store8(ws, 2, 128 as u8);
+    store8(ws, 3, 0 as u8);
+    return tty_rows(ws) == 40 && tty_cols(ws) == 128;
+}

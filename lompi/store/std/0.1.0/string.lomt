@@ -1,0 +1,553 @@
+// std/string.lomt — LibL 的 `<string.h>`（含 POSIX 的 `strtok_r`）
+//
+// **LibL 是什么**：这门语言的标准库的专有名词，形态照 libc —— 一个 libc 头对一个模块，
+// 函数名、参数序、返回值语义都取 libc 的（docs/232）。这一份是 `<string.h>`。
+//
+// 两族函数，别混（这是 libc 自己的分法，不是我们的）：
+//   * `str*` —— **NUL 结尾**，长度从串里读出来，**不要求调用方给**；
+//   * `mem*` —— **显式长度**，可以处理任意字节（含 0），**看不见 NUL**。
+// 于是 `strlen` 撞上中间有 0 的缓冲会提前停 —— 那不是 bug，是这一族的前提。
+//
+// 与仓库里既有那套的关系：`mem.lomt` 的 `mem_copy`/`mem_move`/`mem_fill`/`mem_find_byte`
+// 是**带偏移**的形状（`(p, off, ...)`），libc 的 `memcpy`/`memmove`/`memset`/`memchr` 是
+// **从基址起**。所以这一份是那四个的**薄壳**，字节循环只写一遍。
+//
+// **三个落不下来的（如实列，不假装有）**：
+//   1. `strtok` —— libc 那份靠一个**模块级静态游标**。这门语言**没有模块级可变全局**
+//      （顶层只收 const，lomentc.py:1626-1738），所以那个形状写不出来。给的是 POSIX 的
+//      **`strtok_r`**（游标由调用方持有）—— 它不是降级版，是 libc 里本来就有的可重入那一个。
+//   2. `strdup`/`strndup` —— 要按 libc 的契约分配内存。见 3。
+//   3. `malloc`/`free`/`calloc`/`realloc` —— **本模块不提供**。三条理由分开看：
+//      ① libc 的 malloc 靠一个模块级堆句柄，同上，没有地方放；
+//      ② 仓库里的 `mall.lomt` 是**调用方给 arena** 的无状态分配器（`mall_alloc(buf, cap, n)`），
+//         它给不出 libc 那个签名；
+//      ③ 内建 `alloc` 的堆布局（8 字节头）是**编译器私有的**，从库里伸手去读它就是把
+//         编译器的实现细节钉进库 —— 那正是 `docs/158` 要防的。
+//      这一族要的是**运行期那一半**，属于 LibL 的下一步（docs/232 §未来）。
+//
+// 命名：平名字空间，公开一律 libc 名，内部一律 `st_*`，自检 `test_string_*`。
+// 字节值一律 `u32`（`load8` 的返回类型就是 u32）—— 混宽比较会产出非法 IR（docs/180 §4.2）。
+
+module string
+
+// 需求：这一族要用到运行期（除法/取模/`alloc`）—— 库里写 `choose` 是**声明需求**，
+// 根单元要满足它（docs/227 §2.2）。包内 126 个模块已是同一个形状。
+
+use "mem.lomt"
+
+/// **LibL 唯一一个不是 libc 名字的函数** —— 而它必须存在。
+///
+/// 这一族的输入要 NUL 结尾，而**本语言的字符串字面量不带 NUL**：
+/// `"abc"` 的 IR 是 `[3 x i8] c"\61\62\63"`，没有第四个字节。所以直接把字面量交给
+/// `strlen`／`strcpy` 会**读过头**（实测：`strlen` 对空串返回 17，一路读到偶然的零字节）。
+///
+/// C 里没有这个问题（`"abc"` 在 C 里天生带 NUL），所以 libc 不需要这个函数 ——
+/// 它不是我们漏抄，是两种语言的 `str` **不是同一个东西**：Loment 的带长度，C 的不带。
+/// 仓里同一件事已经做过一次：`loment/lib/proc.lomt` 的 `pc_cstr`（发 syscall 前的私有助手）。
+///
+/// 把 `s` 的 `str_len(s)` 个字节拷到 `dst` 并补一个 NUL，返回 `dst`。
+/// **`dst` 至少要有 `str_len(s) + 1` 字节。**
+pub fn cstr_of(dst: ptr, s: str) -> ptr {
+    let n: u32 = str_len(s);
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, str_byte(s, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return dst;
+}
+
+/// `strlen` —— 到第一个 NUL 为止的字节数（不含 NUL）。
+pub fn strlen(s: ptr) -> u32 {
+    let n: u32 = 0;
+    while load8(s, n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+/// `strcpy` —— 连 NUL 一起拷。返回 `dst`（libc 的返回值）。
+///
+/// **区间重叠是未定义的**（libc 也这么写）—— 要重叠安全用 `memmove`。
+pub fn strcpy(dst: ptr, src: ptr) -> ptr {
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let ch: u32 = load8(src, i);
+        store8(dst, i, ch as u8);
+        if ch == 0 {
+            return dst;
+        }
+        i = i + 1;
+    }
+    return dst;
+}
+
+/// `strncpy` —— 最多拷 n 字节；`src` 提前碰到 NUL 就用 NUL **补满 n 字节**。
+///
+/// **注意它可能不给 NUL 结尾**（`src` 前 n 字节没有 NUL 时）—— 这是 libc 的原语义，
+/// 不是漏了。要保证结尾用 `strncat` 或自己补。
+pub fn strncpy(dst: ptr, src: ptr, n: u32) -> ptr {
+    let i: u32 = 0;
+    while i < n {
+        let ch: u32 = load8(src, i);
+        store8(dst, i, ch as u8);
+        if ch == 0 {
+            let j: u32 = i + 1;
+            while j < n {
+                store8(dst, j, 0 as u8);
+                j = j + 1;
+            }
+            return dst;
+        }
+        i = i + 1;
+    }
+    return dst;
+}
+
+/// `strcat` —— 从 `dst` 的 NUL 处接上 `src`，连 NUL 一起。返回 `dst`。
+pub fn strcat(dst: ptr, src: ptr) -> ptr {
+    let d: u32 = strlen(dst);
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let ch: u32 = load8(src, i);
+        store8(dst, d + i, ch as u8);
+        if ch == 0 {
+            return dst;
+        }
+        i = i + 1;
+    }
+    return dst;
+}
+
+/// `strncat` —— 最多接 n 字节，**并且总是补一个 NUL**。返回 `dst`。
+pub fn strncat(dst: ptr, src: ptr, n: u32) -> ptr {
+    let d: u32 = strlen(dst);
+    let i: u32 = 0;
+    while i < n && load8(src, i) != 0 {
+        store8(dst, d + i, load8(src, i) as u8);
+        i = i + 1;
+    }
+    store8(dst, d + i, 0 as u8);
+    return dst;
+}
+
+/// `strcmp` —— **无符号**逐字节比。相等返 0；否则返两个字节之差（libc 就是这么实现的）。
+///
+/// 判据里比的是**符号**（POSIX 只保证符号），值另有一条 —— 见 docs/232 §5。
+pub fn strcmp(a: ptr, b: ptr) -> i64 {
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let x: u32 = load8(a, i);
+        let y: u32 = load8(b, i);
+        if x != y {
+            return (x as i64) - (y as i64);
+        }
+        if x == 0 {
+            return 0 as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64;
+}
+
+/// `strncmp` —— 同上，最多比 n 字节。
+pub fn strncmp(a: ptr, b: ptr, n: u32) -> i64 {
+    let i: u32 = 0;
+    while i < n {
+        let x: u32 = load8(a, i);
+        let y: u32 = load8(b, i);
+        if x != y {
+            return (x as i64) - (y as i64);
+        }
+        if x == 0 {
+            return 0 as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64;
+}
+
+/// `strchr` —— 第一个等于 c 的位置；**c == 0 也能命中结尾那个 NUL**（libc 的原语义）。
+/// 找不到返回 NULL。
+pub fn strchr(s: ptr, c: u32) -> ptr {
+    let want: u32 = c & 255;
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let ch: u32 = load8(s, i);
+        if ch == want {
+            return ptr_add(s, i);
+        }
+        if ch == 0 {
+            return 0 as ptr;
+        }
+        i = i + 1;
+    }
+    return 0 as ptr;
+}
+
+/// `strrchr` —— 最后一个等于 c 的位置（同样能命中结尾 NUL）。找不到返回 NULL。
+pub fn strrchr(s: ptr, c: u32) -> ptr {
+    let want: u32 = c & 255;
+    let last: ptr = 0 as ptr;
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let ch: u32 = load8(s, i);
+        if ch == want {
+            last = ptr_add(s, i);
+        }
+        if ch == 0 {
+            return last;
+        }
+        i = i + 1;
+    }
+    return last;
+}
+
+/// `strstr` —— 第一次出现 needle 的位置。**空 needle 返回 hay**（libc 原语义）。
+pub fn strstr(hay: ptr, needle: ptr) -> ptr {
+    let n: u32 = strlen(needle);
+    if n == 0 {
+        return hay;
+    }
+    let h: u32 = strlen(hay);
+    if h < n {
+        return 0 as ptr;
+    }
+    let i: u32 = 0;
+    while i + n <= h {
+        if memcmp(ptr_add(hay, i), needle, n) == 0 as i64 {
+            return ptr_add(hay, i);
+        }
+        i = i + 1;
+    }
+    return 0 as ptr;
+}
+
+/// set 里有没有字节 c（set 是 NUL 结尾的集合）。strspn/strcspn/strpbrk/strtok_r 共用。
+fn st_in(c: u32, set: ptr) -> bool {
+    let j: u32 = 0;
+    while load8(set, j) != 0 {
+        if load8(set, j) == c {
+            return true;
+        }
+        j = j + 1;
+    }
+    return false;
+}
+
+/// `strspn` —— 开头连续属于 `accept` 的字节数。
+pub fn strspn(s: ptr, accept: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(s, i) != 0 {
+        if st_in(load8(s, i), accept) == false {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// `strcspn` —— 开头连续**不属于** `reject` 的字节数。
+pub fn strcspn(s: ptr, reject: ptr) -> u32 {
+    let i: u32 = 0;
+    while load8(s, i) != 0 {
+        if st_in(load8(s, i), reject) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// `strpbrk` —— 第一个属于 `accept` 的位置。找不到返回 NULL。
+pub fn strpbrk(s: ptr, accept: ptr) -> ptr {
+    let i: u32 = 0;
+    let go: bool = true;
+    while go {
+        let ch: u32 = load8(s, i);
+        if ch == 0 {
+            return 0 as ptr;
+        }
+        if st_in(ch, accept) {
+            return ptr_add(s, i);
+        }
+        i = i + 1;
+    }
+    return 0 as ptr;
+}
+
+/// `strtok_r` —— 按 `delim` 里的**任一字节**切分。
+///
+/// 游标存进调用方给的 8 字节槽 `save`（libc 的 `char **saveptr`）。`s` 给 NULL 表示
+/// "接着上一次"。切完时把分隔符**就地改成 NUL**，所以它会动那个串 —— libc 也这样。
+///
+/// **`strtok` 本尊没有**：它靠模块级静态游标，而本语言没有模块级可变全局（文件头第 1 条）。
+pub fn strtok_r(s: ptr, delim: ptr, save: ptr) -> ptr {
+    let cur: ptr = s;
+    // **比 u64 而不是 `s == (0 as ptr)`**：`ptr == ptr` 在参考实现里发出非法 IR
+    // （`icmp == ptr ...`，clang 当场拒；issue #205）。比 u64 是同一个判断且合法。
+    if (s as u64) == (0 as u64) {
+        cur = mem_load64(save, 0) as ptr;
+    }
+    let skipping: bool = true;
+    while skipping {
+        if load8(cur, 0) == 0 {
+            mem_store64(save, 0, cur as u64);
+            return 0 as ptr;
+        }
+        if st_in(load8(cur, 0), delim) == false {
+            skipping = false;
+        } else {
+            cur = ptr_add(cur, 1);
+        }
+    }
+    let tok: ptr = cur;
+    let scanning: bool = true;
+    while scanning {
+        if load8(cur, 0) == 0 {
+            mem_store64(save, 0, cur as u64);
+            return tok;
+        }
+        if st_in(load8(cur, 0), delim) {
+            store8(cur, 0, 0 as u8);
+            mem_store64(save, 0, (ptr_add(cur, 1)) as u64);
+            return tok;
+        }
+        cur = ptr_add(cur, 1);
+    }
+    return tok;
+}
+
+/// `memchr` —— 在 `s[0..n)` 里找第一个等于 c 的字节。找不到返回 NULL。
+/// **与 `strchr` 的区别**：看得见 0，也有长度上限。
+pub fn memchr(s: ptr, c: u32, n: u32) -> ptr {
+    let want: u32 = c & 255;
+    let i: u32 = 0;
+    while i < n {
+        if load8(s, i) == want {
+            return ptr_add(s, i);
+        }
+        i = i + 1;
+    }
+    return 0 as ptr;
+}
+
+/// `memcmp` —— 无符号逐字节比，返差（与 `strcmp` 同形状，但有长度、看得见 0）。
+pub fn memcmp(a: ptr, b: ptr, n: u32) -> i64 {
+    let i: u32 = 0;
+    while i < n {
+        let x: u32 = load8(a, i);
+        let y: u32 = load8(b, i);
+        if x != y {
+            return (x as i64) - (y as i64);
+        }
+        i = i + 1;
+    }
+    return 0 as i64;
+}
+
+/// `memcpy` —— 拷 n 字节。**区间重叠是未定义的**，用 `memmove`。
+/// 返回 `dst`（libc 的返回值）。
+pub fn memcpy(dst: ptr, src: ptr, n: u32) -> ptr {
+    mem_copy(dst, 0, src, 0, n);
+    return dst;
+}
+
+/// `memmove` —— 重叠安全。
+///
+/// **为什么这一份没有转给 `mem.lomt` 的 `mem_move`**：那个助手按**偏移**判方向
+/// （`if doff <= so` 走前向），而偏移是**相对各自的基址**的。跨基址调用时这个判断是错的：
+/// `mem_move(b + 1, 0, b, 0, 4)` 两边偏移都是 0，于是它走前向 —— 而真实地址是
+/// `dst > src`，必须倒着拷，结果是第 2 个字节被写成第 1 个还没读的字节（实测
+/// `memmove_b2` 读回 65 而 glibc 是 66）。libc 的 memmove 比的是**地址**，这里照做。
+/// 那个助手的缺陷是既有的、与 LibL 无关，已单独记（docs/232 §6）。
+pub fn memmove(dst: ptr, src: ptr, n: u32) -> ptr {
+    let dp: u64 = dst as u64;
+    let sp: u64 = src as u64;
+    if dp == sp {
+        return dst;
+    }
+    if dp < sp {
+        let i: u32 = 0;
+        while i < n {
+            store8(dst, i, load8(src, i) as u8);
+            i = i + 1;
+        }
+    } else {
+        let i: u32 = n;
+        while i > 0 {
+            i = i - 1;
+            store8(dst, i, load8(src, i) as u8);
+        }
+    }
+    return dst;
+}
+
+/// `memset` —— 填 n 个 `(unsigned char)c`。
+pub fn memset(dst: ptr, c: u32, n: u32) -> ptr {
+    mem_fill(dst, 0, n, c & 255);
+    return dst;
+}
+
+// ---------------------------------------------------------------- 自检
+
+/// 字面量的类型是 `str`（指针 + 长度），而这一族要的是裸 `ptr` —— 自检里用这个收口。
+fn st_lit(s: str) -> ptr {
+    return str_ptr(s);
+}
+
+/// NULL。**不能直接写 `0 as ptr` 当实参** —— 检查器不把内联转换当 ptr
+/// （"实参期望 ptr，得到整型字面量"），要先落到一个 `ptr` 变量/返回里。
+fn st_null() -> ptr {
+    return 0 as ptr;
+}
+
+fn test_string_strlen() -> bool {
+    let b: ptr = alloc(16);
+    store8(b, 0, 104 as u8);
+    store8(b, 1, 105 as u8);
+    store8(b, 2, 0 as u8);
+    store8(b, 3, 120 as u8);
+    // 第 3 字节在 NUL 之后: strlen 必须停在 2。
+    return strlen(b) == 2;
+}
+
+fn test_string_strcpy_and_cat() -> bool {
+    let a: ptr = alloc(32);
+    strcpy(a, st_lit("abc"));
+    strcat(a, st_lit("de"));
+    return strlen(a) == 5 && load8(a, 0) == 97 && load8(a, 4) == 101 && load8(a, 5) == 0;
+}
+
+fn test_string_strncpy_pads_with_nul() -> bool {
+    // "ab" 拷 5 字节 -> 'a','b',0,0,0 (补满, 这是 strncpy 与 memcpy 的分界)
+    let d: ptr = alloc(16);
+    mem_fill(d, 0, 16, 99);
+    strncpy(d, st_lit("ab"), 5);
+    return load8(d, 0) == 97 && load8(d, 1) == 98
+        && load8(d, 2) == 0 && load8(d, 3) == 0 && load8(d, 4) == 0
+        && load8(d, 5) == 99;
+}
+
+fn test_string_strncpy_no_nul_when_full() -> bool {
+    // "abcd" 拷 3 字节 -> 没有 NUL (libc 原语义, 不是漏了)
+    let d: ptr = alloc(16);
+    mem_fill(d, 0, 16, 99);
+    strncpy(d, st_lit("abcd"), 3);
+    return load8(d, 0) == 97 && load8(d, 2) == 99 && load8(d, 3) == 99;
+}
+
+fn test_string_strncat_always_nuls() -> bool {
+    let d: ptr = alloc(32);
+    strcpy(d, st_lit("xy"));
+    strncat(d, st_lit("abcdef"), 3);
+    return strlen(d) == 5 && load8(d, 2) == 97 && load8(d, 4) == 99 && load8(d, 5) == 0;
+}
+
+fn test_string_strcmp_sign() -> bool {
+    // 只判符号 —— libc 的返回值本身是实现定义的 (POSIX 只保证符号)。
+    return strcmp(st_lit("abc"), st_lit("abd")) < 0 as i64
+        && strcmp(st_lit("abd"), st_lit("abc")) > 0 as i64
+        && strcmp(st_lit("abc"), st_lit("abc")) == 0 as i64
+        && strcmp(st_lit("abc"), st_lit("ab")) > 0 as i64;
+}
+
+fn test_string_strcmp_is_unsigned() -> bool {
+    // 有符号比会判 0x80 < 'a'；无符号比才是 0x80 > 'a'。这条把两者分开。
+    let a: ptr = alloc(4);
+    let b: ptr = alloc(4);
+    store8(a, 0, 128 as u8);
+    store8(a, 1, 0 as u8);
+    store8(b, 0, 97 as u8);
+    store8(b, 1, 0 as u8);
+    return strcmp(a, b) > 0 as i64;
+}
+
+fn test_string_strchr_includes_terminator() -> bool {
+    let s: ptr = alloc(8);
+    strcpy(s, st_lit("abc"));
+    let p1: ptr = strchr(s, 98);
+    let p0: ptr = strchr(s, 0);
+    let none: ptr = strchr(s, 122);
+    return (p1 as u64) == (ptr_add(s, 1) as u64)
+        && (p0 as u64) == (ptr_add(s, 3) as u64)
+        && (none as u64) == (0 as u64);
+}
+
+fn test_string_strrchr() -> bool {
+    let s: ptr = alloc(16);
+    strcpy(s, st_lit("abca"));
+    return (strrchr(s, 97) as u64) == (ptr_add(s, 3) as u64)
+        && (strrchr(s, 122) as u64) == (0 as u64);
+}
+
+fn test_string_strstr() -> bool {
+    let h: ptr = alloc(32);
+    strcpy(h, st_lit("hello world"));
+    return (strstr(h, st_lit("world")) as u64) == (ptr_add(h, 6) as u64)
+        && (strstr(h, st_lit("zzz")) as u64) == (0 as u64)
+        && (strstr(h, st_lit("")) as u64) == (h as u64);
+}
+
+fn test_string_spn_cspn_pbrk() -> bool {
+    let s: ptr = alloc(32);
+    strcpy(s, st_lit("aabbcc"));
+    let p: ptr = strpbrk(s, st_lit("cb"));
+    return strspn(s, st_lit("ab")) == 4
+        && strcspn(s, st_lit("c")) == 4
+        && (p as u64) == (ptr_add(s, 4) as u64)
+        && strspn(s, st_lit("x")) == 0;
+}
+
+fn test_string_strtok_r() -> bool {
+    let s: ptr = alloc(32);
+    strcpy(s, st_lit("a,,b,c"));
+    let save: ptr = alloc(8);
+    // 分隔符是集合: "," 与 ";" 都算
+    let t1: ptr = strtok_r(s, st_lit(",;"), save);
+    let t2: ptr = strtok_r(st_null(), st_lit(",;"), save);
+    let t3: ptr = strtok_r(st_null(), st_lit(",;"), save);
+    let t4: ptr = strtok_r(st_null(), st_lit(",;"), save);
+    // 切完第一段后 s 变成 "a\0,b,c"
+    return (t1 as u64) == (s as u64)
+        && load8(s, 1) == 0
+        && load8(t2, 0) == 98
+        && load8(t3, 0) == 99
+        && (t4 as u64) == (0 as u64);
+}
+
+fn test_string_memchr_memcmp() -> bool {
+    let a: ptr = alloc(16);
+    mem_fill(a, 0, 8, 7);
+    store8(a, 3, 0 as u8);
+    // memchr 看得见 0
+    let z: ptr = memchr(a, 0, 8);
+    let none: ptr = memchr(a, 9, 8);
+    // memcmp 在第一个不同的字节上给出差
+    let b: ptr = alloc(16);
+    mem_fill(b, 0, 8, 7);
+    store8(b, 2, 5 as u8);
+    return (z as u64) == (ptr_add(a, 3) as u64)
+        && (none as u64) == (0 as u64)
+        && memcmp(a, b, 8) > 0 as i64
+        && memcmp(a, b, 2) == 0 as i64;
+}
+
+fn test_string_memmove_overlap() -> bool {
+    let b: ptr = alloc(32);
+    memcpy(b, st_lit("ABCD"), 5);
+    memmove(ptr_add(b, 1), b, 4);
+    return load8(b, 0) == 65 && load8(b, 1) == 65 && load8(b, 2) == 66 && load8(b, 4) == 68;
+}
+
+fn test_string_memset_masks_to_byte() -> bool {
+    let b: ptr = alloc(8);
+    memset(b, 257, 4);
+    return load8(b, 0) == 1 && mem_load32(b, 0) == 16843009;
+}

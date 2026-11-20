@@ -1,4 +1,5 @@
 module all_loment
+choose runtime
 
 // M78: 全 Loment 演示 —— 多模块 + 泛型 + 能力域 + 用户态 syscall 的组合。
 use mathutil

@@ -3,6 +3,7 @@
 // expect: ERR divzero
 // 期望: ERR divzero（**不是**崩、不是别的种类）
 module ct_divzero
+choose runtime
 
 fn main() -> u64 {
     let a: u64 = 10;

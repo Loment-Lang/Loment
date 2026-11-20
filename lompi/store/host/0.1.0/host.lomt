@@ -1,6 +1,7 @@
 // host/host.lomt — 包入口 (宿主层)。
 //
-// 包内 6 个模块, 全是**与宿主系统打交道**的东西: 系统调用, fd, argv, 目录, stat, 日志。
+// 包内 8 个模块, 全是**与宿主系统打交道**的东西: 系统调用, fd, argv, 目录, stat, 日志,
+// 以及 LibL 的**宿主脸**(libl_host, docs/232 §5.1)。
 // 它们依赖 std (可移植层) —— 方向是单向的, std 不认识 host。
 //
 // 这里不写 `use std`: 包到 std 的依赖边由 io.lomt 自己的 `use std` 给出 (依赖来自源码,
@@ -14,3 +15,4 @@ use "fs.lomt"
 use "io.lomt"
 use "log.lomt"
 use "stat.lomt"
+use "libl_host.lomt"

@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf       # noqa: E402
 import lomentc      # noqa: E402
 import lomt_from    # noqa: E402
@@ -60,6 +62,13 @@ def test(fn):
 #: （用户提的"将来可以用哈希把它钉死"，钉的就是这一刻；现在先用一条判据钉。）
 LOCKED_ALIASES = {
     "loment": "loment",
+    # 2026-11-03: Tur 是本语言自己的正式语法名（从 Rust 直接修改）。
+    # 2026-11-04: 版次改成**两级名** `tur<年份>.<序号>`（`docs/296` §1.1）。
+    # 规范名永不改义；`tur` 是 Tur 1 的历史拼法，`tur1`/`tur2` 是 2026 年的短名。
+    # 这几笔都是**改锁**，不是顺手加分支。
+    "tur": "tur2026.1", "tur1": "tur2026.1", "tur2": "tur2026.2",
+    "tur3": "tur2026.3",
+    "tur2026.1": "tur2026.1", "tur2026.2": "tur2026.2", "tur2026.3": "tur2026.3",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -73,6 +82,11 @@ LOCKED_ALIASES = {
     # "少打一个字母就静默换成另一种读法"，而那正是这一门最不该有的失败。
     "nl": "natural", "natural": "natural", "lument": "natural",
 }
+
+
+#: `tur2026.2` 封版特性面的 SHA-256（`docs/305`）。**独立于实现**钉在这里：
+#: 改 `potato_from.TUR2026_2_FEATURES` 而不改这一行，判据会先红。
+FROZEN_TUR2026_2_SHA256 = "e5a54fc18a2ee01718db53cd27b589060ef7b7dd0afcf7f9084f9c8c73695479"
 
 
 @test
@@ -124,6 +138,8 @@ def test_aliases_spell_the_same_canonical_name():
                              (("golang", "go"), "go"),
                              (("rs", "rust"), "rust"),
                              (("loment",), "loment"),
+                             (("tur", "tur1", "tur2026.1"), "tur2026.1"),
+                             (("tur2", "tur2026.2"), "tur2026.2"),
                              (("c",), "c"),
                              (("java",), "java")):
         for s in spellings:
@@ -238,10 +254,8 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
         if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
-        s = str(exe.resolve()).replace("\\", "/")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
-                            f"chmod +x {s if s.startswith('/') else '/mnt/' + s[0].lower() + s[2:]}"
-                            f" && {'/mnt/' + s[0].lower() + s[2:]}; echo -n $?"],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
                            capture_output=True, text=True, timeout=300)
     assert r.stdout.strip() == "42", f"跑出来该是 42，得到 {r.stdout.strip()!r}"
     print("      声明抹成等长空白、行号不动；端到端跑出 42")
@@ -288,7 +302,13 @@ def test_the_declaration_word_order_is_the_shared_contract():
     # 他拿到的是一行残缺的源 + 一句指不到点子的语法错。
     for s in ("choose write grammars python\n", "choose writes grammar c\n"):
         g, err, declared = potato_from.read_grammar_decl(s)
-        assert (g, err, declared) == ("loment", None, False), (s, g, err, declared)
+        # **2026-10-09（#148）：这一格从"不报错"改成了"报错"。**
+        # 原先那条断言钉的是"拼错**不能**被当成声明"（对），但它顺带把**静默退回**
+        # 也钉住了 —— 而那正是 `docs/198` §2 记的缺陷（"§2 那句'兜底从**猜**变**拒绝**'
+        # 正是为它写的；现在它既没猜也没拒，是**换了一个猜法**"）。所以这里改判：
+        # 仍然 `loment` / 仍然 `declared=False`，但**要说出来**。
+        # 下面那一句才是这条用例真正要保的东西，一字未动：拼错的那行**不许被抹掉半截**。
+        assert g == "loment" and declared is False and err, (s, g, err, declared)
         assert potato_from.strip_grammar_decl(s) == s, f"拼错的那行被抹了半截: {s!r}"
 
     # **导出那半边也钉上**：产物里就是这三个词、按这个顺序。它 + 对方那条"产物必须新鲜"
@@ -350,46 +370,43 @@ def test_front_door_handles_the_loment_half_without_the_parser():
 
 
 @test
-def test_declared_rust_is_the_base_syntax_not_a_foreign_module():
-    """**`choose write grammar rust` = 基础语法的一种拼法**（用户 2026-09-22 的裁定）：
+def test_declared_tur_is_the_native_syntax_and_rust_is_a_surface_grammar():
+    """**`tur` = 本语言的原生语法；`rust` 退回表层语法**（用户 2026-11-03 的裁定）。
 
-    > rust 语法是 Loment 基础语法，不需要翻译
+    > Tur 从 Rust 直接修改；rust 和其他几种语法一样
 
-    ## 改之前的样子（这条判据治的就是它）
+    ## 为什么把两者分开
 
-    `rust` 在**两处**都登记着 —— 出厂锁 `GRAMMAR_ALIASES` 的右列（== `potato.GRAMMARS`）
-    与 `front_door` 的 `LANGS`。于是**源码里能写、对象也合法**，可 `lomt_from._TOOLS` 里
-    **没有 rust 这一门**（`from_rust` 是 `docs/179` 抽接口那条路：只记声明、**不抓正文**）。
-    结果：
+    2026-09-22 曾把 `rust` 当成"基础语法的另一种拼法"直接原生读。代价是：我们后来给
+    本语言加的每一样东西（`print`、`fn main` 入口、`capability`/`guard` 等）都会落到
+    "`grammar rust` 是严格 Rust 子集"这条承诺上。现在把边界正式化：
 
-    * 前门把这份源交给 `from_rust` → 对象里一个 `body` 都没有 → `emit_lomt(impl=True)`
-      逐个跳过 → `NotRepresentable`，**文件被拒**；
-    * 而那句跳过理由还劝人「带正文的加 `--impl` 翻出来」—— 前门**已经**用的 `impl=True`。
-      一条登记在锁里的写法，**没有任何一份源编得过去，报的话还指反**。
+    * **`tur`** —— 本语言自己的正式语法名，从 Rust 直接修改；原生读，不经过翻译器。
+    * **`rust`** —— 一门**表层语法**，与 C/Java/Go 同级；走 `from_rust`（只抽接口）。
+      于是"严格 Rust 子集"由**读法本身**保证，我们的修改漏不过去。
 
-    ## 钉三件
+    ## 钉四件
 
-    1. **声明为 rust 与没写声明是同一支**：`translated=False`、产物里没有生成器包头、
-       正文一字不动。这同时排除"它被 `from_rust` 读过"—— 那条路的产物是**生成**的
-       （包头 `// 由 tools/lomt_from.py 从 Potato 形式对象生成`）。
-    2. **命令行上真编得出 IR**（`docs/188` §7.2 那条教训：**入口不止一处**，
-       库那侧全绿而命令行上抛栈）—— 而且看的是 `.ll` 里真有那个函数，不只是没报错。
-    3. **`.rs` 那条路没被一起改掉**：后缀说"这是 Rust 的文件"照旧走 `from_rust` 抽接口。
-       **声明与后缀分工不同**（`docs/188` §2）—— 少了这一条，下一次"顺手统一"
-       就会把接口那条路悄悄换成原生读法，而 `kernel/src/*.rs` 与 `lompotc --rust`
-       的孪生判据全靠它。对照面是 `resolve_lang`（**前端工具**的入口，它照旧按后缀说话）。
+    1. **声明为 tur 与没写声明是同一支**：`translated=False`、产物里没有生成器包头、
+       正文一字不动（声明行抹成等长空白）。
+    2. **命令行上真编得出 IR**（`docs/188` §7.2 那条教训：**入口不止一处**）。
+    3. **`rust` 不在 `NATIVE_GRAMMARS`**：声明的 rust 完整程序走 `from_rust` 的既有失败
+       模式（`NotRepresentable`），**不被**原生读法收下。
+    4. **`.rs` 那条路没被一起改掉**：后缀说"这是 Rust 的文件"照旧走 `from_rust`。
+       **声明与后缀分工不同**（`docs/188` §2）—— `kernel/src/*.rs` 与 `lompotc --rust`
+       的孪生判据全靠它。
     """
     body = "module m\n\npub fn f(x: i32) -> i32 {\n    return x * 3;\n}\n"
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
         a = td / "a.lomt"
-        a.write_text("choose write grammar rust\n" + body, encoding="utf-8", newline="\n")
+        a.write_text("choose write grammar tur\n" + body, encoding="utf-8", newline="\n")
         fa = potato_from.front_door(a)
         assert (fa.grammar, fa.translated) == ("loment", False), (fa.grammar, fa.translated)
         assert "从 Potato 形式对象生成" not in fa.source, "它被当外国模块翻过了"
         assert fa.source.endswith(body), "正文没原样留着"
         assert fa.source[:len(fa.source) - len(body)].strip() == "", "声明那一行该抹成空白"
-        assert len(fa.source) == len("choose write grammar rust\n" + body), "抹声明必须等长"
+        assert len(fa.source) == len("choose write grammar tur\n" + body), "抹声明必须等长"
 
         # 对照面：**另一个单元**（同内容、不写声明）。两个实现一起错时"自举 == 参考"
         # 照样绿（`docs/182` §1.9），所以比的得是这份源自己。
@@ -401,25 +418,209 @@ def test_declared_rust_is_the_base_syntax_not_a_foreign_module():
                             "--print", "llvm", str(a)],
                            capture_output=True, text=True, shell=False)
         out = (r.stdout or "") + (r.stderr or "")
-        assert r.returncode == 0, f"`grammar rust` 该编得过：{out[-300:]}"
+        assert r.returncode == 0, f"`grammar tur` 该编得过：{out[-300:]}"
         assert "Traceback" not in out, f"抛栈了 —— 话到不了用户眼前：\n{out[-400:]}"
         assert "define " in out and "@f(" in out, f"IR 里没有那个函数：{out[-300:]}"
+
+        # **Tur 2 是同一支读法的另一个版次**（`docs/296` §4.1）：脚手架阶段它不启用
+        # 任何新语法，所以同一份程序在 Tur 1 与 Tur 2 下**产物必须逐字节相同**。
+        # 短名（`tur2`）与规范名（`tur2026.2`）也必须一致 —— 两者是同一个版次。
+        assert fa.profile == "tur2026.1", f"没写版次的 tur 被读成了 {fa.profile!r}"
+        for name, wording, prof in (("a2", "tur2", "tur2026.2"),
+                                    ("a3", "tur2026.2", "tur2026.2")):
+            p = td / f"{name}.lomt"
+            p.write_text(f"choose write grammar {wording}\n" + body,
+                         encoding="utf-8", newline="\n")
+            fu = potato_from.front_door(p)
+            assert (fu.grammar, fu.profile, fu.translated) == ("loment", prof, False), \
+                (fu.grammar, fu.profile, fu.translated)
+            # 声明那一行的**长度不同**，抹完之后各自等长；比的是正文本身。
+            assert fu.source.endswith(body) and fu.source[:-len(body)].strip() == "", \
+                f"{wording} 的正文没原样留着 / 声明行没抹干净"
+            rr = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                                 "--print", "llvm", str(p)],
+                                capture_output=True, text=True, shell=False)
+            assert rr.returncode == 0, f"`grammar {wording}` 该编得过：{(rr.stderr or rr.stdout)[-300:]}"
+            # 正文/代码逐字节相同；**唯一按版次取值**的是元数据那一条（docs/296 §1.2）。
+            def _no_meta(s: str) -> str:
+                return "\n".join(ln for ln in s.splitlines()
+                                 if not ln.startswith("@loment.tur.edition = global"))
+            assert _no_meta(rr.stdout) == _no_meta(r.stdout), (
+                f"脚手架阶段的 {wording} 产物与 Tur 1 不一致 —— 版次隔离破了"
+                f"（docs/296 §4.1）")
+            # 产物里必须写着**规范名**（docs/296 §1.2），短名/全名都落到同一条。
+            assert ('@loment.tur.edition = global [21 x i8] c"'
+                    '\\4C\\4F\\4D\\45\\4E\\54\\2D\\54\\55\\52\\3A'
+                    '\\74\\75\\72\\32\\30\\32\\36\\2E\\32\\00"') in rr.stdout, (
+                f"`{wording}` 的产物里没有 tur2026.2 的版次元数据")
+
+        # **`rust` 不再是原生语法**：完整程序必须走 `from_rust` 的既有失败模式。
+        r2 = td / "r.lomt"
+        r2.write_text("choose write grammar rust\n" + body, encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(r2)
+        except Exception as e:                                     # noqa: BLE001
+            assert type(e).__name__ in ("NotRepresentable", "FrontDoorRefused"), (
+                f"`grammar rust` 该按表层语法被拒，得到 {type(e).__name__}: {e}")
+        else:
+            raise AssertionError("`grammar rust` 仍被当原生读法收下了 —— 它已退回表层语法")
 
         rs = td / "x.rs"
         rs.write_text("pub fn g(a: i32) -> i32 { a + 1 }\n", encoding="utf-8", newline="\n")
         assert potato_from.resolve_lang(rs)[0] == "rust", "`.rs` 的后缀读法被改掉了"
         assert potato_from.LANGS["rust"] is potato_from.from_rust, "`.rs` 那条路被换掉了"
         assert "rust" not in lomt_from._TOOLS, (
-            "`rust` 出现在 `_TOOLS` 里了 —— 它是**基础语法**，不该有翻译器"
-            "（用户 2026-09-22 的裁定）")
+            "`rust` 出现在 `_TOOLS` 里了 —— 它是**表层语法**，不该有原生翻译器")
 
         # `NATIVE_GRAMMARS` 是**出厂锁里的一个子集**（原生读法的那几个）—— 它不该冒出
         # `potato.GRAMMARS` 之外的名字，否则"源里能写"与"对象里合法"就分家了。
         assert "loment" in potato_from.NATIVE_GRAMMARS
+        assert "tur2026.1" in potato_from.NATIVE_GRAMMARS
+        assert "tur2026.2" in potato_from.NATIVE_GRAMMARS, (
+            "两个 Tur 版次不在原生集里 —— 它们是本语言的版次（docs/296），不是表层语法")
+        assert "tur" not in potato_from.NATIVE_GRAMMARS, (
+            "`tur` 是源侧拼法；原生集里放的是**规范名**（docs/296 §1.1）")
+        assert "rust" not in potato_from.NATIVE_GRAMMARS, (
+            "`rust` 还在原生集里 —— 它已退回成和 C/Java/Go 同级的表层语法")
         assert set(potato_from.NATIVE_GRAMMARS) <= set(potato.GRAMMARS), (
             f"{potato_from.NATIVE_GRAMMARS} 里有不在 `potato.GRAMMARS` 里的名字 —— "
             f"那个名字写不进对象，源侧与对象侧就分家了")
-    print("      `grammar rust`：原生读法、命令行上真编出 IR（`.rs` 那条接口路不受影响）")
+    print("      `grammar tur`：原生读法、命令行上真编出 IR；`grammar rust` 退回表层语法")
+
+
+@test
+def test_tur2_sugar_equals_the_explicit_spelling():
+    """`docs/296` §2.1：`def` / `and` / `or` / `not` / `elif` 只改**拼法**。
+
+    四件：
+      * **等长**：前门抹完之后源的长度不变（行号/列号/token 偏移都不动）；
+      * **同义**：糖版与手写基础拼法的 IR 逐字节相同（只有版次元数据那一条不同）；
+      * **版次隔离**：同一份带 `def` 的源在 `tur`（Tur 1）下编不过、在 `tur2` 下编得过；
+      * **名字位置**：这些词在 `tur2` 里仍可作标识符（只抢算子/构造位置）。
+    """
+    body_sugar = ("module m\n\n"
+                  "def is_small(n: u32) -> bool {\n"
+                  "    return n < 10 and n > 0;\n"
+                  "}\n\n"
+                  "fn main() {\n"
+                  "    if is_small(5) {\n        print(\"a\\n\");\n"
+                  "    } elif is_small(50) {\n        print(\"b\\n\");\n"
+                  "    } else {\n        print(\"c\\n\");\n    }\n"
+                  "}\n")
+    body_plain = (body_sugar.replace("def is_small", "fn is_small")
+                  .replace("and n > 0", "&& n > 0").replace("} elif ", "} else if "))
+
+    def _no_meta(ll: str) -> str:
+        return "\n".join(ln for ln in ll.splitlines()
+                         if not ln.startswith("@loment.tur.edition"))
+
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "a.lomt"
+        a.write_text("choose write grammar tur2\n" + body_sugar, encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(a)
+        assert (fu.profile, fu.spelling) == ("tur2026.2", "tur2"), (fu.profile, fu.spelling)
+        assert len(fu.source) == len("choose write grammar tur2\n" + body_sugar), \
+            "纯糖改写不是等长的 —— 行/列/偏移会漂"
+        assert "def is_small" not in fu.source and "elif" not in fu.source, \
+            "前门没有把纯糖抹成基础拼法"
+
+        b = td / "b.lomt"
+        b.write_text(body_plain, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert _no_meta(la) == _no_meta(lb), "糖版与手写基础拼法的产物不一致"
+
+        c = td / "c.lomt"
+        c.write_text("choose write grammar tur\n" + body_sugar, encoding="utf-8", newline="\n")
+        assert "def is_small" in potato_from.front_door(c).source, \
+            "Tur 1 也被抹了糖 —— 版次隔离破了"
+        try:
+            lomentc.load(c)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("Tur 1 收下了 `def` —— 版次隔离破了")
+
+        d = td / "d.lomt"
+        d.write_text(
+            "choose write grammar tur2\nmodule n\n\nfn main() {\n"
+            "    let and: u32 = 1;\n    let or: u32 = 2;\n    let not: u32 = 3;\n"
+            "    let def: u32 = 4;\n    let elif: u32 = 5;\n"
+            "    print(\"ok\\n\");\n}\n",
+            encoding="utf-8", newline="\n")
+        assert lomentc.emit_llvm(lomentc.load(d), ROOT), \
+            "Tur 2 里这些词不能当标识符了 —— 抢到名字位置了"
+    print("      纯糖: 等长改写、与手写拼法同 IR；Tur 1 拒收；名字位置不受影响")
+
+
+@test
+def test_declared_tur_maps_mut_away_but_keeps_mut_slices():
+    """`#77`：`grammar tur` 里**重赋值必须写得出来**。
+
+    这一门是原生读法，而两种语言在"本地变量怎么声明"上没有交集：
+
+        Rust                     Tur
+        let mut v: T = e;        let v: T = e;      （本地变量本来就可变）
+        fn f(mut a: T)           fn f(a: T)
+
+    不映射的话**每一个有状态循环都写不出来**：写 `let mut` 解析不过（`期望 :，得到 'v'`），
+    去掉 `mut` 被 rustc 拒（不可重赋值）。所以前门做一次**等长**的表层改写（行号不动）。
+
+    **反面也要钉**：`mut` 在本语言里还有别的意思 —— `mut [T]`（可变切片）与 `&mut`
+    （可变借用）。一刀切会把那两处抹掉，直接改坏程序。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "m1.lomt"
+        p.write_text(
+            "choose write grammar tur\n"
+            "module m1\n"
+            "\n"
+            "pub fn f(n: i32) -> i32 {\n"
+            "    let mut v: i32 = n;\n"
+            "    v = v + 1;\n"
+            "    return v;\n"
+            "}\n"
+            "\n"
+            "fn add(mut a: i32) -> i32 {\n"
+            "    a = a + 1;\n"
+            "    return a;\n"
+            "}\n", encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        assert fu.translated is False, "tur 是原生读法，不该走翻译器"
+        # 声明行 + 正文长度不变（等长抹除）
+        assert len(fu.source) == len(p.read_text(encoding="utf-8")), "改写必须等长"
+        assert "let mut" not in fu.source, f"`let mut` 没映射掉:\n{fu.source}"
+        assert "(mut a:" not in fu.source, f"形参的 `mut` 没映射掉:\n{fu.source}"
+        assert "let     v: i32" in fu.source, f"`let mut v` 该变成 `let     v`:\n{fu.source}"
+
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            "--print", "llvm", str(p)],
+                           capture_output=True, text=True, shell=False)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0, f"`let mut` 的 grammar tur 该编得过：{out[-400:]}"
+        assert "@f(" in out and "@add(" in out, out[-300:]
+
+        # **`mut [T]` 与 `&mut` 一个字节都不许动**
+        p2 = td / "m2.lomt"
+        p2.write_text(
+            "choose write grammar tur\n"
+            "module m2\n"
+            "\n"
+            "fn w(xs: mut [u32]) -> u32 {\n"
+            "    xs[0] = 7;\n"
+            "    return xs[0];\n"
+            "}\n"
+            "\n"
+            "fn m() -> u32 {\n"
+            "    let a: [u32; 2] = [1, 2];\n"
+            "    return w(&mut a);\n"
+            "}\n", encoding="utf-8", newline="\n")
+        src2 = potato_from.front_door(p2).source
+        assert "xs: mut [u32]" in src2, f"类型位置上的 `mut [u32]` 被抹掉了:\n{src2}"
+        assert "&mut a" in src2, f"`&mut` 被抹掉了:\n{src2}"
+    print("      `grammar tur`：`let mut` / `mut a:` 映射掉；`mut [T]` / `&mut` 不动")
 
 
 @test
@@ -463,10 +664,179 @@ def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
             return
         s = str(exe.resolve()).replace("\\", "/")
         w = s if s.startswith("/") else "/mnt/" + s[0].lower() + s[2:]
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", f"chmod +x {w} && {w}; echo -n $?"],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", f"chmod +x {w} && {w}; echo -n $?"],
                            capture_output=True, text=True, timeout=300)
     assert r.stdout.strip() == "42", f"跑出来该是 42，得到 {r.stdout.strip()!r}"
     print("      别的写法 -> 翻成 Loment（无 extern fn）-> 真编真跑出 42")
+
+
+@test
+def test_python_top_level_statements_become_the_entry():
+    """Python 写法的顶层语句 -> 入口 `_start`（issue #1510 的落点，2026-11-10 改判）。
+
+    原先 `from_python` 只认函数、类和全大写常量；顶层的 `print(...)` / 赋值 / `if`
+    落在所有分支之外，被**静默丢掉** —— `check` 对一份空单元报绿，LVM 才说
+    "没有 `_start`"。第一批修法是**拒**（不丢东西，但脚本式写法就写不了了）。
+
+    现在按用户 2026-11-10 的裁定：**只对 python 这一门**，顶层语句合成入口的正文。
+    不丢、也不用写 `def`。别的表层语法与原生 Loment 不经过 `from_python`，一行不动。
+
+    与 `def _start` 同时出现时**拒**：两套入口，选哪个都是替用户做主。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for i, body in enumerate(['print("hello")\n', "x = 1\n",
+                                  "if True:\n    x = 1\n"]):
+            p = td / f"top{i}.lomt"
+            p.write_text("choose write grammar python\n\n" + body,
+                         encoding="utf-8", newline="\n")
+            fu = potato_from.front_door(p)
+            assert "fn _start" in fu.source, (body, fu.source[:200])
+        # 两套入口：拒，并说清是二选一
+        p = td / "both.lomt"
+        p.write_text('choose write grammar python\n\nprint_num(42)\n\n'
+                     "def _start() -> int:\n    return 0\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            assert "二选一" in str(e), str(e)[:200]
+        else:
+            raise AssertionError("顶层语句与 `def _start` 同时出现没被拒")
+        # A module docstring is metadata, not executable state.
+        p = td / "docstring.lomt"
+        p.write_text(
+            'choose write grammar python\n\n"""module doc"""\n\n'
+            "def _start() -> int:\n    return 0\n",
+            encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        assert "fn _start" in fu.source, fu.source[:200]
+    print("      顶层 print/赋值/if 合成 `_start`；与 `def _start` 同时出现则拒；docstring 放行")
+
+
+@test
+def test_java_class_body_tail_is_not_silently_dropped():
+    """类体末尾没有 `;`/`}` 的残句也要拒（与 #1510 同一类）。
+
+    `_class_members` 原先只把以 `;` 或 `}}` 结束的片段算成员，类体最后一行如果两样
+    都没有，就在循环结束时被丢掉 —— `system out println('helloworld')` 这种坏行于是
+    既不进产物也不进 `skipped`，整份单元看起来是 OK 的。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        bad = td / "bad_java.lomt"
+        bad.write_text(
+            "choose write grammar java\n\npublic class Main {\n"
+            "    system out println('helloworld')\n}\n",
+            encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(bad)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            msg = str(e)
+            assert "第 4 行" in msg, f"要点名残句所在行: {msg}"
+            assert "类 Main" in msg, f"要说清是哪个类体里的残句: {msg}"
+        else:
+            raise AssertionError("类体尾部残句被静默吞掉了")
+
+        good = td / "good_java.lomt"
+        good.write_text(
+            "choose write grammar java\n\npublic class Main {\n"
+            "    public static int _start() {\n        return 42;\n    }\n}\n",
+            encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(good)
+        assert "fn _start" in fu.source, fu.source[:200]
+    print("      类体尾部残句拒得带行号；合法 Java 类仍放行")
+
+
+@test
+def test_every_surface_grammar_refuses_unrecognised_material():
+    """同一张矩阵：每门写法塞一条不认识的语句/成员，都必须拒（不是静默少一块）。
+
+    这是 #1510 那一类缺陷的跨语言版本：解析器只认自己那几种构造，认不出的残句
+    如果既不进产物也不进 `skipped`，整份单元就会带着少掉的一块被编过去。
+    """
+    cases = [
+        # `python-top` 不在这一张矩阵里：python 这一门的顶层语句**是被收的**
+        # （合成入口 `_start`，见 `test_python_top_level_statements_become_the_entry`），
+        # 别门照旧。矩阵要的是"认不出的残句必须拒"。
+        ("python-class", "python",
+         'choose write grammar python\n\nclass C:\n    x: int\n\n    def f(self) -> int:\n'
+         '        return 1\n\ndef _start() -> int:\n    return 42\n'),
+        ("java-tail", "java",
+         'choose write grammar java\n\npublic class Main {\n'
+         '    public static int _start() { return 42; }\n'
+         '    system out println(1)\n}\n'),
+        ("csharp-tail", "csharp",
+         'choose write grammar csharp\n\npublic class Main {\n'
+         '    public static int _start() { return 42; }\n'
+         '    system out println(1)\n}\n'),
+        ("c-top", "c",
+         'choose write grammar c\n\nint _start() { return 42; }\n\nJUNK;\n'),
+        ("cpp-top", "cpp",
+         'choose write grammar cpp\n\nint _start() { return 42; }\n\nJUNK;\n'),
+        ("c-struct", "c",
+         'choose write grammar c\n\nstruct S {\n    int x;\n    JUNK;\n};\n\n'
+         'int _start() { return 42; }\n'),
+        ("go-top", "go",
+         'choose write grammar go\n\npackage main\n\nfunc _start() int { return 42 }\n\nJUNK()\n'),
+        ("go-struct", "go",
+         'choose write grammar go\n\npackage main\n\ntype S struct {\n    x int\n    JUNK\n}\n\n'
+         'func _start() int { return 42 }\n'),
+        ("rust-top", "rust",
+         'choose write grammar rust\n\npub struct P { pub x: i32 }\n\nJUNK;\n'),
+    ]
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        for name, lang, src in cases:
+            p = td / f"{name}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            try:
+                potato_from.front_door(p)
+            except (lomt_from.NotRepresentable, ValueError) as e:
+                msg = str(e)
+                assert "第" in msg, f"{name}（{lang}）拒了但没点名行号: {msg}"
+            else:
+                raise AssertionError(f"{name}（{lang}）把不认识的残句静默吞掉了")
+    print(f"      {len(cases)} 组跨语法残句全部拒得带行号")
+
+
+@test
+def test_front_memo_does_not_survive_a_source_edit():
+    """**同一个路径换了内容就要重翻**（#1518）。
+
+    `_FRONT_MEMO` 原先只按 `(路径, 语言, 模式)` 记。它的前提是"一次编译里文件不会
+    变" —— 对 `lomentc.load` 的两次读（装载 + 开关预扫）成立，对**同一个进程里反复
+    写同一个路径**的调用方不成立：Playground 每次运行都写 `playground.lomt`，于是
+    先跑一个能过的程序、再把源改成坏的，前门返回的仍是**上一份译文**。屏幕上那个
+    42 就是这么来的 —— 它跟眼前的源码没关系，却看着像"这段代码跑出了 42"。
+
+    这里钉的是键里的**内容**：同一份源再来一次照样命中（预扫那趟还得省），换了源
+    必然重翻（该拒的要拒）。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "work.lomt"
+        good = ("choose write grammar python\n\n"
+                "def _start() -> int:\n    print_num(42)\n    return 0\n")
+        p.write_text(good, encoding="utf-8", newline="\n")
+        first = potato_from.front_door(p)
+        again = potato_from.front_door(p)
+        assert first.source == again.source, "同一份源应当命中记忆（内容没变）"
+        assert "print_num" in first.source
+        # 同一个路径、换了内容：必须重翻 —— 这份解析不过，应当被拒
+        p.write_text("choose write grammar python\n\ndef _start(:\n",
+                     encoding="utf-8", newline="\n")
+        try:
+            potato_from.front_door(p)
+        except (lomt_from.NotRepresentable, ValueError) as e:
+            assert "第 3 行" in str(e), f"要点名行号: {e}"
+        else:
+            raise AssertionError(
+                "改了源还拿回上一份译文 —— 输出会看着像这段代码跑出来的")
+        # 改回原来的内容：应当重新可用（记忆不是"这个路径只有第一次算数"）
+        p.write_text(good, encoding="utf-8", newline="\n")
+        back = potato_from.front_door(p)
+        assert back.source == first.source
+    print("      同一路径换源必须重翻；内容没变仍命中；改回来还能用")
 
 
 @test
@@ -797,11 +1167,18 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -809,6 +1186,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -904,7 +1283,7 @@ def test_grammar_scanner_twin_matches_the_independent_reference():
         binn = f"{_TW}chk.bin"
         script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(td)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, text=True, timeout=300, shell=False)
         got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
     assert rr.stdout.strip() == "0", f"孪生该退 0: rc={rr.stdout!r}\n{got[:400]}"
@@ -934,24 +1313,764 @@ def test_grammar_twin_selfhost_compiles():
         binn = f"{_TW}s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomgrammar.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomgrammar.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
     print(f"      种子自举链编译 lomgrammar.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
-def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
+@test
+def test_a_bom_does_not_hide_the_declaration():
+    """文件开头的 **UTF-8 BOM** 不能让声明失效。
+
+    Windows 的编辑器默认会写 BOM（记事本、"另存为 UTF-8"、PowerShell 的 `>`），
+    而 `docs/188` §2 把"这份源怎么读"**整个压在那一行**上（`.lomt` 刻意**不嗅探**内容）。
+    原先四条第 `_GRAMMAR_*` 正则都是 `^[ \\t]*`：BOM 不是空白 ⇒ `choose` 不在"行首"⇒
+    **声明整个找不到** ⇒ 文件落到"缺声明 = 原生 Loment"，整份 C 被当 Loment 编，
+    报出来是 `1:1 非法字符 '\\ufeff'` —— 用户完全看不出"是你那行声明没生效"。
+
+    两边都钉：带 BOM 与不带 BOM **读出来的语法与译文必须一样**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        body = "choose write grammar c\nint main() { return 44; }\n"
+        outs = []
+        for tag, prefix in (("bom", "﻿"), ("nobom", "")):
+            # **文件名要一样** —— 产物里的 `module <主干名>` 取自路径，
+            # 换个名字比出来的差就不是 BOM 那一处了。
+            d = td / tag
+            d.mkdir()
+            p = d / "t.lomt"
+            p.write_bytes((prefix + body).encode("utf-8"))
+            fu = potato_from.front_door(p)
+            assert fu.grammar == "c" and fu.translated, (tag, fu.grammar, fu.translated)
+            assert "choose write grammar" not in fu.source, (tag, fu.source[:80])
+            outs.append(fu.source)
+        assert outs[0] == outs[1], "带 BOM 与不带的产物不同"
+    print("      带 BOM 的声明照常认到，产物与不带 BOM 的逐字节相同")
+
+
+@test
+def test_a_bom_on_a_native_file_does_not_hide_the_real_error():
+    """`#482`：BOM 后面那份**原生** Loment 的真错要浮出来。
+
+    上一條只管"声明还认不认得"；原生文件（没有声明）原先更糟：BOM 留着，词法器在
+    1:1 报 `非法字符 '﻿'`，真正的类型错一个字都到不了用户眼前。带 BOM 与
+    不带 BOM 的文件，诊断必须**一样**。
+    """
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "bom.lomt"
+        p.write_bytes(bytes([0xEF, 0xBB, 0xBF])
+                      + b"module m\n\nfn f() -> u32 { return true; }\n")
+        mod = lomentc.load(p)
+        deps = lomentc.resolve_deps(mod, ROOT, p.parent, entry=p)
+        errs = lomentc.check(mod, deps=deps)
+        assert errs, "带 BOM 的文件没报错"
+        assert any("bool" in e and "u32" in e for e in errs), (
+            f"真正的类型错没浮出来（BOM 把词法器挡在 1:1）：{errs[:3]}")
+        assert not any("非法字符" in e for e in errs), errs[:3]
+    print("      带 BOM 的原生文件：类型错浮出来，不是 '非法字符' 停在 1:1")
+
+
+@test
+def test_a_misspelled_declaration_is_refused_not_guessed_past():
+    """**关键词写错 / 词序不对**要报，不能"当成没有声明"悄悄读成 Loment。
+
+    `docs/188` §1 列了四种"声明写错"的报错（名字不在表里 / 写在 `module` 之后 /
+    写两次 / 后面没写名字）—— **漏了"关键词本身写错"这一种**（`docs/198` §2 报过，
+    当时未修）。这一种原先**一声不响**：文件落到"缺 = Loment"那一条，用户拿到的是
+    正文里某处的语法错（`未知顶层关键字 'def'` 之类）—— **指的不是那一行**。
+
+    §2 那句"兜底从**猜**变**拒绝**"正是为它写的；原先它既没猜也没拒，是**换了一个猜法**。
+
+    两面都钉：四种写错**必须报**（且指出那一行的原文），而**真没写声明**的照旧回退
+    到 Loment（那是 `docs/188` §2 的规矩：99% 的文件是 Loment，缺 = Loment 没有歧义）。
+    """
+    for bad in ("choose grammar c", "grammar c", "choose write grammars c", "choose language c"):
+        lang, err, declared = potato_from.read_grammar_decl(bad + "\n\nint main() { return 7; }\n")
+        assert err and not declared, (bad, err, declared)
+        assert "第 1 行" in err and bad in err, (bad, err)
+    # 真没声明的照旧回退
+    assert potato_from.read_grammar_decl("module m\nfn f() { }\n") == ("loment", None, False)
+    # 写对的照旧
+    assert potato_from.read_grammar_decl("choose write grammar c\nint main(){}")[:1] == ("c",)
+    # **合法的开关不算"写错的声明"**（它在 `module` 之后；写在之前本来就另有错）
+    assert potato_from.read_grammar_decl("module m\nchoose gc_auto\nfn f() { }\n") == \
+        ("loment", None, False)
+    print("      四种写错的声明都报得出（并给出那一行原文）；缺声明照旧回退")
+
+
+@test
+def test_tur2026_3_struct_literal_shorthand():
+    """2026.3 字段简写 `S { a }` ≡ `S { a: a }`；旧版次仍拒（封版不动）。
+
+    `docs/296` §5 把这条列进 Tur 3 的语法优化。它是**纯拼法**：AST 里就是
+    `a: a`，检查、发射、产物与显式写法完全相同。
+    """
+    short = ("module m\n\nstruct S { a: u32, b: u32 }\n\n"
+             "fn f() -> u32 {\n    let a: u32 = 1;\n    let b: u32 = 2;\n"
+             "    let s: S = S { a, b };\n    return s.a + s.b;\n}\n")
+    long = short.replace("S { a, b }", "S { a: a, b: b }")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "short.lomt"
+        a.write_text(short, encoding="utf-8", newline="\n")
+        b = td / "long.lomt"
+        b.write_text(long, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "字段简写与显式写法的 IR 不一致"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + short,
+                       encoding="utf-8", newline="\n")
         try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_grammar_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了字段简写 —— 封版版次被改了")
+    print("      2026.3 `S { a }` 与 `S { a: a }` 产物相同；tur2026.2 仍拒")
+
+
+@test
+def test_tur2026_3_for_index():
+    """2026.3 `for i, x in xs`：下标 `i` 是 u32 拷贝，元素 `x` 也是拷贝；旧版次仍拒。
+
+    `docs/332` §5 第 2 项。反糖形状与参考实现一致（`__tur2_i.N` + `while` + 体首
+    两条 `let`），自举侧因此能逐字节对拍（`loment_p8_test` M99）。
+    """
+    body = ("module m\n\n"
+            "fn f() -> u32 {\n"
+            "    let xs: [u32; 4] = [5, 6, 7, 8];\n"
+            "    let s: u32 = 0;\n"
+            "    for i, x in xs {\n"
+            "        s = s + i * 10 + x;\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "new.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        ll = lomentc.emit_llvm(lomentc.load(p), ROOT)
+        assert "%i.addr = alloca i32" in ll and "%x.addr = alloca i32" in ll, ll[:600]
+        assert "load i32, ptr %i.addr" in ll, "下标不是 i32 拷贝"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + body,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 `for i, x in xs` —— 封版版次被改了")
+    print("      2026.3 `for i, x in xs` 编得过且下标为 u32；tur2026.2 仍拒")
+
+
+@test
+def test_tur2026_3_for_expression():
+    """2026.3 `for x in <call>`：调用只求值一次，落到 `__tur2_s.N`；旧版次仍拒。
+
+    `docs/334`：v1 只收调用 —— 自举侧只有 `fn_ret` 能给出类型 token。数组与切片
+    返回都收。
+    """
+    body = ("module m\n\n"
+            "fn buf(b: [u32]) -> [u32] {\n    return b;\n}\n\n"
+            "fn f() -> u32 {\n"
+            "    let xs: [u32; 3] = [1, 2, 3];\n"
+            "    let s: u32 = 0;\n"
+            "    for x in buf(&xs) {\n"
+            "        s = s + x;\n"
+            "    }\n"
+            "    return s;\n"
+            "}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "new.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        ll = lomentc.emit_llvm(lomentc.load(p), ROOT)
+        assert "%__tur2_s.1.addr = alloca { ptr, i64 }" in ll, ll[:800]
+        assert ll.count("call { ptr, i64 } @buf") == 1, "调用被求值了不止一次"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + body,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 `for x in <call>` —— 封版版次被改了")
+        # 区间 for 的**调用下界**不能被当成调用源：`for i in lo() .. hi() {` 仍是区间。
+        rng = ("module m\n\nfn lo() -> u32 { return 1; }\n"
+               "fn hi() -> u32 { return 3; }\n\n"
+               "fn f() -> u32 {\n    let s: u32 = 0;\n"
+               "    for i in lo() .. hi() {\n        s = s + i;\n    }\n"
+               "    return s;\n}\n")
+        pr = td / "range.lomt"
+        pr.write_text(rng, encoding="utf-8", newline="\n")
+        lr = lomentc.emit_llvm(lomentc.load(pr), ROOT)
+        assert "__tur2_s." not in lr, "区间 for 的调用下界被当成了 for-call 源"
+    print("      2026.3 `for x in <call>` 编得过且只求值一次；tur2026.2 仍拒")
+
+
+@test
+def test_tur2026_3_if_expression():
+    """2026.3 `let x: T = if c { a } else { b };` —— 产物与显式 if 语句相同。
+
+    `docs/335`：v1 只收 `let` 的初值、两支各一个表达式、必须有 `else`。
+    """
+    expr_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                 "    let x: u32 = if c { 10 } else { 20 };\n"
+                 "    return x;\n}\n")
+    stmt_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                 "    let x: u32;\n"
+                 "    if c { x = 10; } else { x = 20; }\n"
+                 "    return x;\n}\n")
+    bad_form = ("module m\n\nfn f(c: bool) -> u32 {\n"
+                "    return if c { 1 } else { 2 };\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "expr.lomt"
+        a.write_text(expr_form, encoding="utf-8", newline="\n")
+        b = td / "stmt.lomt"
+        b.write_text(stmt_form, encoding="utf-8", newline="\n")
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "if 表达式与显式 if 语句的 IR 不同"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2\n" + expr_form,
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 if 表达式 —— 封版版次被改了")
+        bad = td / "bad.lomt"
+        bad.write_text(bad_form, encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(bad)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`return if …` 被收下了 —— v1 只该收 let 初值")
+    print("      2026.3 if 表达式与显式 if 同产物；非初值位置与 tur2026.2 都拒")
+
+
+@test
+def test_tur2026_3_match_expression():
+    """2026.3 `let x: T = match e { P => a, _ => b };` —— 产物与显式 match 语句相同。
+
+    `docs/336`：v1 只收 `let` 的初值、被匹配值是一个名字、臂体各一个表达式。
+    """
+    expr_form = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn f(d: D) -> u32 {',
+        '    let x: u32 = match d { D::N => 1, D::E => 2 };',
+        '    return x;',
+        '}',
+        '',
+    ])
+    stmt_form = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn f(d: D) -> u32 {',
+        '    let x: u32;',
+        '    match d { D::N => { x = 1; } D::E => { x = 2; } }',
+        '    return x;',
+        '}',
+        '',
+    ])
+    bad_form = chr(10).join([
+        'module m',
+        '',
+        'enum D { N, E }',
+        '',
+        'fn f(d: D) -> u32 {',
+        '    return match d { D::N => 1, D::E => 2 };',
+        '}',
+        '',
+    ])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        a = td / "expr.lomt"
+        a.write_text(expr_form, encoding="utf-8", newline=chr(10))
+        b = td / "stmt.lomt"
+        b.write_text(stmt_form, encoding="utf-8", newline=chr(10))
+        la = lomentc.emit_llvm(lomentc.load(a), ROOT)
+        lb = lomentc.emit_llvm(lomentc.load(b), ROOT)
+        assert la == lb, "match 表达式与显式 match 语句的 IR 不同"
+        old = td / "old.lomt"
+        old.write_text("choose write grammar tur2026.2" + chr(10) + expr_form,
+                       encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(old)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收下了 match 表达式 —— 封版版次被改了")
+        bad = td / "bad.lomt"
+        bad.write_text(bad_form, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(bad)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`return match …` 被收下了 —— v1 只该收 let 初值")
+    print("      2026.3 match 表达式与显式 match 同产物；非初值位置与 tur2026.2 都拒")
+
+@test
+def test_str_num_builtin():
+    """`str_num(u32) -> str`：无符号十进制进堆（`docs/337`）；`no_runtime` 点名拒。"""
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let s: str = str_num(n);", chr(10),
+        "    return s;", chr(10),
+        "}", chr(10), chr(10),
+        "fn g(a: i32) -> str {", chr(10),
+        "    return str_num(a);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        assert "call i32 @__loment_num_to_dec" in ll, ll[-400:]
+        assert "define internal i32 @__loment_num_to_dec" in ll, "十进制转换没随 str_num 发出来"
+        assert "sext i32" in ll, "有符号实参没有按符号扩到 i64"
+        p2 = td / "nort.lomt"
+        p2.write_text(body.replace("choose runtime", "choose no_runtime"),
+                      encoding="utf-8", newline=chr(10))
+        mod2 = lomentc.load(p2)
+        errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
+        assert any("no_runtime" in e and "str_num" in e for e in errs2), errs2[:3]
+    print("      str_num 进堆、随调用发十进制转换；no_runtime 点名拒")
+
+
+@test
+def test_str_interpolation():
+    """`f"…"` / `rf"…"`：前端改写成 `str_concat` 链（`docs/341`）。
+
+    钉四件事：三个 helper 按需发、`no_runtime` 点名拒、`rf` 的反斜杠原样、
+    以及改写之后的报错列号**映射回用户那一行**。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn f(n: u32, b: bool, s: str) -> str {", chr(10),
+        "    let a: str = f\"n={n} {s}\";", chr(10),
+        "    let c: str = f\"{b} {n=}\";", chr(10),
+        "    let d: str = f\"{s!r} {{lit}}\";", chr(10),
+        "    let e: str = rf\"raw\\\\n{n}\";", chr(10),
+        "    let g: str = f\"{n:>5}|{s:<4}|{n:05}|{n:^7}\";", chr(10),
+        "    return a;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        for sym in ("call i32 @__loment_num_to_dec", "call i32 @__loment_bool_to_str",
+                    "call i64 @__loment_str_repr", "call void @__loment_pad",
+                    "define internal void @__loment_pad"):
+            assert sym in ll, (sym, ll[-400:])
+        # `str` 孔是**恒等**：不发 `str_show(` 调用（`str_show` 只出现在别的孔里）
+        assert "str_show(" not in ll, "str 孔不该生成 str_show 调用"
+
+        p2 = td / "nort.lomt"
+        p2.write_text(body.replace("choose runtime", "choose no_runtime"),
+                      encoding="utf-8", newline=chr(10))
+        mod2 = lomentc.load(p2)
+        errs2 = lomentc.check(mod2, deps=lomentc.resolve_deps(mod2, ROOT, td, entry=p2))
+        assert any("no_runtime" in e and "str_" in e for e in errs2), errs2[:3]
+
+        # 格式说明**收** `>W` / `<W` / `^W` / `0W`（`docs/341` §7）；别的形状**指到孔**
+        p3 = td / "bad.lomt"
+        p3.write_text(body.replace('f"n={n} {s}"', 'f"n={n:W5}"'),
+                      encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3)
+        except lomentc.LomError as e:
+            assert "格式说明" in e.msg, e.msg
+        else:
+            raise AssertionError("`{n:W5}` 没被拒")
+        p3b = td / "wide.lomt"
+        p3b.write_text(body.replace('f"n={n} {s}"', 'f"n={n:0}"'),
+                       encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3b)
+        except lomentc.LomError as e:
+            assert "格式说明" in e.msg, e.msg
+        else:
+            raise AssertionError("`{n:0}`（缺宽度）没被拒")
+
+        # **列号映射**：改写之后解析器报的列要指回用户那一行的那一格
+        bad2 = body.replace('f"n={n} {s}"', 'f"n={n + }"')
+        line = [ln for ln in bad2.split(chr(10)) if "n + " in ln][0]
+        want_col = line.index("}") + 1
+        p4 = td / "bad2.lomt"
+        p4.write_text(bad2, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p4)
+        except lomentc.LomError as e:
+            assert e.col == want_col, (e.col, want_col, e.msg)
+        else:
+            raise AssertionError("孔里的语法错没被拒")
+    print("      插值: 三个 helper 按需发; no_runtime 点名拒; rf 原样; 列号映射回原源")
+
+
+@test
+def test_catch_block_and_return():
+    """`catch |e| { … }` / `catch return`（2026.3+，`docs/343`）。
+
+    钉三件事：两条都能编过且产物形状对（绑定槽 / `ret`）、函数返回类型不符要点名、
+    旧版次不收。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "fn may(n: u32) -> Result<u32, u32> {", chr(10),
+        "    if n > 3 {", chr(10),
+        "        return Result::Err(n);", chr(10),
+        "    }", chr(10),
+        "    return Result::Ok(n + 1);", chr(10),
+        "}", chr(10), chr(10),
+        "fn f(n: u32) -> Result<u32, u32> {", chr(10),
+        "    let a: u32 = may(n) catch |e| { e + 100 };", chr(10),
+        "    let b: u32 = may(a) catch return;", chr(10),
+        "    return Result::Ok(b);", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        assert "%e.addr" in ll, "`catch |e|` 的绑定没有槽"
+        assert "ret { i32, i64 }" in ll, "`catch return` 没有把 Err 原样返回"
+
+        # 函数返回类型不是同一个枚举 -> 点名
+        bad = body.replace("fn f(n: u32) -> Result<u32, u32> {",
+                           "fn f(n: u32) -> u32 {")
+        p2 = td / "bad.lomt"
+        p2.write_text(bad, encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p2)
+        except lomentc.LomError as e:
+            assert "catch return" in e.msg, e.msg
+        else:
+            m2 = lomentc.load(p2)
+            e2 = lomentc.check(m2, deps=lomentc.resolve_deps(m2, ROOT, td, entry=p2))
+            assert any("catch return" in x for x in e2), e2[:3]
+
+        # 旧版次不收
+        p3 = td / "old.lomt"
+        p3.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                      + "fn g() -> u32 { let a: u32 = h() catch |e| { e }; return a; }"
+                      + chr(10), encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p3)
+        except (lomentc.LomError, Exception):
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `catch |e|`")
+    print("      `catch |e| { … }` / `catch return`：编得过、返回类型不符点名、旧版次拒")
+
+
+@test
+def test_const_str():
+    """`const NAME: str = "…"`（2026.3+，`docs/342`）。
+
+    两件事：好的那份编得过、产物里就是那个字面量（每个使用点一条 `.str`）；
+    旧版次（tur2026.2）拒它 —— 旧读法里 `const` 只吃整数字面量。
+    """
+    body = "".join([
+        "module m", chr(10),
+        "choose runtime", chr(10), chr(10),
+        "const GREETING: str = \"hello\";", chr(10),
+        "const N: u32 = 42;", chr(10), chr(10),
+        "fn f(n: u32) -> str {", chr(10),
+        "    let a: str = str_concat(GREETING, GREETING);", chr(10),
+        "    let b: str = f\"{GREETING}-{N}-{n}\";", chr(10),
+        "    return a;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        p = td / "ok.lomt"
+        p.write_text(body, encoding="utf-8", newline=chr(10))
+        mod = lomentc.load(p)
+        errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+        assert not errs, errs[:3]
+        ll = lomentc.emit_llvm(mod, ROOT)
+        # 每个使用点一条 `.str` 常量：hello ×3 + "-" ×2
+        assert ll.count(r'c"\68\65\6C\6C\6F"') == 3, ll[-500:]
+        assert ll.count(r'c"\2D"') == 2, ll[-500:]
+        # 加号那一路是整数常量（`{N}` -> str_show(N) -> str_num(42)）
+        assert "zext i32 42 to i64" in ll, "整数常量没有按常量内联"
+
+        p2 = td / "old.lomt"
+        p2.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                      + "const G: str = \"x\";" + chr(10),
+                      encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p2)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `const NAME: str`")
+    print("      `const NAME: str`：内联成字面量；旧版次仍拒")
+
+
+@test
+def test_the_default_edition_is_the_newest_open_one():
+    """**没声明 = 最新版次**（2026-11-06 用户裁定，`docs/312`）。
+
+    用户要的是"写新代码不必先背一行声明"：Tur 1 缺掉的 `def` / `for x in xs` /
+    `break` / `orelse` / `defer` / `lgc` 都在最新版里。显式钉旧版次仍然可以
+    （`tur` / `tur1` / `tur2026.1`）—— 那是**作者明确要的**，不是默认。
+    """
+    assert potato_from.DEFAULT_EDITION == potato_from.TUR_EDITIONS[-1], (
+        "默认版次不是最新那一版 —— 用户 2026-11-06 的口径是「永远用最新」")
+    body = "module m\n\ndef f() -> u32 { return 1 and 1; }\n"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        plain = td / "plain.lomt"
+        plain.write_text(body, encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(plain)
+        assert (fu.grammar, fu.profile, fu.spelling) == (
+            "loment", potato_from.DEFAULT_EDITION, ""), (fu.grammar, fu.profile, fu.spelling)
+        assert "def f" not in fu.source and " and " not in fu.source, \
+            "没声明的那份没过纯糖 —— 默认版次没生效"
+        for word, prof in (("loment", potato_from.DEFAULT_EDITION),
+                           ("tur3", "tur2026.3"),
+                           ("tur2", "tur2026.2"),
+                           ("tur", "tur2026.1"),
+                           ("tur1", "tur2026.1")):
+            p = td / f"{word.replace('.', '_')}.lomt"
+            p.write_text(f"choose write grammar {word}\n" + body,
+                         encoding="utf-8", newline="\n")
+            fu = potato_from.front_door(p)
+            assert fu.profile == prof, (word, fu.profile, prof)
+    print("      默认 = 最新版次；`tur` / `tur1` 仍显式钉 Tur 1，`loment` 跟默认走")
+
+
+@test
+def test_collision_names_are_refused_when_the_reading_is_not_pinned():
+    """**版次不静默**（`docs/312`）：无声明单元里**声明**了新版关键字 -> 拒，不是改义。
+
+    最小的一例是 `let break = 1; while c { break; }`：Tur 1 里 `break;` 是一条空
+    表达式语句，2026.2 起它退出循环。默认改到最新版次之后，这份源必须**响亮地**
+    被拒 —— 改名，或显式 `choose write grammar tur2026.1` 钉回旧读法。
+    """
+    body = ("module m\n\nfn main() -> u32 {\n"
+            "    let break: u32 = 1;\n"
+            "    let c: u32 = 3;\n"
+            "    while c > 0 {\n        break;\n        c = c - 1;\n    }\n"
+            "    return 0;\n}\n")
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        plain = td / "plain.lomt"
+        plain.write_text(body, encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(plain)
+        except potato_from.FrontDoorRefused as e:
+            assert "break" in str(e), e
+        else:
+            raise AssertionError("无声明 + `let break` 被收下了 —— 旧源会静默改义")
+        # `lgc` 是 2026.3 的关键字，旧版次里是合法标识符 —— 同一闸。
+        lgc = td / "lgc.lomt"
+        lgc.write_text("module m\n\nfn main() {\n    let lgc: u32 = 1;\n    print_num(lgc);\n}\n",
+                       encoding="utf-8", newline="\n")
+        try:
+            lomentc.load(lgc)
+        except potato_from.FrontDoorRefused as e:
+            assert "lgc" in str(e), e
+        else:
+            raise AssertionError("无声明 + `let lgc` 被收下了")
+        # 显式钉旧版次 -> 照旧编（这才是"响亮地拒"而不是"一刀切禁掉"）。
+        for word in ("tur2026.1", "tur1", "tur"):
+            p = td / f"{word.replace('.', '_')}.lomt"
+            p.write_text(f"choose write grammar {word}\n" + body,
+                         encoding="utf-8", newline="\n")
+            assert lomentc.load(p).profile == "tur2026.1", word
+        # **用**这些名字不触发：循环里的 `break;` 正是新版次要的写法。
+        ok = td / "ok.lomt"
+        ok.write_text("module m\n\nfn main() {\n    while 1 > 0 {\n        break;\n    }\n}\n",
+                      encoding="utf-8", newline="\n")
+        assert lomentc.load(ok).profile == potato_from.DEFAULT_EDITION
+    print("      `let break` / `let lgc`：无声明 -> 拒；显式钉旧版次 -> 照旧编；用不拒")
+
+
+@test
+def test_every_open_edition_declares_its_collision_set():
+    """开新版次时必须回答"它有没有跟旧标识符撞车"（`docs/312`）。
+
+    这不是风格检查：`EDITION_COLLISIONS` 是前门那一闸的输入。新版次如果用了旧版次里
+    能当标识符的拼法却不登记，默认读法就会**静默改义** —— 而那是"默认 = 最新"
+    唯一不能接受的事。**空元组也算登记**（明确回答"没有撞车"）。
+    """
+    for ed in potato_from.TUR_EDITIONS:
+        if ed in potato_from.FROZEN_EDITIONS:
+            continue
+        assert ed in potato_from.EDITION_COLLISIONS, (
+            f"{ed} 是未封版的新版次，但 `EDITION_COLLISIONS` 里没有它 —— "
+            f"开版次时要明确回答「它有没有跟旧标识符撞车」，空也要写成 ()")
+    assert set(potato_from.EDITION_COLLISIONS) <= set(potato_from.TUR_EDITIONS), (
+        "碰撞表里有不存在的版次名")
+    print("      未封版的版次都有碰撞登记（空元组 = 明确回答没有）")
+
+
+@test
+def test_tur2026_2_is_frozen():
+    """**tur2026.2 已封版**（2026-11-05）：名字、特性面、别名都不再变。
+
+    **Why**: 封版不能只是文档里的一句话。特性面是一个**哈希棘轮** —— 想往这一版
+    加语法，必须同时改这个哈希，于是"这是不是该开 tur2026.3"会被迫问一次。
+    判据同时钉住"当前没有未封版的新版次混进来"。
+    """
+    assert potato_from.FROZEN_EDITIONS == ("tur2026.1", "tur2026.2"), (
+        "封版清单被改了；开新版次不应该改这里")
+    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS + ("tur2026.3",), (
+        "TUR_EDITIONS 应当是「两个封版 + 一个开的 2026.3」—— 开新版次要显式改这条判据")
+    digest = hashlib.sha256(
+        chr(10).join(potato_from.TUR2026_2_FEATURES).encode()).hexdigest()
+    assert digest == FROZEN_TUR2026_2_SHA256, (
+        "tur2026.2 的特性面变了 —— 加语法请开 tur2026.3，不是改这一版")
+    for future in ("tur2027.1",):
+        assert future not in potato_from.GRAMMAR_ALIASES, (
+            f"{future} 还没开；开的时候要同时改锁表、NATIVE_GRAMMARS、docs/304 与这条判据")
+    print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")
+
+
+@test
+def test_auto_type_inference():
+    """`let x: auto = e;` / `let x := e;`（2026.3+，`docs/347`）。
+
+    四件事：
+    * **产物与显式写法逐字节相同** —— 推断只是省了那几个字，不是新的语义；
+    * 收的初值形状：变量、字段、整条 `as T`、`true`/`false`；
+    * **不收**：字面量、调用、运算、`if`/`match` 表达式、没有初值、模块常量 ——
+      这些都没有"写在源里的类型"，两套实现照同一条判据面拒；
+    * `:=` 要**粘着**（`let x: = e` 仍是缺类型的语法错），旧版次整条读法不存在。
+    """
+    explicit = "".join([
+        "module m", chr(10), "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n: u32 = p.a;", chr(10),
+        "    let k: i64 = p.b;", chr(10),
+        "    let j: i64 = k as i64;", chr(10),
+        "    let t: bool = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j as u32);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    inferred = "".join([
+        "module m", chr(10), "choose runtime", chr(10), chr(10),
+        "struct S { a: u32, b: i64 }", chr(10), chr(10),
+        "fn main() -> u32 {", chr(10),
+        "    let p: S = S { a: 3, b: 4 };", chr(10),
+        "    let n := p.a;", chr(10),
+        "    let k: auto = p.b;", chr(10),
+        "    let j := k as i64;", chr(10),
+        "    let t: auto = true;", chr(10),
+        "    print_num(n);", chr(10),
+        "    print_num(j as u32);", chr(10),
+        "    if t { print_num(0); }", chr(10),
+        "    return 0;", chr(10),
+        "}", chr(10)])
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+
+        def ll_of(text: str, name: str) -> str:
+            p = td / f"{name}.lomt"
+            p.write_text(text, encoding="utf-8", newline=chr(10))
+            mod = lomentc.load(p)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+            assert not errs, (name, errs[:3])
+            return lomentc.emit_llvm(mod, ROOT)
+
+        a = ll_of(explicit, "explicit")
+        b = ll_of(inferred, "inferred")
+        assert a == b, "推断写法与显式写法的产物不同"
+
+        bad = {
+            "intlit": "    let x := 5;",
+            "call": "    let x := f();",
+            "binop": "    let x := n + 1;",
+            "noinit": "    let x: auto;",
+            "const": "    let x := K;",
+        }
+        pre = "".join([
+            "module m", chr(10), "choose runtime", chr(10), chr(10),
+            "const K: u32 = 3;", chr(10), chr(10),
+            "fn f() -> u32 { return 1; }", chr(10), chr(10),
+            "fn main() -> u32 {", chr(10), "    let n: u32 = 1;", chr(10)])
+        for name, line in bad.items():
+            p = td / f"bad_{name}.lomt"
+            p.write_text(pre + line + chr(10) + "    return 0;" + chr(10) + "}" + chr(10),
+                         encoding="utf-8", newline=chr(10))
+            mod = lomentc.load(p)
+            errs = lomentc.check(mod, deps=lomentc.resolve_deps(mod, ROOT, td, entry=p))
+            assert any("推断不出" in e for e in errs), (name, errs[:3])
+
+        # `if` 表达式：装载期反糖、推断没有位置 —— 解析期就拒。
+        p = td / "ifexpr.lomt"
+        p.write_text(pre + "    let x: auto = if true { 1 } else { 2 };" + chr(10)
+                     + "    return 0;" + chr(10) + "}" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError as e:
+            assert "不能接" in e.msg, e.msg
+        else:
+            raise AssertionError("`auto` 接了 `if` 表达式")
+
+        # 粘着：`let x: = 1` 仍是"`: ` 后面缺类型"的语法错。
+        p = td / "spaced.lomt"
+        p.write_text("module m" + chr(10) + "fn main() -> u32 { let x: = 1; return 0; }" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("`let x: = 1` 被读成了推断（`:=` 要粘着）")
+
+        # 旧版次：整条读法不存在（`:` 后面缺类型）。
+        p = td / "old.lomt"
+        p.write_text("choose write grammar tur2026.2" + chr(10) + "module m" + chr(10)
+                     + "fn main() -> u32 { let x := 1; return 0; }" + chr(10),
+                     encoding="utf-8", newline=chr(10))
+        try:
+            lomentc.load(p)
+        except lomentc.LomError:
+            pass
+        else:
+            raise AssertionError("tur2026.2 收了 `:=`")
+    print("      `auto` / `:=`：产物与显式写法相同；六种初值与旧版次都拒")
+
+
+def main() -> int:
+    return loment_suite.run(TESTS, "loment_grammar_test")
 
 
 if __name__ == "__main__":

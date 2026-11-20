@@ -56,16 +56,21 @@ def render(mod: lomentc.Module, src: str, name: str) -> str:
         out += ["## 类型", ""]
         for s in mod.structs:
             out += [f"### `struct {s.name}`", "", doc_of(lines, s.line), "",
-                    "| 字段 | 类型 |", "|---|---|"]
-            out += [f"| `{fn}` | `{ft}` |" for fn, ft in s.fields]
+                    "| 字段 | 类型 | 说明 |", "|---|---|---|"]
+            for idx, (fn, ft) in enumerate(s.fields):
+                # 行号只对**源码里读出来的**声明有效（预置/合成的没有）；0 = 没有注释。
+                ln = s.field_lines[idx] if idx < len(s.field_lines) else 0
+                out.append(f"| `{fn}` | `{ft}` | {doc_of(lines, ln) if ln else ''} |")
             out.append("")
     if mod.enums:
         out += ["## 枚举", ""]
         for e in mod.enums:
             out += [f"### `enum {e.name}`", "", doc_of(lines, e.line), ""]
-            for v in e.variants:
+            for idx, v in enumerate(e.variants):
                 payload = f" ({e.payloads[v]})" if v in e.payloads else ""
-                out.append(f"- `{e.name}::{v}`{payload}")
+                ln = e.variant_lines[idx] if idx < len(e.variant_lines) else 0
+                doc = doc_of(lines, ln) if ln else ""
+                out.append(f"- `{e.name}::{v}`{payload}" + (f" — {doc}" if doc else ""))
             out.append("")
     if mod.traits:
         out += ["## trait", ""]
@@ -92,6 +97,17 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     root = Path(a.lom_root) if a.lom_root else ROOT
     p = Path(a.file)
+    # **别的写法要在这里拦住**（`docs/182` §1.9）。`load_unit` 会**过前门**，
+    # 于是拿到的是**译文**的模块（函数带的是**译文行号**），而下面 `render` 拿
+    # **原文**去按那些行号索引 —— 短文件越界、`IndexError` 甩栈；长文件不越界，
+    # 于是**不崩、给出张冠李戴的文档**（`fn alpha` 拿到 `beta` 的注释），退 0。
+    # 两种都是静默错，所以**认出非原生写法就拒**。
+    try:
+        import potato_from                                            # noqa: PLC0415
+        potato_from.refuse_foreign_grammar(p.read_text(encoding="utf-8"), "lomdoc")
+    except (ValueError, OSError) as e:
+        print(f"[ERR] {p}: {e}", file=sys.stderr)
+        return 1
     try:
         mod, deps = lomentc.load_unit(p, root)      # 唯一入口（docs/182 §1.10）
         errs = lomentc.check(mod, deps=deps)
@@ -109,6 +125,11 @@ def main(argv: list[str] | None = None) -> int:
         Path(a.out).write_text(text, encoding="utf-8", newline="\n")
         print(f"[OK] {p} -> {a.out}")
     else:
+        # **两个出口必须逐字节相同**（`#506`）：Windows 的文本模式会把 `\n` 翻成 `\r\n`，
+        # 于是同一份输入 `>` 出去是 CRLF、`--out` 出去是 LF —— 而"文档要跨平台可比"
+        # 正是这个模块存在的理由。`newline=""` 关掉翻译，原样写出。
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(newline="")
         sys.stdout.write(text)
     return 0
 

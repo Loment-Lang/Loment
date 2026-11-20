@@ -104,13 +104,22 @@ if (-not $DryRun) {
     if ($LASTEXITCODE -ne 0) { throw "chmod failed" }
     # working directory = repo root: the driver resolves 'use' itself, so pass the relative path
     Push-Location $Root
+    # stage1 writes UTF-8, but Windows PowerShell decodes a native command's stdout with
+    # [Console]::OutputEncoding -- GBK on a Chinese Windows. The IR carries the source's
+    # comments, so GBK decoding turns them into mojibake, and a double-byte decode can
+    # swallow the newline after one: the next `define` is glued onto a `;` comment and
+    # `entry:` ends up at top level (clang: "expected top-level entity"). Measured
+    # 2026-10-21 on loment/examples/tour.lomt -- compile "succeeded", link failed.
+    $prevEnc = [Console]::OutputEncoding
     try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
         $ir = & wsl -e /tmp/lomc_stage1 $rel
     } finally {
+        [Console]::OutputEncoding = $prevEnc
         Pop-Location
     }
     if ($LASTEXITCODE -ne 0) { throw "stage1 failed to compile (see diagnostics above)" }
-    # write with LF (IR is pure ASCII; PowerShell's '>' would write CRLF/UTF-16)
+    # write with LF (PowerShell's '>' would write CRLF/UTF-16)
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [IO.File]::WriteAllText($outLl, (($ir -join "`n") + "`n"), $utf8)
 }

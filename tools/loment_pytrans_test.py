@@ -38,6 +38,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf      # noqa: E402
 import lomentc     # noqa: E402
 import lomt_from   # noqa: E402
@@ -64,11 +65,18 @@ def _python() -> str | None:
     return None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -76,15 +84,37 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
 def _run(exe: Path) -> int:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc",
+        [*_WSLCMD, "bash", "-lc",
          f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     return int(r.stdout.strip() or -1)
+
+
+def _run_io(exe: Path) -> tuple[int, bytes]:
+    """跑一次，返回 `(退出码, stdout 原始字节)` —— 输出那条判据要的就是字节。"""
+    r = subprocess.run(
+        [*_WSLCMD, "bash", "-lc",
+         f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n \";$?\""],
+        capture_output=True, timeout=300, shell=False)
+    payload, _, rc = r.stdout.rpartition(b";")
+    return int(rc.strip() or -1), payload
+
+
+def _cpython_io(src: Path) -> tuple[int, bytes]:
+    """对照组：CPython 跑 `main()`，取 `(退出码, stdout 字节)`。"""
+    r = subprocess.run(
+        [_python(), "-c",
+         "import runpy,sys;m=runpy.run_path(sys.argv[1]);sys.exit(m['main']())",
+         str(src)],
+        capture_output=True, timeout=120, shell=False)
+    return r.returncode, r.stdout
 
 
 def _cpython(src: Path) -> int:
@@ -274,6 +304,78 @@ def test_agreeing_source_matches_cpython():
 
 
 @test
+def test_printing_matches_cpython_stdout():
+    """**写出去的字节**也要与 CPython 逐字节相同（不是只比退出码）。
+
+    上面那两条比的都是**数**。只比数的话，"数算对了、写出去的字不对"这一类看不见 ——
+    而 Python 写法的第一件事就是 `print`。`prints.py` 把几条形状并排放：`print` 的
+    换行、`print(int)` 走 `print_num`、字符串拼接、空 `print()`、转义 `\\t` 与 `\\"`。
+
+    两边各有一个入口（CPython 调 `main()`，Loment 是 `_L_ENTRY`），比的是
+    **(退出码, stdout 原始字节)** 这一对。
+    """
+    if not _wsl() or not _python():
+        print("      SKIP: 需要 WSL + CPython")
+        return
+    name = "prints.py"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        exe, errs = _build(td, name)
+        assert not errs, f"{name}: 翻译出来的 Loment 检查不过: {errs[:3]}"
+        py_rc, py_out = _cpython_io(EX / name)
+        l_rc, l_out = _run_io(exe)
+    # CPython 的 `print` 换行是**平台的**（Windows 上是 `\r\n`），而译文写的是 `\n`。
+    # 比的是"程序让写什么"，不是"宿主怎么换行" —— 在 Windows 上规范化一次
+    # （Linux 上这行是空操作，CI 就是 Linux）。
+    py_out = py_out.replace(b"\r\n", b"\n")
+    assert (l_rc, l_out) == (py_rc, py_out), (
+        f"**stdout 或退出码与 CPython 不同**\n"
+        f"  CPython -> rc={py_rc}, {py_out!r}\n"
+        f"  译文    -> rc={l_rc}, {l_out!r}")
+    print(f"      CPython 与译文都是 stdout={py_out!r} rc={py_rc}（逐字节相同）")
+
+
+@test
+def test_script_style_matches_cpython():
+    """**脚本式写法**（不写 `def`，顶层语句就是程序）与 CPython 逐字节相同。
+
+    Python 写法允许这样写 —— 顶层可执行语句合成入口 `_start`。这条规则**只对
+    `choose write grammar python` 成立**：别的表层语法与原生 Loment 不经过
+    `from_python`，它们的顶层语句各自处理（见 `potato_from._synthesize_start`）。
+
+    对照组是 `python script.py`（CPython 跑顶层语句），比 **(退出码, stdout 字节)**。
+    """
+    if not _wsl() or not _python():
+        print("      SKIP: 需要 WSL + CPython")
+        return
+    name = "script.py"
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        src = (EX / name).read_text(encoding="utf-8")
+        p = td / "script.lomt"
+        p.write_text("choose write grammar python\n\n" + src,
+                     encoding="utf-8", newline="\n")
+        fu = potato_from.front_door(p)
+        lp = td / "unit.lomt"
+        lp.write_text(fu.source, encoding="utf-8", newline="\n")
+        mod = lomentc.load(lp)
+        deps = lomentc.resolve_deps(mod, ROOT, lp.parent, entry=lp)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, f"翻译出来的 Loment 检查不过: {errs[:3]}"
+        blob, _info = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
+        exe = td / "script.elf"
+        exe.write_bytes(blob)
+        l_rc, l_out = _run_io(exe)
+    r = subprocess.run([_python(), str(EX / name)], capture_output=True, timeout=120,
+                       shell=False)
+    py_rc, py_out = r.returncode, r.stdout.replace(b"\r\n", b"\n")
+    assert (l_rc, l_out) == (py_rc, py_out), (
+        f"**脚本式写法与 CPython 不同**\n  CPython -> rc={py_rc}, {py_out!r}\n"
+        f"  译文    -> rc={l_rc}, {l_out!r}")
+    print(f"      脚本式写法：CPython 与译文都是 stdout={py_out!r} rc={py_rc}")
+
+
+@test
 def test_disagreeing_source_follows_loment_not_python():
     """**不同意集**：两边算得不一样，而**照本语言的来**（`docs/188` §0）。
 
@@ -371,17 +473,50 @@ def test_unary_invert_is_refused_by_the_front_end():
     print("      一元 `-` / `+` 照收")
 
 
+@test
+def test_bool_parameters_can_be_called():
+    """`#218`：`bool` 形参**必须有调用点能过**。
+
+    `docs/187` §5 把 `bool` 列成可写的注解，而调用点的每个实参原先一律按 `i64` 要 ——
+    `pick(True)` 当场被拒，理由还反着说（"这里要的是整数，给的是布尔"：其实是**形参**
+    要 bool、调用点硬塞 i64）。一个文档支持的注解在两边都用不了。
+    """
+    src = ("def pick(c: bool) -> int:\n"
+           "    if c:\n"
+           "        return 1\n"
+           "    return 0\n"
+           "\n"
+           "def main() -> int:\n"
+           "    b = 3 > 2\n"
+           "    return pick(True) + pick(False) + pick(3 > 2) + pick(b)\n")
+    text = pytrans.translate(src)
+    # 字面量/比较/变量三种 bool 实参都按形参的 `bool` 要，而不是被转成 i64
+    assert "pick(true)" in text, f"`pick(True)` 没按 bool 传:\n{text}"
+    assert "pick(false)" in text, f"`pick(False)` 没按 bool 传:\n{text}"
+    assert "pick((3 > 2))" in text, f"`pick(3 > 2)` 没按 bool 传:\n{text}"
+    assert "pick(b)" in text, f"`pick(b)` 没按 bool 传:\n{text}"
+    assert "pick(true != 0)" not in text, "bool 实参被当成整数又转回 bool 了"
+
+    # **整数实参照"整数当条件"的既有规则转**，不是在这里拒：`pick(1)` -> `pick(1 != 0)`
+    int_arg = ("def pick(c: bool) -> int:\n"
+               "    return 1\n"
+               "def main() -> int:\n"
+               "    return pick(1)\n")
+    t2 = pytrans.translate(int_arg)
+    assert "pick(1 != 0)" in t2, f"`pick(1)` 没有按 bool 形参做转换:\n{t2}"
+
+    # 生成的那一份**真能过检查**（不是只在字符串层面看着对）
+    with tempfile.TemporaryDirectory() as t:
+        p = Path(t) / "boolarg.lomt"
+        p.write_text("module boolarg\n\n" + text, encoding="utf-8", newline="\n")
+        mod = lomentc.load(p)
+        e = lomentc.check(mod)
+        assert e == [], f"翻译出来的 Loment 检查不过: {e}"
+    print("      bool 形参：字面量/比较/变量实参都过；整数实参按 `!= 0` 转")
+
+
 def main() -> int:
-    failed: list[str] = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:  # noqa: BLE001
-            failed.append(fn.__name__)
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print(f"\nloment_pytrans_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_pytrans_test")
 
 
 if __name__ == "__main__":

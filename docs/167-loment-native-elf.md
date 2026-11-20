@@ -87,7 +87,7 @@ stage1"那一步出现（见 §5）。
 | 4 | 浮点不支持 | 语言本身没有（发射面 0 处 `fadd`/`fcmp`） |
 | 5 | 变参、结构体动态下标 GEP 不支持 | 同上 |
 | 6 | 不做寄存器分配 —— 产物比 `clang -O1` 大且慢 | v0 要的是正确性；性能是后面的事 |
-| 7 | 不写 DWARF | `--debug` 的元数据（`!DILocalVariable` 等）被忽略；原生产物没有行表 |
+| 7 | 不写 DWARF | `--debug` 的元数据（`!DILocalVariable`、`#dbg_declare` 记录、行尾的 `, !dbg !N` 附着）**被忽略**；原生产物没有行表。**这句话 2026-10-13 之前只是声明，不是事实**：`lomelf` 把 `#dbg_declare` 当成不支持的指令**拒**了，于是 `--debug` 的 IR 链不出来 —— 引号里的"被忽略"是与实现相反的那一半。修法见 `docs/210` §7：两边各跳过行首的 `#dbg_*`、去掉行尾的附着 |
 
 **不覆盖**的东西统一是"报错退出"，不是"编出个错的"——第二条用例专门钉这个。
 
@@ -101,7 +101,7 @@ stage1"那一步出现（见 §5）。
    clang 只剩"种子 → stage1"这一步（见第 4 条）。
 2. **PE64 / Windows 原生（去 WSL）** —— **第一步已落**（2026-09-14）。`tools/lomelf.py` 新增
    `--target pe`：同一份 IR 产出静态 PE32+ 控制台程序，**在 Windows 上原生跑，不经 WSL**
-   （主张 **C24**，判据 `tools/loment_pe_test.py` 9/9）。
+   （主张 **C24**，判据 `tools/loment_pe_test.py` 16/16）。
 
    与 ELF 目标只差 **syscall 面**：x64 Windows 没有 `syscall` 指令，所以 `_call_asm` 把 `0F 05`
    换成 `call __win_syscall`，由 shim 按 syscall 号（仍在 `rax`、参数仍在 `rdi/rsi/rdx`）派发到
@@ -115,13 +115,21 @@ stage1"那一步出现（见 §5）。
    seccomp 沙箱里 getrandom 会失败的断言，在 Windows 上**本就该不同** —— 拿它们当判据只会
    把平台差异误判成回归。
 
-   **syscall 面已经是完整的一组**（2026-09-14 补齐）：`read`(0) / `write`(1) / `close`(3) /
-   `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262) —— 正是
-   仓库里 Loment 工具用到的全部。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
+   **syscall 面（2026-09-14 补齐）**：`read`(0) / `write`(1) / `close`(3) /
+   `brk`(12) / `exit`(60) / `getdents64`(217) / `openat`(257) / `newfstatat`(262) —— 那是
+   仓库里 Loment 工具用到的全部，但**只是文件与进程那一半**：**联网一个号都没有**。
+   **2026-10-10 补上联网那 13 个**（`socket`/`connect`/`accept`/`accept4`/`sendto`/`recvfrom`/
+   `shutdown`/`bind`/`listen`/`getsockname`/`getpeername`/`setsockopt`/`getsockopt`，
+   由 `ws2_32.dll` 顶着）⇒ 派发面 **21 个号**、导入表成 **两条描述符**。
+   **2026-10-10 加 `poll`(7)**（`docs/221`）、**2026-10-11 加 `select`(23)**（`docs/231`）、
+   **2026-10-12 加 `sendmsg`/`recvmsg`/`socketpair`/`epoll` 那一族**（`docs/234`）
+   ⇒ 派发面 **29 个号**、联网面**再无「点名不做」**。号表、五条翻译决定
+   （family / `SO_*` / timeval↔毫秒 / errno / `MSG_NOSIGNAL`）与**点名不做**的那几件
+   见 **`docs/217`**（那一族**已经清零**；2026-10-12 起契约里连 `NotDispatched` 这个枚举都删了 —— `docs/234` §2）。Windows 没有 procfs，所以 **`/proc/self/cmdline` 由 shim
    合成**（`GetCommandLineA` 的空格分隔转成 NUL 分隔），argv 因此照常可用；`brk` 用
    `VirtualAlloc` 一次划一块堆来仿真；`getdents64` 一次发一条 `linux_dirent64`（消费方本来
    就是读到 0 为止的循环）；`newfstatat` 只填消费方会读的 `st_mode`（`load32(stb,24)&S_IFMT`）。
-   于是判据 `tools/loment_pe_test.py` **9/9**：
+   于是判据 `tools/loment_pe_test.py` **16/16**：
 
    * `test_pe_runs_the_loment_toolchain_natively` —— **`lomstatus` 与 `lomrel` 本身**编成 PE 在
      本机原生跑（argv + 目录遍历 + 文件 I/O），stdout 字节 + 退出码与 Python 版逐字节相同；
@@ -169,7 +177,8 @@ stage1"那一步出现（见 §5）。
 
    **PE 的四个节钉在固定 RVA**（`.text` 0x1000 / `.idata` 0x1000000 / `.data` 0x2000000 /
    状态挂在 `.data` 的零填充尾巴上 0x3000000）。这样 shim 里对 IAT 与静态状态的取址全是
-   编译期常量，`--dump-win-shim` 冻出来的 2312 字节 blob **一个待回填的地址都没有** ——
+   编译期常量，`--dump-win-shim` 冻出来的 blob（今天 **15208 字节**；2026-10-10 联网那批是
+   6296，之前 2312，见 `docs/217` §4 与 `docs/234`）**一个待回填的地址都没有** ——
    自举镜像照抄即可。又撞到两条加载器脾气，只有实测才看得见：
    （f）**节间不能留空洞** —— `.text` 与 `.idata` 之间只要空 0x1000，加载器就报"不是有效的
    Win32 应用程序"。解法是每节的 VirtualSize 一直铺到下一节起点；

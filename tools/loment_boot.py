@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # loment_boot.py — Loment 程序在 FujoOS 用户态运行 (M67/M76/M77/M78, docs/149)
 #
-# 流程: .lomt --(lomentc)--> .ll --(clang/ld.lld, -Ttext=0x400000)--> ELF
-#       --(fujorun pack)--> FUJOMULT 容器 --(QEMU -kernel + -append fujo.run=NAME)-->
+# 流程: .lomt --(lomentc)--> .ll --(lomelf, 仓库自己的原生后端)--> ELF
+#       --(fujopack pack)--> FUJR 容器 --(QEMU -kernel + -append fujo.run=NAME)-->
 #       串口输出断言。
 #
 # 用法:
@@ -53,8 +53,16 @@ def build_elf(src: Path, out: Path) -> Path:
 
 
 def pack_initrd(elf: Path, name: str, out: Path) -> Path:
+    # `#1786`：原先调 `tools/fujorun.py` —— 那个文件**从来不在树里**（`git log` 是空的），
+    # 于是每一次 `loment_boot.py FILE` 都在这一步死掉，文档里那条"一键"的路整条不可达。
+    # 树里有的是 `tools/fujopack.py`，它写的就是内核 `fujr.rs` 嗅探的 FUJR 容器。
+    packer = ROOT / "tools" / "fujopack.py"
+    if not packer.exists():
+        print(f"[ERR] 缺 {packer.relative_to(ROOT)} —— 打不出 initrd；先把它补回来",
+              file=sys.stderr)
+        raise SystemExit(2)
     r = subprocess.run(
-        [sys.executable, str(ROOT / "tools" / "fujorun.py"), "pack", "-i", str(elf),
+        [sys.executable, str(packer), "pack", "-e", str(elf),
          "--name", name, "-o", str(out)], capture_output=True, text=True, shell=False)
     if r.returncode:
         print(r.stdout + r.stderr, file=sys.stderr)

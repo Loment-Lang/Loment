@@ -238,6 +238,30 @@ def test_m67_m78_boot_programs():
         assert loment_boot.run_qemu(initrd, name, needle, 40.0), f"{name}: 未出现 {needle}"
 
 
+@test
+def test_pack_step_uses_a_runner_that_exists():
+    """`#1786`：打包那一步要落在树里**真有的**工具上。
+
+    原先 `pack_initrd` 调 `tools/fujorun.py` —— 那个文件从来不在树里（`git log` 是空的），
+    于是每一次 `loment_boot.py FILE` 都死在打包这一步，文档里那条一键路径整条不可达
+    （上面那条启动判据在缺内核镜像时跳过，所以 CI 从来没见过它）。
+    这条判据不碰 QEMU / 内核：只编一份小语料、打包、再用 `fujopack info` 读回来。
+    """
+    import loment_boot  # noqa: PLC0415
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        elf = loment_boot.build_elf(EX / "user_hello.lomt", td / "u.elf")
+        assert elf.exists() and elf.stat().st_size > 0, "ELF 没编出来"
+        initrd = loment_boot.pack_initrd(elf, "user_hello", td / "u.initrd")
+        data = initrd.read_bytes()
+        assert data, "initrd 是空的"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "fujopack.py"),
+                            "info", str(initrd)], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", cwd=str(ROOT))
+        assert r.returncode == 0 and "FUJR" in (r.stdout or ""), (r.returncode, r.stdout, r.stderr)
+    print("      .lomt -> ELF -> FUJR 容器：打包这一步真的产出了容器")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_p7_test")
 

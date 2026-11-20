@@ -77,24 +77,13 @@ fn chk_hash_put(src: ptr, t: ptr, s: ptr, name_tok: u32, slot: u32) {
     }
 }
 
-/// `flomtc_true` 且用户段没有任何"可能触发移动/生命周期诊断"的构造时返回 1。
+/// 用户段没有任何"可能触发移动/生命周期诊断"的构造时返回 1（`docs/350` §12.6）。
 ///
-/// 触发词**保守地多收**：`&`（借用）、`free`（E029）、`struct` / `enum` / `str` / `[`
-/// （非 Copy 类型）、`fp`（函数值）、以及**大写开头的标识符**（类型名，含
-/// `Option<…>` 这类预置泛型的使用）。预置块（`pub enum Option` 起）不算用户段。
+/// 触发项**保守地多收**：`&`（借用）、`free`（E029）、`struct` / `enum` / `str` / `[`
+/// （非 Copy 类型）、`fp`（函数值）、**字符串字面量**（`let s = "x"` 的类型是推断出来的，
+/// 没有 `str` 关键字）、以及**大写开头的标识符**（类型名，含 `Option<…>` 这类预置泛型
+/// 的使用）。预置块（`pub enum Option` 起）不算用户段。
 fn chk_simple_unit(src: ptr, t: ptr) -> u32 {
-    let fl: u32 = 0;
-    let i: u32 = 0;
-    while chk_tok_kind(t, i) != 4 {
-        if chk_tok_is(src, t, i, "choose")
-                && chk_tok_is(src, t, i + 1, "flomtc_true") {
-            fl = 1;
-        }
-        i = i + 1;
-    }
-    if fl == 0 {
-        return 0;
-    }
     // 预置块的头：`pub enum Option`。它是**追加**在用户源之后的固定尾巴。
     let uend: u32 = 0;
     let have: u32 = 0;
@@ -118,6 +107,9 @@ fn chk_simple_unit(src: ptr, t: ptr) -> u32 {
                 || chk_tok_is(src, t, k, "str") || chk_tok_is(src, t, k, "[")
                 || chk_tok_is(src, t, k, "fp") {
             return 0;
+        }
+        if chk_tok_kind(t, k) == 2 {
+            return 0;                   // 字符串字面量：类型是推断的，移动检查照样要有
         }
         if chk_tok_kind(t, k) == 0 {
             let c: u32 = load8(src, load32(t, k * 20 + 4)) as u32;
@@ -4516,7 +4508,11 @@ fn chk_mv_add(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
 // 新表放中间最安全（离两头都远，将来任一张表扩容都不会撞上）。
 // ⚠ **它必须与类型表一起按函数清零**（见 `check_arena` 里 `chk_body` 之前那三行）——
 // 不清就是整单元单调 bump。
-const CHK_FR_ON: u32 = 2044;   // 0 = 还没算, 1 = `lms` 开着, 2 = 关着 (缓存)
+/// `lms` 档的**整单元**缓存：0 = 还没算，1 = 开着，2 = 关着。
+/// 放在类型表（0..1028）与 `moved`/已释放表（3520 起）之间的空段。
+/// ⚠ 它**不能**按函数清零 —— 那会让 `chk_lms_on` 每函数重扫一遍 token 流（O(n²)）。
+const CHK_LMS_ON: u32 = 1032;
+const CHK_FR_ON: u32 = 2044;   // 遗留：不再使用（保留编号，避免挪动其它偏移）
 const CHK_FR_N: u32 = 2048;    // 条数
 const CHK_FR_T: u32 = 2056;    // 表项起始
 
@@ -4563,10 +4559,10 @@ fn chk_fr_del(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
     }
 }
 
-/// `lms` 开着吗（`docs/253`）—— **带缓存**：`chk_use` 会对每一个标识符问一次，
-/// 每次都扫一遍 token 流是 O(n²)。算一次存在 `CHK_FR_ON`，按函数清零。
+/// `lms` 开着吗（`docs/253`）—— **整单元缓存**：`chk_use` 会对每一个标识符问一次，
+/// 每次都扫一遍 token 流是 O(n²)。算一次存在 `CHK_LMS_ON`，**按单元**只清零一次。
 fn chk_lms_c(src: ptr, t: ptr, tyt: ptr) -> u32 {
-    let v: u32 = load32(tyt, CHK_FR_ON);
+    let v: u32 = load32(tyt, CHK_LMS_ON);
     if v == 0 {
         v = 2;
         if chk_lms_on(src, t) == 1 {
@@ -6962,6 +6958,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     store32(oc, 8, prof);
     store32(nc, 0, 0);
     store32(tyt, 0, 0);                 // 复合类型表: 条数清零
+    store32(tyt, CHK_LMS_ON, 0);        // `lms` 档缓存: 整单元只算一次
     store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
@@ -7648,10 +7645,11 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         ib = ib + 1;
     }
     store32(tyt, CHK_HASRET, hbr);
-    // **flomtc_true 的快路径**（`docs/350` §12.6）：没有借用 / 释放 / 聚合类型时，
+    // **证明性跳过**（`docs/350` §12.6）：没有借用 / 释放 / 聚合 / 字符串 / 函数值时，
     // 移动检查与生命周期检查证明不出任何一条诊断 —— 这两趟在 5000 行语料上占
     // 12.4 s / 0.45 s（实测），整段跳过。判据 `chk_simple_unit` 是保守的：任何一种
-    // 可能触发诊断的构造在场，就照旧跑满。
+    // 可能触发诊断的构造在场，就照旧跑满。**默认档同样生效**（用户 2026-11-20 要求
+    // 自举默认进入 2000 ms 内）；它只跳过可证明无诊断的路径。
     let simple_unit: u32 = chk_simple_unit(src, t);
     i = 0;
     while chk_tok_kind(t, i) != 4 {
@@ -7678,7 +7676,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // E029 的"已释放"表与 `lms` 档的缓存 —— **也必须按函数清零**：
                 // 不清就是整单元单调 bump，而这张表的容量只有 63（`CHK_FR_N`）。
                 store32(tyt, CHK_FR_N, 0);
-                store32(tyt, CHK_FR_ON, 0);
+                // `CHK_LMS_ON` **不在这里清**：它是整单元的缓存（每函数清 = 每函数重扫）。
                 store32(tyt, 3528, envc);    // 形参数 (E012 判"局部 vs 形参")
                 store32(tyt, 3520, envc);
                 chk_body(src, t, syms, n, env, envc,

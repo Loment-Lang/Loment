@@ -36,6 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import potato  # noqa: E402
+import potato_from  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -467,7 +468,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="lomt_from",
                                  description="Potato 形式对象 -> L1 接口单元")
     ap.add_argument("path", help=".potato.json, 或源文件 (配 --lang)")
-    ap.add_argument("--lang", choices=("auto", "python", "c", "rust"), default=None,
+    # `#864`：取值表从 `potato_from.LANGS` **派生**，不手抄 —— 手抄的那份漏了
+    # java/csharp/cpp/go，`--lang java` 于是被 argparse 拒掉，而同一份源用
+    # `potato_from --lang java` 是认的。两份清单必然漂，这里只留一份。
+    ap.add_argument("--lang", choices=("auto", *sorted(potato_from.LANGS)), default=None,
                     help="给了就先把源文件转成形式对象再发 L1")
     ap.add_argument("--mode", choices=("strict", "lenient"), default="strict")
     ap.add_argument("--impl", action="store_true",
@@ -497,7 +501,6 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if a.lang is not None:
-            import potato_from
             # **先说清认成了什么** —— 这就是"检测"这一步: 用户拿一份 `.lomt` 装着 C
             # 过来, 他要看到的是"认出来了", 而不是默默转出一个东西。
             got, why = potato_from.resolve_lang(Path(a.path), a.lang)

@@ -706,6 +706,23 @@ def test_reference_pages_are_nonempty():
 
 
 @test
+def test_builtins_page_lists_every_syscall_builtin():
+    """`#1523`：编译器收的每一个 `syscallN`，`loment builtins` 页都要列出来。
+
+    两边各有一个真源：编译器那张 `lomentc.SYSCALL_BUILTINS` 决定"收不收"，CLI 页是用户
+    唯一会去查的地方。少一行不是措辞问题 —— 有人照着"最大五个实参"去写系统程序，把
+    `mmap` 的第六个参数丢掉，改用了更慢的路子（`#1523` 里 FUAI 就是这么绕开的）。
+    """
+    want = sorted(lomentc.SYSCALL_BUILTINS)
+    assert want, "编译器那边一个 syscall 内建都没有？"
+    rc, out, _ = _run(["builtins"] + _no_color())
+    assert rc == 0, rc
+    missing = [n for n in want if n not in out]
+    assert not missing, f"`loment builtins` 少了 {missing}（编译器收这几种）"
+    print(f"      {len(want)} 个 syscall 内建都在 builtins 页里: {', '.join(want)}")
+
+
+@test
 def test_reference_page_columns_never_touch():
     """首列 ≥10 宽时也必须与说明隔开（`#35`）。
 

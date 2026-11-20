@@ -456,6 +456,11 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
         # M55/M56: 格式化由语言服务提供 (编辑器侧因此不需要自己起进程)
         uri = (params.get("textDocument") or {}).get("uri", "")
         src = docs.get(uri, "")
+        # `#865`：别的语法写的那份源，格式化器读不懂 —— 那是"这件事这里做不了"，
+        # 不是服务内部出错。LSP 的格式化结果本来就允许 `null`（= 没有编辑），
+        # 回 `-32603` 会让编辑器弹"内部错误"，用户还以为是插件挂了。
+        if _foreign_grammar(src) is not None:
+            return [{"jsonrpc": "2.0", "id": rid, "result": None}]
         try:
             import lomfmt  # noqa: PLC0415
             new = lomfmt.format_source(src)

@@ -1,5 +1,5 @@
 <!-- translated-from: docs/150-loment-selfhost.md -->
-<!-- source-sha256: 62abb881192cc1315b359bcd83c1c93a54ec99e0c6ae19dc6a22f3f71242a893 -->
+<!-- source-sha256: 0acba79fb4b39579590e2bec038abb31123bee13fab4ec1a840307605d4b20d5 -->
 
 # 150 · Loment self-hosting (P8, M79–M88)
 
@@ -402,8 +402,10 @@ implementation — the precondition for M83 (three-stage fixed point) is satisfi
 **dependency-concatenated unit** after `prepare()` (`mods = deps + [mod]`). The test fixture `_unit_text()`
 fetches dependencies by `resolve_deps`' path rules, concatenating dependents last, and **asserts that the
 module-name sequence is exactly `lomentc.resolve_deps`'** (it fails the moment the rule drifts). So the Loment
-codegen's input is "the loaded unit", consistent with the boundary of the M80/M81 self-hosting stages; moving
-`resolve_deps` into Loment (which needs file I/O) is still a to-do before M83.
+codegen's input is "the loaded unit", consistent with the boundary of the M80/M81 self-hosting stages.
+`resolve_deps` now lives in Loment: `loment/selfhost/driver.lomt` does the recursive `use` resolution itself
+(pre-order concatenation, the same rule as the reference), the dependency depth limit (`MAXDEPTH`, `:44`),
+store probing and the path form.
 
 **Known structural boundary (to be filled in after M82)**: `lomentc.emit_llvm` goes through the
 **dependency-concatenated unit** after `prepare()` (`mods = deps + [mod]`), so for a file like `allocator.lomt`

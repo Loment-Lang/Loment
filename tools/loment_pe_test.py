@@ -2032,6 +2032,130 @@ def test_an_unrecognised_icmp_is_a_diagnostic_not_a_traceback():
     print("      不认识的谓词：点名 `icmp foo`；`samesign ult` 照常编出产物")
 
 
+#: `#1828` 的三格：O_RDWR 必须真能写；O_APPEND 不许截断；O_CREAT|O_EXCL 遇到已存在的
+#: 文件必须失败并**保留内容**。路径自己补 NUL —— Loment 的 `str` 不是 C 字符串。
+_OPENAT_PROG = """module openprobe
+choose runtime
+
+fn cpath(dst: ptr, s: str) -> u64 {
+    let n: u32 = str_len(s) as u32;
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, i, load8(str_ptr(s), i) as u8);
+        i = i + 1;
+    }
+    store8(dst, n, 0 as u8);
+    return dst as u64;
+}
+
+fn open_file(p: u64, flags: u64, mode: u64) -> i64 {
+    return syscall6(257, (0 as u64) - 100, p, flags, mode, 0);
+}
+
+fn bang(code: u32) -> i64 {
+    return syscall4(60, code as u64, 0, 0);
+}
+
+fn main() {
+    let buf: ptr = alloc(64);
+    let pth: ptr = alloc(64);
+
+    let fd: i64 = open_file(cpath(pth, "probe.txt"), 2, 0);
+    if fd < 0 { bang(11); }
+    let w: i64 = syscall4(1, fd as u64, str_ptr("abcd") as u64, 4);
+    if w != 4 { bang(14); }
+    let c1: i64 = syscall4(3, fd as u64, 0, 0);
+    let fd2: i64 = open_file(cpath(pth, "probe.txt"), 0, 0);
+    if fd2 < 0 { bang(12); }
+    let n: i64 = syscall4(0, fd2 as u64, buf as u64, 1);
+    if n != 1 { bang(15); }
+    if load8(buf, 0) != 97 { bang(13); }
+    let c2: i64 = syscall4(3, fd2 as u64, 0, 0);
+
+    let fa: i64 = open_file(cpath(pth, "append.txt"), 1089, 0);
+    if fa < 0 { bang(21); }
+    let w2: i64 = syscall4(1, fa as u64, str_ptr("abcd") as u64, 4);
+    if w2 != 4 { bang(25); }
+    let c3: i64 = syscall4(3, fa as u64, 0, 0);
+    let fb: i64 = open_file(cpath(pth, "append.txt"), 0, 0);
+    let nb: i64 = syscall4(0, fb as u64, buf as u64, 14);
+    if nb != 14 { bang(22); }
+    let i: u32 = 0;
+    while i < 10 {
+        if load8(buf, i) != (48 + i) as u8 { bang(23); }
+        i = i + 1;
+    }
+    if load8(buf, 10) != 97 { bang(24); }
+    if load8(buf, 11) != 98 { bang(26); }
+    if load8(buf, 12) != 99 { bang(27); }
+    if load8(buf, 13) != 100 { bang(28); }
+    let c4: i64 = syscall4(3, fb as u64, 0, 0);
+
+    let fc: i64 = open_file(cpath(pth, "keep.txt"), 192, 420);
+    if fc >= 0 { bang(31); }
+    let fd4: i64 = open_file(cpath(pth, "keep.txt"), 0, 0);
+    if fd4 < 0 { bang(32); }
+    let nk: i64 = syscall4(0, fd4 as u64, buf as u64, 4);
+    if nk != 4 { bang(34); }
+    if load8(buf, 0) != 75 { bang(33); }
+    if load8(buf, 1) != 69 { bang(35); }
+    if load8(buf, 2) != 69 { bang(36); }
+    if load8(buf, 3) != 80 { bang(37); }
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_pe_openat_flags_follow_linux_semantics():
+    """`#1828`：O_RDWR / O_APPEND / O_EXCL 三格必须按 Linux 语义走。
+
+    未修时：O_RDWR 只给 GENERIC_READ（写被丢掉，读回还是 'x'）；O_CREAT 一律
+    CREATE_ALWAYS（append 打开就清空）；O_EXCL 被忽略（已存在的文件照样打开）。
+    PE 运行时判据只在 Windows 上跑（门禁没有 Windows runner），但 Linux 侧用同一份
+    源做对拍 —— 这是断言"PE 的行为 == Linux 的行为"的那一半。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "openprobe.lomt"
+        src.write_text(_OPENAT_PROG, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
+        exe = td / "openprobe.exe"
+        exe.write_bytes(blob)
+        run = td / "run"
+        run.mkdir()
+        (run / "probe.txt").write_bytes(b"x")
+        (run / "append.txt").write_bytes(b"0123456789")
+        (run / "keep.txt").write_bytes(b"KEEP")
+        r = subprocess.run([str(exe)], cwd=str(run), capture_output=True, timeout=20)
+        assert r.returncode == 0, (
+            f"PE openat 探针 rc={r.returncode}（11x 读回 / 2x append / 3x O_EXCL）")
+        assert (run / "probe.txt").read_bytes() == b"abcd"
+        assert (run / "append.txt").read_bytes() == b"0123456789abcd"
+        assert (run / "keep.txt").read_bytes() == b"KEEP"
+        if _wsl():
+            elf = td / "openprobe.elf"
+            elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
+            wd = f"/tmp/loment-openat-{os.getpid()}"
+            script = (
+                f"rm -rf {wd} && mkdir -p {wd} && cd {wd} && "
+                f"printf x > probe.txt && printf 0123456789 > append.txt && "
+                f"printf KEEP > keep.txt && cp {_wsl_path(elf)} ./t && chmod +x t && "
+                f"./t; echo \"rc=$?\"; echo \"probe=$(cat probe.txt)\"; "
+                f"echo \"append=$(cat append.txt)\"; echo \"keep=$(cat keep.txt)\""
+            )
+            w = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                               capture_output=True, text=True, timeout=120)
+            assert "rc=0" in w.stdout, f"Linux 对拍失败：{w.stdout[-300:]}"
+            assert "probe=abcd" in w.stdout and "keep=KEEP" in w.stdout
+            assert "append=0123456789abcd" in w.stdout
+    print("      O_RDWR / O_APPEND / O_EXCL 三格与 Linux 语义一致")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_pe_test")
 

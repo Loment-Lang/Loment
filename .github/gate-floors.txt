@@ -50,8 +50,8 @@ loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 27
-loment_elf_test 90
-loment_pe_test 17
+loment_elf_test 92
+loment_pe_test 18
 loment_genesis_test 9
 loment_status_test 4
 lvm_test 10
@@ -110,9 +110,9 @@ loment_invariant_test 2
 loment_caps_test 11
 loment_book_test 4
 loment_book_site_test 4
-loment_update_test 13
+loment_update_test 16
 loment_hotfix_test 7
-loment_staging_test 6
+loment_staging_test 7
 loment_projection_test 6
 loment_hotline_test 6
 loment_hotart_test 4

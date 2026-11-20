@@ -111,3 +111,6 @@ loment/build/selfhost_driver.ll text eol=lf linguist-generated=true -diff
 *.jpeg  binary
 *.gif   binary
 *.bmp   binary
+
+# 信任锚：钉在运行树里的公钥按 LF 保存（换行转换会让"同一把钥匙"看起来变了一个字节）
+loment/hotswap/*.asc text eol=lf

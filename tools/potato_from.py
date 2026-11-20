@@ -580,6 +580,11 @@ def _from_class_lang(src: str, name: str, mode: str,
                 continue
             ps, bad = [], None
             for raw in [p.strip() for p in params.split(",") if p.strip()]:
+                # `#852`：`int... xs` 是**可变参数**，不是"类型 `int...` 无映射" ——
+                # 后者把一种 Java 形态说成了类型系统的缺口，用户没法照着改。
+                if "..." in raw:
+                    bad = "可变参数（varargs）`…` 不收 —— 用数组形参代替（`int[] xs`）"
+                    break
                 parts = raw.split()
                 if len(parts) < 2:
                     bad = f"形参 {raw!r} 不是 `类型 名字`"

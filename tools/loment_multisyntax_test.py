@@ -1214,6 +1214,9 @@ def test_class_language_out_of_subset_constructs_are_named():
         ("public class C {" + NL + "    static { }" + NL + "}", "静态初始化块"),
         ("public class C {" + NL + "    @Deprecated int x;" + NL + "}", "注解"),
         ("public class C {" + NL + "    record R(int x) { }" + NL + "}", "`record` 类型"),
+        # `#852`：`int... xs` 是可变参数，不是"类型无映射"
+        ("public class C {" + NL + "    static int f(int... xs) { return 0; }" + NL + "}",
+         "可变参数"),
         ("public class C {" + NL + "    static int f() { return 1; }" + NL
          + "    static int f(int a) { return a; }" + NL + "}", "与前面同名的函数重复"),
     ]

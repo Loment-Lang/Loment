@@ -1910,6 +1910,9 @@ class Param:
     type: str
     #: 值的空间标签（`docs/313` §2）：`a: [u32; 64] in disk` 的 `disk`。空 = 没有。
     space: str = ""
+    #: 切片借用上的区域标记（`b: &a [u32]`，`docs/299` §3.3）：规范化之后类型串是 `[u32]`，
+    #: 标记放这里。非切片借用的标记仍编码在 `type` 里（`&a u32`）。
+    region: str = ""
 
 
 @dataclass
@@ -2592,6 +2595,9 @@ class Func:
     from_generic: str = ""       # M45: 由哪个泛型声明单态化而来
     generic_args: list = field(default_factory=list)  # M45: 单态化实参
     extern: bool = False         # docs/173: 外部函数声明 (只有签名, 由链接进来的目标文件提供)
+    #: 切片返回类型上的区域标记（`-> &a [u32]`，`docs/299` §3.3）：类型串是 `[u32]`，
+    #: 标记单独记。空 = 没有标记（省略规则照旧）。
+    ret_region: str = ""
     #: **L0 静态提升**（`docs/210` §2 / `gc_auto_alpha`）：`{局部名: 提升到栈的字节数}`。
     #: 由**解析器**在 `parse()` 末尾填（见 `_l0_promotable`：规则定义在 token 流上，
     #: 而解析器是唯一同时握着 token 流与函数体跨度的地方）。其它档一律为空 dict。
@@ -4351,6 +4357,10 @@ class Parser:
         #: `choose lifetime_*` 那一行 —— 类型可能在那一行**之前**就被解析（顶层顺序自由），
         #: 所以在构造时**预扫一遍**，不依赖 `parse_items` 的先后。
         self.lifetime = _prescan_lifetime(toks, profile)
+        #: 刚解析完的类型上的**区域标记**（`docs/299` §3.3）。非切片借用把它编码在类型串
+        #: 里（`&a u32`）；切片借用规范化成 `[T]` 之后类型串装不下标记，于是放在这里，
+        #: 由 `parse_fn` 取走（形参与返回类型各一格）。每次 `type_name()` 入口清零。
+        self.last_region = ""
         #: **效应语法面**（`docs/341` A2）。与 `lifetime` 同一条"构造时预扫"：
         #: `choose` 可能写在用到它的声明之后，而语法决策是**边走边做**的。
         self.effects = _prescan_slot(toks, "effects") == "true"
@@ -4399,6 +4409,7 @@ class Parser:
         """类型名: 基类型 / struct / 数组 [T; N] / 只读切片 [T] / 可变切片 mut [T] /
         借用 `&T` / `&mut T`（后者只在 `choose lifetime_*` 非 `no` 时，`docs/299`）/
         函数类型 `(A, B) -> C`（`docs/348`）。"""
+        self.last_region = ""
         if self.at("punct", "("):
             # 函数类型。`()` 作**返回类型**（unit）由 `parse_fn` 在 `{` / `;` 那一格先接走，
             # 走不到这里；所以类型位置上一见到 `(` 就只能是 `(A, …) -> R`。
@@ -4427,14 +4438,11 @@ class Parser:
                     region = self.next().val
             inner = self.type_name()
             # 切片借用**规范化**到已有的切片类型（它们本来就是 ptr+len 的借用视图）：
-            # `&[T]` → `[T]`，`&mut [T]` → `mut [T]`。区域标记在切片上 v1 不收 ——
-            # 切片自带区域推断，标记是给非切片借用（`&a u32`）用的。
+            # `&[T]` → `[T]`，`&mut [T]` → `mut [T]`。区域标记在类型串里放不下
+            # （`_is_slice` 要求以 `]` 结尾），于是记在 `last_region`，由 `parse_fn`
+            # 取到形参/返回类型上 —— 它只影响函数摘要，不影响布局（`docs/351`）。
             if _is_slice(inner):
-                if region:
-                    raise LomError(amp.line, amp.col,
-                                   "区域标记不能写在切片借用上 —— `[T]` / `mut [T]` 自带"
-                                   "区域推断；显式标记（`&a T`）只用于非切片借用"
-                                   "（`docs/299` §3.3）")
+                self.last_region = region
                 elem = _slice_elem(inner)
                 return f"mut [{elem}]" if mut else f"[{elem}]"
             return ("&mut " if mut else "&") + (f"{region} " if region else "") + inner
@@ -4719,7 +4727,15 @@ class Parser:
             field_lines.append(self.peek().line)
             fn = self.ident("字段名")
             self.expect("punct", ":")
-            fields.append((fn, self.type_name()))
+            fty = self.type_name()
+            if self.last_region:
+                # 切片字段的标记在类型串里放不下（`Param.region` 是形参专用的），
+                # 而设计上字段本来就不带标记：区域由构造处的来源决定（`docs/299` §3.3）。
+                raise LomError(kw.line, kw.col,
+                               f"结构体 {name} 的字段 {fn} 不能带区域标记"
+                               f"（`&{self.last_region} …`）—— 字段的区域由构造处的"
+                               f"来源决定（`docs/299` §3.3）")
+            fields.append((fn, fty))
             if not self.accept("punct", ","):
                 self.accept("punct", ";")
         self.expect("punct", "}")
@@ -5134,21 +5150,24 @@ class Parser:
             else:
                 self.expect("punct", ":")
                 pty = self.type_name()
+                pregion = self.last_region      # 切片借用上的 `&a [T]`（`docs/299` §3.3）
                 pspace = ""
                 if self.accept("ident", "in"):
                     pspace = self.ident("空间名")
-                params.append(Param(pn, pty, pspace))
+                params.append(Param(pn, pty, pspace, pregion))
             if not self.accept("punct", ","):
                 break
         self.expect("punct", ")")
         # M16: 无返回类型 = ()。**外部函数没有函数体**, 所以"后面是 `;`"同样表示无返回 ——
         # 只认 `{` 的话 `extern fn f(p: ptr);` 会被当成"缺了 `->`"而报错。
+        ret_region = ""
         if self.at("punct", "{") or (extern and self.at("punct", ";")):
             ret = "()"
         else:
             self.expect("punct", "-")
             self.expect("punct", ">")
             ret = self.type_name()
+            ret_region = self.last_region   # `-> &a [u32]` 的标记（类型串里放不下）
         # `effects A, B`（`docs/341` §5.2）：A2 只把它记在函数上，发射器不看它。
         row = None
         if self.effects and self.at("ident", "effects"):
@@ -5173,11 +5192,13 @@ class Parser:
             f = Func(name, params, ret, [], kw.line, False, tparams)
             f.extern = extern
             f.effects = row
+            f.ret_region = ret_region
             return f
         body_at = self.i + 1          # '{' 之后 —— 与自举侧 find_body 同一个起点
         body = self.parse_block()
         f = Func(name, params, ret, body, kw.line, False, tparams)
         f.effects = row
+        f.ret_region = ret_region
         f.tok_at, f.tok_end = body_at, self.i - 1   # '}' 的下标（不含）
         return f
 
@@ -7246,7 +7267,9 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 errs.append(f"{e.line}: slice_len 需要 1 个实参，得到 {len(e.args)}")
             else:
                 at = expr_type(e.args[0], scope, funcs, structs)
-                if at is not None and not (_is_slice(at) or _is_array(at)):
+                # `p: &[T; N]` 与别的下标访问同一条：自动解一层借用（`docs/299` §3.4）。
+                seen = _deref_type(at)
+                if seen is not None and not (_is_slice(seen) or _is_array(seen)):
                     errs.append(f"{e.line}: slice_len 实参 {at} 不是数组或切片")
             for a in e.args:
                 _walk_expr(a, scope, funcs, structs, errs, enums, lifetime)
@@ -8697,17 +8720,21 @@ def _stored_borrows(e) -> list[tuple[str, str]]:
 
 
 def _lifetime_marker_errs(t: str | None, params: list[tuple[str, str]], lifetime: str,
-                          line: int, errs: list[str], where: str) -> None:
-    """显式区域标记 `&a T` 的检查（`docs/299` §3.3）。"""
+                          line: int, errs: list[str], where: str,
+                          region: str = "") -> None:
+    """显式区域标记 `&a T` 的检查（`docs/299` §3.3）。
+
+    `region` 是切片借用上的标记（`&a [T]` 规范化之后类型串里放不下，见 `Param.region`）。
+    """
     if t is None:
         return
-    if _is_ref(t):
-        reg = _ref_region(t)
+    if _is_ref(t) or region:
+        reg = _ref_region(t) if _is_ref(t) else region
         if reg:
             ptypes = dict(params)
             if lifetime != "lifetime_manual":
                 errs.append(
-                    f"{line}: `lifetime_auto` 下不写区域标记（`&{reg} {_ref_elem(t)}`）—— "
+                    f"{line}: `lifetime_auto` 下不写区域标记（`&{reg} {_ref_elem(t) if _is_ref(t) else t}`）—— "
                     f"自动档要求零标注；要显式绑定请 `choose lifetime_manual`")
             elif reg not in ptypes:
                 errs.append(
@@ -8731,6 +8758,11 @@ def _lifetime_summary(f: Func, structs: dict, lifetime: str,
     if not leaves:
         return frozenset()
     pnames = [p.name for p in f.params]
+    # 切片返回上的标记（`-> &a [u32]`）：类型串是 `[u32]`，标记在 `ret_region` 里。
+    # 它直接给出摘要，不再走省略规则。
+    if f.ret_region and _is_slice(f.ret):
+        return frozenset({pnames.index(f.ret_region)}) if f.ret_region in pnames \
+            else frozenset()
     refs = [i for i, p in enumerate(f.params) if _is_borrowish(p.type, structs)]
     src: set[int] = set()
     for leaf in leaves:
@@ -8847,6 +8879,10 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
     scope: dict[str, str] = {p.name: p.type for p in f.params}
     _LIFETIME_PARAM_NAMES[id(scope)] = params
     prov: dict[str, frozenset] = {p.name: frozenset({("p", p.name)}) for p in f.params}
+    # 切片形参上的标记（`b: &a [u32]`）：b 的来源就是 a 的来源。
+    for _p in f.params:
+        if _p.region and _p.region in params:
+            prov[_p.name] = prov[_p.region]
     ret_is_borrow = bool(_borrow_leaf_types(f.ret, structs))
     has_ref = any(_is_borrowish(p.type, structs) for p in f.params)
     borrowed: set[str] = set()       # 被借过的根变量名（`free` 那条用）
@@ -10214,9 +10250,9 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             _pn = [(p.name, p.type) for p in f.params]
             for _p in f.params:
                 _lifetime_marker_errs(_p.type, _pn, lifetime, f.line, errs,
-                                      f"形参 {_p.name}")
+                                      f"形参 {_p.name}", region=_p.region)
             _lifetime_marker_errs(f.ret, _pn, lifetime, f.line, errs,
-                                  f"函数 {f.name} 的返回类型")
+                                  f"函数 {f.name} 的返回类型", region=f.ret_region)
             errs.extend(_lifetime_fn_errs(f, funcs, structs, enums, _lt_sums, lifetime))
         # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
         # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
@@ -15499,6 +15535,8 @@ class _Ir:
             # 传空表会把它当成"不知道"并发出一个常量 0（2026-11-09 实测：游标程序
             # 的 `slice_len(c.data) + c.data[0]` 跑出 1 而不是 3）。
             at = expr_type(e.args[0], self.type_scope(), self.funcs, self.structs)
+            # `p: &[T; N]` 的长度就是 N：解一层借用后按数组取常量（`docs/299` §3.4）。
+            at = _deref_type(at)
             if at and _is_slice(at):
                 _, sv = self.expr(e.args[0], at)
                 p = self.t()

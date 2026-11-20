@@ -5353,10 +5353,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             return ka;
         }
         if tok_is(src, toks, j, "slice_len") {   // M3: 切片取长度 (数组用字面量长度)
-            let k18: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            let at: u32 = expr_type(s, src, toks, j + 2);
-            emit_str(s, out, "  ");
+            // `p: &[T; N]` 的解一层借用与下标访问同序（`docs/299` §3.4）。
+            let at: u32 = deref_tok(src, toks, expr_type(s, src, toks, j + 2));
+            let k18: u32 = 0;
             if is_slice_tok(src, toks, at) == 1 {
+                k18 = arg1(s, out, src, toks, j + 2, lvl);
+                emit_str(s, out, "  ");
                 let exs: u32 = new_temp(s, out);
                 emit_str(s, out, " = extractvalue { ptr, i64 } ");
                 emit_val(s, out, lvl);
@@ -5367,6 +5369,15 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 emit_str(s, out, " to i32\n");
                 set_temp_val(s, lvl, trs);
             } else {
+                // **常量分支不求值实参**（参考实现只取类型）。实参的结束位置要从
+                // `arg1` 拿，所以先在输出上走一遍再回滚输出偏移与临时编号 —— 否则
+                // 一个 Ident 实参会多发一条 load（`pos/slice_borrow.lomt` 的孪生判据）。
+                let save_o: u32 = st_o(s);
+                let save_t: u32 = load32(s, 4);
+                k18 = arg1(s, out, src, toks, j + 2, lvl);
+                store32(s, 0, save_o);
+                store32(s, 4, save_t);
+                emit_str(s, out, "  ");
                 let tra: u32 = new_temp(s, out);
                 emit_str(s, out, " = trunc i64 ");
                 emit_dec(s, out, array_len_of(src, toks, at));

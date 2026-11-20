@@ -88,7 +88,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 2026-11-17 A3a：`effects-runtime-perform` 挪进 `_AHEAD`（参考侧领先自举侧），
 # 预算 149 -> 148。这一条**不是**被删掉：`_AHEAD` 里仍然逐条跑、逐条断言
 # （自举侧还是 E0217、参考侧不再是）。A3b 把它挪回来，预算跟着回去。
-BUDGET = 148
+BUDGET = 149
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -490,6 +490,10 @@ _CASES: list[tuple[str, str]] = [
     ("lifetime-stored-mut-alias",
      "module m\n\nstruct V {\n    a: u32,\n}\n\nfn f(v: V) -> u32 {\n"
      "    let m: &mut V = &mut v;\n    let s: &V = &v;\n    return s.a;\n}\n"),
+    # `#1565`：切片上的区域标记（`&a [u32]`）与别处同一个档：`lifetime_auto` 下是 E041。
+    # 这条钉住"标记的档位检查对切片也生效"—— 两侧都要报同一个码。
+    ("lifetime-slice-marker-in-auto",
+     "module m\n\nfn pick(a: &[u32], b: &[u32]) -> &a [u32] {\n    return a;\n}\n"),
 
     # 2026-11-12 第九维 `fp`（`docs/348`）：函数值 / 闭包 / 间接调用。七条 ——
     # 默认档 `no_fp` 的三个入口（函数名当值、闭包字面量、间接调用）、`extern fn` 不能

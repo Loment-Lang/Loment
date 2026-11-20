@@ -12,7 +12,7 @@
 
 
 lomc_test 25
-lomentc_test 262
+lomentc_test 266
 lspe_test 78
 potato_test 20
 loment_ct_test 2
@@ -31,7 +31,7 @@ loment_gotrans_test 7
 loment_nltrans_test 20
 loment_lomtfrom_test 4
 loment_trans_test 8
-loment_potato_emit_test 11
+loment_potato_emit_test 12
 loment_lms_test 21
 loment_grammar_test 41
 loment_tools_test 66

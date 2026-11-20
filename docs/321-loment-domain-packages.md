@@ -81,3 +81,9 @@ store"；`loment_release` 与 `lomrel` 两份 glob 的顺序不一致会给"同�
 - 没有跨领域包的依赖（`science` 不依赖 `math` 的 `linalg`，`engineering` 不依赖
   `science` 的 `physics`）—— 各包只向下依赖 `std`，保持可单独替换。
 - 不做包级版本选择（编译器只认一个版本；多版本是 lompi materialize 的事）。
+
+---
+
+## 2026-11-18 更新
+
+`tur2027.1Alpha`（显式选用的 alpha 版次）起，核心有了块作用域与独立 `{ … }` 块：内层 `let` 遮蔽而不是改绑，同块重复是 E013。旧版次（`tur2026.1/.2/.3`）保持本文描述的泄漏语义。规则、存储槽名、GC 的 `ReclaimScoped`（E12）与自举镜像见 `docs/351`，规范面见 `standard/LLS.md` §11.1 / §19.4。

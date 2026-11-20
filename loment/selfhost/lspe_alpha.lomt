@@ -1,0 +1,16 @@
+choose write grammar tur2027.1Alpha
+module lspe_alpha
+choose runtime
+
+// `docs/351` §4：`lspe pass "…" { … }` 的体在 alpha 里是一层词法作用域（参考实现把它
+// 解析成 `Block("lspe_pass")`）。自举侧没有 AST，在 token 流上拆头时**必须留下括号** ——
+// 头与括号一起删掉的话，体里的 `let x` 会漏进外层，遮蔽与同块重名都会判错。
+
+fn f(i: u32) -> u32 {
+    let x: u32 = 1;
+    lspe pass "scope probe" {
+        let x: u32 = 2;
+        x = x + i;
+    }
+    return x;
+}

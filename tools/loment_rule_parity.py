@@ -88,7 +88,7 @@ import loment_p8_test as H  # noqa: E402  # 复用已验过的构建/运行夹�
 # 2026-11-17 A3a：`effects-runtime-perform` 挪进 `_AHEAD`（参考侧领先自举侧），
 # 预算 149 -> 148。这一条**不是**被删掉：`_AHEAD` 里仍然逐条跑、逐条断言
 # （自举侧还是 E0217、参考侧不再是）。A3b 把它挪回来，预算跟着回去。
-BUDGET = 149
+BUDGET = 150
 
 # --------------------------------------------------------------------------- 案例表
 #
@@ -474,6 +474,9 @@ _CASES: list[tuple[str, str]] = [
      "fn f() { lgc end; }\n"),
     ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
      "fn f() { lgc start(2 + 3) { } }\n"),
+    # ---- 块作用域（docs/351，tur2027.1Alpha）-------------------------------
+    ("scope-dup-in-block", "choose write grammar tur2027.1Alpha\nmodule m\nchoose runtime\n"
+     "fn f() -> u32 {\n    let x: u32 = 1;\n    let x: u32 = 2;\n    return x;\n}\n"),
     # ---- 借用生命周期（docs/299，第八维 `lifetime`）--------------------------
     # 这五条是"借用从**声明**走到**判据**"的证据：只有参考实现收不算落地，
     # 自举侧必须给出**同一组码**。每一条都对应 `docs/299` §8 的一条 v1 语义。

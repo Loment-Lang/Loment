@@ -1,0 +1,47 @@
+choose write grammar tur2027.1Alpha
+module ir_scope
+choose runtime
+
+enum Opt {
+    Some(u32),
+    None,
+}
+
+fn scope_block(cond: u32) -> u32 {
+    let x: u32 = 1;
+    if cond != 0 {
+        let x: u32 = 2;
+        x = x + 1;
+    }
+    {
+        let x: u32 = 3;
+        x = x + 1;
+    }
+    for i in 0..3 {
+        let i: u32 = 9;
+        x = x + i;
+    }
+    return x;
+}
+
+fn scope_match(o: Opt) -> u32 {
+    let x: u32 = 1;
+    match o {
+        Opt::Some(x) => {
+            let y: u32 = x + 1;
+            return y + x;
+        }
+        Opt::None => {
+            return x;
+        }
+    }
+}
+
+fn scope_iflet(o: Opt) -> u32 {
+    let x: u32 = 1;
+    if let Opt::Some(x) = o {
+        let y: u32 = x + 1;
+        return y + x;
+    }
+    return x;
+}

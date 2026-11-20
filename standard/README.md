@@ -32,7 +32,7 @@ Edition 2 of the document changed the authority model: Edition 1 described itsel
 ## The one number
 
 The standard's version **is** the version of the language surface it defines — today
-**`0.1.5.1`**. There is no separate edition axis for the document beyond Edition 2's
+**`0.1.6`**. There is no separate edition axis for the document beyond Edition 2's
 authority-model change; a language rule change produces a new version in the same commit.
 `LLS.md` §6.4 states the rule.
 

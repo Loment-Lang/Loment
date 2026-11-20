@@ -171,9 +171,9 @@ def test_language_change_is_rejected() -> None:
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         base = _tree(t / "base")
-        cand_tree = _tree(t / "cand", release="0.1.6")
+        cand_tree = _tree(t / "cand", release="0.1.7")
         # 0.1.6 的构建自然打 v0.1.6 的 tag；跑着的当前版本必须拒绝它。
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.6-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.7-hot.1")
         assert _reject(cand, base) == "language"
         print("      语言版本变了（树里 RELEASE 改）—— 拒绝")
 
@@ -185,12 +185,12 @@ def test_baseline_change_is_rejected() -> None:
         t = Path(t)
         cand_tree = _tree(t / "cand")
         try:
-            hf.build(cand_tree, "v0.1.6-hot.1")
+            hf.build(cand_tree, "v0.1.7-hot.1")
         except SystemExit as e:
             assert "基线" in str(e), str(e)
         else:
             raise AssertionError("tag 与树里的 RELEASE 不一致，清单却出出来了")
-        print(f"      tag 说 0.1.6、RELEASE 说 {BASE} —— 生产侧拒绝")
+        print(f"      tag 说 0.1.7、RELEASE 说 {BASE} —— 生产侧拒绝")
 
 
 @test

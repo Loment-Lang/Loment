@@ -1908,6 +1908,15 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "tur2026.1": "tur2026.1",
     "tur2026.2": "tur2026.2",
     "tur2026.3": "tur2026.3",
+    # `tur2027.1Alpha`（块作用域，`docs/351`）是**显式选用**的 alpha 版次：
+    # 它不跟默认走（见 `DEFAULT_EDITION` 的注），但规范名本身是完整的。
+    # 别名 `2027.1Alpha` 只是省掉族前缀的源侧拼法，对象侧仍然只写规范名。
+    "2027.1Alpha": "tur2027.1Alpha",
+    "tur2027.1Alpha": "tur2027.1Alpha",
+    # `read_grammar_decl` 先把拼法 `.lower()` 再查表（与其它别名同一条路），
+    # 所以全小写的写法也要收 —— 规范名本身保留 `Alpha` 的大小写。
+    "2027.1alpha": "tur2027.1Alpha",
+    "tur2027.1alpha": "tur2027.1Alpha",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1937,11 +1946,17 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: Tur 的版次（`docs/296` §1.1）是两级名：`tur<年份>.<序号>`。原生读法的**规范名**就是
 #: 这两个；`tur` / `tur1` / `tur2` 在 `GRAMMAR_ALIASES` 里落到它们。版次只加不改 ——
 #: `tur2026.1` / `tur2026.2` 的语法与语义永久冻结，新特性只进新的规范名。
-TUR_EDITIONS = ("tur2026.1", "tur2026.2", "tur2026.3")
+TUR_EDITIONS = ("tur2026.1", "tur2026.2", "tur2026.3", "tur2027.1Alpha")
 NATIVE_GRAMMARS = ("loment",) + TUR_EDITIONS
 
+#: **alpha 版次**：语法/语义可以继续变，且**不跟默认走**（用户 2026-11-18 裁定）。
+#: 默认仍是最后一个**非 alpha** 版次；要试 alpha 得显式写
+#: `choose write grammar tur2027.1Alpha`。这条与 §26.4「默认跟最新版次走」的差别
+#: 是 LLS 里明写的例外：alpha 是预览，不是承诺。
+ALPHA_EDITIONS: tuple[str, ...] = ("tur2027.1Alpha",)
+
 #: **已封版的版次**（2026-11-05）：这两个版次的语法与语义不再变化。新特性只能开
-#: `tur2026.3`（2026 年内）或 `tur2027.1`（跨年），**不是**改这里已有的名字。
+#: `tur2026.3`（2026 年内）或 `tur2027.1Alpha`（跨年 alpha），**不是**改这里已有的名字。
 #: `TUR_EDITIONS` 是"当前认识的全部版次"，`FROZEN_EDITIONS` 是"其中已封死的"；
 #: 开新版次时前者增长，后者保持不变。判据在 `loment_grammar_test`。
 FROZEN_EDITIONS: tuple[str, ...] = ("tur2026.1", "tur2026.2")
@@ -1962,15 +1977,19 @@ TUR2026_2_FEATURES: tuple[str, ...] = (
 #: 缺掉的正是今天要用的那批构造（`def` / `for x in xs` / `break` / `orelse` / `defer` /
 #: `lgc` …）—— 于是每一份新文件都得先背一行声明。
 #:
-#: 新口径：**没声明 = 当前最新版次**（`TUR_EDITIONS[-1]`）。要钉旧读法仍然随时可钉：
+#: 新口径：**没声明 = 当前最新的稳定版次**（今天 `tur2026.3`）。要钉旧读法仍然随时可钉：
 #: `choose write grammar tur2026.1`（或 `tur1`）。`tur` / `tur1` 是**显式**的历史拼法，
 #: 不跟默认走；`loment` 是语言名，跟默认走。
+#:
+#: **alpha 版次是例外**（`ALPHA_EDITIONS`，2026-11-18 用户裁定）：`tur2027.1Alpha`
+#: 带块作用域，但它只做**显式选用**，默认仍停在 `tur2026.3`。理由：alpha 的语义还
+#: 会随反馈变，把默认挪过去等于让每一份没声明的新旧源先吃一轮预览语义。
 #:
 #: **代价与对策**：新版次只加不改，但"加"的拼法如果本该是旧版里的合法标识符
 #: （`break` / `continue` / `defer` / `print_num` / `lgc`），同一份旧源就会**静默改义**。
 #: 对策不是把默认退回去，而是 `EDITION_COLLISIONS` + 前门那一闸：无声明单元里
 #: **声明**了这些名字就拒编译，要求改名或显式钉版次 —— 宁可响亮地拒，不做安静的改义。
-DEFAULT_EDITION: str = TUR_EDITIONS[-1]
+DEFAULT_EDITION: str = "tur2026.3"
 
 #: **新版次里"从拼法变成语法"的那些词**（按引入它们的版次分组）。
 #:
@@ -1985,6 +2004,9 @@ DEFAULT_EDITION: str = TUR_EDITIONS[-1]
 EDITION_COLLISIONS: dict[str, tuple[str, ...]] = {
     "tur2026.2": ("break", "continue", "defer", "print_num"),
     "tur2026.3": ("lgc",),
+    # 块作用域与独立 `{ }` 块没有引入新的**裸词**：`{` 本来就是标点，旧版次里
+    # 把它写在语句位是解析错（#44），不是合法标识符。所以没有撞车面。
+    "tur2027.1Alpha": (),
 }
 
 
@@ -2540,7 +2562,7 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             # 纯糖按**生效版次**算，不按拼法算：`loment` / 没声明现在都落到默认
             # （最新版），它们也必须有 `def` / `and` / `or` / `not` / `elif`。
             _prof = g if g in TUR_EDITIONS else DEFAULT_EDITION
-            if _prof in ("tur2026.2", "tur2026.3"):
+            if _prof in ("tur2026.2", "tur2026.3", "tur2027.1Alpha"):
                 # Tur 2 的纯糖（`docs/296` §2.1）：等长改写，行/列/偏移不动。
                 # Tur 2026.3 继承它（版次是累积的）。
                 body = _tur2_sugar(body)

@@ -235,8 +235,26 @@ def _brace_kind(line_toks: list[lomc.Tok]) -> str:
     return "code"
 
 
+def _split_grammar_line(src: str) -> tuple[str, str | None]:
+    """把 `choose write grammar …` 那一行**原样**摘出来（保留行号，换成空行）。
+
+    `tur2027.1Alpha` 被词法器拆成 `tur2027` `.` `1` `Alpha`，格式化器会把它
+    重排成 `tur2027.1 Alpha` —— 那已经不是同一个版次拼法了。声明行是**读法**，
+    不是代码，所以原样保留；空行占位让后面的注释行号不漂。
+    """
+    lines = src.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        h = line.strip().split()
+        if len(h) >= 4 and h[0] == "choose" and h[1] == "write" and h[2] == "grammar":
+            decl = line.rstrip("\r\n")
+            lines[i] = "\n" if line.endswith("\n") else ""
+            return "".join(lines), decl
+    return src, None
+
+
 def format_source(src: str) -> str:
     potato_from.refuse_foreign_grammar(src, "lomfmt")
+    src, decl = _split_grammar_line(src)
     toks = [t for t in merge_ops(lomc.lex(src)) if t.kind != "eof"]
     out: list[str] = []
     line: list[str] = []
@@ -391,6 +409,9 @@ def format_source(src: str) -> str:
     flush()
     while out and out[-1] == "":
         out.pop()
+    if decl is not None:
+        out.insert(0, "")
+        out.insert(0, decl)
     return "\n".join(out) + "\n"
 
 

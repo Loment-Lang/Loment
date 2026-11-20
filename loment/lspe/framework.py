@@ -338,6 +338,17 @@ class E11Effects(MacroChecker):
                       triggers=("effects",))
 
 
+class E12GC(MacroChecker):
+    """GC 检查器（`docs/351` §5）：把每个 `alloc` 站点的回收判决指到**唯一**一个声明。
+
+    它不拥有 L0/L1/L2 的判决（那仍是编译器的 Producer 面），只负责**作用域解析**
+    与证据：没有遮蔽 ⇒ `Syntactic`；有遮蔽 ⇒ `Assumed`，编译器在那一格保守退出。
+    """
+    desc = EngineDesc("E12GC", 2, "Evidence",
+                      obligations=("ReclaimScoped",),
+                      triggers=("locals", "loops", "free"))
+
+
 class E7Differential(MacroChecker):
     desc = EngineDesc("E7Differential", 4, "Gate", budget=0)
 
@@ -374,7 +385,7 @@ BUILTIN_CHECKERS = (
     ProducerChecker(),
     E1Constant(), E2Typed(), E2bBounds(), E3LocalFlow(), E4Interproc(),
     E5GlobalInvariant(), E6Substitution(), E9Domain(), E10Loans(), E11Effects(),
-    E7Differential(), E8Falsification(), AdvisoryChecker(),
+    E12GC(), E7Differential(), E8Falsification(), AdvisoryChecker(),
 )
 
 

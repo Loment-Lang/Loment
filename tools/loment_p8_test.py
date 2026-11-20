@@ -895,7 +895,9 @@ def test_m81_loment_checker_matches_python():
            # `docs/299`：借用类型不再是"点名拒" —— 一份合法的借用程序必须零诊断。
            ROOT / "loment" / "selfhost" / "pos" / "borrow.lomt",
            # `docs/320` S1：对象代的合法形状（generation / guard / retire）。
-           ROOT / "loment" / "selfhost" / "pos" / "revision.lomt"]
+           ROOT / "loment" / "selfhost" / "pos" / "revision.lomt",
+           # `#1555` / `#1565`：`slice_len` 解一层借用；切片返回上的区域标记。
+           ROOT / "loment" / "selfhost" / "pos" / "slice_borrow.lomt"]
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         exact = 0

@@ -3342,6 +3342,7 @@ setprev:
 @.str.check_type.6 = private unnamed_addr constant [1 x i8] c"\2D"
 @.str.check_type.7 = private unnamed_addr constant [1 x i8] c"\3E"
 @.str.check_type.8 = private unnamed_addr constant [1 x i8] c"\2C"
+@.str.check_type.9 = private unnamed_addr constant [1 x i8] c"\3C"
 @.str.chk_find_paren.0 = private unnamed_addr constant [1 x i8] c"\28"
 @.str.chk_find_paren.1 = private unnamed_addr constant [1 x i8] c"\7B"
 @.str.chk_skip_type.0 = private unnamed_addr constant [2 x i8] c"\69\6E"
@@ -81690,40 +81691,54 @@ L52_then:
   %t192 = load ptr, ptr %src.addr
   %t193 = load ptr, ptr %t.addr
   %t194 = load i32, ptr %i.addr
-  %t195 = call i32 @chk_skip_type(ptr %t192, ptr %t193, i32 %t194)
-  store i32 %t195, ptr %te.addr
-  %t196 = load ptr, ptr %src.addr
-  %t197 = load ptr, ptr %t.addr
-  %t198 = load i32, ptr %i.addr
-  %t199 = load i32, ptr %te.addr
-  %t200 = call i32 @chk_span_arg(ptr %t196, ptr %t197, i32 %t198, i32 %t199)
-  store i32 %t200, ptr %bad.addr
-  %t201 = load i32, ptr %bad.addr
-  %t202 = icmp ne i32 %t201, 0
-  br i1 %t202, label %L55_then, label %L56_else
+  %t195 = add i32 %t194, 1
+  %t196 = getelementptr inbounds [1 x i8], ptr @.str.check_type.9, i64 0, i64 0
+  %t197 = insertvalue { ptr, i64 } undef, ptr %t196, 0
+  %t198 = insertvalue { ptr, i64 } %t197, i64 1, 1
+  %t199 = call i1 @chk_tok_is(ptr %t192, ptr %t193, i32 %t195, { ptr, i64 } %t198)
+  br i1 %t199, label %L55_then, label %L56_else
 L55_then:
-  %t203 = load i32, ptr %bad.addr
-  %t204 = zext i32 %t203 to i64
-  %t205 = mul i64 %t204, 4294967296
-  %t206 = load ptr, ptr %src.addr
-  %t207 = load ptr, ptr %t.addr
-  %t208 = load ptr, ptr %p.addr
-  %t209 = load i32, ptr %o.addr
-  %t210 = load i32, ptr %bad.addr
-  %t211 = call i32 @sym_pub(ptr %t206, ptr %t207, ptr %t208, i32 %t209, i32 41, i32 %t210)
+  %t200 = load ptr, ptr %src.addr
+  %t201 = load ptr, ptr %t.addr
+  %t202 = load i32, ptr %i.addr
+  %t203 = call i32 @chk_skip_type(ptr %t200, ptr %t201, i32 %t202)
+  store i32 %t203, ptr %te.addr
+  %t204 = load ptr, ptr %src.addr
+  %t205 = load ptr, ptr %t.addr
+  %t206 = load i32, ptr %i.addr
+  %t207 = load i32, ptr %te.addr
+  %t208 = call i32 @chk_span_arg(ptr %t204, ptr %t205, i32 %t206, i32 %t207)
+  store i32 %t208, ptr %bad.addr
+  %t209 = load i32, ptr %bad.addr
+  %t210 = icmp ne i32 %t209, 0
+  br i1 %t210, label %L58_then, label %L59_else
+L58_then:
+  %t211 = load i32, ptr %bad.addr
   %t212 = zext i32 %t211 to i64
-  %t213 = add i64 %t205, %t212
-  ret i64 %t213
+  %t213 = mul i64 %t212, 4294967296
+  %t214 = load ptr, ptr %src.addr
+  %t215 = load ptr, ptr %t.addr
+  %t216 = load ptr, ptr %p.addr
+  %t217 = load i32, ptr %o.addr
+  %t218 = load i32, ptr %bad.addr
+  %t219 = call i32 @sym_pub(ptr %t214, ptr %t215, ptr %t216, i32 %t217, i32 41, i32 %t218)
+  %t220 = zext i32 %t219 to i64
+  %t221 = add i64 %t213, %t220
+  ret i64 %t221
+L59_else:
+  br label %L60_end
+L60_end:
+  br label %L57_end
 L56_else:
   br label %L57_end
 L57_end:
-  %t214 = load i32, ptr %i.addr
-  %t215 = zext i32 %t214 to i64
-  %t216 = mul i64 %t215, 4294967296
-  %t217 = load i32, ptr %o.addr
-  %t218 = zext i32 %t217 to i64
-  %t219 = add i64 %t216, %t218
-  ret i64 %t219
+  %t222 = load i32, ptr %i.addr
+  %t223 = zext i32 %t222 to i64
+  %t224 = mul i64 %t223, 4294967296
+  %t225 = load i32, ptr %o.addr
+  %t226 = zext i32 %t225 to i64
+  %t227 = add i64 %t224, %t226
+  ret i64 %t227
 L53_else:
   br label %L54_end
 L54_end:
@@ -81731,19 +81746,19 @@ L54_end:
 L50_else:
   br label %L51_end
 L51_end:
-  %t220 = load i32, ptr %i.addr
-  %t221 = zext i32 %t220 to i64
-  %t222 = mul i64 %t221, 4294967296
-  %t223 = load ptr, ptr %src.addr
-  %t224 = load ptr, ptr %t.addr
-  %t225 = load ptr, ptr %p.addr
-  %t226 = load i32, ptr %o.addr
-  %t227 = load i32, ptr %code.addr
   %t228 = load i32, ptr %i.addr
-  %t229 = call i32 @sym_pub(ptr %t223, ptr %t224, ptr %t225, i32 %t226, i32 %t227, i32 %t228)
-  %t230 = zext i32 %t229 to i64
-  %t231 = add i64 %t222, %t230
-  ret i64 %t231
+  %t229 = zext i32 %t228 to i64
+  %t230 = mul i64 %t229, 4294967296
+  %t231 = load ptr, ptr %src.addr
+  %t232 = load ptr, ptr %t.addr
+  %t233 = load ptr, ptr %p.addr
+  %t234 = load i32, ptr %o.addr
+  %t235 = load i32, ptr %code.addr
+  %t236 = load i32, ptr %i.addr
+  %t237 = call i32 @sym_pub(ptr %t231, ptr %t232, ptr %t233, i32 %t234, i32 %t235, i32 %t236)
+  %t238 = zext i32 %t237 to i64
+  %t239 = add i64 %t230, %t238
+  ret i64 %t239
 }
 ; chk_find_paren -> u32
 define i32 @chk_find_paren(ptr %src, ptr %t, i32 %i) {

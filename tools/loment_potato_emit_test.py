@@ -183,9 +183,12 @@ def _stage1() -> Path | None:
 
 
 def _run(stage1: Path, rel: str) -> subprocess.CompletedProcess:
+    # 900 是**存活护栏**，不是性能指标（`#1770`）：stage1 编 `lomcli.lomt` 本机 ~2 分钟，
+    # CI 十片并行时越过 300 秒 —— 300 秒那版写下时种子只有 1.6 MB。真正的挂死仍会在
+    # 一刻钟内报出来。
     return subprocess.run([str(stage1), rel, "--emit-potato"], cwd=str(ROOT),
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", shell=False, timeout=300)
+                          errors="replace", shell=False, timeout=900)
 
 
 def _want(rel: str) -> str:

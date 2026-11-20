@@ -446,9 +446,9 @@ def test_pe_selfhost_mirror_matches_reference():
 def test_pe_reports_unsupported_instead_of_miscompiling():
     """不支持的东西必须**报错退出**, 不许静默编出一个错的 PE。"""
     bad = [
-        ("结构体动态下标 GEP",
+        ("结构体动态字段下标 GEP",
          "define void @_start() {\nentry:\n  %p = alloca { i32, i32 }\n  %i = load i32, ptr %p\n"
-         "  %q = getelementptr { i32, i32 }, ptr %p, i32 %i\n  ret void\n}\n"),
+         "  %q = getelementptr { i32, i32 }, ptr %p, i32 0, i32 %i\n  ret void\n}\n"),
         ("间接调用",
          "define void @_start() {\nentry:\n  %f = alloca ptr\n  %g = load ptr, ptr %f\n"
          "  call void %g()\n  ret void\n}\n"),

@@ -1,0 +1,27 @@
+module pos_slice_borrow
+
+// `#1555` / `#1565`：两个口径都只在类型面上，产物不变。
+//   * `slice_len(p)` 的 `p` 是 `&[u32; 2]` —— 与下标访问同一条，先自动解一层借用；
+//   * `-> &a [u32]` 在 `lifetime_manual` 里把返回区域绑到 `a`（切片借用规范化成
+//     `[u32]`，标记只喂函数摘要，不进布局）。
+// 自举检查器与参考实现都必须零诊断（`test_m81_loment_checker_matches_python` 的正例）。
+choose lifetime_manual
+
+fn count(p: &[u32; 2]) -> u32 {
+    return slice_len(p);
+}
+
+fn pick(a: &[u32], b: &[u32]) -> &a [u32] {
+    return a;
+}
+
+fn use_pick(xs: &[u32], ys: &[u32]) -> u32 {
+    let s: [u32] = pick(xs, ys);
+    return s[0];
+}
+
+// `&xs`（`xs` 是数组）在表达式位置是**切片视图** `[u32]`，不是 `&[u32; 2]` ——
+// 后者是形参侧的类型，所以这里不调用 `count`（调用它需要 `&[u32; 2]` 的来源）。
+fn main() -> u32 {
+    return 0;
+}

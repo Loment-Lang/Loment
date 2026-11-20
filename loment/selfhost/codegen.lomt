@@ -18,7 +18,8 @@ choose runtime
 //         实参类型 720+(层)*4 (16 层) 十进制数字缓冲 672..704 函数计数 640  struct 表 1024..6144
 //         函数表 CG_FN+i*12 (CG_MAXFN 个) fk 表 CG_FK+i*8 当前函数参数表 CG_CUR..
 //         枚举表 CG_ENUM+i*80 (CG_MAXENUM 个) 局部表 CG_LOCAL.. (4 KiB) 每函数形参类型 CG_PARAM+i*160
-//         564/568 = 当前函数体的 token 跨度 (L0 分析用), 572 = 本单元是不是 `gc_auto_alpha`
+//         560 = 本帧的栈区表条数 (`#1655`), 564/568 = 当前函数体的 token 跨度 (L0 分析用),
+//         572 = 本单元是不是 `gc_auto_alpha`
 //         576 = 本单元是不是 `gc_auto` (收集器), 580 = 本帧的根表格数 (`gc_auto` 用, 每函数写)
 //         584 = L1 扫描的临时: 某个名字**最后一次出现**的 token 下标
 //
@@ -103,6 +104,10 @@ const CG_MAXDFARGS: u32 = 4;
 //:   `CG_LGC_STK` = 打开窗口的编号栈：64 x 4
 const CG_LGC: u32 = 648;
 const CG_LGC_N: u32 = 652;
+//: **本帧的栈区条数**（`#1655`，与 580 的根表格数是同一对）：`roots_push` 每次都写，
+//: `roots_pop` 靠它把 `@__loment_regionn` 退回去。560 是 512–660 这一段里唯一没人认的格
+//: （552 是根表游标那一族的最后一个，564/568 是函数体 token 跨度）。
+const CG_REGN: u32 = 560;
 const CG_LGC_D: u32 = 921300;
 const CG_LGC_STK: u32 = 921304;
 //: **块级域**（`docs/314`）：作用域栈 + 变量空间表。
@@ -5353,10 +5358,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             return ka;
         }
         if tok_is(src, toks, j, "slice_len") {   // M3: 切片取长度 (数组用字面量长度)
-            let k18: u32 = arg1(s, out, src, toks, j + 2, lvl);
-            let at: u32 = expr_type(s, src, toks, j + 2);
-            emit_str(s, out, "  ");
+            // `p: &[T; N]` 的解一层借用与下标访问同序（`docs/299` §3.4）。
+            let at: u32 = deref_tok(src, toks, expr_type(s, src, toks, j + 2));
+            let k18: u32 = 0;
             if is_slice_tok(src, toks, at) == 1 {
+                k18 = arg1(s, out, src, toks, j + 2, lvl);
+                emit_str(s, out, "  ");
                 let exs: u32 = new_temp(s, out);
                 emit_str(s, out, " = extractvalue { ptr, i64 } ");
                 emit_val(s, out, lvl);
@@ -5367,6 +5374,15 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 emit_str(s, out, " to i32\n");
                 set_temp_val(s, lvl, trs);
             } else {
+                // **常量分支不求值实参**（参考实现只取类型）。实参的结束位置要从
+                // `arg1` 拿，所以先在输出上走一遍再回滚输出偏移与临时编号 —— 否则
+                // 一个 Ident 实参会多发一条 load（`pos/slice_borrow.lomt` 的孪生判据）。
+                let save_o: u32 = st_o(s);
+                let save_t: u32 = load32(s, 4);
+                k18 = arg1(s, out, src, toks, j + 2, lvl);
+                store32(s, 0, save_o);
+                store32(s, 4, save_t);
+                emit_str(s, out, "  ");
                 let tra: u32 = new_temp(s, out);
                 emit_str(s, out, " = trunc i64 ");
                 emit_dec(s, out, array_len_of(src, toks, at));
@@ -11764,6 +11780,11 @@ fn emit_roots(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
 @__loment_rootn = internal global i32 0
+; **栈区表**：L0 提升的缓冲（和 L0.5 的栈区）整块登记成「起点 + 字数」一条，而不是每个
+; 8 字节字占一格根表 —— 后者让一块 8 KiB 的缓冲就把 1024 格根表占满（#1655）。
+@__loment_regions = internal global [256 x i64] zeroinitializer
+@__loment_regionl = internal global [256 x i64] zeroinitializer
+@__loment_regionn = internal global i32 0
 ");
 }
 
@@ -11842,6 +11863,44 @@ rlc:
   %rk2 = add i32 %rk, 1
   br label %rl
 done:
+  br label %gl
+; **栈区那一趟**：一块 L0 缓冲（L0.5 的栈区同理）在根表里只占**一条**（起点 + 字数），
+; 扫的时候逐字读、口径与根表那一趟完全相同 —— 一个字看着像堆内地址就去标记它。
+gl:
+  %gi = phi i32 [ 0, %done ], [ %gi2, %glc ]
+  %gn = load i32, ptr @__loment_regionn
+  %gd = icmp uge i32 %gi, %gn
+  br i1 %gd, label %wend, label %gb
+gb:
+  %gs = getelementptr [256 x i64], ptr @__loment_regions, i32 0, i32 %gi
+  %gsv = load i64, ptr %gs
+  %glp = getelementptr [256 x i64], ptr @__loment_regionl, i32 0, i32 %gi
+  %gln = load i64, ptr %glp
+  br label %wl
+wl:
+  %wi = phi i64 [ 0, %gb ], [ %wi2, %wlc ]
+  %wd = icmp uge i64 %wi, %gln
+  br i1 %wd, label %glc, label %wb
+wb:
+  %wo = shl i64 %wi, 3
+  %wa = add i64 %gsv, %wo
+  %wp = inttoptr i64 %wa to ptr
+  %wv = load i64, ptr %wp
+  %wbase = ptrtoint ptr @__loment_heap to i64
+  %wdo = sub i64 %wv, %wbase
+  %win = icmp ult i64 %wdo, 65536
+  br i1 %win, label %wmk, label %wlc
+wmk:
+  %wd32 = trunc i64 %wdo to i32
+  %wr = call i32 @__loment_markp(i32 %wd32)
+  br label %wlc
+wlc:
+  %wi2 = add i64 %wi, 1
+  br label %wl
+glc:
+  %gi2 = add i32 %gi, 1
+  br label %gl
+wend:
   ret void
 }
 
@@ -12122,6 +12181,44 @@ rlc:
   %rk2 = add i32 %rk, 1
   br label %rl
 done:
+  br label %gl
+; **栈区那一趟**：一块 L0 缓冲（L0.5 的栈区同理）在根表里只占**一条**（起点 + 字数），
+; 扫的时候逐字读、口径与根表那一趟完全相同 —— 一个字看着像堆内地址就去标记它。
+gl:
+  %gi = phi i32 [ 0, %done ], [ %gi2, %glc ]
+  %gn = load i32, ptr @__loment_regionn
+  %gd = icmp uge i32 %gi, %gn
+  br i1 %gd, label %wend, label %gb
+gb:
+  %gs = getelementptr [256 x i64], ptr @__loment_regions, i32 0, i32 %gi
+  %gsv = load i64, ptr %gs
+  %glp = getelementptr [256 x i64], ptr @__loment_regionl, i32 0, i32 %gi
+  %gln = load i64, ptr %glp
+  br label %wl
+wl:
+  %wi = phi i64 [ 0, %gb ], [ %wi2, %wlc ]
+  %wd = icmp uge i64 %wi, %gln
+  br i1 %wd, label %glc, label %wb
+wb:
+  %wo = shl i64 %wi, 3
+  %wa = add i64 %gsv, %wo
+  %wp = inttoptr i64 %wa to ptr
+  %wv = load i64, ptr %wp
+  %wbase = ptrtoint ptr %hb to i64
+  %wdo = sub i64 %wv, %wbase
+  %win = icmp ult i64 %wdo, 1048576
+  br i1 %win, label %wmk, label %wlc
+wmk:
+  %wd32 = trunc i64 %wdo to i32
+  %wr = call i32 @__loment_markp(i32 %wd32)
+  br label %wlc
+wlc:
+  %wi2 = add i64 %wi, 1
+  br label %wl
+glc:
+  %gi2 = add i32 %gi, 1
+  br label %gl
+wend:
   ret void
 }
 
@@ -12717,11 +12814,32 @@ fn root_count(s: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            n = n + root_slots(s, src, toks, load32(s, CG_LOCAL + j * 8));
+            // **自带缓冲的 L0 站点走栈区表**（`#1655`）：它们不占根表格。
+            if l0_own_buffer(s, src, toks, load32(s, CG_LOCAL + j * 8)) == 0 {
+                n = n + 1;
+            }
         }
         j = j + 1;
     }
-    return n + load32(s, CG_L05_CAP) / 8;
+    return n;
+}
+
+/// 本帧的**栈区条数**（`#1655`）：每一块自带缓冲的 L0 缓冲一条，L0.5 的区整块一条。
+fn region_count(s: ptr, src: ptr, toks: ptr, nl: u32) -> u32 {
+    let n: u32 = 0;
+    let j: u32 = 0;
+    while j < nl {
+        if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
+            if l0_own_buffer(s, src, toks, load32(s, CG_LOCAL + j * 8)) == 1 {
+                n = n + 1;
+            }
+        }
+        j = j + 1;
+    }
+    if load32(s, CG_L05_CAP) != 0 {
+        n = n + 1;
+    }
+    return n;
 }
 
 /// 一个**类型 token** 是不是"槽里有指针"那种（`lomentc._Ir._root_ty` 的 token 版）。
@@ -12807,32 +12925,34 @@ fn l0_bytes(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
     return l0_size(s, src, toks, nm);
 }
 
-/// 这个名字占几格根表：**L0 提升过的缓冲按它的字数算**（`FujoJTOP/loment#362`），其余一格。
-fn root_slots(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
-    let n: u32 = l0_bytes(s, src, toks, nm);
-    if n == 0 || l05_off(s, nm) != 0 {
-        return 1;                                  // L0.5 的区整块另记（见 `roots_push`）
+/// 这个局部是不是**自带缓冲**的 L0 站点（→ 栈区表一条），而不是一个普通指针槽。
+/// 1 = 自带缓冲；0 = 普通槽（含 L0.5 的区里那些 —— 它们整块另记一条）。
+fn l0_own_buffer(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if l0_bytes(s, src, toks, nm) == 0 {
+        return 0;
     }
-    return (n + 7) / 8;
+    if l05_off(s, nm) != 0 {
+        return 0;
+    }
+    return 1;
 }
 
-/// 登记 L0 缓冲里的**一个字**（`FujoJTOP/loment#362`）：那一格存的是**栈**地址
-/// （`%NAME.buf + 8j` 的地址），根扫读它就知道缓冲里那个字像不像堆内地址。
-/// 三条 temp 的次序与 `emit_root_slot` 一致（`idx` / `gp` / `bp` / `v`）。
-fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
-                  nm: u32, j: u32, kw: u32) -> u32 {
+/// 登记一条**栈区**（`#1655`）：起点与字数各一格 —— `(idx, gp, bp, v, store, lp, store)`
+/// 的次序与参考侧 `roots_push` 完全一致（逐字节判据）。
+fn emit_region(s: ptr, out: ptr, src: ptr, toks: ptr, g0: u32, c: u32,
+               nm: u32, kw: u32) -> u32 {
     let idx: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
     emit_temp_ref(s, out, idx);
     emit_str(s, out, " = add i32 ");
-    emit_temp_ref(s, out, n0);
+    emit_temp_ref(s, out, g0);
     emit_str(s, out, ", ");
     emit_dec(s, out, c);
     emit_str(s, out, "\n");
     let gp: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
     emit_temp_ref(s, out, gp);
-    emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
+    emit_str(s, out, " = getelementptr [256 x i64], ptr @__loment_regions, i32 0, i32 ");
     emit_temp_ref(s, out, idx);
     emit_str(s, out, "\n");
     let bp: u32 = alloc_temp(s);
@@ -12842,9 +12962,7 @@ fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     emit_dec(s, out, kw);
     emit_str(s, out, " x i64], ptr %");
     emit_local_name(s, out, src, toks, nm);
-    emit_str(s, out, ".buf, i32 0, i32 ");
-    emit_dec(s, out, j);
-    emit_str(s, out, "\n");
+    emit_str(s, out, ".buf, i32 0, i32 0\n");
     let v: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
     emit_temp_ref(s, out, v);
@@ -12854,6 +12972,60 @@ fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     emit_temp_ref(s, out, v);
     emit_str(s, out, ", ptr ");
     emit_temp_ref(s, out, gp);
+    emit_str(s, out, "\n");
+    let lp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, lp);
+    emit_str(s, out, " = getelementptr [256 x i64], ptr @__loment_regionl, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n  store i64 ");
+    emit_dec(s, out, kw);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, lp);
+    return emit_str(s, out, "\n");
+}
+
+/// L0.5 那一整块区（`%l05.buf`）的栈区条目 —— 与 `emit_region` 同形，只有缓冲名固定。
+fn emit_region_l05(s: ptr, out: ptr, g0: u32, c: u32, kw: u32) -> u32 {
+    let idx: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, " = add i32 ");
+    emit_temp_ref(s, out, g0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, c);
+    emit_str(s, out, "\n");
+    let gp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, gp);
+    emit_str(s, out, " = getelementptr [256 x i64], ptr @__loment_regions, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n");
+    let bp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " = getelementptr [");
+    emit_dec(s, out, kw);
+    emit_str(s, out, " x i64], ptr %l05.buf, i32 0, i32 0\n");
+    let v: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, " = ptrtoint ptr ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " to i64\n  store i64 ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, gp);
+    emit_str(s, out, "\n");
+    let lp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, lp);
+    emit_str(s, out, " = getelementptr [256 x i64], ptr @__loment_regionl, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n  store i64 ");
+    emit_dec(s, out, kw);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, lp);
     return emit_str(s, out, "\n");
 }
 
@@ -12867,160 +13039,182 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     //: 放在最后 —— 次序必须与参考实现一致（逐字节判据）。
     let ns: u32 = alloc_sites(src, toks, load32(s, 564), load32(s, 568));
     let n: u32 = root_count(s, src, toks, k, nl) + ns;
+    //: **栈区条数**（`#1655`）：L0 缓冲与 L0.5 的区走栈区表 —— 一条只占一层，
+    //: 不再按字数把根表吃掉。
+    let g: u32 = region_count(s, src, toks, nl);
     store32(s, 580, n);
-    if n == 0 {
+    store32(s, CG_REGN, g);
+    if n == 0 && g == 0 {
         return 0;
     }
     // `#778`：根表的游标与槽是线程间共享的 —— push 这一段整体是一段短临界区。
     if load32(s, 556) == 1 {
         emit_str(s, out, "  call void @__loment_rt_acquire()\n");
     }
-    let n0: u32 = alloc_temp(s);
-    emit_str(s, out, "  ");
-    emit_temp_ref(s, out, n0);
-    emit_str(s, out, " = load i32, ptr @__loment_rootn\n");
-    let c: u32 = 0;
-    let i: u32 = 0;
-    while i < k {
-        if root_ty_tok(src, toks, load32(s, CG_CUR + i * 8 + 4)) == 1 {
-            emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_CUR + i * 8), 1);
-            c = c + 1;
-        }
-        i = i + 1;
-    }
-    let j: u32 = 0;
-    while j < nl {
-        if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            let lnm: u32 = load32(s, CG_LOCAL + j * 8);
-            let lsz: u32 = l0_bytes(s, src, toks, lnm);
-            if lsz == 0 || l05_off(s, lnm) != 0 {
-                emit_root_slot(s, out, src, toks, n0, c, lnm, 0);
+    if n != 0 {
+        let n0: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, n0);
+        emit_str(s, out, " = load i32, ptr @__loment_rootn\n");
+        let c: u32 = 0;
+        let i: u32 = 0;
+        while i < k {
+            if root_ty_tok(src, toks, load32(s, CG_CUR + i * 8 + 4)) == 1 {
+                emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_CUR + i * 8), 1);
                 c = c + 1;
-            } else {
-                // **L0 提升的缓冲：一个字一格**（`FujoJTOP/loment#362`）。槽里存的是栈地址，
-                // 根扫拿它减堆基址得到巨大的无符号数 ⇒ 整块缓冲从来没人扫。
-                let kw: u32 = (lsz + 7) / 8;
-                let w: u32 = 0;
-                while w < kw {
-                    emit_root_word(s, out, src, toks, n0, c, lnm, w, kw);
+            }
+            i = i + 1;
+        }
+        let j: u32 = 0;
+        while j < nl {
+            if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
+                let lnm: u32 = load32(s, CG_LOCAL + j * 8);
+                if l0_own_buffer(s, src, toks, lnm) == 0 {
+                    emit_root_slot(s, out, src, toks, n0, c, lnm, 0);
                     c = c + 1;
-                    w = w + 1;
                 }
             }
+            j = j + 1;
         }
-        j = j + 1;
-    }
-    // **L0.5 的区**：整块每个 8 字节字各占一格 —— 与 L0 缓冲同口径（#362）。
-    // 少了这一段，`rootn` 会跨过一批**从未初始化**的槽。
-    let kw05: u32 = load32(s, CG_L05_CAP) / 8;
-    let w05: u32 = 0;
-    while w05 < kw05 {
-        let i05: u32 = alloc_temp(s);
+        // **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同形。
+        let qs: u32 = 0;
+        while qs < ns {
+            emit_root_gcsp(s, out, n0, c, qs);
+            c = c + 1;
+            qs = qs + 1;
+        }
+        let n1: u32 = alloc_temp(s);
         emit_str(s, out, "  ");
-        emit_temp_ref(s, out, i05);
+        emit_temp_ref(s, out, n1);
         emit_str(s, out, " = add i32 ");
         emit_temp_ref(s, out, n0);
         emit_str(s, out, ", ");
-        emit_dec(s, out, c);
-        emit_str(s, out, "
-");
-        let g05: u32 = alloc_temp(s);
+        emit_dec(s, out, n);
+        emit_str(s, out, "\n  store i32 ");
+        emit_temp_ref(s, out, n1);
+        emit_str(s, out, ", ptr @__loment_rootn\n");
+        let ov: u32 = alloc_temp(s);
         emit_str(s, out, "  ");
-        emit_temp_ref(s, out, g05);
-        emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
-        emit_temp_ref(s, out, i05);
-        emit_str(s, out, "
-");
-        let b05: u32 = alloc_temp(s);
-        emit_str(s, out, "  ");
-        emit_temp_ref(s, out, b05);
-        emit_str(s, out, " = getelementptr [");
-        emit_dec(s, out, kw05);
-        emit_str(s, out, " x i64], ptr %l05.buf, i32 0, i32 ");
-        emit_dec(s, out, w05);
-        emit_str(s, out, "
-");
-        let v05: u32 = alloc_temp(s);
-        emit_str(s, out, "  ");
-        emit_temp_ref(s, out, v05);
-        emit_str(s, out, " = ptrtoint ptr ");
-        emit_temp_ref(s, out, b05);
-        emit_str(s, out, " to i64
-  store i64 ");
-        emit_temp_ref(s, out, v05);
-        emit_str(s, out, ", ptr ");
-        emit_temp_ref(s, out, g05);
-        emit_str(s, out, "
-");
-        c = c + 1;
-        w05 = w05 + 1;
+        emit_temp_ref(s, out, ov);
+        emit_str(s, out, " = icmp ugt i32 ");
+        emit_temp_ref(s, out, n1);
+        emit_str(s, out, ", 1024\n  br i1 ");
+        emit_temp_ref(s, out, ov);
+        let ok: u32 = load32(s, 480) + 1;   // 参考侧先 `l("rok")` 再 `l("rovf")` -> ok 在前
+        store32(s, 480, ok + 1);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, ok + 1, "rovf");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, ok, "rok");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, ok + 1, "rovf");
+        emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+        store32(s, 476, 1);
+        lab_def(s, out, ok, "rok");
     }
-    // **分配站点的 spill 槽**（`#1465`）：一格一个槽的地址，与具名槽同形。
-    let qs: u32 = 0;
-    while qs < ns {
-        emit_root_gcsp(s, out, n0, c, qs);
-        c = c + 1;
-        qs = qs + 1;
+    if g != 0 {
+        // 越界检查**写在存之前**（`#1433` 那条"先写后查"在这里不能重演）。
+        let g0: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, g0);
+        emit_str(s, out, " = load i32, ptr @__loment_regionn\n");
+        let g1: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, g1);
+        emit_str(s, out, " = add i32 ");
+        emit_temp_ref(s, out, g0);
+        emit_str(s, out, ", ");
+        emit_dec(s, out, g);
+        emit_str(s, out, "\n");
+        let gov: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, gov);
+        emit_str(s, out, " = icmp ugt i32 ");
+        emit_temp_ref(s, out, g1);
+        emit_str(s, out, ", 256\n  br i1 ");
+        emit_temp_ref(s, out, gov);
+        let gok: u32 = load32(s, 480) + 1;   // 参考侧先 `l("gok")` 再 `l("gtrap")` -> gok 在前
+        store32(s, 480, gok + 1);
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, gok + 1, "gtrap");
+        emit_str(s, out, ", label ");
+        lab_ref(s, out, gok, "gok");
+        emit_str(s, out, "\n");
+        store32(s, 476, 1);
+        lab_def(s, out, gok + 1, "gtrap");
+        emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+        store32(s, 476, 1);
+        lab_def(s, out, gok, "gok");
+        let r: u32 = 0;
+        let jj: u32 = 0;
+        while jj < nl {
+            if root_ty_tok(src, toks, load32(s, CG_LOCAL + jj * 8 + 4)) == 1 {
+                let qnm: u32 = load32(s, CG_LOCAL + jj * 8);
+                if l0_own_buffer(s, src, toks, qnm) == 1 {
+                    let kw: u32 = (l0_bytes(s, src, toks, qnm) + 7) / 8;
+                    emit_region(s, out, src, toks, g0, r, qnm, kw);
+                    r = r + 1;
+                }
+            }
+            jj = jj + 1;
+        }
+        if load32(s, CG_L05_CAP) != 0 {
+            emit_region_l05(s, out, g0, r, load32(s, CG_L05_CAP) / 8);
+        }
+        emit_str(s, out, "  store i32 ");
+        emit_temp_ref(s, out, g1);
+        emit_str(s, out, ", ptr @__loment_regionn\n");
     }
-    let n1: u32 = alloc_temp(s);
-    emit_str(s, out, "  ");
-    emit_temp_ref(s, out, n1);
-    emit_str(s, out, " = add i32 ");
-    emit_temp_ref(s, out, n0);
-    emit_str(s, out, ", ");
-    emit_dec(s, out, n);
-    emit_str(s, out, "\n  store i32 ");
-    emit_temp_ref(s, out, n1);
-    emit_str(s, out, ", ptr @__loment_rootn\n");
-    let ov: u32 = alloc_temp(s);
-    emit_str(s, out, "  ");
-    emit_temp_ref(s, out, ov);
-    emit_str(s, out, " = icmp ugt i32 ");
-    emit_temp_ref(s, out, n1);
-    emit_str(s, out, ", 1024\n  br i1 ");
-    emit_temp_ref(s, out, ov);
-    let ok: u32 = load32(s, 480) + 1;   // 参考侧先 `l("rok")` 再 `l("rovf")` -> ok 在前
-    store32(s, 480, ok + 1);
-    emit_str(s, out, ", label ");
-    lab_ref(s, out, ok + 1, "rovf");
-    emit_str(s, out, ", label ");
-    lab_ref(s, out, ok, "rok");
-    emit_str(s, out, "\n");
-    store32(s, 476, 1);
-    lab_def(s, out, ok + 1, "rovf");
-    emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
-    store32(s, 476, 1);
-    lab_def(s, out, ok, "rok");
     if load32(s, 556) == 1 {
         emit_str(s, out, "  call void @__loment_rt_release()\n");
     }
     return 0;
 }
 
-/// `gc_auto`：离开本帧前把根表游标退回去（与 `roots_push` 成对）。
+/// `gc_auto`：离开本帧前把根表与栈区表的游标都退回去（与 `roots_push` 成对）。
 fn roots_pop(s: ptr, out: ptr) -> u32 {
     let n: u32 = load32(s, 580);
-    if n == 0 {
+    let g: u32 = load32(s, CG_REGN);
+    if n == 0 && g == 0 {
         return 0;
     }
     // `#778`：与 `roots_push` 同一把锁、同一段短临界区。
     if load32(s, 556) == 1 {
         emit_str(s, out, "  call void @__loment_rt_acquire()\n");
     }
-    let a: u32 = alloc_temp(s);
-    emit_str(s, out, "  ");
-    emit_temp_ref(s, out, a);
-    emit_str(s, out, " = load i32, ptr @__loment_rootn\n");
-    let b: u32 = alloc_temp(s);
-    emit_str(s, out, "  ");
-    emit_temp_ref(s, out, b);
-    emit_str(s, out, " = sub i32 ");
-    emit_temp_ref(s, out, a);
-    emit_str(s, out, ", ");
-    emit_dec(s, out, n);
-    emit_str(s, out, "\n  store i32 ");
-    emit_temp_ref(s, out, b);
-    emit_str(s, out, ", ptr @__loment_rootn\n");
+    if n != 0 {
+        let a: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, a);
+        emit_str(s, out, " = load i32, ptr @__loment_rootn\n");
+        let b: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, b);
+        emit_str(s, out, " = sub i32 ");
+        emit_temp_ref(s, out, a);
+        emit_str(s, out, ", ");
+        emit_dec(s, out, n);
+        emit_str(s, out, "\n  store i32 ");
+        emit_temp_ref(s, out, b);
+        emit_str(s, out, ", ptr @__loment_rootn\n");
+    }
+    if g != 0 {
+        let gn: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, gn);
+        emit_str(s, out, " = load i32, ptr @__loment_regionn\n");
+        let gm: u32 = alloc_temp(s);
+        emit_str(s, out, "  ");
+        emit_temp_ref(s, out, gm);
+        emit_str(s, out, " = sub i32 ");
+        emit_temp_ref(s, out, gn);
+        emit_str(s, out, ", ");
+        emit_dec(s, out, g);
+        emit_str(s, out, "\n  store i32 ");
+        emit_temp_ref(s, out, gm);
+        emit_str(s, out, ", ptr @__loment_regionn\n");
+    }
     if load32(s, 556) == 1 {
         emit_str(s, out, "  call void @__loment_rt_release()\n");
     }

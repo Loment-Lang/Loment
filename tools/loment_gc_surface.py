@@ -19,17 +19,21 @@
 * 数的是 **`alloc` 调用点**（`gc_ladder` 的定义）。`str_concat` 也落堆，但它不是 `alloc` 站点，
   **不计入** —— 这一层是 `docs/210` 设计里就写明的口径，不是这里的省略。
 * 注入只加 `choose`，**不改函数体**，所以「站点数」是这份源本来就有的。
-* 注入后的副本写在**本进程私有的临时目录**里 —— 那段源**不进仓库**（见 `_ladder_of`）。
-  它**不必**是源的同级文件：名字形式的 `use` 按 `lomentc.NAME_ROOTS`（仓根的
-  `loment/lib` / `loment/examples` / `loment/selfhost` / `loment/tools`）解析，**没有一层是
-  「入口文件旁边」**；路径形式的 `use` 先试 `root` 再试文件自己的目录，语料里唯一一条
-  （`loment/examples/demo.lomt` 的 `use "lom/fujr.lom"`）正是 `root` 那一条。
+* 注入后的副本写在**本进程私有的临时目录**里 —— 那段源**不进仓库**，语料目录**只读**
+  也能量，进程被杀也不留残件（`#1452`）。临时目录里**把源的同级文件一起拷进来**：
+  路径形式的 `use "x.lomt"` 按**入口所在目录**解析（`loment/examples/cproject/main.lomt`
+  引 `bitkit.lomt` 就是这样），只把入口单独搬走会让那些单元整批变成"跳过的"。
+  名字形式的 `use` 仍按 `lomentc.NAME_ROOTS` 解析，与副本放在哪无关。
+* 副本**保留原后缀**（`#1477`）：`lomentc.load_unit` 按后缀决定读法，无后缀的副本会让
+  每一份声明了非默认语法的单元（`choose write grammar tur2026.3` 等）装载失败、被静默记成
+  跳过 —— 那 10 份 Tur 单元原先就是这么没被量到的。
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -57,6 +61,11 @@ def _inject(text: str) -> str | None:
     **为什么必须 `module` 行之后**：`module` 是文件的第一件事，`choose` 排在它后面（语言规定）。
     没有 `module` 行（不是一份 Loment 单元）也回 `None`。
     """
+    # `#1479`：已经声明 `gc_auto_alpha` 的源**原样量**（不用注入）。原先它们被一律跳过，
+    # 而语料里唯一会产出 L2 的正是那一份（`loment/examples/gc_ladder/main.lomt`）——
+    # 于是尺子的 L2 一栏恒为 0，删掉 L2 那一层也不会有判据变红。
+    if "choose gc_auto_alpha" in text:
+        return text
     if "choose gc" in text or any(
             ln.split()[:1] == ["choose"] and "no_std" in ln.split()
             for ln in text.split("\n")):
@@ -80,27 +89,33 @@ def _ladder_of(path: Path) -> dict:
     `loment_gc_surface_test` 与 `loment_rel_test` 放进同一片之后，
     `loment_rel_test::test_manifest_order_is_platform_independent` 会在窗口里数到多出来的
     那一份，报"这一组在清单里的次序不是字节序" —— 5/6，单跑 6/6（`docs/213` §7 记的那次）。
+
+    所以副本进 `TemporaryDirectory`（`#1452`）：仓库里一个字节都不落，语料目录只读也能量，
+    崩溃/被杀也不留残件。两件事让"搬走"不改变量到的数：
+
+    * **同级文件一起拷** —— 路径形式的 `use "x.lomt"` 按入口所在目录解析；
+    * **保留原后缀** —— `load_unit` 按后缀分派读法（`#1477`：无后缀的副本让非默认语法的
+      单元装载失败、被静默记成跳过，Tur 那 10 份原先就是这么漏掉的）。
     """
     text = path.read_text(encoding="utf-8")
     src = _inject(text)
     if src is None:
         return {"skipped": True}
-    # **临时件写在源同目录、且不以 `.lomt` 结尾**：`use` 的相对依赖按入口所在目录解析
-    # （私有临时目录里 `use "bytes.lomt"` 找不到，整份源会被误判成"跳过的"）；而结尾不是
-    # `.lomt` 时，`Path.glob("**/*.lomt")` 与发布清单都匹配不到它 —— 于是并行分片的
-    # 假红（docs/213 §7）也不会回来。名字里带 pid，同目录并发也撞不上。
-    tmp = path.parent / f".gcsurface-{path.stem}-{os.getpid()}"
-    try:
-        tmp.write_text(src, encoding="utf-8", newline="\n")
-        mod, deps = lomentc.load_unit(tmp, ROOT)
-        doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
-        return doc["gc_ladder"]
-    except Exception as e:                       # noqa: BLE001
-        # 递归之后会撞到**不是可发射单元**的语料（例如带 `Box<[u32]>` 的负例）。
-        # 量尺不替它们编数：记成"跳过的"，并在 `--all` 里给出原因。
-        return {"skipped": True, "why": f"{type(e).__name__}: {e}"[:120]}
-    finally:
-        tmp.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="gcsurface-") as tds:
+        td = Path(tds)
+        for sib in path.parent.iterdir():
+            if sib.is_file():
+                shutil.copyfile(sib, td / sib.name)
+        ent = td / path.name
+        ent.write_text(src, encoding="utf-8", newline="\n")
+        try:
+            mod, deps = lomentc.load_unit(ent, ROOT)
+            doc = json.loads(lomentc.emit_potato(mod, ROOT, deps))
+            return doc["gc_ladder"]
+        except Exception as e:                   # noqa: BLE001
+            # 递归之后会撞到**不是可发射单元**的语料（例如带 `Box<[u32]>` 的负例）。
+            # 量尺不替它们编数：记成"跳过的"，并在 `--all` 里给出原因。
+            return {"skipped": True, "why": f"{type(e).__name__}: {e}"[:120]}
 
 def measure(dirs=CORPUS) -> list[tuple[str, dict]]:
     """逐文件量：`[(相对路径, gc_ladder), …]`，**按路径排序**（确定性）。跳过的也留着（带 `skipped`）。"""

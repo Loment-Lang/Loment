@@ -341,7 +341,8 @@ codegen 557823B，差异行均为 0）—— 即"用 Loment 写的编译器生�
 **依赖拼接单元**（`mods = deps + [mod]`）。测试夹具 `_unit_text()` 按 `resolve_deps` 的路径规则
 取依赖、被依赖者在前拼接，并**断言模块名序列与 `lomentc.resolve_deps` 完全一致**
 （规则一漂移就失败）。因此 Loment 版 codegen 的输入是"已装载的单元"，与 M80/M81 自举阶段的
-边界一致；把 `resolve_deps` 搬进 Loment（需要文件 I/O）仍是 M83 之前的待办。
+边界一致。`resolve_deps` 已经搬进 Loment：`loment/selfhost/driver.lomt` 自己做递归 `use`
+解析（先序拼接，与参考实现同规则）、依赖深度上限（`MAXDEPTH`，`:44`）、包/店探测与路径形。
 
 **已知的结构性边界（M82 之后要补）**：`lomentc.emit_llvm` 走的是 `prepare()` 之后的
 **依赖拼接单元**（`mods = deps + [mod]`），所以像 `allocator.lomt` 这种自身不含 `/` 但

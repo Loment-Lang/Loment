@@ -4,7 +4,7 @@
 > 判据 `loment_lompi_test::test_the_store_index_is_current` 逐字节比，
 > 改了模块忘了重生成就会红。
 
-合计 **332 个模块**、**2791 个公开函数**。每行末尾括号里是该模块的公开常量。
+合计 **332 个模块**、**2795 个公开函数**。每行末尾括号里是该模块的公开常量。
 
 ## std（148 个模块）
 
@@ -217,8 +217,8 @@
   - `ra_isqrt`, `ra_bytes`, `ra_inside`, `ra_pixel`, `ra_get`, `ra_get_safe`, `ra_clip`, `ra_fill`, `ra_hline`, `ra_vline`, `ra_rect`, `ra_rect_outline`, `ra_line`, `ra_circle`, `ra_circle_fill`
 - **`rational`** — 精确分数 (有理数) 算术（`RA_OK`·`RA_ERR`·`RA_NO`·`RA_CMP_EQ`·`RA_CMP_LT`·`RA_CMP_GT`）
   - `ra_scratch_bytes`, `ra_num`, `ra_den`, `ra_mul_i64`, `ra_add_i64`, `ra_sub_i64`, `ra_reduce`, `ra_set`, `ra_add`, `ra_sub`, `ra_mul`, `ra_div`, `ra_cmp`, `ra_to_dec`
-- **`regex`** — 正则表达式（POSIX ERE 的公共子集，回溯实现）（`RX_MAX_REP`·`RX_BUDGET`）
-  - `re_no`, `re_ctx_bytes`, `re_match_at`, `re_match_at_budget`, `re_match`, `re_search_from`, `re_search`
+- **`regex`** — 正则表达式引擎（编译成字节码 + 显式回溯栈 + UTF-8）（`RX_MAX_REP`·`RX_BUDGET`）
+  - `re_no`, `re_ctx_bytes`, `re_match_mem`, `re_search_mem`, `re_match_at`, `re_match_at_budget`, `re_match`, `re_search_from`, `re_search`, `re_cap_start`, `re_cap_end`
 - **`ring`** — 环形缓冲 (FIFO, 调用方持有数组)（`RING_W`）
   - `ring_head`, `ring_count`, `ring_full`, `ring_empty`, `ring_front`, `ring_push`, `ring_peek`, `ring_pop`, `ring_clear`
 - **`rle`** — 行程编码 (RLE) 的两种常见形态（`RLE_ERR`·`RLE_MAX_RUN`·`RLE_BMP_EOL`·`RLE_BMP_EOB`·`RLE_BMP_DELTA`）

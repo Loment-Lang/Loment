@@ -1310,6 +1310,83 @@ def test_a_promoted_buffer_is_scanned():
 
 
 @test
+def test_a_promoted_buffer_larger_than_the_root_table_runs():
+    """**一块 8 KiB 的 L0 缓冲不该把根表撑爆**（`#1655`）。
+
+    **Why**：`#362` 的修法给提升缓冲的**每个 8 字节字**登记一格根表。根表是 1024 格，
+    于是一块 `alloc(8192)`（1024 个字）自己就填满 —— 运行时那条 `rootn > 1024` 走
+    `__loment_abort`，退出码 132、stderr 一个字都没有；`alloc(16384)` 更差：表外照写，
+    SIGSEGV 139。而且每进一次函数都要写"字数"条根 —— 热路径上是 O(缓冲大小) 的开销
+    （8192 字节 ≈ 每次调用 1 024 条 store）。
+
+    修法把栈区整块登记成一条 `(起点, 字数)`（`@__loment_regions` / `@__loment_regionl`），
+    扫描留在**收集**那一趟：同样的字都要扫，但不再占根表格、也不在每次调用上重付。
+
+    **How to apply**：`keep = alloc(8192)` 是 L0 候选（只经由 `store8` / `wr64` 解引用）；
+    目标 `t` 唯一的引用是 `wr64` 写进它的第一个 8 字节。4000 次 `junk()` 逼出回收，
+    随后探测块（40 B，全程序只有 `t` 用这个尺寸）会盖掉真被收掉的目标。
+
+      * `alpha` + 写进去 → **跑完**（rc = 7）：旧口径下这一只直接 rc = 132；
+      * `alpha` + **不写** → **必须不是 7**：没有那个字，对象本来就该被收（证伪）；
+      * `auto` + 写进去 → **跑完**（rc = 7）：同一份源在堆那一档的对照。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module bigbuf\n%s\nchoose runtime\n\n"
+            "fn junk() -> u64 {\n"
+            "    let p: u64 = alloc(16) as u64;\n"
+            "    store8(p as ptr, 0, 200);\n"
+            "    return p;\n}\n\n"
+            "fn wr64(p: ptr, o: u32, v: u64) -> u32 {\n"
+            "    store8(p, o, (v & 255) as u8);\n"
+            "    store8(p, o + 1, ((v >> 8) & 255) as u8);\n"
+            "    store8(p, o + 2, ((v >> 16) & 255) as u8);\n"
+            "    store8(p, o + 3, ((v >> 24) & 255) as u8);\n"
+            "    store8(p, o + 4, ((v >> 32) & 255) as u8);\n"
+            "    store8(p, o + 5, ((v >> 40) & 255) as u8);\n"
+            "    store8(p, o + 6, ((v >> 48) & 255) as u8);\n"
+            "    store8(p, o + 7, ((v >> 56) & 255) as u8);\n"
+            "    return 0;\n}\n\n"
+            "fn _start() {\n"
+            "    let keep: ptr = alloc(8192);\n"
+            "    let t: u64 = alloc(32) as u64;\n"
+            "    store8(t as ptr, 0, 7);\n"
+            "%s"
+            "    let i: u32 = 0;\n"
+            "    while i < 4000 { let _a: u64 = junk(); i = i + 1; }\n"
+            "    let probe: u64 = alloc(32) as u64;\n"
+            "    store8(probe as ptr, 0, 200);\n"
+            "    if load8(t as ptr, 0) == 7 { syscall4(60, 7, 0, 0); }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("alpha_big", "choose gc_auto_alpha", "    wr64(keep, 0, t);\n"),
+             ("alpha_big_nowrite", "choose gc_auto_alpha", ""),
+             ("auto_big", "choose gc_auto", "    wr64(keep, 0, t);\n"))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"bigbuf_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto_alpha` 那一只没跑完：退出码 {got[0]}（期望 7）。132 = 根表被一块 8 KiB"
+        " 的缓冲填满（1024 个字 × 每字一格）；139 = 表外照写。栈区该整块登记一条")
+    assert got[1] != 7, (
+        f"**不写那 8 个字节的那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "没有那个字，对象本来就该被收，探测块就该盖掉它")
+    assert got[2] == 7, (
+        f"`gc_auto` 那一只读到 {got[2]}（期望 7）—— 那一档没有 L0，8192 字节在堆里、"
+        "整块按一个根扫，不该在这里出问题")
+    print(f"      alpha 8 KiB 跑通 (rc={got[0]})；不写就不保 (rc={got[1]})；"
+          f"auto 跑通 (rc={got[2]}) —— 栈区一条，不再按字吃根表")
+
+
+@test
 def test_l0_static_promotion_bounds_the_heap():
     """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
 

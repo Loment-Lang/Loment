@@ -1,0 +1,215 @@
+// loment/tools/lomrxcheck.lomt — 正则引擎对拍驱动器（判据在 tools/loment_regex_test.py）
+//
+// 吃一份 JSONL：每行 `{"pat": "...", "text": "...", "cap": n}`（`cap` 可省，默认 0），
+// 对每一行跑 `regex.re_search`，**一行一行**打印捕获组的字节跨度：
+//
+//     <start>:<end>     命中（`cap` 组；0 = 整个匹配）
+//     -1                没命中
+//
+// 判据那一侧用 CPython `re.search` 算同一批，再把字符下标换成字节下标逐行比。
+// 两侧看的是**同一份输入**（判据生成），所以这里不解析任何期望值 —— 它只报观察。
+//
+// **为什么用 ptr+len 那套入口**：JSON 解出来的串住在缓冲区里，`str` 是 `{ptr,len}`
+// 胖指针、没有运行期构造器。`re_search_mem` 正是为这条情境存在的。
+//
+// 入口是 `fn _start()`（写成 `main` 时 lld 把入口留成 0 → 一跑就段错误）。
+
+module lomrxcheck
+choose runtime
+
+use json
+use regex
+
+const FILE_CAP: u32 = 16777216;
+const ARENA_CAP: u32 = 262144;
+const PAT_CAP: u32 = 16384;
+const TXT_CAP: u32 = 262144;
+
+// ---------------------------------------------------------------- 内核
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+/// 十进制写进 `buf`，返回写了几个字节（不写前导零）。
+fn wdec(buf: ptr, v: u32) -> u32 {
+    if v == 0 {
+        store8(buf, 0, 48 as u8);
+        return 1;
+    }
+    let d: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(buf, d, (48 + x % 10) as u8);
+        x = x / 10;
+        d = d + 1;
+    }
+    let i: u32 = 0;
+    while i < d / 2 {
+        let t: u32 = load8(buf, i);
+        store8(buf, i, load8(buf, d - 1 - i) as u8);
+        store8(buf, d - 1 - i, t as u8);
+        i = i + 1;
+    }
+    return d;
+}
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let i: u32 = 0;
+    while i < n && i < 4000 {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// 第 `idx` 个 argv 的 `(起点 << 32) | 长度`；0 = 没有。
+fn argv_at(buf: ptr, cap: u64, scr: ptr, idx: u32) -> u64 {
+    let fd: i64 = open_ro(str_ptr("/proc/self/cmdline"),
+                          str_len("/proc/self/cmdline"), scr);
+    if fd < 0 {
+        return 0;
+    }
+    let n: i64 = syscall4(0, fd as u64, buf as u64, cap);
+    syscall4(3, fd as u64, 0, 0);
+    if n <= 0 {
+        return 0;
+    }
+    let i: u64 = 0;
+    let k: u32 = 0;
+    while k < idx {
+        while i < n as u64 && load8(buf, i as u32) != 0 {
+            i = i + 1;
+        }
+        if i >= n as u64 {
+            return 0;
+        }
+        i = i + 1;
+        k = k + 1;
+    }
+    let s: u64 = i;
+    while i < n as u64 && load8(buf, i as u32) != 0 {
+        i = i + 1;
+    }
+    if i == s {
+        return 0;
+    }
+    return (s << 32) | (i - s);
+}
+
+fn line_blank(buf: ptr, s: u32, e: u32) -> u32 {
+    let i: u32 = s;
+    while i < e {
+        let c: u32 = load8(buf, i);
+        if c != 32 && c != 9 && c != 13 && c != 10 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn out_span(fd: u64, num: ptr, r: i64, g: u32, ctx: ptr) -> u64 {
+    if r < 0 {
+        return write_all(fd, str_ptr("-1\n"), 3);
+    }
+    let cs: i64 = re_cap_start(ctx, g);
+    let ce: i64 = re_cap_end(ctx, g);
+    if cs < 0 || ce < 0 {
+        return write_all(fd, str_ptr("-1\n"), 3);
+    }
+    let a: u32 = wdec(num, cs as u32);
+    let _b: u64 = write_all(fd, num, a as u64);
+    let _c: u64 = write_all(fd, str_ptr(":"), 1);
+    let d: u32 = wdec(num, ce as u32);
+    let _e: u64 = write_all(fd, num, d as u64);
+    return write_all(fd, str_ptr("\n"), 1);
+}
+
+fn _start() -> u32 {
+    let scr: ptr = sys_alloc(8192) as ptr;
+    let ab: ptr = sys_alloc(65536) as ptr;
+    let dg: ptr = sys_alloc(FILE_CAP as u64) as ptr;
+    let ar: ptr = sys_alloc(ARENA_CAP as u64) as ptr;
+    let pb: ptr = sys_alloc(PAT_CAP as u64) as ptr;
+    let tb: ptr = sys_alloc(TXT_CAP as u64) as ptr;
+    let num: ptr = sys_alloc(32) as ptr;
+    let ctx: ptr = sys_alloc(re_ctx_bytes() as u64) as ptr;
+    let a: u64 = argv_at(ab, 65536, scr, 1);
+    if a == 0 {
+        return die(2);
+    }
+    let fd: i64 = open_ro(ptr_add(ab, (a >> 32) as u32), (a % 4294967296) as u32, scr);
+    if fd < 0 {
+        return die(2);
+    }
+    let n: u32 = read_all(fd as u64, dg, FILE_CAP as u64) as u32;
+    syscall4(3, fd as u64, 0, 0);
+    let i: u32 = 0;
+    while i < n {
+        let s: u32 = i;
+        while i < n && load8(dg, i) != 10 {
+            i = i + 1;
+        }
+        let e: u32 = i;
+        if i < n {
+            i = i + 1;
+        }
+        if line_blank(dg, s, e) == 0 {
+            let js: ptr = ptr_add(dg, s);
+            let root: u32 = json_parse(js, e - s, ar);
+            let np: u32 = json_get(js, ar, root, "pat");
+            let nt: u32 = json_get(js, ar, root, "text");
+            if np != 4294967295 && nt != 4294967295 {
+                let pn: u32 = json_str_into(js, ar, np, pb, PAT_CAP);
+                let tn: u32 = json_str_into(js, ar, nt, tb, TXT_CAP);
+                let nc: u32 = json_get(js, ar, root, "cap");
+                let cap: u32 = 0;
+                if nc != 4294967295 && json_nkind(ar, nc) == 4 {
+                    cap = json_as_u32(js, ar, nc);
+                }
+                let r: i64 = re_search_mem(pb, pn, tb, tn, 0, ctx);
+                let _o: u64 = out_span(1, num, r, cap, ctx);
+            }
+        }
+    }
+    return die(0);
+}

@@ -110,6 +110,10 @@ TOOLS: list[tuple] = [
     # ⚠ 它是**镜像**（Loment 写的那份），走同一条自举链；`docs/231` §2 的渠道闸也同日放开，
     # 所以"发行版可以调 VM"这句话现在有东西可调，不是一句声明。
     ("loment-lvm", "loment/tools/lvm.lomt", "."),
+    # Flomtc（`docs/350`）：**独立 exe、独立入口**（用户 2026-11-18 定，与 `lomenterr`
+    # 同一种存在）。它复用自举驱动的**同一份编译器实现**，快路径由输入单元的
+    # `choose flomtc_true` 选 —— 不另起一份编译器。
+    ("flomtc", "loment/tools/flomtc.lomt", "."),
 ]
 #: 随包发的示例。`tour.lomt` 是**一个文件过完整门语言**的导览 —— 纯包用户没有仓库里的
 #: 其它示例, 所以它比 hello 更该在包里 (agent 指南 §1 讲的就是这一份, 三者同源)。
@@ -3430,6 +3434,18 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
         print(f"  [--opt] clang -O2 了 {len(optimized)}/{len(out)} 个入口"
               + (f"（{' '.join(optimized)}）" if optimized else ""))
     return out
+
+
+def build_host_tool(entry: str, cwd: str = ".", profile: str = "") -> bytes:
+    """一个入口 -> **本机格式**的可执行字节（种子 -> stage1 -> IR -> lomelf 链接）。
+
+    与 `build_tools` 的分工：只出本机那一份（不链另一个平台），也不打印任何东西 ——
+    仓库侧的开发入口（`tools/loment.py::build_lomenterr`）与判据都用它。**没有缓存**：
+    缓存按内容哈希判新鲜的活由调用方做（`build_lomenterr` 有自己的戳）。
+    """
+    stage1 = build_stage1()
+    ir = emit_ir(stage1, entry, cwd)
+    return _lomelf_link(ir.read_text(encoding="utf-8"), _host_target(), profile)
 
 
 # ------------------------------------------------------------------ payload

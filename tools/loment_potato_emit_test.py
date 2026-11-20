@@ -37,6 +37,12 @@ import lomentc  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "loment" / "examples"
 
+#: stage1 编一条大单元的**上限**。300 秒在 `lomcli.lomt` 上不够：2026-11-19/20 的
+#: 门禁里这条命令在并行分片（`-j 4`、十片同时跑）下要 330–420 秒，于是
+#: `loment_potato_emit_test` / `loment_cli_test` 双双超时（`#1770`）。本机同一份单元
+#: 约 115 秒，所以这是**负载下的墙钟**，不是编译器真退化了。抬到 900 秒留出三倍余量。
+STAGE1_TIMEOUT = 900
+
 #: 这一格**覆盖**的语料: 单文件（不带 `use`）、非泛型、无 trait/impl 的那一片。
 #: 逐份与参考实现比字节 —— 不挑"有代表性"的几份。
 COVERED = (
@@ -183,12 +189,9 @@ def _stage1() -> Path | None:
 
 
 def _run(stage1: Path, rel: str) -> subprocess.CompletedProcess:
-    # 900 是**存活护栏**，不是性能指标（`#1770`）：stage1 编 `lomcli.lomt` 本机 ~2 分钟，
-    # CI 十片并行时越过 300 秒 —— 300 秒那版写下时种子只有 1.6 MB。真正的挂死仍会在
-    # 一刻钟内报出来。
     return subprocess.run([str(stage1), rel, "--emit-potato"], cwd=str(ROOT),
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", shell=False, timeout=900)
+                          errors="replace", shell=False, timeout=STAGE1_TIMEOUT)
 
 
 def _want(rel: str) -> str:
@@ -335,6 +338,45 @@ def test_non_scalar_generic_arg_refused_by_name():
     assert "自检失败" not in got, f"参考侧又退回**内部错误**了（该是点名拒）：{got[:200]}"
     assert "只支持标量" in got, f"拒绝话里该带上真正的卡点（字段类型只支持标量）：{got[:200]}"
     print("      Box<[u32]>：参考侧与自举侧都**点名拒**（真正卡点是字段类型只支持标量，不是命名）")
+
+
+@test
+def test_flomtc_true_changes_nothing_but_the_path():
+    """`flomtc`（`docs/350`，第十维）：只换编译路径，**产物逐字节相同**，也不进 Potato。
+
+    两份同一源，只差一行 `choose flomtc_true`：
+
+    * 参考侧 Potato 相同；
+    * 自举 `--emit-potato` 相同，且都等于参考；
+    * Potato 里**没有** `flomtc` 这一格 —— 与 `mode`/`gc` 那种"必填"相反：
+      它说的是**这份产物是怎么被编出来的**，不是这份产物的性质。
+
+    语料带一个**声明了但没调用**的泛型函数：这正是快路径要跳过的形状
+    （跳过 `pt_mono_all` 与参考侧的 deepcopy 都只在这里发生）。
+    """
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    body = ("module flomtc_probe\n{ch}\n"
+            "fn pick<T>(a: T, b: T) -> T {{\n    return a;\n}}\n\n"
+            "fn _start() {{\n}}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        pots = {}
+        for tag, ch in (("off", ""), ("on", "choose flomtc_true")):
+            p = td / f"{tag}.lomt"
+            p.write_text(body.format(ch=ch), encoding="utf-8", newline="\n")
+            mod, deps = lomentc.load_unit(p, ROOT)
+            errs = lomentc.check(mod, deps=deps)
+            assert not errs, f"{tag}: 参考侧检查失败 {errs[:2]}"
+            pots[tag] = lomentc.emit_potato(mod, ROOT, deps)
+            r = _emit_potato_on(stage1, p)
+            assert r.returncode == 0, f"{tag}: 自举拒绝 {r.stderr[-300:]}"
+            assert r.stdout == pots[tag], f"{tag}: 自举与参考不同"
+            assert "flomtc" not in json.loads(pots[tag]), (
+                "flomtc 进了 Potato —— 它是编译路径开关，不是产物性质")
+        assert pots["off"] == pots["on"], "flomtc_true 改变了产物"
+    print("      flomtc_false / flomtc_true：参考与自举两侧逐字节相同")
 
 
 @test
@@ -495,7 +537,7 @@ def test_lspe_effect_sites_match_on_both_implementations():
             r = subprocess.run([str(s1), str(p), "--emit-potato",
                                 "--lspe-level", str(lvl)], cwd=str(ROOT),
                                capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=300, shell=False)
+                               errors="replace", timeout=STAGE1_TIMEOUT, shell=False)
             assert r.returncode == 0, r.stderr[-400:]
             mod, deps = lomentc.load_unit(p, ROOT, lspe_level=lvl)
             want = lomentc.emit_potato(mod, ROOT, deps)
@@ -514,7 +556,7 @@ def test_lspe_effect_sites_match_on_both_implementations():
 def _emit_potato_on(stage1: Path, p: Path) -> subprocess.CompletedProcess:
     return subprocess.run([str(stage1), str(p), "--emit-potato"], cwd=str(ROOT),
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", shell=False, timeout=300)
+                          errors="replace", shell=False, timeout=STAGE1_TIMEOUT)
 
 
 @test

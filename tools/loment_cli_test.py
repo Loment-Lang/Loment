@@ -148,9 +148,12 @@ def test_reference_backend_agrees_with_selfhost_ir():
     import loment_dist  # noqa: E402
     stage1 = loment_dist.build_stage1()
     want = lomentc.emit_llvm(*_load_src())
+    # `#1770`：这一条判的是**逐字节相同**，不是速度 —— 300 s 的硬上限贴着实测
+    # （本机 221–238 s，CI 的 shard 10 也撞过），慢机或负载一高就翻车成"新红"。
+    # 真要判速度另有一条预算判据（`test_m86_selfhost_perf_budget` 的 60 s 护栏）。
     r = subprocess.run([str(stage1), SRC.relative_to(ROOT).as_posix()],
                        cwd=str(ROOT), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", shell=False, timeout=300)
+                       encoding="utf-8", errors="replace", shell=False, timeout=900)
     assert r.returncode == 0, f"stage1 编译失败: {r.stderr[-300:]}"
     # 参考经 Python stdout 出去时会被 Windows 文本模式翻成 CRLF, 镜直接 write 是 LF ——
     # 读时统一成 LF 再比 (语义上两边都是 LF)。

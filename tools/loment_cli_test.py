@@ -32,6 +32,9 @@ import potato  # noqa: E402  (边界内建那份清单的**单一真源**: potat
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomcli.lomt"
+#: stage1 编 `lomcli.lomt` 的上限。300 秒在并行分片下不够（本机约 115 秒、CI 上
+#: 330 秒以上，`#1770`）；与 `loment_potato_emit_test.STAGE1_TIMEOUT` 同一个数。
+STAGE1_TIMEOUT = 900
 IS_WIN = sys.platform == "win32"
 #: 目录里至少要有这么多命令 (用户 2026-09-15 的要求: 至少 30 条)
 CATALOG_FLOOR = 30
@@ -150,7 +153,7 @@ def test_reference_backend_agrees_with_selfhost_ir():
     want = lomentc.emit_llvm(*_load_src())
     r = subprocess.run([str(stage1), SRC.relative_to(ROOT).as_posix()],
                        cwd=str(ROOT), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", shell=False, timeout=300)
+                       encoding="utf-8", errors="replace", shell=False, timeout=STAGE1_TIMEOUT)
     assert r.returncode == 0, f"stage1 编译失败: {r.stderr[-300:]}"
     # 参考经 Python stdout 出去时会被 Windows 文本模式翻成 CRLF, 镜直接 write 是 LF ——
     # 读时统一成 LF 再比 (语义上两边都是 LF)。

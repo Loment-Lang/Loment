@@ -375,7 +375,7 @@ SHARD_COST = {
     "lmgr_test": 6.0,
     "loment_channel_test": 92.8,
     "loment_choose_matrix_test": 16.7,
-    "loment_cli_test": 29.5,
+    "loment_cli_test": 340.0,   # #1770: 并行分片下的实测墙钟
     "loment_comefor_test": 14.5,
     "loment_cpptrans_test": 0.1,
     "loment_crash_test": 26.1,   # 种子 -> 驱动（clang -O1）一次, 九条判据共用
@@ -397,7 +397,7 @@ SHARD_COST = {
     "loment_eol": 0.2,
     "loment_eol_test": 2.4,
     # 2026-11-18 起 build_lomenterr 走自举链：冷构建 ~133s（种子 -> stage1 -> IR -> lomelf）。
-    "loment_err_test": 150.0,
+    "loment_err_test": 500.0,   # #1770
     "loment_regex_test": 30.0,
     "loment_extblock_test": 1.2,
     "loment_ffi_test": 1.9,
@@ -424,7 +424,7 @@ SHARD_COST = {
     "loment_lomc_test": 9.5,
     "loment_lompi_test": 220.0,
     "loment_lomtfrom_test": 6.8,
-    "loment_lsp_test": 47.0,
+    "loment_lsp_test": 300.0,   # #1770
     "loment_lumtui_test": 4.9,
     "loment_megaproject_test": 16.6,
     "loment_multilang_test": 0.0,
@@ -439,7 +439,7 @@ SHARD_COST = {
     "loment_pe_test": 4.1,
     "loment_pkg_test": 3.9,
     "loment_ports_test": 0.3,
-    "loment_potato_emit_test": 90.6,
+    "loment_potato_emit_test": 420.0,   # #1770
     "loment_publish": 0.5,
     "loment_pytrans_test": 0.3,
     "loment_register_test": 0.8,

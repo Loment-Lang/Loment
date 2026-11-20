@@ -3213,6 +3213,18 @@ setprev:
 @.str.desugar_lspe_pass.0 = private unnamed_addr constant [4 x i8] c"\6C\73\70\65"
 @.str.desugar_lspe_pass.1 = private unnamed_addr constant [4 x i8] c"\70\61\73\73"
 @.str.switch_rules.0 = private unnamed_addr constant [21 x i8] c"\64\6F\6D\61\69\6E\5F\63\6C\6F\63\6B\5F\65\78\70\6C\69\63\69\74"
+@.str.chk_simple_unit.0 = private unnamed_addr constant [6 x i8] c"\63\68\6F\6F\73\65"
+@.str.chk_simple_unit.1 = private unnamed_addr constant [11 x i8] c"\66\6C\6F\6D\74\63\5F\74\72\75\65"
+@.str.chk_simple_unit.2 = private unnamed_addr constant [3 x i8] c"\70\75\62"
+@.str.chk_simple_unit.3 = private unnamed_addr constant [4 x i8] c"\65\6E\75\6D"
+@.str.chk_simple_unit.4 = private unnamed_addr constant [6 x i8] c"\4F\70\74\69\6F\6E"
+@.str.chk_simple_unit.5 = private unnamed_addr constant [1 x i8] c"\26"
+@.str.chk_simple_unit.6 = private unnamed_addr constant [4 x i8] c"\66\72\65\65"
+@.str.chk_simple_unit.7 = private unnamed_addr constant [6 x i8] c"\73\74\72\75\63\74"
+@.str.chk_simple_unit.8 = private unnamed_addr constant [4 x i8] c"\65\6E\75\6D"
+@.str.chk_simple_unit.9 = private unnamed_addr constant [3 x i8] c"\73\74\72"
+@.str.chk_simple_unit.10 = private unnamed_addr constant [1 x i8] c"\5B"
+@.str.chk_simple_unit.11 = private unnamed_addr constant [2 x i8] c"\66\70"
 @.str.chk_base_code.0 = private unnamed_addr constant [2 x i8] c"\75\38"
 @.str.chk_base_code.1 = private unnamed_addr constant [3 x i8] c"\75\31\36"
 @.str.chk_base_code.2 = private unnamed_addr constant [3 x i8] c"\75\33\32"
@@ -77129,6 +77141,462 @@ L46_dok:
 L48_dend:
   ret i32 %t105
 }
+; chk_hash -> u32
+define i32 @chk_hash(ptr %src, ptr %t, i32 %name_tok) {
+entry:
+  %src.addr = alloca ptr
+  %t.addr = alloca ptr
+  %name_tok.addr = alloca i32
+  %st.addr = alloca i32
+  %ln.addr = alloca i32
+  %h.addr = alloca i32
+  %i.addr = alloca i32
+  store ptr %src, ptr %src.addr
+  store ptr %t, ptr %t.addr
+  store i32 %name_tok, ptr %name_tok.addr
+  %t1 = load ptr, ptr %t.addr
+  %t2 = load i32, ptr %name_tok.addr
+  %t3 = mul i32 %t2, 20
+  %t4 = add i32 %t3, 4
+  %t5 = call i32 @load32(ptr %t1, i32 %t4)
+  store i32 %t5, ptr %st.addr
+  %t6 = load ptr, ptr %t.addr
+  %t7 = load i32, ptr %name_tok.addr
+  %t8 = mul i32 %t7, 20
+  %t9 = add i32 %t8, 8
+  %t10 = call i32 @load32(ptr %t6, i32 %t9)
+  store i32 %t10, ptr %ln.addr
+  store i32 2166136261, ptr %h.addr
+  store i32 0, ptr %i.addr
+  br label %L1_wcond
+L1_wcond:
+  %t11 = load i32, ptr %i.addr
+  %t12 = load i32, ptr %ln.addr
+  %t13 = icmp ult i32 %t11, %t12
+  br i1 %t13, label %L2_wbody, label %L3_wend
+L2_wbody:
+  %t14 = load i32, ptr %h.addr
+  %t15 = load ptr, ptr %src.addr
+  %t16 = load i32, ptr %st.addr
+  %t17 = load i32, ptr %i.addr
+  %t18 = add i32 %t16, %t17
+  %t19 = getelementptr i8, ptr %t15, i32 %t18
+  %t20 = load i8, ptr %t19
+  %t21 = zext i8 %t20 to i32
+  %t22 = xor i32 %t14, %t21
+  %t23 = mul i32 %t22, 16777619
+  store i32 %t23, ptr %h.addr
+  %t24 = load i32, ptr %i.addr
+  %t25 = add i32 %t24, 1
+  store i32 %t25, ptr %i.addr
+  br label %L1_wcond
+L3_wend:
+  %t26 = load i32, ptr %h.addr
+  %t28 = icmp eq i32 8192, 0
+  br i1 %t28, label %L5_dtrap, label %L4_dok
+L5_dtrap:
+  call void @__loment_abort()
+  unreachable
+L4_dok:
+  %t27 = urem i32 %t26, 8192
+  br label %L6_dend
+L6_dend:
+  ret i32 %t27
+}
+; chk_hash_put -> ()
+define void @chk_hash_put(ptr %src, ptr %t, ptr %s, i32 %name_tok, i32 %slot) {
+entry:
+  %src.addr = alloca ptr
+  %t.addr = alloca ptr
+  %s.addr = alloca ptr
+  %name_tok.addr = alloca i32
+  %slot.addr = alloca i32
+  %hp.addr = alloca ptr
+  %hb.addr = alloca i32
+  %hk.addr = alloca i32
+  store ptr %src, ptr %src.addr
+  store ptr %t, ptr %t.addr
+  store ptr %s, ptr %s.addr
+  store i32 %name_tok, ptr %name_tok.addr
+  store i32 %slot, ptr %slot.addr
+  %t1 = load ptr, ptr %s.addr
+  %t2 = zext i32 142688 to i64
+  %t3 = getelementptr inbounds i8, ptr %t1, i64 %t2
+  store ptr %t3, ptr %hp.addr
+  %t4 = load ptr, ptr %src.addr
+  %t5 = load ptr, ptr %t.addr
+  %t6 = load i32, ptr %name_tok.addr
+  %t7 = call i32 @chk_hash(ptr %t4, ptr %t5, i32 %t6)
+  store i32 %t7, ptr %hb.addr
+  store i32 0, ptr %hk.addr
+  br label %L1_wcond
+L1_wcond:
+  %t8 = load i32, ptr %hk.addr
+  %t9 = icmp ult i32 %t8, 8192
+  br i1 %t9, label %L4_sc_rhs, label %L5_sc_short
+L4_sc_rhs:
+  %t10 = load ptr, ptr %hp.addr
+  %t11 = load i32, ptr %hb.addr
+  %t12 = load i32, ptr %hk.addr
+  %t13 = add i32 %t11, %t12
+  %t15 = icmp eq i32 8192, 0
+  br i1 %t15, label %L8_dtrap, label %L7_dok
+L8_dtrap:
+  call void @__loment_abort()
+  unreachable
+L7_dok:
+  %t14 = urem i32 %t13, 8192
+  br label %L9_dend
+L9_dend:
+  %t16 = mul i32 %t14, 4
+  %t17 = call i32 @load32(ptr %t10, i32 %t16)
+  %t18 = icmp ne i32 %t17, 0
+  br label %L6_sc_end
+L5_sc_short:
+  br label %L6_sc_end
+L6_sc_end:
+  %t19 = phi i1 [ %t18, %L9_dend ], [ false, %L5_sc_short ]
+  br i1 %t19, label %L2_wbody, label %L3_wend
+L2_wbody:
+  %t20 = load i32, ptr %hk.addr
+  %t21 = add i32 %t20, 1
+  store i32 %t21, ptr %hk.addr
+  br label %L1_wcond
+L3_wend:
+  %t22 = load i32, ptr %hk.addr
+  %t23 = icmp ult i32 %t22, 8192
+  br i1 %t23, label %L10_then, label %L11_else
+L10_then:
+  %t24 = load ptr, ptr %hp.addr
+  %t25 = load i32, ptr %hb.addr
+  %t26 = load i32, ptr %hk.addr
+  %t27 = add i32 %t25, %t26
+  %t29 = icmp eq i32 8192, 0
+  br i1 %t29, label %L14_dtrap, label %L13_dok
+L14_dtrap:
+  call void @__loment_abort()
+  unreachable
+L13_dok:
+  %t28 = urem i32 %t27, 8192
+  br label %L15_dend
+L15_dend:
+  %t30 = mul i32 %t28, 4
+  %t31 = load i32, ptr %slot.addr
+  %t32 = add i32 %t31, 1
+  call void @store32(ptr %t24, i32 %t30, i32 %t32)
+  br label %L12_end
+L11_else:
+  br label %L12_end
+L12_end:
+  ret void
+}
+; chk_simple_unit -> u32
+define i32 @chk_simple_unit(ptr %src, ptr %t) {
+entry:
+  %src.addr = alloca ptr
+  %t.addr = alloca ptr
+  %fl.addr = alloca i32
+  %i.addr = alloca i32
+  %uend.addr = alloca i32
+  %have.addr = alloca i32
+  %j.addr = alloca i32
+  %k.addr = alloca i32
+  %c.addr = alloca i32
+  store ptr %src, ptr %src.addr
+  store ptr %t, ptr %t.addr
+  store i32 0, ptr %fl.addr
+  store i32 0, ptr %i.addr
+  br label %L1_wcond
+L1_wcond:
+  %t1 = load ptr, ptr %t.addr
+  %t2 = load i32, ptr %i.addr
+  %t3 = call i32 @chk_tok_kind(ptr %t1, i32 %t2)
+  %t4 = icmp ne i32 %t3, 4
+  br i1 %t4, label %L2_wbody, label %L3_wend
+L2_wbody:
+  %t5 = load ptr, ptr %src.addr
+  %t6 = load ptr, ptr %t.addr
+  %t7 = load i32, ptr %i.addr
+  %t8 = getelementptr inbounds [6 x i8], ptr @.str.chk_simple_unit.0, i64 0, i64 0
+  %t9 = insertvalue { ptr, i64 } undef, ptr %t8, 0
+  %t10 = insertvalue { ptr, i64 } %t9, i64 6, 1
+  %t11 = call i1 @chk_tok_is(ptr %t5, ptr %t6, i32 %t7, { ptr, i64 } %t10)
+  br i1 %t11, label %L4_sc_rhs, label %L5_sc_short
+L4_sc_rhs:
+  %t12 = load ptr, ptr %src.addr
+  %t13 = load ptr, ptr %t.addr
+  %t14 = load i32, ptr %i.addr
+  %t15 = add i32 %t14, 1
+  %t16 = getelementptr inbounds [11 x i8], ptr @.str.chk_simple_unit.1, i64 0, i64 0
+  %t17 = insertvalue { ptr, i64 } undef, ptr %t16, 0
+  %t18 = insertvalue { ptr, i64 } %t17, i64 11, 1
+  %t19 = call i1 @chk_tok_is(ptr %t12, ptr %t13, i32 %t15, { ptr, i64 } %t18)
+  br label %L6_sc_end
+L5_sc_short:
+  br label %L6_sc_end
+L6_sc_end:
+  %t20 = phi i1 [ %t19, %L4_sc_rhs ], [ false, %L5_sc_short ]
+  br i1 %t20, label %L7_then, label %L8_else
+L7_then:
+  store i32 1, ptr %fl.addr
+  br label %L9_end
+L8_else:
+  br label %L9_end
+L9_end:
+  %t21 = load i32, ptr %i.addr
+  %t22 = add i32 %t21, 1
+  store i32 %t22, ptr %i.addr
+  br label %L1_wcond
+L3_wend:
+  %t23 = load i32, ptr %fl.addr
+  %t24 = icmp eq i32 %t23, 0
+  br i1 %t24, label %L10_then, label %L11_else
+L10_then:
+  ret i32 0
+L11_else:
+  br label %L12_end
+L12_end:
+  store i32 0, ptr %uend.addr
+  store i32 0, ptr %have.addr
+  store i32 0, ptr %j.addr
+  br label %L13_wcond
+L13_wcond:
+  %t25 = load ptr, ptr %t.addr
+  %t26 = load i32, ptr %j.addr
+  %t27 = call i32 @chk_tok_kind(ptr %t25, i32 %t26)
+  %t28 = icmp ne i32 %t27, 4
+  br i1 %t28, label %L14_wbody, label %L15_wend
+L14_wbody:
+  %t29 = load i32, ptr %have.addr
+  %t30 = icmp eq i32 %t29, 0
+  br i1 %t30, label %L16_sc_rhs, label %L17_sc_short
+L16_sc_rhs:
+  %t31 = load ptr, ptr %src.addr
+  %t32 = load ptr, ptr %t.addr
+  %t33 = load i32, ptr %j.addr
+  %t34 = getelementptr inbounds [3 x i8], ptr @.str.chk_simple_unit.2, i64 0, i64 0
+  %t35 = insertvalue { ptr, i64 } undef, ptr %t34, 0
+  %t36 = insertvalue { ptr, i64 } %t35, i64 3, 1
+  %t37 = call i1 @chk_tok_is(ptr %t31, ptr %t32, i32 %t33, { ptr, i64 } %t36)
+  br label %L18_sc_end
+L17_sc_short:
+  br label %L18_sc_end
+L18_sc_end:
+  %t38 = phi i1 [ %t37, %L16_sc_rhs ], [ false, %L17_sc_short ]
+  br i1 %t38, label %L19_sc_rhs, label %L20_sc_short
+L19_sc_rhs:
+  %t39 = load ptr, ptr %src.addr
+  %t40 = load ptr, ptr %t.addr
+  %t41 = load i32, ptr %j.addr
+  %t42 = add i32 %t41, 1
+  %t43 = getelementptr inbounds [4 x i8], ptr @.str.chk_simple_unit.3, i64 0, i64 0
+  %t44 = insertvalue { ptr, i64 } undef, ptr %t43, 0
+  %t45 = insertvalue { ptr, i64 } %t44, i64 4, 1
+  %t46 = call i1 @chk_tok_is(ptr %t39, ptr %t40, i32 %t42, { ptr, i64 } %t45)
+  br label %L21_sc_end
+L20_sc_short:
+  br label %L21_sc_end
+L21_sc_end:
+  %t47 = phi i1 [ %t46, %L19_sc_rhs ], [ false, %L20_sc_short ]
+  br i1 %t47, label %L22_sc_rhs, label %L23_sc_short
+L22_sc_rhs:
+  %t48 = load ptr, ptr %src.addr
+  %t49 = load ptr, ptr %t.addr
+  %t50 = load i32, ptr %j.addr
+  %t51 = add i32 %t50, 2
+  %t52 = getelementptr inbounds [6 x i8], ptr @.str.chk_simple_unit.4, i64 0, i64 0
+  %t53 = insertvalue { ptr, i64 } undef, ptr %t52, 0
+  %t54 = insertvalue { ptr, i64 } %t53, i64 6, 1
+  %t55 = call i1 @chk_tok_is(ptr %t48, ptr %t49, i32 %t51, { ptr, i64 } %t54)
+  br label %L24_sc_end
+L23_sc_short:
+  br label %L24_sc_end
+L24_sc_end:
+  %t56 = phi i1 [ %t55, %L22_sc_rhs ], [ false, %L23_sc_short ]
+  br i1 %t56, label %L25_then, label %L26_else
+L25_then:
+  %t57 = load i32, ptr %j.addr
+  store i32 %t57, ptr %uend.addr
+  store i32 1, ptr %have.addr
+  br label %L27_end
+L26_else:
+  br label %L27_end
+L27_end:
+  %t58 = load i32, ptr %j.addr
+  %t59 = add i32 %t58, 1
+  store i32 %t59, ptr %j.addr
+  br label %L13_wcond
+L15_wend:
+  %t60 = load i32, ptr %have.addr
+  %t61 = icmp eq i32 %t60, 0
+  br i1 %t61, label %L28_then, label %L29_else
+L28_then:
+  %t62 = load i32, ptr %j.addr
+  store i32 %t62, ptr %uend.addr
+  br label %L30_end
+L29_else:
+  br label %L30_end
+L30_end:
+  store i32 0, ptr %k.addr
+  br label %L31_wcond
+L31_wcond:
+  %t63 = load i32, ptr %k.addr
+  %t64 = load i32, ptr %uend.addr
+  %t65 = icmp ult i32 %t63, %t64
+  br i1 %t65, label %L34_sc_rhs, label %L35_sc_short
+L34_sc_rhs:
+  %t66 = load ptr, ptr %t.addr
+  %t67 = load i32, ptr %k.addr
+  %t68 = call i32 @chk_tok_kind(ptr %t66, i32 %t67)
+  %t69 = icmp ne i32 %t68, 4
+  br label %L36_sc_end
+L35_sc_short:
+  br label %L36_sc_end
+L36_sc_end:
+  %t70 = phi i1 [ %t69, %L34_sc_rhs ], [ false, %L35_sc_short ]
+  br i1 %t70, label %L32_wbody, label %L33_wend
+L32_wbody:
+  %t71 = load ptr, ptr %src.addr
+  %t72 = load ptr, ptr %t.addr
+  %t73 = load i32, ptr %k.addr
+  %t74 = getelementptr inbounds [1 x i8], ptr @.str.chk_simple_unit.5, i64 0, i64 0
+  %t75 = insertvalue { ptr, i64 } undef, ptr %t74, 0
+  %t76 = insertvalue { ptr, i64 } %t75, i64 1, 1
+  %t77 = call i1 @chk_tok_is(ptr %t71, ptr %t72, i32 %t73, { ptr, i64 } %t76)
+  br i1 %t77, label %L38_sc_short, label %L37_sc_rhs
+L37_sc_rhs:
+  %t78 = load ptr, ptr %src.addr
+  %t79 = load ptr, ptr %t.addr
+  %t80 = load i32, ptr %k.addr
+  %t81 = getelementptr inbounds [4 x i8], ptr @.str.chk_simple_unit.6, i64 0, i64 0
+  %t82 = insertvalue { ptr, i64 } undef, ptr %t81, 0
+  %t83 = insertvalue { ptr, i64 } %t82, i64 4, 1
+  %t84 = call i1 @chk_tok_is(ptr %t78, ptr %t79, i32 %t80, { ptr, i64 } %t83)
+  br label %L39_sc_end
+L38_sc_short:
+  br label %L39_sc_end
+L39_sc_end:
+  %t85 = phi i1 [ %t84, %L37_sc_rhs ], [ true, %L38_sc_short ]
+  br i1 %t85, label %L41_sc_short, label %L40_sc_rhs
+L40_sc_rhs:
+  %t86 = load ptr, ptr %src.addr
+  %t87 = load ptr, ptr %t.addr
+  %t88 = load i32, ptr %k.addr
+  %t89 = getelementptr inbounds [6 x i8], ptr @.str.chk_simple_unit.7, i64 0, i64 0
+  %t90 = insertvalue { ptr, i64 } undef, ptr %t89, 0
+  %t91 = insertvalue { ptr, i64 } %t90, i64 6, 1
+  %t92 = call i1 @chk_tok_is(ptr %t86, ptr %t87, i32 %t88, { ptr, i64 } %t91)
+  br label %L42_sc_end
+L41_sc_short:
+  br label %L42_sc_end
+L42_sc_end:
+  %t93 = phi i1 [ %t92, %L40_sc_rhs ], [ true, %L41_sc_short ]
+  br i1 %t93, label %L44_sc_short, label %L43_sc_rhs
+L43_sc_rhs:
+  %t94 = load ptr, ptr %src.addr
+  %t95 = load ptr, ptr %t.addr
+  %t96 = load i32, ptr %k.addr
+  %t97 = getelementptr inbounds [4 x i8], ptr @.str.chk_simple_unit.8, i64 0, i64 0
+  %t98 = insertvalue { ptr, i64 } undef, ptr %t97, 0
+  %t99 = insertvalue { ptr, i64 } %t98, i64 4, 1
+  %t100 = call i1 @chk_tok_is(ptr %t94, ptr %t95, i32 %t96, { ptr, i64 } %t99)
+  br label %L45_sc_end
+L44_sc_short:
+  br label %L45_sc_end
+L45_sc_end:
+  %t101 = phi i1 [ %t100, %L43_sc_rhs ], [ true, %L44_sc_short ]
+  br i1 %t101, label %L47_sc_short, label %L46_sc_rhs
+L46_sc_rhs:
+  %t102 = load ptr, ptr %src.addr
+  %t103 = load ptr, ptr %t.addr
+  %t104 = load i32, ptr %k.addr
+  %t105 = getelementptr inbounds [3 x i8], ptr @.str.chk_simple_unit.9, i64 0, i64 0
+  %t106 = insertvalue { ptr, i64 } undef, ptr %t105, 0
+  %t107 = insertvalue { ptr, i64 } %t106, i64 3, 1
+  %t108 = call i1 @chk_tok_is(ptr %t102, ptr %t103, i32 %t104, { ptr, i64 } %t107)
+  br label %L48_sc_end
+L47_sc_short:
+  br label %L48_sc_end
+L48_sc_end:
+  %t109 = phi i1 [ %t108, %L46_sc_rhs ], [ true, %L47_sc_short ]
+  br i1 %t109, label %L50_sc_short, label %L49_sc_rhs
+L49_sc_rhs:
+  %t110 = load ptr, ptr %src.addr
+  %t111 = load ptr, ptr %t.addr
+  %t112 = load i32, ptr %k.addr
+  %t113 = getelementptr inbounds [1 x i8], ptr @.str.chk_simple_unit.10, i64 0, i64 0
+  %t114 = insertvalue { ptr, i64 } undef, ptr %t113, 0
+  %t115 = insertvalue { ptr, i64 } %t114, i64 1, 1
+  %t116 = call i1 @chk_tok_is(ptr %t110, ptr %t111, i32 %t112, { ptr, i64 } %t115)
+  br label %L51_sc_end
+L50_sc_short:
+  br label %L51_sc_end
+L51_sc_end:
+  %t117 = phi i1 [ %t116, %L49_sc_rhs ], [ true, %L50_sc_short ]
+  br i1 %t117, label %L53_sc_short, label %L52_sc_rhs
+L52_sc_rhs:
+  %t118 = load ptr, ptr %src.addr
+  %t119 = load ptr, ptr %t.addr
+  %t120 = load i32, ptr %k.addr
+  %t121 = getelementptr inbounds [2 x i8], ptr @.str.chk_simple_unit.11, i64 0, i64 0
+  %t122 = insertvalue { ptr, i64 } undef, ptr %t121, 0
+  %t123 = insertvalue { ptr, i64 } %t122, i64 2, 1
+  %t124 = call i1 @chk_tok_is(ptr %t118, ptr %t119, i32 %t120, { ptr, i64 } %t123)
+  br label %L54_sc_end
+L53_sc_short:
+  br label %L54_sc_end
+L54_sc_end:
+  %t125 = phi i1 [ %t124, %L52_sc_rhs ], [ true, %L53_sc_short ]
+  br i1 %t125, label %L55_then, label %L56_else
+L55_then:
+  ret i32 0
+L56_else:
+  br label %L57_end
+L57_end:
+  %t126 = load ptr, ptr %t.addr
+  %t127 = load i32, ptr %k.addr
+  %t128 = call i32 @chk_tok_kind(ptr %t126, i32 %t127)
+  %t129 = icmp eq i32 %t128, 0
+  br i1 %t129, label %L58_then, label %L59_else
+L58_then:
+  %t130 = load ptr, ptr %src.addr
+  %t131 = load ptr, ptr %t.addr
+  %t132 = load i32, ptr %k.addr
+  %t133 = mul i32 %t132, 20
+  %t134 = add i32 %t133, 4
+  %t135 = call i32 @load32(ptr %t131, i32 %t134)
+  %t136 = getelementptr i8, ptr %t130, i32 %t135
+  %t137 = load i8, ptr %t136
+  %t138 = zext i8 %t137 to i32
+  store i32 %t138, ptr %c.addr
+  %t139 = load i32, ptr %c.addr
+  %t140 = icmp uge i32 %t139, 65
+  br i1 %t140, label %L61_sc_rhs, label %L62_sc_short
+L61_sc_rhs:
+  %t141 = load i32, ptr %c.addr
+  %t142 = icmp ule i32 %t141, 90
+  br label %L63_sc_end
+L62_sc_short:
+  br label %L63_sc_end
+L63_sc_end:
+  %t143 = phi i1 [ %t142, %L61_sc_rhs ], [ false, %L62_sc_short ]
+  br i1 %t143, label %L64_then, label %L65_else
+L64_then:
+  ret i32 0
+L65_else:
+  br label %L66_end
+L66_end:
+  br label %L60_end
+L59_else:
+  br label %L60_end
+L60_end:
+  %t144 = load i32, ptr %k.addr
+  %t145 = add i32 %t144, 1
+  store i32 %t145, ptr %k.addr
+  br label %L31_wcond
+L33_wend:
+  ret i32 1
+}
 ; chk_base_code -> u32
 define i32 @chk_base_code(ptr %src, ptr %t, i32 %i) {
 entry:
@@ -81368,53 +81836,91 @@ entry:
   %s.addr = alloca ptr
   %n.addr = alloca i32
   %name_tok.addr = alloca i32
-  %i.addr = alloca i32
+  %hp.addr = alloca ptr
+  %b.addr = alloca i32
+  %k.addr = alloca i32
+  %pos.addr = alloca i32
+  %v.addr = alloca i32
   store ptr %src, ptr %src.addr
   store ptr %t, ptr %t.addr
   store ptr %s, ptr %s.addr
   store i32 %n, ptr %n.addr
   store i32 %name_tok, ptr %name_tok.addr
-  store i32 0, ptr %i.addr
+  %t1 = load ptr, ptr %s.addr
+  %t2 = zext i32 142688 to i64
+  %t3 = getelementptr inbounds i8, ptr %t1, i64 %t2
+  store ptr %t3, ptr %hp.addr
+  %t4 = load ptr, ptr %src.addr
+  %t5 = load ptr, ptr %t.addr
+  %t6 = load i32, ptr %name_tok.addr
+  %t7 = call i32 @chk_hash(ptr %t4, ptr %t5, i32 %t6)
+  store i32 %t7, ptr %b.addr
+  store i32 0, ptr %k.addr
   br label %L1_wcond
 L1_wcond:
-  %t1 = load i32, ptr %i.addr
-  %t2 = load i32, ptr %n.addr
-  %t3 = icmp ult i32 %t1, %t2
-  br i1 %t3, label %L2_wbody, label %L3_wend
+  %t8 = load i32, ptr %k.addr
+  %t9 = icmp ult i32 %t8, 8192
+  br i1 %t9, label %L2_wbody, label %L3_wend
 L2_wbody:
-  %t4 = load ptr, ptr %s.addr
-  %t5 = load i32, ptr %i.addr
-  %t6 = mul i32 %t5, 20
-  %t7 = add i32 %t6, 4
-  %t8 = call i32 @load32(ptr %t4, i32 %t7)
-  %t9 = icmp ne i32 %t8, 6
-  br i1 %t9, label %L4_sc_rhs, label %L5_sc_short
-L4_sc_rhs:
-  %t10 = load ptr, ptr %src.addr
-  %t11 = load ptr, ptr %t.addr
-  %t12 = load ptr, ptr %t.addr
-  %t13 = load ptr, ptr %s.addr
-  %t14 = load i32, ptr %n.addr
-  %t15 = load i32, ptr %i.addr
-  %t16 = call i32 @sym_get(ptr %t12, ptr %t13, i32 %t14, i32 %t15)
-  %t17 = load i32, ptr %name_tok.addr
-  %t18 = call i1 @same(ptr %t10, ptr %t11, i32 %t16, i32 %t17)
-  br label %L6_sc_end
-L5_sc_short:
-  br label %L6_sc_end
-L6_sc_end:
-  %t19 = phi i1 [ %t18, %L4_sc_rhs ], [ false, %L5_sc_short ]
-  br i1 %t19, label %L7_then, label %L8_else
+  %t10 = load i32, ptr %b.addr
+  %t11 = load i32, ptr %k.addr
+  %t12 = add i32 %t10, %t11
+  %t14 = icmp eq i32 8192, 0
+  br i1 %t14, label %L5_dtrap, label %L4_dok
+L5_dtrap:
+  call void @__loment_abort()
+  unreachable
+L4_dok:
+  %t13 = urem i32 %t12, 8192
+  br label %L6_dend
+L6_dend:
+  store i32 %t13, ptr %pos.addr
+  %t15 = load ptr, ptr %hp.addr
+  %t16 = load i32, ptr %pos.addr
+  %t17 = mul i32 %t16, 4
+  %t18 = call i32 @load32(ptr %t15, i32 %t17)
+  store i32 %t18, ptr %v.addr
+  %t19 = load i32, ptr %v.addr
+  %t20 = icmp eq i32 %t19, 0
+  br i1 %t20, label %L7_then, label %L8_else
 L7_then:
-  %t20 = load i32, ptr %i.addr
-  %t21 = add i32 %t20, 1
-  ret i32 %t21
+  ret i32 0
 L8_else:
   br label %L9_end
 L9_end:
-  %t22 = load i32, ptr %i.addr
-  %t23 = add i32 %t22, 1
-  store i32 %t23, ptr %i.addr
+  %t21 = load ptr, ptr %s.addr
+  %t22 = load i32, ptr %v.addr
+  %t23 = sub i32 %t22, 1
+  %t24 = mul i32 %t23, 20
+  %t25 = add i32 %t24, 4
+  %t26 = call i32 @load32(ptr %t21, i32 %t25)
+  %t27 = icmp ne i32 %t26, 6
+  br i1 %t27, label %L10_sc_rhs, label %L11_sc_short
+L10_sc_rhs:
+  %t28 = load ptr, ptr %src.addr
+  %t29 = load ptr, ptr %t.addr
+  %t30 = load ptr, ptr %s.addr
+  %t31 = load i32, ptr %v.addr
+  %t32 = sub i32 %t31, 1
+  %t33 = mul i32 %t32, 20
+  %t34 = call i32 @load32(ptr %t30, i32 %t33)
+  %t35 = load i32, ptr %name_tok.addr
+  %t36 = call i1 @same(ptr %t28, ptr %t29, i32 %t34, i32 %t35)
+  br label %L12_sc_end
+L11_sc_short:
+  br label %L12_sc_end
+L12_sc_end:
+  %t37 = phi i1 [ %t36, %L10_sc_rhs ], [ false, %L11_sc_short ]
+  br i1 %t37, label %L13_then, label %L14_else
+L13_then:
+  %t38 = load i32, ptr %v.addr
+  ret i32 %t38
+L14_else:
+  br label %L15_end
+L15_end:
+  %t39 = load i32, ptr %k.addr
+  %t40 = add i32 %t39, 1
+  store i32 %t40, ptr %k.addr
   br label %L1_wcond
 L3_wend:
   ret i32 0
@@ -81707,14 +82213,20 @@ L21_dend:
   %t55 = add i32 %t54, 16
   %t56 = load i32, ptr %aux.addr
   call void @store32(ptr %t52, i32 %t55, i32 %t56)
-  %t57 = load i32, ptr %n.addr
-  %t58 = add i32 %t57, 1
-  %t59 = zext i32 %t58 to i64
-  %t60 = mul i64 %t59, 4294967296
-  %t61 = load i32, ptr %o.addr
-  %t62 = zext i32 %t61 to i64
-  %t63 = add i64 %t60, %t62
-  ret i64 %t63
+  %t57 = load ptr, ptr %src.addr
+  %t58 = load ptr, ptr %t.addr
+  %t59 = load ptr, ptr %s.addr
+  %t60 = load i32, ptr %name_tok.addr
+  %t61 = load i32, ptr %n.addr
+  call void @chk_hash_put(ptr %t57, ptr %t58, ptr %t59, i32 %t60, i32 %t61)
+  %t62 = load i32, ptr %n.addr
+  %t63 = add i32 %t62, 1
+  %t64 = zext i32 %t63 to i64
+  %t65 = mul i64 %t64, 4294967296
+  %t66 = load i32, ptr %o.addr
+  %t67 = zext i32 %t66 to i64
+  %t68 = add i64 %t65, %t67
+  ret i64 %t68
 }
 ; chk_span_arg -> u32
 define i32 @chk_span_arg(ptr %src, ptr %t, i32 %lo, i32 %hi) {
@@ -82738,20 +83250,26 @@ L10_then:
   %t50 = mul i32 %t49, 20
   %t51 = add i32 %t50, 16
   call void @store32(ptr %t48, i32 %t51, i32 0)
-  %t52 = load i32, ptr %c.addr
-  %t53 = add i32 %t52, 1
-  store i32 %t53, ptr %c.addr
+  %t52 = load ptr, ptr %src.addr
+  %t53 = load ptr, ptr %t.addr
+  %t54 = load ptr, ptr %s.addr
+  %t55 = load i32, ptr %k.addr
+  %t56 = load i32, ptr %c.addr
+  call void @chk_hash_put(ptr %t52, ptr %t53, ptr %t54, i32 %t55, i32 %t56)
+  %t57 = load i32, ptr %c.addr
+  %t58 = add i32 %t57, 1
+  store i32 %t58, ptr %c.addr
   br label %L12_end
 L11_else:
   br label %L12_end
 L12_end:
-  %t54 = load i32, ptr %k.addr
-  %t55 = add i32 %t54, 1
-  store i32 %t55, ptr %k.addr
+  %t59 = load i32, ptr %k.addr
+  %t60 = add i32 %t59, 1
+  store i32 %t60, ptr %k.addr
   br label %L4_wcond
 L6_wend:
-  %t56 = load i32, ptr %c.addr
-  ret i32 %t56
+  %t61 = load i32, ptr %c.addr
+  ret i32 %t61
 }
 ; chk_is_kw -> u32
 define i32 @chk_is_kw(ptr %src, ptr %t, i32 %i) {
@@ -115135,6 +115653,7 @@ entry:
   %oc.addr = alloca ptr
   %n.addr = alloca i32
   %o.addr = alloca i32
+  %_hz.addr = alloca i32
   %ntks.addr = alloca i32
   %nt2.addr = alloca i32
   %oe.addr = alloca i32
@@ -115227,6 +115746,7 @@ entry:
   %ib.addr = alloca i32
   %lbp.addr = alloca i32
   %rbp.addr = alloca i32
+  %simple_unit.addr = alloca i32
   %lp2.addr = alloca i32
   %slot2.addr = alloca i32
   %fbra.addr = alloca i32
@@ -115260,351 +115780,368 @@ entry:
   call void @store32(ptr %t8, i32 0, i32 0)
   store i32 0, ptr %n.addr
   store i32 0, ptr %o.addr
-  store i32 0, ptr %ntks.addr
+  store i32 0, ptr %_hz.addr
   br label %L1_wcond
 L1_wcond:
-  %t9 = load ptr, ptr %t.addr
-  %t10 = load i32, ptr %ntks.addr
-  %t11 = call i32 @chk_tok_kind(ptr %t9, i32 %t10)
-  %t12 = icmp ne i32 %t11, 4
-  br i1 %t12, label %L2_wbody, label %L3_wend
+  %t9 = load i32, ptr %_hz.addr
+  %t10 = icmp ult i32 %t9, 8192
+  br i1 %t10, label %L2_wbody, label %L3_wend
 L2_wbody:
-  %t13 = load i32, ptr %ntks.addr
-  %t14 = add i32 %t13, 1
-  store i32 %t14, ptr %ntks.addr
+  %t11 = load ptr, ptr %syms.addr
+  %t12 = load i32, ptr %_hz.addr
+  %t13 = mul i32 %t12, 4
+  %t14 = add i32 142688, %t13
+  call void @store32(ptr %t11, i32 %t14, i32 0)
+  %t15 = load i32, ptr %_hz.addr
+  %t16 = add i32 %t15, 1
+  store i32 %t16, ptr %_hz.addr
   br label %L1_wcond
 L3_wend:
-  %t15 = load ptr, ptr %src.addr
-  %t16 = load ptr, ptr %t.addr
-  %t17 = load i32, ptr %ntks.addr
-  %t18 = load ptr, ptr %t.addr
-  %t19 = call i32 @desugar_lspe_pass(ptr %t15, ptr %t16, i32 0, i32 %t17, ptr %t18, i32 0)
-  store i32 %t19, ptr %nt2.addr
-  %t20 = load ptr, ptr %src.addr
-  %t21 = load ptr, ptr %t.addr
-  %t22 = call i32 @sw_effects_on(ptr %t20, ptr %t21)
-  %t23 = icmp eq i32 %t22, 1
-  br i1 %t23, label %L4_then, label %L5_else
-L4_then:
-  %t24 = load ptr, ptr %src.addr
-  %t25 = load ptr, ptr %t.addr
-  %t26 = load ptr, ptr %out.addr
-  %t27 = call i32 @chk_effects_prepass(ptr %t24, ptr %t25, ptr %t26, i32 0)
-  store i32 %t27, ptr %oe.addr
-  %t28 = load i32, ptr %oe.addr
-  %t29 = icmp ne i32 %t28, 0
-  br i1 %t29, label %L7_then, label %L8_else
+  store i32 0, ptr %ntks.addr
+  br label %L4_wcond
+L4_wcond:
+  %t17 = load ptr, ptr %t.addr
+  %t18 = load i32, ptr %ntks.addr
+  %t19 = call i32 @chk_tok_kind(ptr %t17, i32 %t18)
+  %t20 = icmp ne i32 %t19, 4
+  br i1 %t20, label %L5_wbody, label %L6_wend
+L5_wbody:
+  %t21 = load i32, ptr %ntks.addr
+  %t22 = add i32 %t21, 1
+  store i32 %t22, ptr %ntks.addr
+  br label %L4_wcond
+L6_wend:
+  %t23 = load ptr, ptr %src.addr
+  %t24 = load ptr, ptr %t.addr
+  %t25 = load i32, ptr %ntks.addr
+  %t26 = load ptr, ptr %t.addr
+  %t27 = call i32 @desugar_lspe_pass(ptr %t23, ptr %t24, i32 0, i32 %t25, ptr %t26, i32 0)
+  store i32 %t27, ptr %nt2.addr
+  %t28 = load ptr, ptr %src.addr
+  %t29 = load ptr, ptr %t.addr
+  %t30 = call i32 @sw_effects_on(ptr %t28, ptr %t29)
+  %t31 = icmp eq i32 %t30, 1
+  br i1 %t31, label %L7_then, label %L8_else
 L7_then:
-  %t30 = load ptr, ptr %oc.addr
-  %t31 = load i32, ptr %oe.addr
-  call void @store32(ptr %t30, i32 0, i32 %t31)
-  %t32 = load i32, ptr %oe.addr
-  %t34 = icmp eq i32 8, 0
-  br i1 %t34, label %L11_dtrap, label %L10_dok
-L11_dtrap:
+  %t32 = load ptr, ptr %src.addr
+  %t33 = load ptr, ptr %t.addr
+  %t34 = load ptr, ptr %out.addr
+  %t35 = call i32 @chk_effects_prepass(ptr %t32, ptr %t33, ptr %t34, i32 0)
+  store i32 %t35, ptr %oe.addr
+  %t36 = load i32, ptr %oe.addr
+  %t37 = icmp ne i32 %t36, 0
+  br i1 %t37, label %L10_then, label %L11_else
+L10_then:
+  %t38 = load ptr, ptr %oc.addr
+  %t39 = load i32, ptr %oe.addr
+  call void @store32(ptr %t38, i32 0, i32 %t39)
+  %t40 = load i32, ptr %oe.addr
+  %t42 = icmp eq i32 8, 0
+  br i1 %t42, label %L14_dtrap, label %L13_dok
+L14_dtrap:
   call void @__loment_abort()
   unreachable
-L10_dok:
-  %t33 = udiv i32 %t32, 8
-  br label %L12_dend
-L12_dend:
-  ret i32 %t33
+L13_dok:
+  %t41 = udiv i32 %t40, 8
+  br label %L15_dend
+L15_dend:
+  ret i32 %t41
+L11_else:
+  br label %L12_end
+L12_end:
+  %t43 = load ptr, ptr %src.addr
+  %t44 = load ptr, ptr %t.addr
+  %t45 = load i32, ptr %nt2.addr
+  %t46 = load ptr, ptr %t.addr
+  %t47 = call i32 @desugar_effects(ptr %t43, ptr %t44, i32 0, i32 %t45, ptr %t46, i32 0)
+  store i32 %t47, ptr %_nt3.addr
+  br label %L9_end
 L8_else:
   br label %L9_end
 L9_end:
-  %t35 = load ptr, ptr %src.addr
-  %t36 = load ptr, ptr %t.addr
-  %t37 = load i32, ptr %nt2.addr
-  %t38 = load ptr, ptr %t.addr
-  %t39 = call i32 @desugar_effects(ptr %t35, ptr %t36, i32 0, i32 %t37, ptr %t38, i32 0)
-  store i32 %t39, ptr %_nt3.addr
-  br label %L6_end
-L5_else:
-  br label %L6_end
-L6_end:
-  %t40 = load ptr, ptr %src.addr
-  %t41 = load ptr, ptr %t.addr
-  %t42 = load ptr, ptr %out.addr
-  %t43 = load i32, ptr %prof.addr
-  %t44 = call i32 @chk_syntax_prepass(ptr %t40, ptr %t41, ptr %t42, i32 0, i32 %t43)
-  store i32 %t44, ptr %o.addr
-  %t45 = load i32, ptr %o.addr
-  %t46 = icmp ne i32 %t45, 0
-  br i1 %t46, label %L13_then, label %L14_else
-L13_then:
-  %t47 = load ptr, ptr %oc.addr
-  %t48 = load i32, ptr %o.addr
-  call void @store32(ptr %t47, i32 0, i32 %t48)
-  %t49 = load i32, ptr %o.addr
-  %t51 = icmp eq i32 8, 0
-  br i1 %t51, label %L17_dtrap, label %L16_dok
-L17_dtrap:
+  %t48 = load ptr, ptr %src.addr
+  %t49 = load ptr, ptr %t.addr
+  %t50 = load ptr, ptr %out.addr
+  %t51 = load i32, ptr %prof.addr
+  %t52 = call i32 @chk_syntax_prepass(ptr %t48, ptr %t49, ptr %t50, i32 0, i32 %t51)
+  store i32 %t52, ptr %o.addr
+  %t53 = load i32, ptr %o.addr
+  %t54 = icmp ne i32 %t53, 0
+  br i1 %t54, label %L16_then, label %L17_else
+L16_then:
+  %t55 = load ptr, ptr %oc.addr
+  %t56 = load i32, ptr %o.addr
+  call void @store32(ptr %t55, i32 0, i32 %t56)
+  %t57 = load i32, ptr %o.addr
+  %t59 = icmp eq i32 8, 0
+  br i1 %t59, label %L20_dtrap, label %L19_dok
+L20_dtrap:
   call void @__loment_abort()
   unreachable
-L16_dok:
-  %t50 = udiv i32 %t49, 8
-  br label %L18_dend
-L18_dend:
-  ret i32 %t50
-L14_else:
-  br label %L15_end
-L15_end:
+L19_dok:
+  %t58 = udiv i32 %t57, 8
+  br label %L21_dend
+L21_dend:
+  ret i32 %t58
+L17_else:
+  br label %L18_end
+L18_end:
   store i32 0, ptr %pi.addr
-  br label %L19_wcond
-L19_wcond:
-  %t52 = load ptr, ptr %t.addr
-  %t53 = load i32, ptr %pi.addr
-  %t54 = call i32 @chk_tok_kind(ptr %t52, i32 %t53)
-  %t55 = icmp ne i32 %t54, 4
-  br i1 %t55, label %L20_wbody, label %L21_wend
-L20_wbody:
-  %t56 = load ptr, ptr %src.addr
-  %t57 = load ptr, ptr %t.addr
-  %t58 = load i32, ptr %pi.addr
-  %t59 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.0, i64 0, i64 0
-  %t60 = insertvalue { ptr, i64 } undef, ptr %t59, 0
-  %t61 = insertvalue { ptr, i64 } %t60, i64 4, 1
-  %t62 = call i1 @chk_tok_is(ptr %t56, ptr %t57, i32 %t58, { ptr, i64 } %t61)
-  br i1 %t62, label %L22_sc_rhs, label %L23_sc_short
-L22_sc_rhs:
-  %t63 = load ptr, ptr %src.addr
-  %t64 = load ptr, ptr %t.addr
-  %t65 = load i32, ptr %pi.addr
-  %t66 = add i32 %t65, 1
-  %t67 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.1, i64 0, i64 0
+  br label %L22_wcond
+L22_wcond:
+  %t60 = load ptr, ptr %t.addr
+  %t61 = load i32, ptr %pi.addr
+  %t62 = call i32 @chk_tok_kind(ptr %t60, i32 %t61)
+  %t63 = icmp ne i32 %t62, 4
+  br i1 %t63, label %L23_wbody, label %L24_wend
+L23_wbody:
+  %t64 = load ptr, ptr %src.addr
+  %t65 = load ptr, ptr %t.addr
+  %t66 = load i32, ptr %pi.addr
+  %t67 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.0, i64 0, i64 0
   %t68 = insertvalue { ptr, i64 } undef, ptr %t67, 0
   %t69 = insertvalue { ptr, i64 } %t68, i64 4, 1
-  %t70 = call i1 @chk_tok_is(ptr %t63, ptr %t64, i32 %t66, { ptr, i64 } %t69)
-  br label %L24_sc_end
-L23_sc_short:
-  br label %L24_sc_end
-L24_sc_end:
-  %t71 = phi i1 [ %t70, %L22_sc_rhs ], [ false, %L23_sc_short ]
-  br i1 %t71, label %L25_then, label %L26_else
-L25_then:
-  store i32 0, ptr %nonblank.addr
+  %t70 = call i1 @chk_tok_is(ptr %t64, ptr %t65, i32 %t66, { ptr, i64 } %t69)
+  br i1 %t70, label %L25_sc_rhs, label %L26_sc_short
+L25_sc_rhs:
+  %t71 = load ptr, ptr %src.addr
   %t72 = load ptr, ptr %t.addr
   %t73 = load i32, ptr %pi.addr
-  %t74 = add i32 %t73, 2
-  %t75 = call i32 @chk_tok_kind(ptr %t72, i32 %t74)
-  %t76 = icmp eq i32 %t75, 2
-  br i1 %t76, label %L28_then, label %L29_else
+  %t74 = add i32 %t73, 1
+  %t75 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.1, i64 0, i64 0
+  %t76 = insertvalue { ptr, i64 } undef, ptr %t75, 0
+  %t77 = insertvalue { ptr, i64 } %t76, i64 4, 1
+  %t78 = call i1 @chk_tok_is(ptr %t71, ptr %t72, i32 %t74, { ptr, i64 } %t77)
+  br label %L27_sc_end
+L26_sc_short:
+  br label %L27_sc_end
+L27_sc_end:
+  %t79 = phi i1 [ %t78, %L25_sc_rhs ], [ false, %L26_sc_short ]
+  br i1 %t79, label %L28_then, label %L29_else
 L28_then:
-  %t77 = load ptr, ptr %t.addr
-  %t78 = load i32, ptr %pi.addr
-  %t79 = add i32 %t78, 2
-  %t80 = call i32 @tok_len(ptr %t77, i32 %t79)
-  store i32 %t80, ptr %sl.addr
+  store i32 0, ptr %nonblank.addr
+  %t80 = load ptr, ptr %t.addr
+  %t81 = load i32, ptr %pi.addr
+  %t82 = add i32 %t81, 2
+  %t83 = call i32 @chk_tok_kind(ptr %t80, i32 %t82)
+  %t84 = icmp eq i32 %t83, 2
+  br i1 %t84, label %L31_then, label %L32_else
+L31_then:
+  %t85 = load ptr, ptr %t.addr
+  %t86 = load i32, ptr %pi.addr
+  %t87 = add i32 %t86, 2
+  %t88 = call i32 @tok_len(ptr %t85, i32 %t87)
+  store i32 %t88, ptr %sl.addr
   store i32 1, ptr %kk.addr
-  br label %L31_wcond
-L31_wcond:
-  %t81 = load i32, ptr %kk.addr
-  %t82 = add i32 %t81, 1
-  %t83 = load i32, ptr %sl.addr
-  %t84 = icmp ult i32 %t82, %t83
-  br i1 %t84, label %L32_wbody, label %L33_wend
-L32_wbody:
-  %t85 = load ptr, ptr %src.addr
-  %t86 = load ptr, ptr %t.addr
-  %t87 = load i32, ptr %pi.addr
-  %t88 = add i32 %t87, 2
-  %t89 = call i32 @tok_start(ptr %t86, i32 %t88)
-  %t90 = load i32, ptr %kk.addr
-  %t91 = add i32 %t89, %t90
-  %t92 = getelementptr i8, ptr %t85, i32 %t91
-  %t93 = load i8, ptr %t92
-  %t94 = zext i8 %t93 to i32
-  store i32 %t94, ptr %ch.addr
-  %t95 = load i32, ptr %ch.addr
-  %t96 = icmp eq i32 %t95, 92
-  br i1 %t96, label %L34_sc_rhs, label %L35_sc_short
-L34_sc_rhs:
-  %t97 = load i32, ptr %kk.addr
-  %t98 = add i32 %t97, 2
-  %t99 = load i32, ptr %sl.addr
-  %t100 = icmp ult i32 %t98, %t99
-  br label %L36_sc_end
-L35_sc_short:
-  br label %L36_sc_end
-L36_sc_end:
-  %t101 = phi i1 [ %t100, %L34_sc_rhs ], [ false, %L35_sc_short ]
-  br i1 %t101, label %L37_then, label %L38_else
-L37_then:
-  %t102 = load ptr, ptr %src.addr
-  %t103 = load ptr, ptr %t.addr
-  %t104 = load i32, ptr %pi.addr
-  %t105 = add i32 %t104, 2
-  %t106 = call i32 @tok_start(ptr %t103, i32 %t105)
-  %t107 = load i32, ptr %kk.addr
-  %t108 = add i32 %t106, %t107
-  %t109 = add i32 %t108, 1
-  %t110 = getelementptr i8, ptr %t102, i32 %t109
-  %t111 = load i8, ptr %t110
-  %t112 = zext i8 %t111 to i32
-  store i32 %t112, ptr %e.addr
-  %t113 = load i32, ptr %e.addr
-  store i32 %t113, ptr %d.addr
-  %t114 = load i32, ptr %e.addr
-  %t115 = icmp eq i32 %t114, 110
-  br i1 %t115, label %L40_then, label %L41_else
+  br label %L34_wcond
+L34_wcond:
+  %t89 = load i32, ptr %kk.addr
+  %t90 = add i32 %t89, 1
+  %t91 = load i32, ptr %sl.addr
+  %t92 = icmp ult i32 %t90, %t91
+  br i1 %t92, label %L35_wbody, label %L36_wend
+L35_wbody:
+  %t93 = load ptr, ptr %src.addr
+  %t94 = load ptr, ptr %t.addr
+  %t95 = load i32, ptr %pi.addr
+  %t96 = add i32 %t95, 2
+  %t97 = call i32 @tok_start(ptr %t94, i32 %t96)
+  %t98 = load i32, ptr %kk.addr
+  %t99 = add i32 %t97, %t98
+  %t100 = getelementptr i8, ptr %t93, i32 %t99
+  %t101 = load i8, ptr %t100
+  %t102 = zext i8 %t101 to i32
+  store i32 %t102, ptr %ch.addr
+  %t103 = load i32, ptr %ch.addr
+  %t104 = icmp eq i32 %t103, 92
+  br i1 %t104, label %L37_sc_rhs, label %L38_sc_short
+L37_sc_rhs:
+  %t105 = load i32, ptr %kk.addr
+  %t106 = add i32 %t105, 2
+  %t107 = load i32, ptr %sl.addr
+  %t108 = icmp ult i32 %t106, %t107
+  br label %L39_sc_end
+L38_sc_short:
+  br label %L39_sc_end
+L39_sc_end:
+  %t109 = phi i1 [ %t108, %L37_sc_rhs ], [ false, %L38_sc_short ]
+  br i1 %t109, label %L40_then, label %L41_else
 L40_then:
-  store i32 10, ptr %d.addr
-  br label %L42_end
-L41_else:
-  %t116 = load i32, ptr %e.addr
-  %t117 = icmp eq i32 %t116, 116
-  br i1 %t117, label %L43_then, label %L44_else
+  %t110 = load ptr, ptr %src.addr
+  %t111 = load ptr, ptr %t.addr
+  %t112 = load i32, ptr %pi.addr
+  %t113 = add i32 %t112, 2
+  %t114 = call i32 @tok_start(ptr %t111, i32 %t113)
+  %t115 = load i32, ptr %kk.addr
+  %t116 = add i32 %t114, %t115
+  %t117 = add i32 %t116, 1
+  %t118 = getelementptr i8, ptr %t110, i32 %t117
+  %t119 = load i8, ptr %t118
+  %t120 = zext i8 %t119 to i32
+  store i32 %t120, ptr %e.addr
+  %t121 = load i32, ptr %e.addr
+  store i32 %t121, ptr %d.addr
+  %t122 = load i32, ptr %e.addr
+  %t123 = icmp eq i32 %t122, 110
+  br i1 %t123, label %L43_then, label %L44_else
 L43_then:
-  store i32 9, ptr %d.addr
+  store i32 10, ptr %d.addr
   br label %L45_end
 L44_else:
-  %t118 = load i32, ptr %e.addr
-  %t119 = icmp eq i32 %t118, 114
-  br i1 %t119, label %L46_then, label %L47_else
+  %t124 = load i32, ptr %e.addr
+  %t125 = icmp eq i32 %t124, 116
+  br i1 %t125, label %L46_then, label %L47_else
 L46_then:
-  store i32 13, ptr %d.addr
+  store i32 9, ptr %d.addr
   br label %L48_end
 L47_else:
-  %t120 = load i32, ptr %e.addr
-  %t121 = icmp eq i32 %t120, 48
-  br i1 %t121, label %L49_then, label %L50_else
+  %t126 = load i32, ptr %e.addr
+  %t127 = icmp eq i32 %t126, 114
+  br i1 %t127, label %L49_then, label %L50_else
 L49_then:
-  store i32 0, ptr %d.addr
+  store i32 13, ptr %d.addr
   br label %L51_end
 L50_else:
+  %t128 = load i32, ptr %e.addr
+  %t129 = icmp eq i32 %t128, 48
+  br i1 %t129, label %L52_then, label %L53_else
+L52_then:
+  store i32 0, ptr %d.addr
+  br label %L54_end
+L53_else:
+  br label %L54_end
+L54_end:
   br label %L51_end
 L51_end:
   br label %L48_end
 L48_end:
   br label %L45_end
 L45_end:
-  br label %L42_end
-L42_end:
-  %t122 = load i32, ptr %d.addr
-  %t123 = icmp ne i32 %t122, 32
-  br i1 %t123, label %L52_sc_rhs, label %L53_sc_short
-L52_sc_rhs:
-  %t124 = load i32, ptr %d.addr
-  %t125 = icmp ne i32 %t124, 9
-  br label %L54_sc_end
-L53_sc_short:
-  br label %L54_sc_end
-L54_sc_end:
-  %t126 = phi i1 [ %t125, %L52_sc_rhs ], [ false, %L53_sc_short ]
-  br i1 %t126, label %L55_sc_rhs, label %L56_sc_short
+  %t130 = load i32, ptr %d.addr
+  %t131 = icmp ne i32 %t130, 32
+  br i1 %t131, label %L55_sc_rhs, label %L56_sc_short
 L55_sc_rhs:
-  %t127 = load i32, ptr %d.addr
-  %t128 = icmp ne i32 %t127, 10
+  %t132 = load i32, ptr %d.addr
+  %t133 = icmp ne i32 %t132, 9
   br label %L57_sc_end
 L56_sc_short:
   br label %L57_sc_end
 L57_sc_end:
-  %t129 = phi i1 [ %t128, %L55_sc_rhs ], [ false, %L56_sc_short ]
-  br i1 %t129, label %L58_sc_rhs, label %L59_sc_short
+  %t134 = phi i1 [ %t133, %L55_sc_rhs ], [ false, %L56_sc_short ]
+  br i1 %t134, label %L58_sc_rhs, label %L59_sc_short
 L58_sc_rhs:
-  %t130 = load i32, ptr %d.addr
-  %t131 = icmp ne i32 %t130, 13
+  %t135 = load i32, ptr %d.addr
+  %t136 = icmp ne i32 %t135, 10
   br label %L60_sc_end
 L59_sc_short:
   br label %L60_sc_end
 L60_sc_end:
-  %t132 = phi i1 [ %t131, %L58_sc_rhs ], [ false, %L59_sc_short ]
-  br i1 %t132, label %L61_then, label %L62_else
-L61_then:
+  %t137 = phi i1 [ %t136, %L58_sc_rhs ], [ false, %L59_sc_short ]
+  br i1 %t137, label %L61_sc_rhs, label %L62_sc_short
+L61_sc_rhs:
+  %t138 = load i32, ptr %d.addr
+  %t139 = icmp ne i32 %t138, 13
+  br label %L63_sc_end
+L62_sc_short:
+  br label %L63_sc_end
+L63_sc_end:
+  %t140 = phi i1 [ %t139, %L61_sc_rhs ], [ false, %L62_sc_short ]
+  br i1 %t140, label %L64_then, label %L65_else
+L64_then:
   store i32 1, ptr %nonblank.addr
-  br label %L63_end
-L62_else:
-  br label %L63_end
-L63_end:
-  %t133 = load i32, ptr %kk.addr
-  %t134 = add i32 %t133, 2
-  store i32 %t134, ptr %kk.addr
-  br label %L39_end
-L38_else:
-  %t135 = load i32, ptr %ch.addr
-  %t136 = icmp ne i32 %t135, 32
-  br i1 %t136, label %L64_sc_rhs, label %L65_sc_short
-L64_sc_rhs:
-  %t137 = load i32, ptr %ch.addr
-  %t138 = icmp ne i32 %t137, 9
-  br label %L66_sc_end
-L65_sc_short:
-  br label %L66_sc_end
-L66_sc_end:
-  %t139 = phi i1 [ %t138, %L64_sc_rhs ], [ false, %L65_sc_short ]
-  br i1 %t139, label %L67_sc_rhs, label %L68_sc_short
+  br label %L66_end
+L65_else:
+  br label %L66_end
+L66_end:
+  %t141 = load i32, ptr %kk.addr
+  %t142 = add i32 %t141, 2
+  store i32 %t142, ptr %kk.addr
+  br label %L42_end
+L41_else:
+  %t143 = load i32, ptr %ch.addr
+  %t144 = icmp ne i32 %t143, 32
+  br i1 %t144, label %L67_sc_rhs, label %L68_sc_short
 L67_sc_rhs:
-  %t140 = load i32, ptr %ch.addr
-  %t141 = icmp ne i32 %t140, 10
+  %t145 = load i32, ptr %ch.addr
+  %t146 = icmp ne i32 %t145, 9
   br label %L69_sc_end
 L68_sc_short:
   br label %L69_sc_end
 L69_sc_end:
-  %t142 = phi i1 [ %t141, %L67_sc_rhs ], [ false, %L68_sc_short ]
-  br i1 %t142, label %L70_sc_rhs, label %L71_sc_short
+  %t147 = phi i1 [ %t146, %L67_sc_rhs ], [ false, %L68_sc_short ]
+  br i1 %t147, label %L70_sc_rhs, label %L71_sc_short
 L70_sc_rhs:
-  %t143 = load i32, ptr %ch.addr
-  %t144 = icmp ne i32 %t143, 13
+  %t148 = load i32, ptr %ch.addr
+  %t149 = icmp ne i32 %t148, 10
   br label %L72_sc_end
 L71_sc_short:
   br label %L72_sc_end
 L72_sc_end:
-  %t145 = phi i1 [ %t144, %L70_sc_rhs ], [ false, %L71_sc_short ]
-  br i1 %t145, label %L73_then, label %L74_else
-L73_then:
+  %t150 = phi i1 [ %t149, %L70_sc_rhs ], [ false, %L71_sc_short ]
+  br i1 %t150, label %L73_sc_rhs, label %L74_sc_short
+L73_sc_rhs:
+  %t151 = load i32, ptr %ch.addr
+  %t152 = icmp ne i32 %t151, 13
+  br label %L75_sc_end
+L74_sc_short:
+  br label %L75_sc_end
+L75_sc_end:
+  %t153 = phi i1 [ %t152, %L73_sc_rhs ], [ false, %L74_sc_short ]
+  br i1 %t153, label %L76_then, label %L77_else
+L76_then:
   store i32 1, ptr %nonblank.addr
-  br label %L75_end
-L74_else:
-  br label %L75_end
-L75_end:
-  %t146 = load i32, ptr %kk.addr
-  %t147 = add i32 %t146, 1
-  store i32 %t147, ptr %kk.addr
-  br label %L39_end
-L39_end:
-  br label %L31_wcond
-L33_wend:
+  br label %L78_end
+L77_else:
+  br label %L78_end
+L78_end:
+  %t154 = load i32, ptr %kk.addr
+  %t155 = add i32 %t154, 1
+  store i32 %t155, ptr %kk.addr
+  br label %L42_end
+L42_end:
+  br label %L34_wcond
+L36_wend:
+  br label %L33_end
+L32_else:
+  br label %L33_end
+L33_end:
+  %t156 = load i32, ptr %nonblank.addr
+  %t157 = icmp eq i32 %t156, 0
+  br i1 %t157, label %L79_then, label %L80_else
+L79_then:
+  %t158 = load ptr, ptr %src.addr
+  %t159 = load ptr, ptr %t.addr
+  %t160 = load ptr, ptr %out.addr
+  %t161 = load i32, ptr %o.addr
+  %t162 = load i32, ptr %pi.addr
+  %t163 = call i32 @sym_pub(ptr %t158, ptr %t159, ptr %t160, i32 %t161, i32 38, i32 %t162)
+  store i32 %t163, ptr %o.addr
+  %t164 = load ptr, ptr %oc.addr
+  %t165 = load i32, ptr %o.addr
+  call void @store32(ptr %t164, i32 0, i32 %t165)
+  %t166 = load i32, ptr %o.addr
+  %t168 = icmp eq i32 8, 0
+  br i1 %t168, label %L83_dtrap, label %L82_dok
+L83_dtrap:
+  call void @__loment_abort()
+  unreachable
+L82_dok:
+  %t167 = udiv i32 %t166, 8
+  br label %L84_dend
+L84_dend:
+  ret i32 %t167
+L80_else:
+  br label %L81_end
+L81_end:
   br label %L30_end
 L29_else:
   br label %L30_end
 L30_end:
-  %t148 = load i32, ptr %nonblank.addr
-  %t149 = icmp eq i32 %t148, 0
-  br i1 %t149, label %L76_then, label %L77_else
-L76_then:
-  %t150 = load ptr, ptr %src.addr
-  %t151 = load ptr, ptr %t.addr
-  %t152 = load ptr, ptr %out.addr
-  %t153 = load i32, ptr %o.addr
-  %t154 = load i32, ptr %pi.addr
-  %t155 = call i32 @sym_pub(ptr %t150, ptr %t151, ptr %t152, i32 %t153, i32 38, i32 %t154)
-  store i32 %t155, ptr %o.addr
-  %t156 = load ptr, ptr %oc.addr
-  %t157 = load i32, ptr %o.addr
-  call void @store32(ptr %t156, i32 0, i32 %t157)
-  %t158 = load i32, ptr %o.addr
-  %t160 = icmp eq i32 8, 0
-  br i1 %t160, label %L80_dtrap, label %L79_dok
-L80_dtrap:
-  call void @__loment_abort()
-  unreachable
-L79_dok:
-  %t159 = udiv i32 %t158, 8
-  br label %L81_dend
-L81_dend:
-  ret i32 %t159
-L77_else:
-  br label %L78_end
-L78_end:
-  br label %L27_end
-L26_else:
-  br label %L27_end
-L27_end:
-  %t161 = load i32, ptr %pi.addr
-  %t162 = add i32 %t161, 1
-  store i32 %t162, ptr %pi.addr
-  br label %L19_wcond
-L21_wend:
+  %t169 = load i32, ptr %pi.addr
+  %t170 = add i32 %t169, 1
+  store i32 %t170, ptr %pi.addr
+  br label %L22_wcond
+L24_wend:
   store i32 0, ptr %nexs.addr
   store i32 0, ptr %i.addr
   store i32 0, ptr %nch_mode.addr
@@ -115633,1120 +116170,1107 @@ L21_wend:
   store i32 0, ptr %nch_fp.addr
   store i32 0, ptr %ln_fp.addr
   store i32 0, ptr %v_fp.addr
-  br label %L82_wcond
-L82_wcond:
-  %t163 = load ptr, ptr %t.addr
-  %t164 = load i32, ptr %i.addr
-  %t165 = call i32 @chk_tok_kind(ptr %t163, i32 %t164)
-  %t166 = icmp ne i32 %t165, 4
-  br i1 %t166, label %L83_wbody, label %L84_wend
-L83_wbody:
-  %t167 = load ptr, ptr %src.addr
-  %t168 = load ptr, ptr %t.addr
-  %t169 = load i32, ptr %i.addr
-  %t170 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.2, i64 0, i64 0
-  %t171 = insertvalue { ptr, i64 } undef, ptr %t170, 0
-  %t172 = insertvalue { ptr, i64 } %t171, i64 6, 1
-  %t173 = call i1 @chk_tok_is(ptr %t167, ptr %t168, i32 %t169, { ptr, i64 } %t172)
-  br i1 %t173, label %L86_sc_short, label %L85_sc_rhs
-L85_sc_rhs:
-  %t174 = load ptr, ptr %src.addr
-  %t175 = load ptr, ptr %t.addr
-  %t176 = load i32, ptr %i.addr
-  %t177 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.3, i64 0, i64 0
-  %t178 = insertvalue { ptr, i64 } undef, ptr %t177, 0
-  %t179 = insertvalue { ptr, i64 } %t178, i64 4, 1
-  %t180 = call i1 @chk_tok_is(ptr %t174, ptr %t175, i32 %t176, { ptr, i64 } %t179)
-  br label %L87_sc_end
-L86_sc_short:
-  br label %L87_sc_end
-L87_sc_end:
-  %t181 = phi i1 [ %t180, %L85_sc_rhs ], [ true, %L86_sc_short ]
-  br i1 %t181, label %L88_then, label %L89_else
-L88_then:
-  store i32 2, ptr %k0.addr
+  br label %L85_wcond
+L85_wcond:
+  %t171 = load ptr, ptr %t.addr
+  %t172 = load i32, ptr %i.addr
+  %t173 = call i32 @chk_tok_kind(ptr %t171, i32 %t172)
+  %t174 = icmp ne i32 %t173, 4
+  br i1 %t174, label %L86_wbody, label %L87_wend
+L86_wbody:
+  %t175 = load ptr, ptr %src.addr
+  %t176 = load ptr, ptr %t.addr
+  %t177 = load i32, ptr %i.addr
+  %t178 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.2, i64 0, i64 0
+  %t179 = insertvalue { ptr, i64 } undef, ptr %t178, 0
+  %t180 = insertvalue { ptr, i64 } %t179, i64 6, 1
+  %t181 = call i1 @chk_tok_is(ptr %t175, ptr %t176, i32 %t177, { ptr, i64 } %t180)
+  br i1 %t181, label %L89_sc_short, label %L88_sc_rhs
+L88_sc_rhs:
   %t182 = load ptr, ptr %src.addr
   %t183 = load ptr, ptr %t.addr
   %t184 = load i32, ptr %i.addr
-  %t185 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.4, i64 0, i64 0
+  %t185 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.3, i64 0, i64 0
   %t186 = insertvalue { ptr, i64 } undef, ptr %t185, 0
   %t187 = insertvalue { ptr, i64 } %t186, i64 4, 1
   %t188 = call i1 @chk_tok_is(ptr %t182, ptr %t183, i32 %t184, { ptr, i64 } %t187)
-  br i1 %t188, label %L91_then, label %L92_else
+  br label %L90_sc_end
+L89_sc_short:
+  br label %L90_sc_end
+L90_sc_end:
+  %t189 = phi i1 [ %t188, %L88_sc_rhs ], [ true, %L89_sc_short ]
+  br i1 %t189, label %L91_then, label %L92_else
 L91_then:
+  store i32 2, ptr %k0.addr
+  %t190 = load ptr, ptr %src.addr
+  %t191 = load ptr, ptr %t.addr
+  %t192 = load i32, ptr %i.addr
+  %t193 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.4, i64 0, i64 0
+  %t194 = insertvalue { ptr, i64 } undef, ptr %t193, 0
+  %t195 = insertvalue { ptr, i64 } %t194, i64 4, 1
+  %t196 = call i1 @chk_tok_is(ptr %t190, ptr %t191, i32 %t192, { ptr, i64 } %t195)
+  br i1 %t196, label %L94_then, label %L95_else
+L94_then:
   store i32 3, ptr %k0.addr
-  br label %L93_end
-L92_else:
-  br label %L93_end
-L93_end:
-  %t189 = load ptr, ptr %src.addr
-  %t190 = load ptr, ptr %t.addr
-  %t191 = load ptr, ptr %syms.addr
-  %t192 = load i32, ptr %n.addr
-  %t193 = load i32, ptr %i.addr
-  %t194 = add i32 %t193, 1
-  %t195 = load i32, ptr %k0.addr
-  %t196 = mul i32 %t195, 256
+  br label %L96_end
+L95_else:
+  br label %L96_end
+L96_end:
   %t197 = load ptr, ptr %src.addr
   %t198 = load ptr, ptr %t.addr
-  %t199 = load i32, ptr %i.addr
-  %t200 = add i32 %t199, 1
-  %t201 = call i32 @chk_find_brace(ptr %t197, ptr %t198, i32 %t200)
-  %t202 = load ptr, ptr %out.addr
-  %t203 = load i32, ptr %o.addr
-  %t204 = call i64 @declare(ptr %t189, ptr %t190, ptr %t191, i32 %t192, i32 %t194, i32 %t196, i32 0, i32 %t201, ptr %t202, i32 %t203)
-  store i64 %t204, ptr %r0a.addr
-  %t205 = load i64, ptr %r0a.addr
-  %t207 = icmp eq i64 4294967296, 0
-  br i1 %t207, label %L95_dtrap, label %L94_dok
-L95_dtrap:
-  call void @__loment_abort()
-  unreachable
-L94_dok:
-  %t206 = udiv i64 %t205, 4294967296
-  br label %L96_dend
-L96_dend:
-  %t208 = trunc i64 %t206 to i32
-  store i32 %t208, ptr %n.addr
-  %t209 = load i64, ptr %r0a.addr
-  %t211 = icmp eq i64 4294967296, 0
-  br i1 %t211, label %L98_dtrap, label %L97_dok
+  %t199 = load ptr, ptr %syms.addr
+  %t200 = load i32, ptr %n.addr
+  %t201 = load i32, ptr %i.addr
+  %t202 = add i32 %t201, 1
+  %t203 = load i32, ptr %k0.addr
+  %t204 = mul i32 %t203, 256
+  %t205 = load ptr, ptr %src.addr
+  %t206 = load ptr, ptr %t.addr
+  %t207 = load i32, ptr %i.addr
+  %t208 = add i32 %t207, 1
+  %t209 = call i32 @chk_find_brace(ptr %t205, ptr %t206, i32 %t208)
+  %t210 = load ptr, ptr %out.addr
+  %t211 = load i32, ptr %o.addr
+  %t212 = call i64 @declare(ptr %t197, ptr %t198, ptr %t199, i32 %t200, i32 %t202, i32 %t204, i32 0, i32 %t209, ptr %t210, i32 %t211)
+  store i64 %t212, ptr %r0a.addr
+  %t213 = load i64, ptr %r0a.addr
+  %t215 = icmp eq i64 4294967296, 0
+  br i1 %t215, label %L98_dtrap, label %L97_dok
 L98_dtrap:
   call void @__loment_abort()
   unreachable
 L97_dok:
-  %t210 = urem i64 %t209, 4294967296
+  %t214 = udiv i64 %t213, 4294967296
   br label %L99_dend
 L99_dend:
-  %t212 = trunc i64 %t210 to i32
-  store i32 %t212, ptr %o.addr
-  %t213 = load ptr, ptr %src.addr
-  %t214 = load ptr, ptr %t.addr
-  %t215 = load ptr, ptr %syms.addr
-  %t216 = load i32, ptr %n.addr
-  %t217 = load i32, ptr %i.addr
-  %t218 = add i32 %t217, 1
-  %t219 = call i32 @decl_tparams(ptr %t213, ptr %t214, ptr %t215, i32 %t216, i32 %t218)
-  store i32 %t219, ptr %n.addr
-  %t220 = load i32, ptr %i.addr
-  %t221 = add i32 %t220, 1
-  store i32 %t221, ptr %i.addr
-  br label %L90_end
-L89_else:
-  %t222 = load ptr, ptr %src.addr
-  %t223 = load ptr, ptr %t.addr
-  %t224 = load i32, ptr %i.addr
-  %t225 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.5, i64 0, i64 0
-  %t226 = insertvalue { ptr, i64 } undef, ptr %t225, 0
-  %t227 = insertvalue { ptr, i64 } %t226, i64 4, 1
-  %t228 = call i1 @chk_tok_is(ptr %t222, ptr %t223, i32 %t224, { ptr, i64 } %t227)
-  br i1 %t228, label %L100_then, label %L101_else
-L100_then:
-  %t229 = load ptr, ptr %src.addr
-  %t230 = load ptr, ptr %t.addr
-  %t231 = load i32, ptr %i.addr
-  %t232 = call i32 @chk_skip_body(ptr %t229, ptr %t230, i32 %t231)
-  store i32 %t232, ptr %i.addr
-  br label %L102_end
-L101_else:
-  %t233 = load i32, ptr %i.addr
-  %t234 = add i32 %t233, 1
-  store i32 %t234, ptr %i.addr
-  br label %L102_end
-L102_end:
-  br label %L90_end
-L90_end:
-  br label %L82_wcond
-L84_wend:
-  store i32 0, ptr %i.addr
-  br label %L103_wcond
-L103_wcond:
-  %t235 = load ptr, ptr %t.addr
-  %t236 = load i32, ptr %i.addr
-  %t237 = call i32 @chk_tok_kind(ptr %t235, i32 %t236)
-  %t238 = icmp ne i32 %t237, 4
-  br i1 %t238, label %L104_wbody, label %L105_wend
-L104_wbody:
-  %t239 = load ptr, ptr %src.addr
-  %t240 = load ptr, ptr %t.addr
+  %t216 = trunc i64 %t214 to i32
+  store i32 %t216, ptr %n.addr
+  %t217 = load i64, ptr %r0a.addr
+  %t219 = icmp eq i64 4294967296, 0
+  br i1 %t219, label %L101_dtrap, label %L100_dok
+L101_dtrap:
+  call void @__loment_abort()
+  unreachable
+L100_dok:
+  %t218 = urem i64 %t217, 4294967296
+  br label %L102_dend
+L102_dend:
+  %t220 = trunc i64 %t218 to i32
+  store i32 %t220, ptr %o.addr
+  %t221 = load ptr, ptr %src.addr
+  %t222 = load ptr, ptr %t.addr
+  %t223 = load ptr, ptr %syms.addr
+  %t224 = load i32, ptr %n.addr
+  %t225 = load i32, ptr %i.addr
+  %t226 = add i32 %t225, 1
+  %t227 = call i32 @decl_tparams(ptr %t221, ptr %t222, ptr %t223, i32 %t224, i32 %t226)
+  store i32 %t227, ptr %n.addr
+  %t228 = load i32, ptr %i.addr
+  %t229 = add i32 %t228, 1
+  store i32 %t229, ptr %i.addr
+  br label %L93_end
+L92_else:
+  %t230 = load ptr, ptr %src.addr
+  %t231 = load ptr, ptr %t.addr
+  %t232 = load i32, ptr %i.addr
+  %t233 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.5, i64 0, i64 0
+  %t234 = insertvalue { ptr, i64 } undef, ptr %t233, 0
+  %t235 = insertvalue { ptr, i64 } %t234, i64 4, 1
+  %t236 = call i1 @chk_tok_is(ptr %t230, ptr %t231, i32 %t232, { ptr, i64 } %t235)
+  br i1 %t236, label %L103_then, label %L104_else
+L103_then:
+  %t237 = load ptr, ptr %src.addr
+  %t238 = load ptr, ptr %t.addr
+  %t239 = load i32, ptr %i.addr
+  %t240 = call i32 @chk_skip_body(ptr %t237, ptr %t238, i32 %t239)
+  store i32 %t240, ptr %i.addr
+  br label %L105_end
+L104_else:
   %t241 = load i32, ptr %i.addr
-  %t242 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.6, i64 0, i64 0
-  %t243 = insertvalue { ptr, i64 } undef, ptr %t242, 0
-  %t244 = insertvalue { ptr, i64 } %t243, i64 2, 1
-  %t245 = call i1 @chk_tok_is(ptr %t239, ptr %t240, i32 %t241, { ptr, i64 } %t244)
-  br i1 %t245, label %L106_then, label %L107_else
-L106_then:
-  %t246 = load ptr, ptr %src.addr
-  %t247 = load ptr, ptr %t.addr
-  %t248 = load i32, ptr %i.addr
-  %t249 = add i32 %t248, 2
-  %t250 = call i32 @chk_find_paren(ptr %t246, ptr %t247, i32 %t249)
-  store i32 %t250, ptr %lp.addr
-  %t251 = load ptr, ptr %src.addr
-  %t252 = load ptr, ptr %t.addr
-  %t253 = load i32, ptr %lp.addr
-  %t254 = call i32 @chk_count_args(ptr %t251, ptr %t252, i32 %t253)
-  store i32 %t254, ptr %argc.addr
-  %t255 = load i32, ptr %i.addr
-  %t256 = add i32 %t255, 2
-  store i32 %t256, ptr %j.addr
+  %t242 = add i32 %t241, 1
+  store i32 %t242, ptr %i.addr
+  br label %L105_end
+L105_end:
+  br label %L93_end
+L93_end:
+  br label %L85_wcond
+L87_wend:
+  store i32 0, ptr %i.addr
+  br label %L106_wcond
+L106_wcond:
+  %t243 = load ptr, ptr %t.addr
+  %t244 = load i32, ptr %i.addr
+  %t245 = call i32 @chk_tok_kind(ptr %t243, i32 %t244)
+  %t246 = icmp ne i32 %t245, 4
+  br i1 %t246, label %L107_wbody, label %L108_wend
+L107_wbody:
+  %t247 = load ptr, ptr %src.addr
+  %t248 = load ptr, ptr %t.addr
+  %t249 = load i32, ptr %i.addr
+  %t250 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.6, i64 0, i64 0
+  %t251 = insertvalue { ptr, i64 } undef, ptr %t250, 0
+  %t252 = insertvalue { ptr, i64 } %t251, i64 2, 1
+  %t253 = call i1 @chk_tok_is(ptr %t247, ptr %t248, i32 %t249, { ptr, i64 } %t252)
+  br i1 %t253, label %L109_then, label %L110_else
+L109_then:
+  %t254 = load ptr, ptr %src.addr
+  %t255 = load ptr, ptr %t.addr
+  %t256 = load i32, ptr %i.addr
+  %t257 = add i32 %t256, 2
+  %t258 = call i32 @chk_find_paren(ptr %t254, ptr %t255, i32 %t257)
+  store i32 %t258, ptr %lp.addr
+  %t259 = load ptr, ptr %src.addr
+  %t260 = load ptr, ptr %t.addr
+  %t261 = load i32, ptr %lp.addr
+  %t262 = call i32 @chk_count_args(ptr %t259, ptr %t260, i32 %t261)
+  store i32 %t262, ptr %argc.addr
+  %t263 = load i32, ptr %i.addr
+  %t264 = add i32 %t263, 2
+  store i32 %t264, ptr %j.addr
   store i32 0, ptr %rtok.addr
-  br label %L109_wcond
-L109_wcond:
-  %t257 = load ptr, ptr %src.addr
-  %t258 = load ptr, ptr %t.addr
-  %t259 = load i32, ptr %j.addr
-  %t260 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.7, i64 0, i64 0
-  %t261 = insertvalue { ptr, i64 } undef, ptr %t260, 0
-  %t262 = insertvalue { ptr, i64 } %t261, i64 1, 1
-  %t263 = call i1 @chk_tok_is(ptr %t257, ptr %t258, i32 %t259, { ptr, i64 } %t262)
-  %t264 = xor i1 %t263, true
-  br i1 %t264, label %L112_sc_rhs, label %L113_sc_short
-L112_sc_rhs:
+  br label %L112_wcond
+L112_wcond:
   %t265 = load ptr, ptr %src.addr
   %t266 = load ptr, ptr %t.addr
   %t267 = load i32, ptr %j.addr
-  %t268 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.8, i64 0, i64 0
+  %t268 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.7, i64 0, i64 0
   %t269 = insertvalue { ptr, i64 } undef, ptr %t268, 0
   %t270 = insertvalue { ptr, i64 } %t269, i64 1, 1
   %t271 = call i1 @chk_tok_is(ptr %t265, ptr %t266, i32 %t267, { ptr, i64 } %t270)
   %t272 = xor i1 %t271, true
-  br label %L114_sc_end
-L113_sc_short:
-  br label %L114_sc_end
-L114_sc_end:
-  %t273 = phi i1 [ %t272, %L112_sc_rhs ], [ false, %L113_sc_short ]
-  br i1 %t273, label %L115_sc_rhs, label %L116_sc_short
+  br i1 %t272, label %L115_sc_rhs, label %L116_sc_short
 L115_sc_rhs:
+  %t273 = load ptr, ptr %src.addr
   %t274 = load ptr, ptr %t.addr
   %t275 = load i32, ptr %j.addr
-  %t276 = call i32 @chk_tok_kind(ptr %t274, i32 %t275)
-  %t277 = icmp ne i32 %t276, 4
+  %t276 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.8, i64 0, i64 0
+  %t277 = insertvalue { ptr, i64 } undef, ptr %t276, 0
+  %t278 = insertvalue { ptr, i64 } %t277, i64 1, 1
+  %t279 = call i1 @chk_tok_is(ptr %t273, ptr %t274, i32 %t275, { ptr, i64 } %t278)
+  %t280 = xor i1 %t279, true
   br label %L117_sc_end
 L116_sc_short:
   br label %L117_sc_end
 L117_sc_end:
-  %t278 = phi i1 [ %t277, %L115_sc_rhs ], [ false, %L116_sc_short ]
-  br i1 %t278, label %L110_wbody, label %L111_wend
-L110_wbody:
-  %t279 = load ptr, ptr %src.addr
-  %t280 = load ptr, ptr %t.addr
-  %t281 = load i32, ptr %j.addr
-  %t282 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.9, i64 0, i64 0
-  %t283 = insertvalue { ptr, i64 } undef, ptr %t282, 0
-  %t284 = insertvalue { ptr, i64 } %t283, i64 1, 1
-  %t285 = call i1 @chk_tok_is(ptr %t279, ptr %t280, i32 %t281, { ptr, i64 } %t284)
-  br i1 %t285, label %L118_then, label %L119_else
-L118_then:
-  %t286 = load i32, ptr %j.addr
-  %t287 = add i32 %t286, 2
-  store i32 %t287, ptr %rtok.addr
-  br label %L120_end
-L119_else:
-  br label %L120_end
-L120_end:
-  %t288 = load i32, ptr %j.addr
-  %t289 = add i32 %t288, 1
-  store i32 %t289, ptr %j.addr
-  br label %L109_wcond
-L111_wend:
-  store i32 0, ptr %rcode.addr
-  %t290 = load i32, ptr %rtok.addr
-  %t291 = icmp ne i32 %t290, 0
-  br i1 %t291, label %L121_then, label %L122_else
+  %t281 = phi i1 [ %t280, %L115_sc_rhs ], [ false, %L116_sc_short ]
+  br i1 %t281, label %L118_sc_rhs, label %L119_sc_short
+L118_sc_rhs:
+  %t282 = load ptr, ptr %t.addr
+  %t283 = load i32, ptr %j.addr
+  %t284 = call i32 @chk_tok_kind(ptr %t282, i32 %t283)
+  %t285 = icmp ne i32 %t284, 4
+  br label %L120_sc_end
+L119_sc_short:
+  br label %L120_sc_end
+L120_sc_end:
+  %t286 = phi i1 [ %t285, %L118_sc_rhs ], [ false, %L119_sc_short ]
+  br i1 %t286, label %L113_wbody, label %L114_wend
+L113_wbody:
+  %t287 = load ptr, ptr %src.addr
+  %t288 = load ptr, ptr %t.addr
+  %t289 = load i32, ptr %j.addr
+  %t290 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.9, i64 0, i64 0
+  %t291 = insertvalue { ptr, i64 } undef, ptr %t290, 0
+  %t292 = insertvalue { ptr, i64 } %t291, i64 1, 1
+  %t293 = call i1 @chk_tok_is(ptr %t287, ptr %t288, i32 %t289, { ptr, i64 } %t292)
+  br i1 %t293, label %L121_then, label %L122_else
 L121_then:
-  %t292 = load ptr, ptr %src.addr
-  %t293 = load ptr, ptr %t.addr
-  %t294 = load ptr, ptr %syms.addr
-  %t295 = load i32, ptr %n.addr
-  %t296 = load i32, ptr %rtok.addr
-  %t297 = call i32 @chk_ty_of_tok(ptr %t292, ptr %t293, ptr %t294, i32 %t295, i32 %t296)
-  store i32 %t297, ptr %rcode.addr
+  %t294 = load i32, ptr %j.addr
+  %t295 = add i32 %t294, 2
+  store i32 %t295, ptr %rtok.addr
   br label %L123_end
 L122_else:
   br label %L123_end
 L123_end:
-  %t298 = load ptr, ptr %src.addr
-  %t299 = load ptr, ptr %t.addr
-  %t300 = load ptr, ptr %syms.addr
-  %t301 = load i32, ptr %n.addr
-  %t302 = load i32, ptr %i.addr
-  %t303 = add i32 %t302, 1
-  %t304 = mul i32 1, 256
-  %t305 = load i32, ptr %argc.addr
-  %t306 = add i32 %t304, %t305
-  %t307 = load i32, ptr %rcode.addr
-  %t308 = load i32, ptr %lp.addr
-  %t309 = load ptr, ptr %out.addr
-  %t310 = load i32, ptr %o.addr
-  %t311 = call i64 @declare(ptr %t298, ptr %t299, ptr %t300, i32 %t301, i32 %t303, i32 %t306, i32 %t307, i32 %t308, ptr %t309, i32 %t310)
-  store i64 %t311, ptr %r0.addr
-  %t312 = load i64, ptr %r0.addr
-  %t314 = icmp eq i64 4294967296, 0
-  br i1 %t314, label %L125_dtrap, label %L124_dok
-L125_dtrap:
-  call void @__loment_abort()
-  unreachable
-L124_dok:
-  %t313 = udiv i64 %t312, 4294967296
-  br label %L126_dend
-L126_dend:
-  %t315 = trunc i64 %t313 to i32
-  store i32 %t315, ptr %n.addr
-  %t316 = load i64, ptr %r0.addr
-  %t318 = icmp eq i64 4294967296, 0
-  br i1 %t318, label %L128_dtrap, label %L127_dok
+  %t296 = load i32, ptr %j.addr
+  %t297 = add i32 %t296, 1
+  store i32 %t297, ptr %j.addr
+  br label %L112_wcond
+L114_wend:
+  store i32 0, ptr %rcode.addr
+  %t298 = load i32, ptr %rtok.addr
+  %t299 = icmp ne i32 %t298, 0
+  br i1 %t299, label %L124_then, label %L125_else
+L124_then:
+  %t300 = load ptr, ptr %src.addr
+  %t301 = load ptr, ptr %t.addr
+  %t302 = load ptr, ptr %syms.addr
+  %t303 = load i32, ptr %n.addr
+  %t304 = load i32, ptr %rtok.addr
+  %t305 = call i32 @chk_ty_of_tok(ptr %t300, ptr %t301, ptr %t302, i32 %t303, i32 %t304)
+  store i32 %t305, ptr %rcode.addr
+  br label %L126_end
+L125_else:
+  br label %L126_end
+L126_end:
+  %t306 = load ptr, ptr %src.addr
+  %t307 = load ptr, ptr %t.addr
+  %t308 = load ptr, ptr %syms.addr
+  %t309 = load i32, ptr %n.addr
+  %t310 = load i32, ptr %i.addr
+  %t311 = add i32 %t310, 1
+  %t312 = mul i32 1, 256
+  %t313 = load i32, ptr %argc.addr
+  %t314 = add i32 %t312, %t313
+  %t315 = load i32, ptr %rcode.addr
+  %t316 = load i32, ptr %lp.addr
+  %t317 = load ptr, ptr %out.addr
+  %t318 = load i32, ptr %o.addr
+  %t319 = call i64 @declare(ptr %t306, ptr %t307, ptr %t308, i32 %t309, i32 %t311, i32 %t314, i32 %t315, i32 %t316, ptr %t317, i32 %t318)
+  store i64 %t319, ptr %r0.addr
+  %t320 = load i64, ptr %r0.addr
+  %t322 = icmp eq i64 4294967296, 0
+  br i1 %t322, label %L128_dtrap, label %L127_dok
 L128_dtrap:
   call void @__loment_abort()
   unreachable
 L127_dok:
-  %t317 = urem i64 %t316, 4294967296
+  %t321 = udiv i64 %t320, 4294967296
   br label %L129_dend
 L129_dend:
-  %t319 = trunc i64 %t317 to i32
-  store i32 %t319, ptr %o.addr
-  %t320 = load ptr, ptr %src.addr
-  %t321 = load ptr, ptr %t.addr
-  %t322 = load ptr, ptr %syms.addr
-  %t323 = load i32, ptr %n.addr
-  %t324 = load i32, ptr %i.addr
-  %t325 = add i32 %t324, 1
-  %t326 = call i32 @decl_tparams(ptr %t320, ptr %t321, ptr %t322, i32 %t323, i32 %t325)
-  store i32 %t326, ptr %n.addr
-  %t327 = load ptr, ptr %src.addr
-  %t328 = load ptr, ptr %t.addr
-  %t329 = load ptr, ptr %syms.addr
-  %t330 = load i32, ptr %n.addr
-  %t331 = load i32, ptr %lp.addr
-  %t332 = load ptr, ptr %out.addr
-  %t333 = load i32, ptr %o.addr
-  %t334 = load ptr, ptr %scr.addr
-  %t335 = call i64 @scan_params(ptr %t327, ptr %t328, ptr %t329, i32 %t330, i32 %t331, ptr %t332, i32 %t333, ptr %t334)
-  store i64 %t335, ptr %r1.addr
-  %t336 = load i64, ptr %r1.addr
-  %t338 = icmp eq i64 4294967296, 0
-  br i1 %t338, label %L131_dtrap, label %L130_dok
+  %t323 = trunc i64 %t321 to i32
+  store i32 %t323, ptr %n.addr
+  %t324 = load i64, ptr %r0.addr
+  %t326 = icmp eq i64 4294967296, 0
+  br i1 %t326, label %L131_dtrap, label %L130_dok
 L131_dtrap:
   call void @__loment_abort()
   unreachable
 L130_dok:
-  %t337 = urem i64 %t336, 4294967296
+  %t325 = urem i64 %t324, 4294967296
   br label %L132_dend
 L132_dend:
-  %t339 = trunc i64 %t337 to i32
-  store i32 %t339, ptr %o.addr
-  %t340 = load i32, ptr %rtok.addr
-  %t341 = icmp ne i32 %t340, 0
-  br i1 %t341, label %L133_then, label %L134_else
-L133_then:
-  %t342 = load ptr, ptr %src.addr
-  %t343 = load ptr, ptr %t.addr
-  %t344 = load ptr, ptr %syms.addr
-  %t345 = load i32, ptr %n.addr
-  %t346 = load i32, ptr %rtok.addr
-  %t347 = load ptr, ptr %out.addr
-  %t348 = load i32, ptr %o.addr
-  %t349 = call i64 @check_type(ptr %t342, ptr %t343, ptr %t344, i32 %t345, i32 %t346, ptr %t347, i32 %t348, i32 184)
-  store i64 %t349, ptr %r2.addr
-  %t350 = load i64, ptr %r2.addr
-  %t352 = icmp eq i64 4294967296, 0
-  br i1 %t352, label %L137_dtrap, label %L136_dok
-L137_dtrap:
+  %t327 = trunc i64 %t325 to i32
+  store i32 %t327, ptr %o.addr
+  %t328 = load ptr, ptr %src.addr
+  %t329 = load ptr, ptr %t.addr
+  %t330 = load ptr, ptr %syms.addr
+  %t331 = load i32, ptr %n.addr
+  %t332 = load i32, ptr %i.addr
+  %t333 = add i32 %t332, 1
+  %t334 = call i32 @decl_tparams(ptr %t328, ptr %t329, ptr %t330, i32 %t331, i32 %t333)
+  store i32 %t334, ptr %n.addr
+  %t335 = load ptr, ptr %src.addr
+  %t336 = load ptr, ptr %t.addr
+  %t337 = load ptr, ptr %syms.addr
+  %t338 = load i32, ptr %n.addr
+  %t339 = load i32, ptr %lp.addr
+  %t340 = load ptr, ptr %out.addr
+  %t341 = load i32, ptr %o.addr
+  %t342 = load ptr, ptr %scr.addr
+  %t343 = call i64 @scan_params(ptr %t335, ptr %t336, ptr %t337, i32 %t338, i32 %t339, ptr %t340, i32 %t341, ptr %t342)
+  store i64 %t343, ptr %r1.addr
+  %t344 = load i64, ptr %r1.addr
+  %t346 = icmp eq i64 4294967296, 0
+  br i1 %t346, label %L134_dtrap, label %L133_dok
+L134_dtrap:
   call void @__loment_abort()
   unreachable
-L136_dok:
-  %t351 = urem i64 %t350, 4294967296
-  br label %L138_dend
-L138_dend:
-  %t353 = trunc i64 %t351 to i32
-  store i32 %t353, ptr %o.addr
-  br label %L135_end
-L134_else:
-  br label %L135_end
-L135_end:
-  %t354 = load ptr, ptr %tyt.addr
-  call void @store32(ptr %t354, i32 0, i32 0)
-  %t355 = load i32, ptr %j.addr
-  store i32 %t355, ptr %i.addr
-  br label %L108_end
-L107_else:
-  %t356 = load ptr, ptr %src.addr
-  %t357 = load ptr, ptr %t.addr
-  %t358 = load i32, ptr %i.addr
-  %t359 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.10, i64 0, i64 0
-  %t360 = insertvalue { ptr, i64 } undef, ptr %t359, 0
-  %t361 = insertvalue { ptr, i64 } %t360, i64 6, 1
-  %t362 = call i1 @chk_tok_is(ptr %t356, ptr %t357, i32 %t358, { ptr, i64 } %t361)
-  br i1 %t362, label %L140_sc_short, label %L139_sc_rhs
-L139_sc_rhs:
-  %t363 = load ptr, ptr %src.addr
-  %t364 = load ptr, ptr %t.addr
-  %t365 = load i32, ptr %i.addr
-  %t366 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.11, i64 0, i64 0
-  %t367 = insertvalue { ptr, i64 } undef, ptr %t366, 0
-  %t368 = insertvalue { ptr, i64 } %t367, i64 4, 1
-  %t369 = call i1 @chk_tok_is(ptr %t363, ptr %t364, i32 %t365, { ptr, i64 } %t368)
-  br label %L141_sc_end
-L140_sc_short:
-  br label %L141_sc_end
-L141_sc_end:
-  %t370 = phi i1 [ %t369, %L139_sc_rhs ], [ true, %L140_sc_short ]
-  br i1 %t370, label %L142_then, label %L143_else
-L142_then:
+L133_dok:
+  %t345 = urem i64 %t344, 4294967296
+  br label %L135_dend
+L135_dend:
+  %t347 = trunc i64 %t345 to i32
+  store i32 %t347, ptr %o.addr
+  %t348 = load i32, ptr %rtok.addr
+  %t349 = icmp ne i32 %t348, 0
+  br i1 %t349, label %L136_then, label %L137_else
+L136_then:
+  %t350 = load ptr, ptr %src.addr
+  %t351 = load ptr, ptr %t.addr
+  %t352 = load ptr, ptr %syms.addr
+  %t353 = load i32, ptr %n.addr
+  %t354 = load i32, ptr %rtok.addr
+  %t355 = load ptr, ptr %out.addr
+  %t356 = load i32, ptr %o.addr
+  %t357 = call i64 @check_type(ptr %t350, ptr %t351, ptr %t352, i32 %t353, i32 %t354, ptr %t355, i32 %t356, i32 184)
+  store i64 %t357, ptr %r2.addr
+  %t358 = load i64, ptr %r2.addr
+  %t360 = icmp eq i64 4294967296, 0
+  br i1 %t360, label %L140_dtrap, label %L139_dok
+L140_dtrap:
+  call void @__loment_abort()
+  unreachable
+L139_dok:
+  %t359 = urem i64 %t358, 4294967296
+  br label %L141_dend
+L141_dend:
+  %t361 = trunc i64 %t359 to i32
+  store i32 %t361, ptr %o.addr
+  br label %L138_end
+L137_else:
+  br label %L138_end
+L138_end:
+  %t362 = load ptr, ptr %tyt.addr
+  call void @store32(ptr %t362, i32 0, i32 0)
+  %t363 = load i32, ptr %j.addr
+  store i32 %t363, ptr %i.addr
+  br label %L111_end
+L110_else:
+  %t364 = load ptr, ptr %src.addr
+  %t365 = load ptr, ptr %t.addr
+  %t366 = load i32, ptr %i.addr
+  %t367 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.10, i64 0, i64 0
+  %t368 = insertvalue { ptr, i64 } undef, ptr %t367, 0
+  %t369 = insertvalue { ptr, i64 } %t368, i64 6, 1
+  %t370 = call i1 @chk_tok_is(ptr %t364, ptr %t365, i32 %t366, { ptr, i64 } %t369)
+  br i1 %t370, label %L143_sc_short, label %L142_sc_rhs
+L142_sc_rhs:
   %t371 = load ptr, ptr %src.addr
   %t372 = load ptr, ptr %t.addr
   %t373 = load i32, ptr %i.addr
-  %t374 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.12, i64 0, i64 0
+  %t374 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.11, i64 0, i64 0
   %t375 = insertvalue { ptr, i64 } undef, ptr %t374, 0
   %t376 = insertvalue { ptr, i64 } %t375, i64 4, 1
   %t377 = call i1 @chk_tok_is(ptr %t371, ptr %t372, i32 %t373, { ptr, i64 } %t376)
-  store i1 %t377, ptr %is_enum.addr
-  %t378 = load ptr, ptr %src.addr
-  %t379 = load ptr, ptr %t.addr
-  %t380 = load i32, ptr %i.addr
-  %t381 = add i32 %t380, 1
-  %t382 = call i1 @is_base_type(ptr %t378, ptr %t379, i32 %t381)
-  %t383 = icmp eq i1 %t382, 1
-  br i1 %t383, label %L145_then, label %L146_else
+  br label %L144_sc_end
+L143_sc_short:
+  br label %L144_sc_end
+L144_sc_end:
+  %t378 = phi i1 [ %t377, %L142_sc_rhs ], [ true, %L143_sc_short ]
+  br i1 %t378, label %L145_then, label %L146_else
 L145_then:
-  store i32 119, ptr %bcode.addr
-  %t384 = load i1, ptr %is_enum.addr
-  br i1 %t384, label %L148_then, label %L149_else
+  %t379 = load ptr, ptr %src.addr
+  %t380 = load ptr, ptr %t.addr
+  %t381 = load i32, ptr %i.addr
+  %t382 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.12, i64 0, i64 0
+  %t383 = insertvalue { ptr, i64 } undef, ptr %t382, 0
+  %t384 = insertvalue { ptr, i64 } %t383, i64 4, 1
+  %t385 = call i1 @chk_tok_is(ptr %t379, ptr %t380, i32 %t381, { ptr, i64 } %t384)
+  store i1 %t385, ptr %is_enum.addr
+  %t386 = load ptr, ptr %src.addr
+  %t387 = load ptr, ptr %t.addr
+  %t388 = load i32, ptr %i.addr
+  %t389 = add i32 %t388, 1
+  %t390 = call i1 @is_base_type(ptr %t386, ptr %t387, i32 %t389)
+  %t391 = icmp eq i1 %t390, 1
+  br i1 %t391, label %L148_then, label %L149_else
 L148_then:
+  store i32 119, ptr %bcode.addr
+  %t392 = load i1, ptr %is_enum.addr
+  br i1 %t392, label %L151_then, label %L152_else
+L151_then:
   store i32 121, ptr %bcode.addr
+  br label %L153_end
+L152_else:
+  br label %L153_end
+L153_end:
+  %t393 = load ptr, ptr %src.addr
+  %t394 = load ptr, ptr %t.addr
+  %t395 = load ptr, ptr %out.addr
+  %t396 = load i32, ptr %o.addr
+  %t397 = load i32, ptr %bcode.addr
+  %t398 = load i32, ptr %i.addr
+  %t399 = add i32 %t398, 1
+  %t400 = call i32 @sym_pub(ptr %t393, ptr %t394, ptr %t395, i32 %t396, i32 %t397, i32 %t399)
+  store i32 %t400, ptr %o.addr
   br label %L150_end
 L149_else:
   br label %L150_end
 L150_end:
-  %t385 = load ptr, ptr %src.addr
-  %t386 = load ptr, ptr %t.addr
-  %t387 = load ptr, ptr %out.addr
-  %t388 = load i32, ptr %o.addr
-  %t389 = load i32, ptr %bcode.addr
-  %t390 = load i32, ptr %i.addr
-  %t391 = add i32 %t390, 1
-  %t392 = call i32 @sym_pub(ptr %t385, ptr %t386, ptr %t387, i32 %t388, i32 %t389, i32 %t391)
-  store i32 %t392, ptr %o.addr
-  br label %L147_end
-L146_else:
-  br label %L147_end
-L147_end:
-  %t393 = load ptr, ptr %src.addr
-  %t394 = load ptr, ptr %t.addr
-  %t395 = load i32, ptr %i.addr
-  %t396 = add i32 %t395, 1
-  %t397 = call i32 @chk_find_brace(ptr %t393, ptr %t394, i32 %t396)
-  store i32 %t397, ptr %lb.addr
-  %t398 = load i1, ptr %is_enum.addr
-  br i1 %t398, label %L151_then, label %L152_else
-L151_then:
-  %t399 = load ptr, ptr %src.addr
-  %t400 = load ptr, ptr %t.addr
-  %t401 = load ptr, ptr %syms.addr
-  %t402 = load i32, ptr %n.addr
-  %t403 = load i32, ptr %lb.addr
-  %t404 = load i32, ptr %i.addr
-  %t405 = add i32 %t404, 1
-  %t406 = load ptr, ptr %scr.addr
-  %t407 = load ptr, ptr %out.addr
-  %t408 = load i32, ptr %o.addr
-  %t409 = call i64 @chk_enum_body(ptr %t399, ptr %t400, ptr %t401, i32 %t402, i32 %t403, i32 %t405, ptr %t406, ptr %t407, i32 %t408)
-  store i64 %t409, ptr %rb.addr
-  %t410 = load i64, ptr %rb.addr
-  %t412 = icmp eq i64 4294967296, 0
-  br i1 %t412, label %L155_dtrap, label %L154_dok
-L155_dtrap:
-  call void @__loment_abort()
-  unreachable
-L154_dok:
-  %t411 = urem i64 %t410, 4294967296
-  br label %L156_dend
-L156_dend:
-  %t413 = trunc i64 %t411 to i32
-  store i32 %t413, ptr %o.addr
-  %t414 = load i64, ptr %rb.addr
-  %t416 = icmp eq i64 4294967296, 0
-  br i1 %t416, label %L158_dtrap, label %L157_dok
+  %t401 = load ptr, ptr %src.addr
+  %t402 = load ptr, ptr %t.addr
+  %t403 = load i32, ptr %i.addr
+  %t404 = add i32 %t403, 1
+  %t405 = call i32 @chk_find_brace(ptr %t401, ptr %t402, i32 %t404)
+  store i32 %t405, ptr %lb.addr
+  %t406 = load i1, ptr %is_enum.addr
+  br i1 %t406, label %L154_then, label %L155_else
+L154_then:
+  %t407 = load ptr, ptr %src.addr
+  %t408 = load ptr, ptr %t.addr
+  %t409 = load ptr, ptr %syms.addr
+  %t410 = load i32, ptr %n.addr
+  %t411 = load i32, ptr %lb.addr
+  %t412 = load i32, ptr %i.addr
+  %t413 = add i32 %t412, 1
+  %t414 = load ptr, ptr %scr.addr
+  %t415 = load ptr, ptr %out.addr
+  %t416 = load i32, ptr %o.addr
+  %t417 = call i64 @chk_enum_body(ptr %t407, ptr %t408, ptr %t409, i32 %t410, i32 %t411, i32 %t413, ptr %t414, ptr %t415, i32 %t416)
+  store i64 %t417, ptr %rb.addr
+  %t418 = load i64, ptr %rb.addr
+  %t420 = icmp eq i64 4294967296, 0
+  br i1 %t420, label %L158_dtrap, label %L157_dok
 L158_dtrap:
   call void @__loment_abort()
   unreachable
 L157_dok:
-  %t415 = udiv i64 %t414, 4294967296
+  %t419 = urem i64 %t418, 4294967296
   br label %L159_dend
 L159_dend:
-  %t417 = trunc i64 %t415 to i32
-  store i32 %t417, ptr %i.addr
-  br label %L153_end
-L152_else:
-  %t418 = load ptr, ptr %src.addr
-  %t419 = load ptr, ptr %t.addr
-  %t420 = load ptr, ptr %syms.addr
-  %t421 = load i32, ptr %n.addr
-  %t422 = load i32, ptr %lb.addr
-  %t423 = load i32, ptr %i.addr
-  %t424 = add i32 %t423, 1
-  %t425 = load ptr, ptr %scr.addr
-  %t426 = load ptr, ptr %out.addr
-  %t427 = load i32, ptr %o.addr
-  %t428 = call i64 @chk_struct_body(ptr %t418, ptr %t419, ptr %t420, i32 %t421, i32 %t422, i32 %t424, ptr %t425, ptr %t426, i32 %t427)
-  store i64 %t428, ptr %rb2.addr
-  %t429 = load i64, ptr %rb2.addr
-  %t431 = icmp eq i64 4294967296, 0
-  br i1 %t431, label %L161_dtrap, label %L160_dok
+  %t421 = trunc i64 %t419 to i32
+  store i32 %t421, ptr %o.addr
+  %t422 = load i64, ptr %rb.addr
+  %t424 = icmp eq i64 4294967296, 0
+  br i1 %t424, label %L161_dtrap, label %L160_dok
 L161_dtrap:
   call void @__loment_abort()
   unreachable
 L160_dok:
-  %t430 = urem i64 %t429, 4294967296
+  %t423 = udiv i64 %t422, 4294967296
   br label %L162_dend
 L162_dend:
-  %t432 = trunc i64 %t430 to i32
-  store i32 %t432, ptr %o.addr
-  %t433 = load i64, ptr %rb2.addr
-  %t435 = icmp eq i64 4294967296, 0
-  br i1 %t435, label %L164_dtrap, label %L163_dok
+  %t425 = trunc i64 %t423 to i32
+  store i32 %t425, ptr %i.addr
+  br label %L156_end
+L155_else:
+  %t426 = load ptr, ptr %src.addr
+  %t427 = load ptr, ptr %t.addr
+  %t428 = load ptr, ptr %syms.addr
+  %t429 = load i32, ptr %n.addr
+  %t430 = load i32, ptr %lb.addr
+  %t431 = load i32, ptr %i.addr
+  %t432 = add i32 %t431, 1
+  %t433 = load ptr, ptr %scr.addr
+  %t434 = load ptr, ptr %out.addr
+  %t435 = load i32, ptr %o.addr
+  %t436 = call i64 @chk_struct_body(ptr %t426, ptr %t427, ptr %t428, i32 %t429, i32 %t430, i32 %t432, ptr %t433, ptr %t434, i32 %t435)
+  store i64 %t436, ptr %rb2.addr
+  %t437 = load i64, ptr %rb2.addr
+  %t439 = icmp eq i64 4294967296, 0
+  br i1 %t439, label %L164_dtrap, label %L163_dok
 L164_dtrap:
   call void @__loment_abort()
   unreachable
 L163_dok:
-  %t434 = udiv i64 %t433, 4294967296
+  %t438 = urem i64 %t437, 4294967296
   br label %L165_dend
 L165_dend:
-  %t436 = trunc i64 %t434 to i32
-  store i32 %t436, ptr %i.addr
-  br label %L153_end
-L153_end:
-  br label %L144_end
-L143_else:
-  %t437 = load ptr, ptr %src.addr
-  %t438 = load ptr, ptr %t.addr
-  %t439 = load i32, ptr %i.addr
-  %t440 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.13, i64 0, i64 0
-  %t441 = insertvalue { ptr, i64 } undef, ptr %t440, 0
-  %t442 = insertvalue { ptr, i64 } %t441, i64 4, 1
-  %t443 = call i1 @chk_tok_is(ptr %t437, ptr %t438, i32 %t439, { ptr, i64 } %t442)
-  br i1 %t443, label %L166_then, label %L167_else
-L166_then:
-  %t444 = load ptr, ptr %src.addr
-  %t445 = load ptr, ptr %t.addr
-  %t446 = load ptr, ptr %syms.addr
-  %t447 = load i32, ptr %n.addr
-  %t448 = load i32, ptr %i.addr
-  %t449 = add i32 %t448, 3
-  %t450 = call i32 @chk_ty_of_tok(ptr %t444, ptr %t445, ptr %t446, i32 %t447, i32 %t449)
-  store i32 %t450, ptr %rty.addr
-  %t451 = load ptr, ptr %src.addr
-  %t452 = load ptr, ptr %t.addr
-  %t453 = load i32, ptr %i.addr
-  %t454 = add i32 %t453, 3
-  %t455 = call i32 @chk_find_brace(ptr %t451, ptr %t452, i32 %t454)
-  store i32 %t455, ptr %mbody.addr
-  %t456 = load ptr, ptr %src.addr
-  %t457 = load ptr, ptr %t.addr
-  %t458 = load i32, ptr %mbody.addr
-  %t459 = call i32 @chk_skip_body(ptr %t456, ptr %t457, i32 %t458)
-  store i32 %t459, ptr %mbodye.addr
-  %t460 = load i32, ptr %mbody.addr
-  %t461 = add i32 %t460, 1
-  store i32 %t461, ptr %mk.addr
-  br label %L169_wcond
-L169_wcond:
-  %t462 = load i32, ptr %mk.addr
-  %t463 = load i32, ptr %mbodye.addr
-  %t464 = icmp ult i32 %t462, %t463
-  br i1 %t464, label %L172_sc_rhs, label %L173_sc_short
-L172_sc_rhs:
+  %t440 = trunc i64 %t438 to i32
+  store i32 %t440, ptr %o.addr
+  %t441 = load i64, ptr %rb2.addr
+  %t443 = icmp eq i64 4294967296, 0
+  br i1 %t443, label %L167_dtrap, label %L166_dok
+L167_dtrap:
+  call void @__loment_abort()
+  unreachable
+L166_dok:
+  %t442 = udiv i64 %t441, 4294967296
+  br label %L168_dend
+L168_dend:
+  %t444 = trunc i64 %t442 to i32
+  store i32 %t444, ptr %i.addr
+  br label %L156_end
+L156_end:
+  br label %L147_end
+L146_else:
+  %t445 = load ptr, ptr %src.addr
+  %t446 = load ptr, ptr %t.addr
+  %t447 = load i32, ptr %i.addr
+  %t448 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.13, i64 0, i64 0
+  %t449 = insertvalue { ptr, i64 } undef, ptr %t448, 0
+  %t450 = insertvalue { ptr, i64 } %t449, i64 4, 1
+  %t451 = call i1 @chk_tok_is(ptr %t445, ptr %t446, i32 %t447, { ptr, i64 } %t450)
+  br i1 %t451, label %L169_then, label %L170_else
+L169_then:
+  %t452 = load ptr, ptr %src.addr
+  %t453 = load ptr, ptr %t.addr
+  %t454 = load ptr, ptr %syms.addr
+  %t455 = load i32, ptr %n.addr
+  %t456 = load i32, ptr %i.addr
+  %t457 = add i32 %t456, 3
+  %t458 = call i32 @chk_ty_of_tok(ptr %t452, ptr %t453, ptr %t454, i32 %t455, i32 %t457)
+  store i32 %t458, ptr %rty.addr
+  %t459 = load ptr, ptr %src.addr
+  %t460 = load ptr, ptr %t.addr
+  %t461 = load i32, ptr %i.addr
+  %t462 = add i32 %t461, 3
+  %t463 = call i32 @chk_find_brace(ptr %t459, ptr %t460, i32 %t462)
+  store i32 %t463, ptr %mbody.addr
+  %t464 = load ptr, ptr %src.addr
   %t465 = load ptr, ptr %t.addr
-  %t466 = load i32, ptr %mk.addr
-  %t467 = call i32 @chk_tok_kind(ptr %t465, i32 %t466)
-  %t468 = icmp ne i32 %t467, 4
-  br label %L174_sc_end
-L173_sc_short:
-  br label %L174_sc_end
-L174_sc_end:
-  %t469 = phi i1 [ %t468, %L172_sc_rhs ], [ false, %L173_sc_short ]
-  br i1 %t469, label %L170_wbody, label %L171_wend
-L170_wbody:
-  %t470 = load ptr, ptr %src.addr
-  %t471 = load ptr, ptr %t.addr
-  %t472 = load i32, ptr %mk.addr
-  %t473 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.14, i64 0, i64 0
-  %t474 = insertvalue { ptr, i64 } undef, ptr %t473, 0
-  %t475 = insertvalue { ptr, i64 } %t474, i64 2, 1
-  %t476 = call i1 @chk_tok_is(ptr %t470, ptr %t471, i32 %t472, { ptr, i64 } %t475)
-  br i1 %t476, label %L175_then, label %L176_else
-L175_then:
-  %t477 = load ptr, ptr %src.addr
-  %t478 = load ptr, ptr %t.addr
-  %t479 = load i32, ptr %mk.addr
-  %t480 = add i32 %t479, 2
-  %t481 = call i32 @chk_find_paren(ptr %t477, ptr %t478, i32 %t480)
-  store i32 %t481, ptr %mlp.addr
-  %t482 = load ptr, ptr %src.addr
-  %t483 = load ptr, ptr %t.addr
-  %t484 = load i32, ptr %mlp.addr
-  %t485 = call i32 @chk_count_args(ptr %t482, ptr %t483, i32 %t484)
-  store i32 %t485, ptr %margc.addr
-  %t486 = load ptr, ptr %src.addr
-  %t487 = load ptr, ptr %t.addr
-  %t488 = load i32, ptr %mk.addr
-  %t489 = add i32 %t488, 2
-  %t490 = call i32 @chk_find_brace(ptr %t486, ptr %t487, i32 %t489)
-  store i32 %t490, ptr %mbrace.addr
-  %t491 = load i32, ptr %mk.addr
-  %t492 = add i32 %t491, 2
-  store i32 %t492, ptr %mj.addr
+  %t466 = load i32, ptr %mbody.addr
+  %t467 = call i32 @chk_skip_body(ptr %t464, ptr %t465, i32 %t466)
+  store i32 %t467, ptr %mbodye.addr
+  %t468 = load i32, ptr %mbody.addr
+  %t469 = add i32 %t468, 1
+  store i32 %t469, ptr %mk.addr
+  br label %L172_wcond
+L172_wcond:
+  %t470 = load i32, ptr %mk.addr
+  %t471 = load i32, ptr %mbodye.addr
+  %t472 = icmp ult i32 %t470, %t471
+  br i1 %t472, label %L175_sc_rhs, label %L176_sc_short
+L175_sc_rhs:
+  %t473 = load ptr, ptr %t.addr
+  %t474 = load i32, ptr %mk.addr
+  %t475 = call i32 @chk_tok_kind(ptr %t473, i32 %t474)
+  %t476 = icmp ne i32 %t475, 4
+  br label %L177_sc_end
+L176_sc_short:
+  br label %L177_sc_end
+L177_sc_end:
+  %t477 = phi i1 [ %t476, %L175_sc_rhs ], [ false, %L176_sc_short ]
+  br i1 %t477, label %L173_wbody, label %L174_wend
+L173_wbody:
+  %t478 = load ptr, ptr %src.addr
+  %t479 = load ptr, ptr %t.addr
+  %t480 = load i32, ptr %mk.addr
+  %t481 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.14, i64 0, i64 0
+  %t482 = insertvalue { ptr, i64 } undef, ptr %t481, 0
+  %t483 = insertvalue { ptr, i64 } %t482, i64 2, 1
+  %t484 = call i1 @chk_tok_is(ptr %t478, ptr %t479, i32 %t480, { ptr, i64 } %t483)
+  br i1 %t484, label %L178_then, label %L179_else
+L178_then:
+  %t485 = load ptr, ptr %src.addr
+  %t486 = load ptr, ptr %t.addr
+  %t487 = load i32, ptr %mk.addr
+  %t488 = add i32 %t487, 2
+  %t489 = call i32 @chk_find_paren(ptr %t485, ptr %t486, i32 %t488)
+  store i32 %t489, ptr %mlp.addr
+  %t490 = load ptr, ptr %src.addr
+  %t491 = load ptr, ptr %t.addr
+  %t492 = load i32, ptr %mlp.addr
+  %t493 = call i32 @chk_count_args(ptr %t490, ptr %t491, i32 %t492)
+  store i32 %t493, ptr %margc.addr
+  %t494 = load ptr, ptr %src.addr
+  %t495 = load ptr, ptr %t.addr
+  %t496 = load i32, ptr %mk.addr
+  %t497 = add i32 %t496, 2
+  %t498 = call i32 @chk_find_brace(ptr %t494, ptr %t495, i32 %t497)
+  store i32 %t498, ptr %mbrace.addr
+  %t499 = load i32, ptr %mk.addr
+  %t500 = add i32 %t499, 2
+  store i32 %t500, ptr %mj.addr
   store i32 0, ptr %mrt.addr
-  br label %L178_wcond
-L178_wcond:
-  %t493 = load i32, ptr %mj.addr
-  %t494 = load i32, ptr %mbrace.addr
-  %t495 = icmp ult i32 %t493, %t494
-  br i1 %t495, label %L181_sc_rhs, label %L182_sc_short
-L181_sc_rhs:
-  %t496 = load ptr, ptr %t.addr
-  %t497 = load i32, ptr %mj.addr
-  %t498 = call i32 @chk_tok_kind(ptr %t496, i32 %t497)
-  %t499 = icmp ne i32 %t498, 4
-  br label %L183_sc_end
-L182_sc_short:
-  br label %L183_sc_end
-L183_sc_end:
-  %t500 = phi i1 [ %t499, %L181_sc_rhs ], [ false, %L182_sc_short ]
-  br i1 %t500, label %L179_wbody, label %L180_wend
-L179_wbody:
-  %t501 = load ptr, ptr %src.addr
-  %t502 = load ptr, ptr %t.addr
-  %t503 = load i32, ptr %mj.addr
-  %t504 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.15, i64 0, i64 0
-  %t505 = insertvalue { ptr, i64 } undef, ptr %t504, 0
-  %t506 = insertvalue { ptr, i64 } %t505, i64 1, 1
-  %t507 = call i1 @chk_tok_is(ptr %t501, ptr %t502, i32 %t503, { ptr, i64 } %t506)
-  br i1 %t507, label %L184_then, label %L185_else
-L184_then:
-  %t508 = load i32, ptr %mj.addr
-  %t509 = add i32 %t508, 2
-  store i32 %t509, ptr %mrt.addr
-  br label %L186_end
-L185_else:
-  br label %L186_end
-L186_end:
-  %t510 = load i32, ptr %mj.addr
-  %t511 = add i32 %t510, 1
-  store i32 %t511, ptr %mj.addr
-  br label %L178_wcond
-L180_wend:
-  store i32 0, ptr %mrc.addr
-  %t512 = load i32, ptr %mrt.addr
-  %t513 = icmp ne i32 %t512, 0
-  br i1 %t513, label %L187_then, label %L188_else
+  br label %L181_wcond
+L181_wcond:
+  %t501 = load i32, ptr %mj.addr
+  %t502 = load i32, ptr %mbrace.addr
+  %t503 = icmp ult i32 %t501, %t502
+  br i1 %t503, label %L184_sc_rhs, label %L185_sc_short
+L184_sc_rhs:
+  %t504 = load ptr, ptr %t.addr
+  %t505 = load i32, ptr %mj.addr
+  %t506 = call i32 @chk_tok_kind(ptr %t504, i32 %t505)
+  %t507 = icmp ne i32 %t506, 4
+  br label %L186_sc_end
+L185_sc_short:
+  br label %L186_sc_end
+L186_sc_end:
+  %t508 = phi i1 [ %t507, %L184_sc_rhs ], [ false, %L185_sc_short ]
+  br i1 %t508, label %L182_wbody, label %L183_wend
+L182_wbody:
+  %t509 = load ptr, ptr %src.addr
+  %t510 = load ptr, ptr %t.addr
+  %t511 = load i32, ptr %mj.addr
+  %t512 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.15, i64 0, i64 0
+  %t513 = insertvalue { ptr, i64 } undef, ptr %t512, 0
+  %t514 = insertvalue { ptr, i64 } %t513, i64 1, 1
+  %t515 = call i1 @chk_tok_is(ptr %t509, ptr %t510, i32 %t511, { ptr, i64 } %t514)
+  br i1 %t515, label %L187_then, label %L188_else
 L187_then:
-  %t514 = load ptr, ptr %src.addr
-  %t515 = load ptr, ptr %t.addr
-  %t516 = load ptr, ptr %syms.addr
-  %t517 = load i32, ptr %n.addr
-  %t518 = load ptr, ptr %tyt.addr
-  %t519 = load i32, ptr %mrt.addr
-  %t520 = load ptr, ptr %src.addr
-  %t521 = load ptr, ptr %t.addr
-  %t522 = load i32, ptr %mrt.addr
-  %t523 = call i32 @chk_skip_type(ptr %t520, ptr %t521, i32 %t522)
-  %t524 = call i32 @chk_ty_range(ptr %t514, ptr %t515, ptr %t516, i32 %t517, ptr %t518, i32 %t519, i32 %t523)
-  store i32 %t524, ptr %mrc.addr
+  %t516 = load i32, ptr %mj.addr
+  %t517 = add i32 %t516, 2
+  store i32 %t517, ptr %mrt.addr
   br label %L189_end
 L188_else:
   br label %L189_end
 L189_end:
-  %t525 = load i32, ptr %margc.addr
-  store i32 %t525, ptr %mac.addr
-  %t526 = load i32, ptr %margc.addr
-  %t527 = icmp ugt i32 %t526, 0
-  br i1 %t527, label %L190_then, label %L191_else
+  %t518 = load i32, ptr %mj.addr
+  %t519 = add i32 %t518, 1
+  store i32 %t519, ptr %mj.addr
+  br label %L181_wcond
+L183_wend:
+  store i32 0, ptr %mrc.addr
+  %t520 = load i32, ptr %mrt.addr
+  %t521 = icmp ne i32 %t520, 0
+  br i1 %t521, label %L190_then, label %L191_else
 L190_then:
-  %t528 = load i32, ptr %margc.addr
-  %t529 = sub i32 %t528, 1
-  store i32 %t529, ptr %mac.addr
+  %t522 = load ptr, ptr %src.addr
+  %t523 = load ptr, ptr %t.addr
+  %t524 = load ptr, ptr %syms.addr
+  %t525 = load i32, ptr %n.addr
+  %t526 = load ptr, ptr %tyt.addr
+  %t527 = load i32, ptr %mrt.addr
+  %t528 = load ptr, ptr %src.addr
+  %t529 = load ptr, ptr %t.addr
+  %t530 = load i32, ptr %mrt.addr
+  %t531 = call i32 @chk_skip_type(ptr %t528, ptr %t529, i32 %t530)
+  %t532 = call i32 @chk_ty_range(ptr %t522, ptr %t523, ptr %t524, i32 %t525, ptr %t526, i32 %t527, i32 %t531)
+  store i32 %t532, ptr %mrc.addr
   br label %L192_end
 L191_else:
   br label %L192_end
 L192_end:
-  %t530 = load ptr, ptr %src.addr
-  %t531 = load ptr, ptr %t.addr
-  %t532 = load ptr, ptr %syms.addr
-  %t533 = load i32, ptr %n.addr
-  %t534 = load i32, ptr %mk.addr
-  %t535 = add i32 %t534, 1
-  %t536 = load i32, ptr %mac.addr
-  %t537 = load i32, ptr %mrc.addr
-  %t538 = load i32, ptr %rty.addr
-  %t539 = call i32 @chk_decl_method(ptr %t530, ptr %t531, ptr %t532, i32 %t533, i32 %t535, i32 %t536, i32 %t537, i32 %t538)
-  store i32 %t539, ptr %n.addr
-  %t540 = load ptr, ptr %src.addr
-  %t541 = load ptr, ptr %t.addr
-  %t542 = load i32, ptr %mbrace.addr
-  %t543 = call i32 @chk_skip_body(ptr %t540, ptr %t541, i32 %t542)
-  store i32 %t543, ptr %mk.addr
-  br label %L177_end
-L176_else:
-  %t544 = load i32, ptr %mk.addr
-  %t545 = add i32 %t544, 1
-  store i32 %t545, ptr %mk.addr
-  br label %L177_end
-L177_end:
-  br label %L169_wcond
-L171_wend:
-  %t546 = load i32, ptr %mbodye.addr
-  store i32 %t546, ptr %i.addr
-  br label %L168_end
-L167_else:
-  %t547 = load ptr, ptr %src.addr
-  %t548 = load ptr, ptr %t.addr
-  %t549 = load i32, ptr %i.addr
-  %t550 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.16, i64 0, i64 0
-  %t551 = insertvalue { ptr, i64 } undef, ptr %t550, 0
-  %t552 = insertvalue { ptr, i64 } %t551, i64 10, 1
-  %t553 = call i1 @chk_tok_is(ptr %t547, ptr %t548, i32 %t549, { ptr, i64 } %t552)
-  br i1 %t553, label %L193_then, label %L194_else
+  %t533 = load i32, ptr %margc.addr
+  store i32 %t533, ptr %mac.addr
+  %t534 = load i32, ptr %margc.addr
+  %t535 = icmp ugt i32 %t534, 0
+  br i1 %t535, label %L193_then, label %L194_else
 L193_then:
-  %t554 = load ptr, ptr %src.addr
-  %t555 = load ptr, ptr %t.addr
-  %t556 = load ptr, ptr %ctab.addr
-  %t557 = load ptr, ptr %nc.addr
-  %t558 = load i32, ptr %i.addr
-  %t559 = call i32 @chk_cap_collect(ptr %t554, ptr %t555, ptr %t556, ptr %t557, i32 %t558)
-  store i32 %t559, ptr %i.addr
+  %t536 = load i32, ptr %margc.addr
+  %t537 = sub i32 %t536, 1
+  store i32 %t537, ptr %mac.addr
   br label %L195_end
 L194_else:
-  %t560 = load ptr, ptr %src.addr
-  %t561 = load ptr, ptr %t.addr
-  %t562 = load i32, ptr %i.addr
-  %t563 = getelementptr inbounds [8 x i8], ptr @.str.check_arena.17, i64 0, i64 0
-  %t564 = insertvalue { ptr, i64 } undef, ptr %t563, 0
-  %t565 = insertvalue { ptr, i64 } %t564, i64 8, 1
-  %t566 = call i1 @chk_tok_is(ptr %t560, ptr %t561, i32 %t562, { ptr, i64 } %t565)
-  br i1 %t566, label %L196_then, label %L197_else
+  br label %L195_end
+L195_end:
+  %t538 = load ptr, ptr %src.addr
+  %t539 = load ptr, ptr %t.addr
+  %t540 = load ptr, ptr %syms.addr
+  %t541 = load i32, ptr %n.addr
+  %t542 = load i32, ptr %mk.addr
+  %t543 = add i32 %t542, 1
+  %t544 = load i32, ptr %mac.addr
+  %t545 = load i32, ptr %mrc.addr
+  %t546 = load i32, ptr %rty.addr
+  %t547 = call i32 @chk_decl_method(ptr %t538, ptr %t539, ptr %t540, i32 %t541, i32 %t543, i32 %t544, i32 %t545, i32 %t546)
+  store i32 %t547, ptr %n.addr
+  %t548 = load ptr, ptr %src.addr
+  %t549 = load ptr, ptr %t.addr
+  %t550 = load i32, ptr %mbrace.addr
+  %t551 = call i32 @chk_skip_body(ptr %t548, ptr %t549, i32 %t550)
+  store i32 %t551, ptr %mk.addr
+  br label %L180_end
+L179_else:
+  %t552 = load i32, ptr %mk.addr
+  %t553 = add i32 %t552, 1
+  store i32 %t553, ptr %mk.addr
+  br label %L180_end
+L180_end:
+  br label %L172_wcond
+L174_wend:
+  %t554 = load i32, ptr %mbodye.addr
+  store i32 %t554, ptr %i.addr
+  br label %L171_end
+L170_else:
+  %t555 = load ptr, ptr %src.addr
+  %t556 = load ptr, ptr %t.addr
+  %t557 = load i32, ptr %i.addr
+  %t558 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.16, i64 0, i64 0
+  %t559 = insertvalue { ptr, i64 } undef, ptr %t558, 0
+  %t560 = insertvalue { ptr, i64 } %t559, i64 10, 1
+  %t561 = call i1 @chk_tok_is(ptr %t555, ptr %t556, i32 %t557, { ptr, i64 } %t560)
+  br i1 %t561, label %L196_then, label %L197_else
 L196_then:
-  %t567 = load ptr, ptr %t.addr
-  %t568 = load i32, ptr %i.addr
-  %t569 = add i32 %t568, 1
-  %t570 = call i32 @chk_tok_kind(ptr %t567, i32 %t569)
-  %t571 = icmp eq i32 %t570, 2
-  br i1 %t571, label %L199_then, label %L200_else
-L199_then:
-  %t572 = load ptr, ptr %exs.addr
-  %t573 = load i32, ptr %nexs.addr
-  %t574 = mul i32 %t573, 4
-  %t575 = load i32, ptr %i.addr
-  %t576 = add i32 %t575, 1
-  call void @store32(ptr %t572, i32 %t574, i32 %t576)
-  %t577 = load i32, ptr %nexs.addr
-  %t578 = add i32 %t577, 1
-  store i32 %t578, ptr %nexs.addr
-  br label %L201_end
-L200_else:
-  br label %L201_end
-L201_end:
-  %t579 = load i32, ptr %i.addr
-  %t580 = add i32 %t579, 2
-  store i32 %t580, ptr %i.addr
+  %t562 = load ptr, ptr %src.addr
+  %t563 = load ptr, ptr %t.addr
+  %t564 = load ptr, ptr %ctab.addr
+  %t565 = load ptr, ptr %nc.addr
+  %t566 = load i32, ptr %i.addr
+  %t567 = call i32 @chk_cap_collect(ptr %t562, ptr %t563, ptr %t564, ptr %t565, i32 %t566)
+  store i32 %t567, ptr %i.addr
   br label %L198_end
 L197_else:
-  %t581 = load ptr, ptr %src.addr
-  %t582 = load ptr, ptr %t.addr
-  %t583 = load i32, ptr %i.addr
-  %t584 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.18, i64 0, i64 0
-  %t585 = insertvalue { ptr, i64 } undef, ptr %t584, 0
-  %t586 = insertvalue { ptr, i64 } %t585, i64 5, 1
-  %t587 = call i1 @chk_tok_is(ptr %t581, ptr %t582, i32 %t583, { ptr, i64 } %t586)
-  br i1 %t587, label %L202_then, label %L203_else
+  %t568 = load ptr, ptr %src.addr
+  %t569 = load ptr, ptr %t.addr
+  %t570 = load i32, ptr %i.addr
+  %t571 = getelementptr inbounds [8 x i8], ptr @.str.check_arena.17, i64 0, i64 0
+  %t572 = insertvalue { ptr, i64 } undef, ptr %t571, 0
+  %t573 = insertvalue { ptr, i64 } %t572, i64 8, 1
+  %t574 = call i1 @chk_tok_is(ptr %t568, ptr %t569, i32 %t570, { ptr, i64 } %t573)
+  br i1 %t574, label %L199_then, label %L200_else
+L199_then:
+  %t575 = load ptr, ptr %t.addr
+  %t576 = load i32, ptr %i.addr
+  %t577 = add i32 %t576, 1
+  %t578 = call i32 @chk_tok_kind(ptr %t575, i32 %t577)
+  %t579 = icmp eq i32 %t578, 2
+  br i1 %t579, label %L202_then, label %L203_else
 L202_then:
-  store i32 0, ptr %cty.addr
-  %t588 = load ptr, ptr %src.addr
-  %t589 = load ptr, ptr %t.addr
-  %t590 = load i32, ptr %i.addr
-  %t591 = add i32 %t590, 2
-  %t592 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.19, i64 0, i64 0
+  %t580 = load ptr, ptr %exs.addr
+  %t581 = load i32, ptr %nexs.addr
+  %t582 = mul i32 %t581, 4
+  %t583 = load i32, ptr %i.addr
+  %t584 = add i32 %t583, 1
+  call void @store32(ptr %t580, i32 %t582, i32 %t584)
+  %t585 = load i32, ptr %nexs.addr
+  %t586 = add i32 %t585, 1
+  store i32 %t586, ptr %nexs.addr
+  br label %L204_end
+L203_else:
+  br label %L204_end
+L204_end:
+  %t587 = load i32, ptr %i.addr
+  %t588 = add i32 %t587, 2
+  store i32 %t588, ptr %i.addr
+  br label %L201_end
+L200_else:
+  %t589 = load ptr, ptr %src.addr
+  %t590 = load ptr, ptr %t.addr
+  %t591 = load i32, ptr %i.addr
+  %t592 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.18, i64 0, i64 0
   %t593 = insertvalue { ptr, i64 } undef, ptr %t592, 0
-  %t594 = insertvalue { ptr, i64 } %t593, i64 1, 1
-  %t595 = call i1 @chk_tok_is(ptr %t588, ptr %t589, i32 %t591, { ptr, i64 } %t594)
+  %t594 = insertvalue { ptr, i64 } %t593, i64 5, 1
+  %t595 = call i1 @chk_tok_is(ptr %t589, ptr %t590, i32 %t591, { ptr, i64 } %t594)
   br i1 %t595, label %L205_then, label %L206_else
 L205_then:
+  store i32 0, ptr %cty.addr
   %t596 = load ptr, ptr %src.addr
   %t597 = load ptr, ptr %t.addr
-  %t598 = load ptr, ptr %syms.addr
-  %t599 = load i32, ptr %n.addr
-  %t600 = load i32, ptr %i.addr
-  %t601 = add i32 %t600, 3
-  %t602 = call i32 @chk_ty_of_tok(ptr %t596, ptr %t597, ptr %t598, i32 %t599, i32 %t601)
-  store i32 %t602, ptr %cty.addr
-  br label %L207_end
-L206_else:
-  br label %L207_end
-L207_end:
-  %t603 = load ptr, ptr %src.addr
-  %t604 = load ptr, ptr %t.addr
-  %t605 = load ptr, ptr %syms.addr
-  %t606 = load i32, ptr %n.addr
-  %t607 = load i32, ptr %i.addr
-  %t608 = add i32 %t607, 1
-  %t609 = mul i32 4, 256
-  %t610 = load i32, ptr %cty.addr
-  %t611 = load ptr, ptr %out.addr
-  %t612 = load i32, ptr %o.addr
-  %t613 = call i64 @declare(ptr %t603, ptr %t604, ptr %t605, i32 %t606, i32 %t608, i32 %t609, i32 %t610, i32 0, ptr %t611, i32 %t612)
-  store i64 %t613, ptr %r4.addr
-  %t614 = load i64, ptr %r4.addr
-  %t616 = icmp eq i64 4294967296, 0
-  br i1 %t616, label %L209_dtrap, label %L208_dok
-L209_dtrap:
-  call void @__loment_abort()
-  unreachable
-L208_dok:
-  %t615 = udiv i64 %t614, 4294967296
-  br label %L210_dend
-L210_dend:
-  %t617 = trunc i64 %t615 to i32
-  store i32 %t617, ptr %n.addr
-  %t618 = load i64, ptr %r4.addr
-  %t620 = icmp eq i64 4294967296, 0
-  br i1 %t620, label %L212_dtrap, label %L211_dok
+  %t598 = load i32, ptr %i.addr
+  %t599 = add i32 %t598, 2
+  %t600 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.19, i64 0, i64 0
+  %t601 = insertvalue { ptr, i64 } undef, ptr %t600, 0
+  %t602 = insertvalue { ptr, i64 } %t601, i64 1, 1
+  %t603 = call i1 @chk_tok_is(ptr %t596, ptr %t597, i32 %t599, { ptr, i64 } %t602)
+  br i1 %t603, label %L208_then, label %L209_else
+L208_then:
+  %t604 = load ptr, ptr %src.addr
+  %t605 = load ptr, ptr %t.addr
+  %t606 = load ptr, ptr %syms.addr
+  %t607 = load i32, ptr %n.addr
+  %t608 = load i32, ptr %i.addr
+  %t609 = add i32 %t608, 3
+  %t610 = call i32 @chk_ty_of_tok(ptr %t604, ptr %t605, ptr %t606, i32 %t607, i32 %t609)
+  store i32 %t610, ptr %cty.addr
+  br label %L210_end
+L209_else:
+  br label %L210_end
+L210_end:
+  %t611 = load ptr, ptr %src.addr
+  %t612 = load ptr, ptr %t.addr
+  %t613 = load ptr, ptr %syms.addr
+  %t614 = load i32, ptr %n.addr
+  %t615 = load i32, ptr %i.addr
+  %t616 = add i32 %t615, 1
+  %t617 = mul i32 4, 256
+  %t618 = load i32, ptr %cty.addr
+  %t619 = load ptr, ptr %out.addr
+  %t620 = load i32, ptr %o.addr
+  %t621 = call i64 @declare(ptr %t611, ptr %t612, ptr %t613, i32 %t614, i32 %t616, i32 %t617, i32 %t618, i32 0, ptr %t619, i32 %t620)
+  store i64 %t621, ptr %r4.addr
+  %t622 = load i64, ptr %r4.addr
+  %t624 = icmp eq i64 4294967296, 0
+  br i1 %t624, label %L212_dtrap, label %L211_dok
 L212_dtrap:
   call void @__loment_abort()
   unreachable
 L211_dok:
-  %t619 = urem i64 %t618, 4294967296
+  %t623 = udiv i64 %t622, 4294967296
   br label %L213_dend
 L213_dend:
-  %t621 = trunc i64 %t619 to i32
-  store i32 %t621, ptr %o.addr
-  %t622 = load ptr, ptr %src.addr
-  %t623 = load ptr, ptr %t.addr
-  %t624 = load i32, ptr %i.addr
-  %t625 = add i32 %t624, 2
-  %t626 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.20, i64 0, i64 0
-  %t627 = insertvalue { ptr, i64 } undef, ptr %t626, 0
-  %t628 = insertvalue { ptr, i64 } %t627, i64 1, 1
-  %t629 = call i1 @chk_tok_is(ptr %t622, ptr %t623, i32 %t625, { ptr, i64 } %t628)
-  br i1 %t629, label %L214_then, label %L215_else
-L214_then:
+  %t625 = trunc i64 %t623 to i32
+  store i32 %t625, ptr %n.addr
+  %t626 = load i64, ptr %r4.addr
+  %t628 = icmp eq i64 4294967296, 0
+  br i1 %t628, label %L215_dtrap, label %L214_dok
+L215_dtrap:
+  call void @__loment_abort()
+  unreachable
+L214_dok:
+  %t627 = urem i64 %t626, 4294967296
+  br label %L216_dend
+L216_dend:
+  %t629 = trunc i64 %t627 to i32
+  store i32 %t629, ptr %o.addr
   %t630 = load ptr, ptr %src.addr
   %t631 = load ptr, ptr %t.addr
   %t632 = load i32, ptr %i.addr
-  %t633 = add i32 %t632, 3
-  %t634 = call i32 @chk_is_int(ptr %t630, ptr %t631, i32 %t633)
-  store i32 %t634, ptr %cok.addr
-  %t635 = load i32, ptr %cok.addr
-  %t636 = icmp eq i32 %t635, 0
-  br i1 %t636, label %L217_sc_rhs, label %L218_sc_short
-L217_sc_rhs:
-  %t637 = load ptr, ptr %oc.addr
-  %t638 = call i32 @load32(ptr %t637, i32 8)
-  %t639 = icmp uge i32 %t638, 2
-  br label %L219_sc_end
-L218_sc_short:
-  br label %L219_sc_end
-L219_sc_end:
-  %t640 = phi i1 [ %t639, %L217_sc_rhs ], [ false, %L218_sc_short ]
-  br i1 %t640, label %L220_sc_rhs, label %L221_sc_short
+  %t633 = add i32 %t632, 2
+  %t634 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.20, i64 0, i64 0
+  %t635 = insertvalue { ptr, i64 } undef, ptr %t634, 0
+  %t636 = insertvalue { ptr, i64 } %t635, i64 1, 1
+  %t637 = call i1 @chk_tok_is(ptr %t630, ptr %t631, i32 %t633, { ptr, i64 } %t636)
+  br i1 %t637, label %L217_then, label %L218_else
+L217_then:
+  %t638 = load ptr, ptr %src.addr
+  %t639 = load ptr, ptr %t.addr
+  %t640 = load i32, ptr %i.addr
+  %t641 = add i32 %t640, 3
+  %t642 = call i32 @chk_is_int(ptr %t638, ptr %t639, i32 %t641)
+  store i32 %t642, ptr %cok.addr
+  %t643 = load i32, ptr %cok.addr
+  %t644 = icmp eq i32 %t643, 0
+  br i1 %t644, label %L220_sc_rhs, label %L221_sc_short
 L220_sc_rhs:
-  %t641 = load ptr, ptr %src.addr
-  %t642 = load ptr, ptr %t.addr
-  %t643 = load i32, ptr %i.addr
-  %t644 = add i32 %t643, 3
-  %t645 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.21, i64 0, i64 0
-  %t646 = insertvalue { ptr, i64 } undef, ptr %t645, 0
-  %t647 = insertvalue { ptr, i64 } %t646, i64 3, 1
-  %t648 = call i1 @chk_tok_is(ptr %t641, ptr %t642, i32 %t644, { ptr, i64 } %t647)
+  %t645 = load ptr, ptr %oc.addr
+  %t646 = call i32 @load32(ptr %t645, i32 8)
+  %t647 = icmp uge i32 %t646, 2
   br label %L222_sc_end
 L221_sc_short:
   br label %L222_sc_end
 L222_sc_end:
-  %t649 = phi i1 [ %t648, %L220_sc_rhs ], [ false, %L221_sc_short ]
-  br i1 %t649, label %L223_then, label %L224_else
-L223_then:
-  store i32 1, ptr %cok.addr
-  br label %L225_end
-L224_else:
-  br label %L225_end
-L225_end:
-  %t650 = load i32, ptr %cok.addr
-  %t651 = icmp eq i32 %t650, 0
-  br i1 %t651, label %L226_then, label %L227_else
+  %t648 = phi i1 [ %t647, %L220_sc_rhs ], [ false, %L221_sc_short ]
+  br i1 %t648, label %L223_sc_rhs, label %L224_sc_short
+L223_sc_rhs:
+  %t649 = load ptr, ptr %src.addr
+  %t650 = load ptr, ptr %t.addr
+  %t651 = load i32, ptr %i.addr
+  %t652 = add i32 %t651, 3
+  %t653 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.21, i64 0, i64 0
+  %t654 = insertvalue { ptr, i64 } undef, ptr %t653, 0
+  %t655 = insertvalue { ptr, i64 } %t654, i64 3, 1
+  %t656 = call i1 @chk_tok_is(ptr %t649, ptr %t650, i32 %t652, { ptr, i64 } %t655)
+  br label %L225_sc_end
+L224_sc_short:
+  br label %L225_sc_end
+L225_sc_end:
+  %t657 = phi i1 [ %t656, %L223_sc_rhs ], [ false, %L224_sc_short ]
+  br i1 %t657, label %L226_then, label %L227_else
 L226_then:
-  %t652 = load ptr, ptr %src.addr
-  %t653 = load ptr, ptr %t.addr
-  %t654 = load ptr, ptr %out.addr
-  %t655 = load i32, ptr %o.addr
-  %t656 = load i32, ptr %i.addr
-  %t657 = add i32 %t656, 3
-  %t658 = call i32 @sym_pub(ptr %t652, ptr %t653, ptr %t654, i32 %t655, i32 57, i32 %t657)
-  store i32 %t658, ptr %o.addr
+  store i32 1, ptr %cok.addr
   br label %L228_end
 L227_else:
   br label %L228_end
 L228_end:
-  br label %L216_end
-L215_else:
-  br label %L216_end
-L216_end:
-  %t659 = load i32, ptr %i.addr
-  %t660 = add i32 %t659, 4
-  store i32 %t660, ptr %i.addr
-  br label %L204_end
-L203_else:
-  %t661 = load ptr, ptr %src.addr
-  %t662 = load ptr, ptr %t.addr
-  %t663 = load i32, ptr %i.addr
-  %t664 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.22, i64 0, i64 0
-  %t665 = insertvalue { ptr, i64 } undef, ptr %t664, 0
-  %t666 = insertvalue { ptr, i64 } %t665, i64 6, 1
-  %t667 = call i1 @chk_tok_is(ptr %t661, ptr %t662, i32 %t663, { ptr, i64 } %t666)
-  br i1 %t667, label %L229_then, label %L230_else
+  %t658 = load i32, ptr %cok.addr
+  %t659 = icmp eq i32 %t658, 0
+  br i1 %t659, label %L229_then, label %L230_else
 L229_then:
-  %t668 = load ptr, ptr %src.addr
-  %t669 = load ptr, ptr %t.addr
-  %t670 = load i32, ptr %i.addr
-  %t671 = add i32 %t670, 1
-  %t672 = call i32 @chk_core_dim(ptr %t668, ptr %t669, i32 %t671)
-  store i32 %t672, ptr %dim.addr
-  %t673 = load i32, ptr %dim.addr
-  %t674 = icmp eq i32 %t673, 0
-  br i1 %t674, label %L232_then, label %L233_else
+  %t660 = load ptr, ptr %src.addr
+  %t661 = load ptr, ptr %t.addr
+  %t662 = load ptr, ptr %out.addr
+  %t663 = load i32, ptr %o.addr
+  %t664 = load i32, ptr %i.addr
+  %t665 = add i32 %t664, 3
+  %t666 = call i32 @sym_pub(ptr %t660, ptr %t661, ptr %t662, i32 %t663, i32 57, i32 %t665)
+  store i32 %t666, ptr %o.addr
+  br label %L231_end
+L230_else:
+  br label %L231_end
+L231_end:
+  br label %L219_end
+L218_else:
+  br label %L219_end
+L219_end:
+  %t667 = load i32, ptr %i.addr
+  %t668 = add i32 %t667, 4
+  store i32 %t668, ptr %i.addr
+  br label %L207_end
+L206_else:
+  %t669 = load ptr, ptr %src.addr
+  %t670 = load ptr, ptr %t.addr
+  %t671 = load i32, ptr %i.addr
+  %t672 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.22, i64 0, i64 0
+  %t673 = insertvalue { ptr, i64 } undef, ptr %t672, 0
+  %t674 = insertvalue { ptr, i64 } %t673, i64 6, 1
+  %t675 = call i1 @chk_tok_is(ptr %t669, ptr %t670, i32 %t671, { ptr, i64 } %t674)
+  br i1 %t675, label %L232_then, label %L233_else
 L232_then:
-  %t675 = load i32, ptr %nch_mode.addr
-  %t676 = add i32 %t675, 1
-  store i32 %t676, ptr %nch_mode.addr
-  %t677 = load ptr, ptr %src.addr
-  %t678 = load ptr, ptr %t.addr
-  %t679 = load i32, ptr %i.addr
-  %t680 = add i32 %t679, 1
-  %t681 = call i32 @chk_core_val(ptr %t677, ptr %t678, i32 %t680)
-  store i32 %t681, ptr %v_mode.addr
-  %t682 = load i32, ptr %i.addr
-  store i32 %t682, ptr %ln_mode.addr
-  %t683 = load i32, ptr %nch_mode.addr
-  %t684 = icmp ugt i32 %t683, 1
-  br i1 %t684, label %L235_then, label %L236_else
+  %t676 = load ptr, ptr %src.addr
+  %t677 = load ptr, ptr %t.addr
+  %t678 = load i32, ptr %i.addr
+  %t679 = add i32 %t678, 1
+  %t680 = call i32 @chk_core_dim(ptr %t676, ptr %t677, i32 %t679)
+  store i32 %t680, ptr %dim.addr
+  %t681 = load i32, ptr %dim.addr
+  %t682 = icmp eq i32 %t681, 0
+  br i1 %t682, label %L235_then, label %L236_else
 L235_then:
+  %t683 = load i32, ptr %nch_mode.addr
+  %t684 = add i32 %t683, 1
+  store i32 %t684, ptr %nch_mode.addr
   %t685 = load ptr, ptr %src.addr
   %t686 = load ptr, ptr %t.addr
-  %t687 = load ptr, ptr %out.addr
-  %t688 = load i32, ptr %o.addr
-  %t689 = load i32, ptr %i.addr
-  %t690 = call i32 @sym_pub(ptr %t685, ptr %t686, ptr %t687, i32 %t688, i32 159, i32 %t689)
-  store i32 %t690, ptr %o.addr
-  br label %L237_end
-L236_else:
-  br label %L237_end
-L237_end:
-  br label %L234_end
-L233_else:
-  %t691 = load i32, ptr %dim.addr
-  %t692 = icmp eq i32 %t691, 1
+  %t687 = load i32, ptr %i.addr
+  %t688 = add i32 %t687, 1
+  %t689 = call i32 @chk_core_val(ptr %t685, ptr %t686, i32 %t688)
+  store i32 %t689, ptr %v_mode.addr
+  %t690 = load i32, ptr %i.addr
+  store i32 %t690, ptr %ln_mode.addr
+  %t691 = load i32, ptr %nch_mode.addr
+  %t692 = icmp ugt i32 %t691, 1
   br i1 %t692, label %L238_then, label %L239_else
 L238_then:
-  %t693 = load i32, ptr %nch_gc.addr
-  %t694 = add i32 %t693, 1
-  store i32 %t694, ptr %nch_gc.addr
-  %t695 = load ptr, ptr %src.addr
-  %t696 = load ptr, ptr %t.addr
+  %t693 = load ptr, ptr %src.addr
+  %t694 = load ptr, ptr %t.addr
+  %t695 = load ptr, ptr %out.addr
+  %t696 = load i32, ptr %o.addr
   %t697 = load i32, ptr %i.addr
-  %t698 = add i32 %t697, 1
-  %t699 = call i32 @chk_core_val(ptr %t695, ptr %t696, i32 %t698)
-  store i32 %t699, ptr %v_gc.addr
-  %t700 = load i32, ptr %i.addr
-  store i32 %t700, ptr %ln_gc.addr
-  %t701 = load i32, ptr %nch_gc.addr
-  %t702 = icmp ugt i32 %t701, 1
-  br i1 %t702, label %L241_then, label %L242_else
-L241_then:
-  %t703 = load ptr, ptr %src.addr
-  %t704 = load ptr, ptr %t.addr
-  %t705 = load ptr, ptr %out.addr
-  %t706 = load i32, ptr %o.addr
-  %t707 = load i32, ptr %i.addr
-  %t708 = call i32 @sym_pub(ptr %t703, ptr %t704, ptr %t705, i32 %t706, i32 159, i32 %t707)
-  store i32 %t708, ptr %o.addr
-  br label %L243_end
-L242_else:
-  br label %L243_end
-L243_end:
+  %t698 = call i32 @sym_pub(ptr %t693, ptr %t694, ptr %t695, i32 %t696, i32 159, i32 %t697)
+  store i32 %t698, ptr %o.addr
   br label %L240_end
 L239_else:
-  %t709 = load i32, ptr %dim.addr
-  %t710 = icmp eq i32 %t709, 2
+  br label %L240_end
+L240_end:
+  br label %L237_end
+L236_else:
+  %t699 = load i32, ptr %dim.addr
+  %t700 = icmp eq i32 %t699, 1
+  br i1 %t700, label %L241_then, label %L242_else
+L241_then:
+  %t701 = load i32, ptr %nch_gc.addr
+  %t702 = add i32 %t701, 1
+  store i32 %t702, ptr %nch_gc.addr
+  %t703 = load ptr, ptr %src.addr
+  %t704 = load ptr, ptr %t.addr
+  %t705 = load i32, ptr %i.addr
+  %t706 = add i32 %t705, 1
+  %t707 = call i32 @chk_core_val(ptr %t703, ptr %t704, i32 %t706)
+  store i32 %t707, ptr %v_gc.addr
+  %t708 = load i32, ptr %i.addr
+  store i32 %t708, ptr %ln_gc.addr
+  %t709 = load i32, ptr %nch_gc.addr
+  %t710 = icmp ugt i32 %t709, 1
   br i1 %t710, label %L244_then, label %L245_else
 L244_then:
-  %t711 = load i32, ptr %nch_rt.addr
-  %t712 = add i32 %t711, 1
-  store i32 %t712, ptr %nch_rt.addr
-  %t713 = load ptr, ptr %src.addr
-  %t714 = load ptr, ptr %t.addr
+  %t711 = load ptr, ptr %src.addr
+  %t712 = load ptr, ptr %t.addr
+  %t713 = load ptr, ptr %out.addr
+  %t714 = load i32, ptr %o.addr
   %t715 = load i32, ptr %i.addr
-  %t716 = add i32 %t715, 1
-  %t717 = call i32 @chk_core_val(ptr %t713, ptr %t714, i32 %t716)
-  store i32 %t717, ptr %v_rt.addr
-  %t718 = load i32, ptr %i.addr
-  store i32 %t718, ptr %ln_rt.addr
-  %t719 = load i32, ptr %nch_rt.addr
-  %t720 = icmp ugt i32 %t719, 1
-  br i1 %t720, label %L247_then, label %L248_else
-L247_then:
-  %t721 = load ptr, ptr %src.addr
-  %t722 = load ptr, ptr %t.addr
-  %t723 = load ptr, ptr %out.addr
-  %t724 = load i32, ptr %o.addr
-  %t725 = load i32, ptr %i.addr
-  %t726 = call i32 @sym_pub(ptr %t721, ptr %t722, ptr %t723, i32 %t724, i32 159, i32 %t725)
-  store i32 %t726, ptr %o.addr
-  br label %L249_end
-L248_else:
-  br label %L249_end
-L249_end:
+  %t716 = call i32 @sym_pub(ptr %t711, ptr %t712, ptr %t713, i32 %t714, i32 159, i32 %t715)
+  store i32 %t716, ptr %o.addr
   br label %L246_end
 L245_else:
-  %t727 = load i32, ptr %dim.addr
-  %t728 = icmp eq i32 %t727, 3
+  br label %L246_end
+L246_end:
+  br label %L243_end
+L242_else:
+  %t717 = load i32, ptr %dim.addr
+  %t718 = icmp eq i32 %t717, 2
+  br i1 %t718, label %L247_then, label %L248_else
+L247_then:
+  %t719 = load i32, ptr %nch_rt.addr
+  %t720 = add i32 %t719, 1
+  store i32 %t720, ptr %nch_rt.addr
+  %t721 = load ptr, ptr %src.addr
+  %t722 = load ptr, ptr %t.addr
+  %t723 = load i32, ptr %i.addr
+  %t724 = add i32 %t723, 1
+  %t725 = call i32 @chk_core_val(ptr %t721, ptr %t722, i32 %t724)
+  store i32 %t725, ptr %v_rt.addr
+  %t726 = load i32, ptr %i.addr
+  store i32 %t726, ptr %ln_rt.addr
+  %t727 = load i32, ptr %nch_rt.addr
+  %t728 = icmp ugt i32 %t727, 1
   br i1 %t728, label %L250_then, label %L251_else
 L250_then:
-  %t729 = load i32, ptr %nch_port.addr
-  %t730 = add i32 %t729, 1
-  store i32 %t730, ptr %nch_port.addr
-  %t731 = load ptr, ptr %src.addr
-  %t732 = load ptr, ptr %t.addr
+  %t729 = load ptr, ptr %src.addr
+  %t730 = load ptr, ptr %t.addr
+  %t731 = load ptr, ptr %out.addr
+  %t732 = load i32, ptr %o.addr
   %t733 = load i32, ptr %i.addr
-  %t734 = add i32 %t733, 1
-  %t735 = call i32 @chk_core_val(ptr %t731, ptr %t732, i32 %t734)
-  store i32 %t735, ptr %v_port.addr
-  %t736 = load i32, ptr %i.addr
-  store i32 %t736, ptr %ln_port.addr
-  %t737 = load i32, ptr %nch_port.addr
-  %t738 = icmp ugt i32 %t737, 1
-  br i1 %t738, label %L253_then, label %L254_else
-L253_then:
-  %t739 = load ptr, ptr %src.addr
-  %t740 = load ptr, ptr %t.addr
-  %t741 = load ptr, ptr %out.addr
-  %t742 = load i32, ptr %o.addr
-  %t743 = load i32, ptr %i.addr
-  %t744 = call i32 @sym_pub(ptr %t739, ptr %t740, ptr %t741, i32 %t742, i32 159, i32 %t743)
-  store i32 %t744, ptr %o.addr
-  br label %L255_end
-L254_else:
-  br label %L255_end
-L255_end:
+  %t734 = call i32 @sym_pub(ptr %t729, ptr %t730, ptr %t731, i32 %t732, i32 159, i32 %t733)
+  store i32 %t734, ptr %o.addr
   br label %L252_end
 L251_else:
-  %t745 = load i32, ptr %dim.addr
-  %t746 = icmp eq i32 %t745, 4
+  br label %L252_end
+L252_end:
+  br label %L249_end
+L248_else:
+  %t735 = load i32, ptr %dim.addr
+  %t736 = icmp eq i32 %t735, 3
+  br i1 %t736, label %L253_then, label %L254_else
+L253_then:
+  %t737 = load i32, ptr %nch_port.addr
+  %t738 = add i32 %t737, 1
+  store i32 %t738, ptr %nch_port.addr
+  %t739 = load ptr, ptr %src.addr
+  %t740 = load ptr, ptr %t.addr
+  %t741 = load i32, ptr %i.addr
+  %t742 = add i32 %t741, 1
+  %t743 = call i32 @chk_core_val(ptr %t739, ptr %t740, i32 %t742)
+  store i32 %t743, ptr %v_port.addr
+  %t744 = load i32, ptr %i.addr
+  store i32 %t744, ptr %ln_port.addr
+  %t745 = load i32, ptr %nch_port.addr
+  %t746 = icmp ugt i32 %t745, 1
   br i1 %t746, label %L256_then, label %L257_else
 L256_then:
-  %t747 = load i32, ptr %nch_vm.addr
-  %t748 = add i32 %t747, 1
-  store i32 %t748, ptr %nch_vm.addr
-  %t749 = load ptr, ptr %src.addr
-  %t750 = load ptr, ptr %t.addr
+  %t747 = load ptr, ptr %src.addr
+  %t748 = load ptr, ptr %t.addr
+  %t749 = load ptr, ptr %out.addr
+  %t750 = load i32, ptr %o.addr
   %t751 = load i32, ptr %i.addr
-  %t752 = add i32 %t751, 1
-  %t753 = call i32 @chk_core_val(ptr %t749, ptr %t750, i32 %t752)
-  store i32 %t753, ptr %v_vm.addr
-  %t754 = load i32, ptr %i.addr
-  store i32 %t754, ptr %ln_vm.addr
-  %t755 = load i32, ptr %nch_vm.addr
-  %t756 = icmp ugt i32 %t755, 1
-  br i1 %t756, label %L259_then, label %L260_else
-L259_then:
-  %t757 = load ptr, ptr %src.addr
-  %t758 = load ptr, ptr %t.addr
-  %t759 = load ptr, ptr %out.addr
-  %t760 = load i32, ptr %o.addr
-  %t761 = load i32, ptr %i.addr
-  %t762 = call i32 @sym_pub(ptr %t757, ptr %t758, ptr %t759, i32 %t760, i32 159, i32 %t761)
-  store i32 %t762, ptr %o.addr
-  br label %L261_end
-L260_else:
-  br label %L261_end
-L261_end:
+  %t752 = call i32 @sym_pub(ptr %t747, ptr %t748, ptr %t749, i32 %t750, i32 159, i32 %t751)
+  store i32 %t752, ptr %o.addr
   br label %L258_end
 L257_else:
-  %t763 = load i32, ptr %dim.addr
-  %t764 = icmp eq i32 %t763, 5
+  br label %L258_end
+L258_end:
+  br label %L255_end
+L254_else:
+  %t753 = load i32, ptr %dim.addr
+  %t754 = icmp eq i32 %t753, 4
+  br i1 %t754, label %L259_then, label %L260_else
+L259_then:
+  %t755 = load i32, ptr %nch_vm.addr
+  %t756 = add i32 %t755, 1
+  store i32 %t756, ptr %nch_vm.addr
+  %t757 = load ptr, ptr %src.addr
+  %t758 = load ptr, ptr %t.addr
+  %t759 = load i32, ptr %i.addr
+  %t760 = add i32 %t759, 1
+  %t761 = call i32 @chk_core_val(ptr %t757, ptr %t758, i32 %t760)
+  store i32 %t761, ptr %v_vm.addr
+  %t762 = load i32, ptr %i.addr
+  store i32 %t762, ptr %ln_vm.addr
+  %t763 = load i32, ptr %nch_vm.addr
+  %t764 = icmp ugt i32 %t763, 1
   br i1 %t764, label %L262_then, label %L263_else
 L262_then:
-  %t765 = load i32, ptr %nch_lms.addr
-  %t766 = add i32 %t765, 1
-  store i32 %t766, ptr %nch_lms.addr
-  %t767 = load i32, ptr %nch_lms.addr
-  %t768 = icmp ugt i32 %t767, 1
-  br i1 %t768, label %L265_then, label %L266_else
-L265_then:
-  %t769 = load ptr, ptr %src.addr
-  %t770 = load ptr, ptr %t.addr
-  %t771 = load ptr, ptr %out.addr
-  %t772 = load i32, ptr %o.addr
-  %t773 = load i32, ptr %i.addr
-  %t774 = call i32 @sym_pub(ptr %t769, ptr %t770, ptr %t771, i32 %t772, i32 159, i32 %t773)
-  store i32 %t774, ptr %o.addr
-  br label %L267_end
-L266_else:
-  br label %L267_end
-L267_end:
+  %t765 = load ptr, ptr %src.addr
+  %t766 = load ptr, ptr %t.addr
+  %t767 = load ptr, ptr %out.addr
+  %t768 = load i32, ptr %o.addr
+  %t769 = load i32, ptr %i.addr
+  %t770 = call i32 @sym_pub(ptr %t765, ptr %t766, ptr %t767, i32 %t768, i32 159, i32 %t769)
+  store i32 %t770, ptr %o.addr
   br label %L264_end
 L263_else:
-  %t775 = load i32, ptr %dim.addr
-  %t776 = icmp eq i32 %t775, 6
+  br label %L264_end
+L264_end:
+  br label %L261_end
+L260_else:
+  %t771 = load i32, ptr %dim.addr
+  %t772 = icmp eq i32 %t771, 5
+  br i1 %t772, label %L265_then, label %L266_else
+L265_then:
+  %t773 = load i32, ptr %nch_lms.addr
+  %t774 = add i32 %t773, 1
+  store i32 %t774, ptr %nch_lms.addr
+  %t775 = load i32, ptr %nch_lms.addr
+  %t776 = icmp ugt i32 %t775, 1
   br i1 %t776, label %L268_then, label %L269_else
 L268_then:
-  %t777 = load i32, ptr %nch_lspe.addr
-  %t778 = add i32 %t777, 1
-  store i32 %t778, ptr %nch_lspe.addr
-  %t779 = load i32, ptr %nch_lspe.addr
-  %t780 = icmp ugt i32 %t779, 1
-  br i1 %t780, label %L271_then, label %L272_else
-L271_then:
-  %t781 = load ptr, ptr %src.addr
-  %t782 = load ptr, ptr %t.addr
-  %t783 = load ptr, ptr %out.addr
-  %t784 = load i32, ptr %o.addr
-  %t785 = load i32, ptr %i.addr
-  %t786 = call i32 @sym_pub(ptr %t781, ptr %t782, ptr %t783, i32 %t784, i32 159, i32 %t785)
-  store i32 %t786, ptr %o.addr
-  br label %L273_end
-L272_else:
-  br label %L273_end
-L273_end:
+  %t777 = load ptr, ptr %src.addr
+  %t778 = load ptr, ptr %t.addr
+  %t779 = load ptr, ptr %out.addr
+  %t780 = load i32, ptr %o.addr
+  %t781 = load i32, ptr %i.addr
+  %t782 = call i32 @sym_pub(ptr %t777, ptr %t778, ptr %t779, i32 %t780, i32 159, i32 %t781)
+  store i32 %t782, ptr %o.addr
   br label %L270_end
 L269_else:
-  %t787 = load i32, ptr %dim.addr
-  %t788 = icmp eq i32 %t787, 7
+  br label %L270_end
+L270_end:
+  br label %L267_end
+L266_else:
+  %t783 = load i32, ptr %dim.addr
+  %t784 = icmp eq i32 %t783, 6
+  br i1 %t784, label %L271_then, label %L272_else
+L271_then:
+  %t785 = load i32, ptr %nch_lspe.addr
+  %t786 = add i32 %t785, 1
+  store i32 %t786, ptr %nch_lspe.addr
+  %t787 = load i32, ptr %nch_lspe.addr
+  %t788 = icmp ugt i32 %t787, 1
   br i1 %t788, label %L274_then, label %L275_else
 L274_then:
-  %t789 = load i32, ptr %nch_lifetime.addr
-  %t790 = add i32 %t789, 1
-  store i32 %t790, ptr %nch_lifetime.addr
-  %t791 = load ptr, ptr %src.addr
-  %t792 = load ptr, ptr %t.addr
+  %t789 = load ptr, ptr %src.addr
+  %t790 = load ptr, ptr %t.addr
+  %t791 = load ptr, ptr %out.addr
+  %t792 = load i32, ptr %o.addr
   %t793 = load i32, ptr %i.addr
-  %t794 = add i32 %t793, 1
-  %t795 = call i32 @chk_core_val(ptr %t791, ptr %t792, i32 %t794)
-  store i32 %t795, ptr %v_lifetime.addr
-  %t796 = load i32, ptr %i.addr
-  store i32 %t796, ptr %ln_lifetime.addr
-  %t797 = load i32, ptr %nch_lifetime.addr
-  %t798 = icmp ugt i32 %t797, 1
-  br i1 %t798, label %L277_then, label %L278_else
+  %t794 = call i32 @sym_pub(ptr %t789, ptr %t790, ptr %t791, i32 %t792, i32 159, i32 %t793)
+  store i32 %t794, ptr %o.addr
+  br label %L276_end
+L275_else:
+  br label %L276_end
+L276_end:
+  br label %L273_end
+L272_else:
+  %t795 = load i32, ptr %dim.addr
+  %t796 = icmp eq i32 %t795, 7
+  br i1 %t796, label %L277_then, label %L278_else
 L277_then:
+  %t797 = load i32, ptr %nch_lifetime.addr
+  %t798 = add i32 %t797, 1
+  store i32 %t798, ptr %nch_lifetime.addr
   %t799 = load ptr, ptr %src.addr
   %t800 = load ptr, ptr %t.addr
-  %t801 = load ptr, ptr %out.addr
-  %t802 = load i32, ptr %o.addr
-  %t803 = load i32, ptr %i.addr
-  %t804 = call i32 @sym_pub(ptr %t799, ptr %t800, ptr %t801, i32 %t802, i32 159, i32 %t803)
-  store i32 %t804, ptr %o.addr
-  br label %L279_end
-L278_else:
-  %t805 = load i32, ptr %prof.addr
-  %t806 = icmp ult i32 %t805, 2
+  %t801 = load i32, ptr %i.addr
+  %t802 = add i32 %t801, 1
+  %t803 = call i32 @chk_core_val(ptr %t799, ptr %t800, i32 %t802)
+  store i32 %t803, ptr %v_lifetime.addr
+  %t804 = load i32, ptr %i.addr
+  store i32 %t804, ptr %ln_lifetime.addr
+  %t805 = load i32, ptr %nch_lifetime.addr
+  %t806 = icmp ugt i32 %t805, 1
   br i1 %t806, label %L280_then, label %L281_else
 L280_then:
   %t807 = load ptr, ptr %src.addr
@@ -116754,1679 +117278,1686 @@ L280_then:
   %t809 = load ptr, ptr %out.addr
   %t810 = load i32, ptr %o.addr
   %t811 = load i32, ptr %i.addr
-  %t812 = call i32 @sym_pub(ptr %t807, ptr %t808, ptr %t809, i32 %t810, i32 158, i32 %t811)
+  %t812 = call i32 @sym_pub(ptr %t807, ptr %t808, ptr %t809, i32 %t810, i32 159, i32 %t811)
   store i32 %t812, ptr %o.addr
   br label %L282_end
 L281_else:
+  %t813 = load i32, ptr %prof.addr
+  %t814 = icmp ult i32 %t813, 2
+  br i1 %t814, label %L283_then, label %L284_else
+L283_then:
+  %t815 = load ptr, ptr %src.addr
+  %t816 = load ptr, ptr %t.addr
+  %t817 = load ptr, ptr %out.addr
+  %t818 = load i32, ptr %o.addr
+  %t819 = load i32, ptr %i.addr
+  %t820 = call i32 @sym_pub(ptr %t815, ptr %t816, ptr %t817, i32 %t818, i32 158, i32 %t819)
+  store i32 %t820, ptr %o.addr
+  br label %L285_end
+L284_else:
+  br label %L285_end
+L285_end:
   br label %L282_end
 L282_end:
   br label %L279_end
-L279_end:
-  br label %L276_end
-L275_else:
-  %t813 = load i32, ptr %dim.addr
-  %t814 = icmp eq i32 %t813, 8
-  br i1 %t814, label %L283_then, label %L284_else
-L283_then:
-  %t815 = load i32, ptr %nch_fp.addr
-  %t816 = add i32 %t815, 1
-  store i32 %t816, ptr %nch_fp.addr
-  %t817 = load ptr, ptr %src.addr
-  %t818 = load ptr, ptr %t.addr
-  %t819 = load i32, ptr %i.addr
-  %t820 = add i32 %t819, 1
-  %t821 = call i32 @chk_core_val(ptr %t817, ptr %t818, i32 %t820)
-  store i32 %t821, ptr %v_fp.addr
-  %t822 = load i32, ptr %i.addr
-  store i32 %t822, ptr %ln_fp.addr
-  %t823 = load i32, ptr %nch_fp.addr
-  %t824 = icmp ugt i32 %t823, 1
-  br i1 %t824, label %L286_then, label %L287_else
+L278_else:
+  %t821 = load i32, ptr %dim.addr
+  %t822 = icmp eq i32 %t821, 8
+  br i1 %t822, label %L286_then, label %L287_else
 L286_then:
+  %t823 = load i32, ptr %nch_fp.addr
+  %t824 = add i32 %t823, 1
+  store i32 %t824, ptr %nch_fp.addr
   %t825 = load ptr, ptr %src.addr
   %t826 = load ptr, ptr %t.addr
-  %t827 = load ptr, ptr %out.addr
-  %t828 = load i32, ptr %o.addr
-  %t829 = load i32, ptr %i.addr
-  %t830 = call i32 @sym_pub(ptr %t825, ptr %t826, ptr %t827, i32 %t828, i32 159, i32 %t829)
-  store i32 %t830, ptr %o.addr
-  br label %L288_end
-L287_else:
-  br label %L288_end
-L288_end:
-  br label %L285_end
-L284_else:
-  %t831 = load i32, ptr %dim.addr
-  %t832 = icmp eq i32 %t831, 9
+  %t827 = load i32, ptr %i.addr
+  %t828 = add i32 %t827, 1
+  %t829 = call i32 @chk_core_val(ptr %t825, ptr %t826, i32 %t828)
+  store i32 %t829, ptr %v_fp.addr
+  %t830 = load i32, ptr %i.addr
+  store i32 %t830, ptr %ln_fp.addr
+  %t831 = load i32, ptr %nch_fp.addr
+  %t832 = icmp ugt i32 %t831, 1
   br i1 %t832, label %L289_then, label %L290_else
 L289_then:
-  %t833 = load i32, ptr %nch_flomtc.addr
-  %t834 = add i32 %t833, 1
-  store i32 %t834, ptr %nch_flomtc.addr
-  %t835 = load i32, ptr %nch_flomtc.addr
-  %t836 = icmp ugt i32 %t835, 1
-  br i1 %t836, label %L292_then, label %L293_else
-L292_then:
-  %t837 = load ptr, ptr %src.addr
-  %t838 = load ptr, ptr %t.addr
-  %t839 = load ptr, ptr %out.addr
-  %t840 = load i32, ptr %o.addr
-  %t841 = load i32, ptr %i.addr
-  %t842 = call i32 @sym_pub(ptr %t837, ptr %t838, ptr %t839, i32 %t840, i32 159, i32 %t841)
-  store i32 %t842, ptr %o.addr
-  br label %L294_end
-L293_else:
-  br label %L294_end
-L294_end:
+  %t833 = load ptr, ptr %src.addr
+  %t834 = load ptr, ptr %t.addr
+  %t835 = load ptr, ptr %out.addr
+  %t836 = load i32, ptr %o.addr
+  %t837 = load i32, ptr %i.addr
+  %t838 = call i32 @sym_pub(ptr %t833, ptr %t834, ptr %t835, i32 %t836, i32 159, i32 %t837)
+  store i32 %t838, ptr %o.addr
   br label %L291_end
 L290_else:
-  %t843 = load i32, ptr %dim.addr
-  %t844 = icmp eq i32 %t843, 10
+  br label %L291_end
+L291_end:
+  br label %L288_end
+L287_else:
+  %t839 = load i32, ptr %dim.addr
+  %t840 = icmp eq i32 %t839, 9
+  br i1 %t840, label %L292_then, label %L293_else
+L292_then:
+  %t841 = load i32, ptr %nch_flomtc.addr
+  %t842 = add i32 %t841, 1
+  store i32 %t842, ptr %nch_flomtc.addr
+  %t843 = load i32, ptr %nch_flomtc.addr
+  %t844 = icmp ugt i32 %t843, 1
   br i1 %t844, label %L295_then, label %L296_else
 L295_then:
   %t845 = load ptr, ptr %src.addr
   %t846 = load ptr, ptr %t.addr
-  %t847 = load i32, ptr %i.addr
-  %t848 = add i32 %t847, 1
-  %t849 = getelementptr inbounds [17 x i8], ptr @.str.check_arena.23, i64 0, i64 0
-  %t850 = insertvalue { ptr, i64 } undef, ptr %t849, 0
-  %t851 = insertvalue { ptr, i64 } %t850, i64 17, 1
-  %t852 = call i1 @chk_tok_is(ptr %t845, ptr %t846, i32 %t848, { ptr, i64 } %t851)
-  br i1 %t852, label %L299_sc_short, label %L298_sc_rhs
-L298_sc_rhs:
+  %t847 = load ptr, ptr %out.addr
+  %t848 = load i32, ptr %o.addr
+  %t849 = load i32, ptr %i.addr
+  %t850 = call i32 @sym_pub(ptr %t845, ptr %t846, ptr %t847, i32 %t848, i32 159, i32 %t849)
+  store i32 %t850, ptr %o.addr
+  br label %L297_end
+L296_else:
+  br label %L297_end
+L297_end:
+  br label %L294_end
+L293_else:
+  %t851 = load i32, ptr %dim.addr
+  %t852 = icmp eq i32 %t851, 10
+  br i1 %t852, label %L298_then, label %L299_else
+L298_then:
   %t853 = load ptr, ptr %src.addr
   %t854 = load ptr, ptr %t.addr
   %t855 = load i32, ptr %i.addr
   %t856 = add i32 %t855, 1
-  %t857 = getelementptr inbounds [18 x i8], ptr @.str.check_arena.24, i64 0, i64 0
+  %t857 = getelementptr inbounds [17 x i8], ptr @.str.check_arena.23, i64 0, i64 0
   %t858 = insertvalue { ptr, i64 } undef, ptr %t857, 0
-  %t859 = insertvalue { ptr, i64 } %t858, i64 18, 1
+  %t859 = insertvalue { ptr, i64 } %t858, i64 17, 1
   %t860 = call i1 @chk_tok_is(ptr %t853, ptr %t854, i32 %t856, { ptr, i64 } %t859)
-  br label %L300_sc_end
-L299_sc_short:
-  br label %L300_sc_end
-L300_sc_end:
-  %t861 = phi i1 [ %t860, %L298_sc_rhs ], [ true, %L299_sc_short ]
-  br i1 %t861, label %L301_then, label %L302_else
-L301_then:
-  %t862 = load i32, ptr %nch_ef.addr
-  %t863 = add i32 %t862, 1
-  store i32 %t863, ptr %nch_ef.addr
-  %t864 = load i32, ptr %nch_ef.addr
-  %t865 = icmp ugt i32 %t864, 1
-  br i1 %t865, label %L304_then, label %L305_else
+  br i1 %t860, label %L302_sc_short, label %L301_sc_rhs
+L301_sc_rhs:
+  %t861 = load ptr, ptr %src.addr
+  %t862 = load ptr, ptr %t.addr
+  %t863 = load i32, ptr %i.addr
+  %t864 = add i32 %t863, 1
+  %t865 = getelementptr inbounds [18 x i8], ptr @.str.check_arena.24, i64 0, i64 0
+  %t866 = insertvalue { ptr, i64 } undef, ptr %t865, 0
+  %t867 = insertvalue { ptr, i64 } %t866, i64 18, 1
+  %t868 = call i1 @chk_tok_is(ptr %t861, ptr %t862, i32 %t864, { ptr, i64 } %t867)
+  br label %L303_sc_end
+L302_sc_short:
+  br label %L303_sc_end
+L303_sc_end:
+  %t869 = phi i1 [ %t868, %L301_sc_rhs ], [ true, %L302_sc_short ]
+  br i1 %t869, label %L304_then, label %L305_else
 L304_then:
-  %t866 = load ptr, ptr %src.addr
-  %t867 = load ptr, ptr %t.addr
-  %t868 = load ptr, ptr %out.addr
-  %t869 = load i32, ptr %o.addr
-  %t870 = load i32, ptr %i.addr
-  %t871 = call i32 @sym_pub(ptr %t866, ptr %t867, ptr %t868, i32 %t869, i32 159, i32 %t870)
-  store i32 %t871, ptr %o.addr
-  br label %L306_end
-L305_else:
-  br label %L306_end
-L306_end:
-  br label %L303_end
-L302_else:
-  %t872 = load i32, ptr %nch_ai.addr
-  %t873 = add i32 %t872, 1
-  store i32 %t873, ptr %nch_ai.addr
-  %t874 = load i32, ptr %nch_ai.addr
-  %t875 = icmp ugt i32 %t874, 1
-  br i1 %t875, label %L307_then, label %L308_else
+  %t870 = load i32, ptr %nch_ef.addr
+  %t871 = add i32 %t870, 1
+  store i32 %t871, ptr %nch_ef.addr
+  %t872 = load i32, ptr %nch_ef.addr
+  %t873 = icmp ugt i32 %t872, 1
+  br i1 %t873, label %L307_then, label %L308_else
 L307_then:
-  %t876 = load ptr, ptr %src.addr
-  %t877 = load ptr, ptr %t.addr
-  %t878 = load ptr, ptr %out.addr
-  %t879 = load i32, ptr %o.addr
-  %t880 = load i32, ptr %i.addr
-  %t881 = call i32 @sym_pub(ptr %t876, ptr %t877, ptr %t878, i32 %t879, i32 159, i32 %t880)
-  store i32 %t881, ptr %o.addr
+  %t874 = load ptr, ptr %src.addr
+  %t875 = load ptr, ptr %t.addr
+  %t876 = load ptr, ptr %out.addr
+  %t877 = load i32, ptr %o.addr
+  %t878 = load i32, ptr %i.addr
+  %t879 = call i32 @sym_pub(ptr %t874, ptr %t875, ptr %t876, i32 %t877, i32 159, i32 %t878)
+  store i32 %t879, ptr %o.addr
   br label %L309_end
 L308_else:
   br label %L309_end
 L309_end:
-  br label %L303_end
-L303_end:
-  br label %L297_end
-L296_else:
-  %t882 = load ptr, ptr %src.addr
-  %t883 = load ptr, ptr %t.addr
-  %t884 = load ptr, ptr %out.addr
-  %t885 = load i32, ptr %o.addr
-  %t886 = load i32, ptr %i.addr
-  %t887 = call i32 @sym_pub(ptr %t882, ptr %t883, ptr %t884, i32 %t885, i32 22, i32 %t886)
-  store i32 %t887, ptr %o.addr
-  br label %L297_end
-L297_end:
-  br label %L291_end
-L291_end:
-  br label %L285_end
-L285_end:
-  br label %L276_end
-L276_end:
-  br label %L270_end
-L270_end:
-  br label %L264_end
-L264_end:
-  br label %L258_end
-L258_end:
-  br label %L252_end
-L252_end:
-  br label %L246_end
-L246_end:
-  br label %L240_end
-L240_end:
-  br label %L234_end
-L234_end:
-  %t888 = load i32, ptr %i.addr
-  %t889 = add i32 %t888, 1
-  store i32 %t889, ptr %i.addr
-  br label %L231_end
-L230_else:
-  %t890 = load i32, ptr %i.addr
-  %t891 = add i32 %t890, 1
-  store i32 %t891, ptr %i.addr
-  br label %L231_end
-L231_end:
-  br label %L204_end
-L204_end:
-  br label %L198_end
-L198_end:
-  br label %L195_end
-L195_end:
-  br label %L168_end
-L168_end:
-  br label %L144_end
-L144_end:
-  br label %L108_end
-L108_end:
-  br label %L103_wcond
-L105_wend:
-  store i32 1, ptr %eff_mode.addr
-  %t892 = load i32, ptr %v_mode.addr
-  %t893 = icmp ne i32 %t892, 0
-  br i1 %t893, label %L310_then, label %L311_else
+  br label %L306_end
+L305_else:
+  %t880 = load i32, ptr %nch_ai.addr
+  %t881 = add i32 %t880, 1
+  store i32 %t881, ptr %nch_ai.addr
+  %t882 = load i32, ptr %nch_ai.addr
+  %t883 = icmp ugt i32 %t882, 1
+  br i1 %t883, label %L310_then, label %L311_else
 L310_then:
-  %t894 = load i32, ptr %v_mode.addr
-  store i32 %t894, ptr %eff_mode.addr
+  %t884 = load ptr, ptr %src.addr
+  %t885 = load ptr, ptr %t.addr
+  %t886 = load ptr, ptr %out.addr
+  %t887 = load i32, ptr %o.addr
+  %t888 = load i32, ptr %i.addr
+  %t889 = call i32 @sym_pub(ptr %t884, ptr %t885, ptr %t886, i32 %t887, i32 159, i32 %t888)
+  store i32 %t889, ptr %o.addr
   br label %L312_end
 L311_else:
   br label %L312_end
 L312_end:
-  store i32 1, ptr %eff_gc.addr
-  %t895 = load i32, ptr %v_gc.addr
-  %t896 = icmp ne i32 %t895, 0
-  br i1 %t896, label %L313_then, label %L314_else
+  br label %L306_end
+L306_end:
+  br label %L300_end
+L299_else:
+  %t890 = load ptr, ptr %src.addr
+  %t891 = load ptr, ptr %t.addr
+  %t892 = load ptr, ptr %out.addr
+  %t893 = load i32, ptr %o.addr
+  %t894 = load i32, ptr %i.addr
+  %t895 = call i32 @sym_pub(ptr %t890, ptr %t891, ptr %t892, i32 %t893, i32 22, i32 %t894)
+  store i32 %t895, ptr %o.addr
+  br label %L300_end
+L300_end:
+  br label %L294_end
+L294_end:
+  br label %L288_end
+L288_end:
+  br label %L279_end
+L279_end:
+  br label %L273_end
+L273_end:
+  br label %L267_end
+L267_end:
+  br label %L261_end
+L261_end:
+  br label %L255_end
+L255_end:
+  br label %L249_end
+L249_end:
+  br label %L243_end
+L243_end:
+  br label %L237_end
+L237_end:
+  %t896 = load i32, ptr %i.addr
+  %t897 = add i32 %t896, 1
+  store i32 %t897, ptr %i.addr
+  br label %L234_end
+L233_else:
+  %t898 = load i32, ptr %i.addr
+  %t899 = add i32 %t898, 1
+  store i32 %t899, ptr %i.addr
+  br label %L234_end
+L234_end:
+  br label %L207_end
+L207_end:
+  br label %L201_end
+L201_end:
+  br label %L198_end
+L198_end:
+  br label %L171_end
+L171_end:
+  br label %L147_end
+L147_end:
+  br label %L111_end
+L111_end:
+  br label %L106_wcond
+L108_wend:
+  store i32 1, ptr %eff_mode.addr
+  %t900 = load i32, ptr %v_mode.addr
+  %t901 = icmp ne i32 %t900, 0
+  br i1 %t901, label %L313_then, label %L314_else
 L313_then:
-  %t897 = load i32, ptr %v_gc.addr
-  store i32 %t897, ptr %eff_gc.addr
+  %t902 = load i32, ptr %v_mode.addr
+  store i32 %t902, ptr %eff_mode.addr
   br label %L315_end
 L314_else:
   br label %L315_end
 L315_end:
-  store i32 2, ptr %eff_rt.addr
-  %t898 = load i32, ptr %v_rt.addr
-  %t899 = icmp ne i32 %t898, 0
-  br i1 %t899, label %L316_then, label %L317_else
+  store i32 1, ptr %eff_gc.addr
+  %t903 = load i32, ptr %v_gc.addr
+  %t904 = icmp ne i32 %t903, 0
+  br i1 %t904, label %L316_then, label %L317_else
 L316_then:
-  %t900 = load i32, ptr %v_rt.addr
-  store i32 %t900, ptr %eff_rt.addr
+  %t905 = load i32, ptr %v_gc.addr
+  store i32 %t905, ptr %eff_gc.addr
   br label %L318_end
 L317_else:
   br label %L318_end
 L318_end:
-  store i32 1, ptr %eff_port.addr
-  %t901 = load i32, ptr %v_port.addr
-  %t902 = icmp ne i32 %t901, 0
-  br i1 %t902, label %L319_then, label %L320_else
+  store i32 2, ptr %eff_rt.addr
+  %t906 = load i32, ptr %v_rt.addr
+  %t907 = icmp ne i32 %t906, 0
+  br i1 %t907, label %L319_then, label %L320_else
 L319_then:
-  %t903 = load i32, ptr %v_port.addr
-  store i32 %t903, ptr %eff_port.addr
+  %t908 = load i32, ptr %v_rt.addr
+  store i32 %t908, ptr %eff_rt.addr
   br label %L321_end
 L320_else:
   br label %L321_end
 L321_end:
-  store i32 2, ptr %eff_vm.addr
-  %t904 = load i32, ptr %v_vm.addr
-  %t905 = icmp ne i32 %t904, 0
-  br i1 %t905, label %L322_then, label %L323_else
+  store i32 1, ptr %eff_port.addr
+  %t909 = load i32, ptr %v_port.addr
+  %t910 = icmp ne i32 %t909, 0
+  br i1 %t910, label %L322_then, label %L323_else
 L322_then:
-  %t906 = load i32, ptr %v_vm.addr
-  store i32 %t906, ptr %eff_vm.addr
+  %t911 = load i32, ptr %v_port.addr
+  store i32 %t911, ptr %eff_port.addr
   br label %L324_end
 L323_else:
   br label %L324_end
 L324_end:
-  %t907 = load i32, ptr %eff_mode.addr
-  %t908 = icmp eq i32 %t907, 2
-  br i1 %t908, label %L325_sc_rhs, label %L326_sc_short
-L325_sc_rhs:
-  %t909 = load i32, ptr %eff_gc.addr
-  %t910 = icmp eq i32 %t909, 2
-  br i1 %t910, label %L329_sc_short, label %L328_sc_rhs
+  store i32 2, ptr %eff_vm.addr
+  %t912 = load i32, ptr %v_vm.addr
+  %t913 = icmp ne i32 %t912, 0
+  br i1 %t913, label %L325_then, label %L326_else
+L325_then:
+  %t914 = load i32, ptr %v_vm.addr
+  store i32 %t914, ptr %eff_vm.addr
+  br label %L327_end
+L326_else:
+  br label %L327_end
+L327_end:
+  %t915 = load i32, ptr %eff_mode.addr
+  %t916 = icmp eq i32 %t915, 2
+  br i1 %t916, label %L328_sc_rhs, label %L329_sc_short
 L328_sc_rhs:
-  %t911 = load i32, ptr %eff_gc.addr
-  %t912 = icmp eq i32 %t911, 3
+  %t917 = load i32, ptr %eff_gc.addr
+  %t918 = icmp eq i32 %t917, 2
+  br i1 %t918, label %L332_sc_short, label %L331_sc_rhs
+L331_sc_rhs:
+  %t919 = load i32, ptr %eff_gc.addr
+  %t920 = icmp eq i32 %t919, 3
+  br label %L333_sc_end
+L332_sc_short:
+  br label %L333_sc_end
+L333_sc_end:
+  %t921 = phi i1 [ %t920, %L331_sc_rhs ], [ true, %L332_sc_short ]
   br label %L330_sc_end
 L329_sc_short:
   br label %L330_sc_end
 L330_sc_end:
-  %t913 = phi i1 [ %t912, %L328_sc_rhs ], [ true, %L329_sc_short ]
-  br label %L327_sc_end
-L326_sc_short:
-  br label %L327_sc_end
-L327_sc_end:
-  %t914 = phi i1 [ %t913, %L330_sc_end ], [ false, %L326_sc_short ]
-  br i1 %t914, label %L331_then, label %L332_else
-L331_then:
-  %t915 = load ptr, ptr %src.addr
-  %t916 = load ptr, ptr %t.addr
-  %t917 = load ptr, ptr %out.addr
-  %t918 = load i32, ptr %o.addr
-  %t919 = load i32, ptr %ln_mode.addr
-  %t920 = load i32, ptr %ln_gc.addr
-  %t921 = call i32 @later_line(i32 %t919, i32 %t920)
-  %t922 = call i32 @sym_pub(ptr %t915, ptr %t916, ptr %t917, i32 %t918, i32 161, i32 %t921)
-  store i32 %t922, ptr %o.addr
-  br label %L333_end
-L332_else:
-  br label %L333_end
-L333_end:
-  %t923 = load i32, ptr %eff_mode.addr
-  %t924 = icmp eq i32 %t923, 2
-  br i1 %t924, label %L334_sc_rhs, label %L335_sc_short
-L334_sc_rhs:
-  %t925 = load i32, ptr %eff_port.addr
-  %t926 = icmp eq i32 %t925, 2
-  br label %L336_sc_end
-L335_sc_short:
-  br label %L336_sc_end
-L336_sc_end:
-  %t927 = phi i1 [ %t926, %L334_sc_rhs ], [ false, %L335_sc_short ]
-  br i1 %t927, label %L337_then, label %L338_else
-L337_then:
-  %t928 = load ptr, ptr %src.addr
-  %t929 = load ptr, ptr %t.addr
-  %t930 = load ptr, ptr %out.addr
-  %t931 = load i32, ptr %o.addr
-  %t932 = load i32, ptr %ln_mode.addr
-  %t933 = load i32, ptr %ln_port.addr
-  %t934 = call i32 @later_line(i32 %t932, i32 %t933)
-  %t935 = call i32 @sym_pub(ptr %t928, ptr %t929, ptr %t930, i32 %t931, i32 161, i32 %t934)
-  store i32 %t935, ptr %o.addr
-  br label %L339_end
-L338_else:
-  br label %L339_end
-L339_end:
-  %t936 = load i32, ptr %eff_gc.addr
-  %t937 = icmp eq i32 %t936, 2
-  br i1 %t937, label %L341_sc_short, label %L340_sc_rhs
-L340_sc_rhs:
-  %t938 = load i32, ptr %eff_gc.addr
-  %t939 = icmp eq i32 %t938, 3
-  br label %L342_sc_end
-L341_sc_short:
-  br label %L342_sc_end
-L342_sc_end:
-  %t940 = phi i1 [ %t939, %L340_sc_rhs ], [ true, %L341_sc_short ]
-  br i1 %t940, label %L343_sc_rhs, label %L344_sc_short
+  %t922 = phi i1 [ %t921, %L333_sc_end ], [ false, %L329_sc_short ]
+  br i1 %t922, label %L334_then, label %L335_else
+L334_then:
+  %t923 = load ptr, ptr %src.addr
+  %t924 = load ptr, ptr %t.addr
+  %t925 = load ptr, ptr %out.addr
+  %t926 = load i32, ptr %o.addr
+  %t927 = load i32, ptr %ln_mode.addr
+  %t928 = load i32, ptr %ln_gc.addr
+  %t929 = call i32 @later_line(i32 %t927, i32 %t928)
+  %t930 = call i32 @sym_pub(ptr %t923, ptr %t924, ptr %t925, i32 %t926, i32 161, i32 %t929)
+  store i32 %t930, ptr %o.addr
+  br label %L336_end
+L335_else:
+  br label %L336_end
+L336_end:
+  %t931 = load i32, ptr %eff_mode.addr
+  %t932 = icmp eq i32 %t931, 2
+  br i1 %t932, label %L337_sc_rhs, label %L338_sc_short
+L337_sc_rhs:
+  %t933 = load i32, ptr %eff_port.addr
+  %t934 = icmp eq i32 %t933, 2
+  br label %L339_sc_end
+L338_sc_short:
+  br label %L339_sc_end
+L339_sc_end:
+  %t935 = phi i1 [ %t934, %L337_sc_rhs ], [ false, %L338_sc_short ]
+  br i1 %t935, label %L340_then, label %L341_else
+L340_then:
+  %t936 = load ptr, ptr %src.addr
+  %t937 = load ptr, ptr %t.addr
+  %t938 = load ptr, ptr %out.addr
+  %t939 = load i32, ptr %o.addr
+  %t940 = load i32, ptr %ln_mode.addr
+  %t941 = load i32, ptr %ln_port.addr
+  %t942 = call i32 @later_line(i32 %t940, i32 %t941)
+  %t943 = call i32 @sym_pub(ptr %t936, ptr %t937, ptr %t938, i32 %t939, i32 161, i32 %t942)
+  store i32 %t943, ptr %o.addr
+  br label %L342_end
+L341_else:
+  br label %L342_end
+L342_end:
+  %t944 = load i32, ptr %eff_gc.addr
+  %t945 = icmp eq i32 %t944, 2
+  br i1 %t945, label %L344_sc_short, label %L343_sc_rhs
 L343_sc_rhs:
-  %t941 = load i32, ptr %eff_rt.addr
-  %t942 = icmp eq i32 %t941, 2
+  %t946 = load i32, ptr %eff_gc.addr
+  %t947 = icmp eq i32 %t946, 3
   br label %L345_sc_end
 L344_sc_short:
   br label %L345_sc_end
 L345_sc_end:
-  %t943 = phi i1 [ %t942, %L343_sc_rhs ], [ false, %L344_sc_short ]
-  br i1 %t943, label %L346_then, label %L347_else
-L346_then:
-  %t944 = load ptr, ptr %src.addr
-  %t945 = load ptr, ptr %t.addr
-  %t946 = load ptr, ptr %out.addr
-  %t947 = load i32, ptr %o.addr
-  %t948 = load i32, ptr %ln_gc.addr
-  %t949 = load i32, ptr %ln_rt.addr
-  %t950 = call i32 @later_line(i32 %t948, i32 %t949)
-  %t951 = call i32 @sym_pub(ptr %t944, ptr %t945, ptr %t946, i32 %t947, i32 161, i32 %t950)
-  store i32 %t951, ptr %o.addr
-  br label %L348_end
-L347_else:
-  br label %L348_end
-L348_end:
-  %t952 = load i32, ptr %eff_rt.addr
-  %t953 = icmp eq i32 %t952, 2
-  br i1 %t953, label %L349_then, label %L350_else
+  %t948 = phi i1 [ %t947, %L343_sc_rhs ], [ true, %L344_sc_short ]
+  br i1 %t948, label %L346_sc_rhs, label %L347_sc_short
+L346_sc_rhs:
+  %t949 = load i32, ptr %eff_rt.addr
+  %t950 = icmp eq i32 %t949, 2
+  br label %L348_sc_end
+L347_sc_short:
+  br label %L348_sc_end
+L348_sc_end:
+  %t951 = phi i1 [ %t950, %L346_sc_rhs ], [ false, %L347_sc_short ]
+  br i1 %t951, label %L349_then, label %L350_else
 L349_then:
-  store i32 0, ptr %jr.addr
-  store i32 4294967295, ptr %hit.addr
-  store i32 0, ptr %nsites.addr
-  br label %L352_wcond
-L352_wcond:
-  %t954 = load ptr, ptr %t.addr
-  %t955 = load i32, ptr %jr.addr
-  %t956 = call i32 @chk_tok_kind(ptr %t954, i32 %t955)
-  %t957 = icmp ne i32 %t956, 4
-  br i1 %t957, label %L353_wbody, label %L354_wend
-L353_wbody:
-  %t958 = load ptr, ptr %src.addr
-  %t959 = load ptr, ptr %t.addr
-  %t960 = load i32, ptr %jr.addr
-  %t961 = load ptr, ptr %oc.addr
-  %t962 = call i32 @load32(ptr %t961, i32 8)
-  %t963 = call i32 @chk_rt_site(ptr %t958, ptr %t959, i32 %t960, i32 %t962)
-  %t964 = icmp eq i32 %t963, 1
-  br i1 %t964, label %L355_then, label %L356_else
-L355_then:
-  %t965 = load i32, ptr %nsites.addr
-  %t966 = icmp eq i32 %t965, 0
-  br i1 %t966, label %L358_then, label %L359_else
-L358_then:
-  %t967 = load i32, ptr %jr.addr
-  store i32 %t967, ptr %hit.addr
-  br label %L360_end
-L359_else:
-  br label %L360_end
-L360_end:
-  %t968 = load i32, ptr %nsites.addr
-  %t969 = add i32 %t968, 1
-  store i32 %t969, ptr %nsites.addr
-  br label %L357_end
-L356_else:
-  br label %L357_end
-L357_end:
-  %t970 = load i32, ptr %jr.addr
-  %t971 = add i32 %t970, 1
-  store i32 %t971, ptr %jr.addr
-  br label %L352_wcond
-L354_wend:
-  %t972 = load ptr, ptr %tyt.addr
-  %t973 = load i32, ptr %nsites.addr
-  call void @store32(ptr %t972, i32 4100, i32 %t973)
-  %t974 = load i32, ptr %nsites.addr
-  %t975 = icmp ugt i32 %t974, 0
-  br i1 %t975, label %L361_then, label %L362_else
-L361_then:
-  %t976 = load ptr, ptr %src.addr
-  %t977 = load ptr, ptr %t.addr
-  %t978 = load ptr, ptr %out.addr
-  %t979 = load i32, ptr %o.addr
-  %t980 = load i32, ptr %hit.addr
-  %t981 = call i32 @sym_pub(ptr %t976, ptr %t977, ptr %t978, i32 %t979, i32 208, i32 %t980)
-  store i32 %t981, ptr %o.addr
-  br label %L363_end
-L362_else:
-  br label %L363_end
-L363_end:
+  %t952 = load ptr, ptr %src.addr
+  %t953 = load ptr, ptr %t.addr
+  %t954 = load ptr, ptr %out.addr
+  %t955 = load i32, ptr %o.addr
+  %t956 = load i32, ptr %ln_gc.addr
+  %t957 = load i32, ptr %ln_rt.addr
+  %t958 = call i32 @later_line(i32 %t956, i32 %t957)
+  %t959 = call i32 @sym_pub(ptr %t952, ptr %t953, ptr %t954, i32 %t955, i32 161, i32 %t958)
+  store i32 %t959, ptr %o.addr
   br label %L351_end
 L350_else:
   br label %L351_end
 L351_end:
-  %t982 = load i32, ptr %eff_gc.addr
-  %t983 = icmp eq i32 %t982, 3
-  br i1 %t983, label %L364_sc_rhs, label %L365_sc_short
-L364_sc_rhs:
-  %t984 = load i32, ptr %eff_port.addr
-  %t985 = icmp eq i32 %t984, 2
-  br label %L366_sc_end
-L365_sc_short:
-  br label %L366_sc_end
-L366_sc_end:
-  %t986 = phi i1 [ %t985, %L364_sc_rhs ], [ false, %L365_sc_short ]
-  br i1 %t986, label %L367_then, label %L368_else
-L367_then:
-  %t987 = load ptr, ptr %src.addr
-  %t988 = load ptr, ptr %t.addr
-  %t989 = load ptr, ptr %out.addr
-  %t990 = load i32, ptr %o.addr
-  %t991 = load i32, ptr %ln_gc.addr
-  %t992 = load i32, ptr %ln_port.addr
-  %t993 = call i32 @later_line(i32 %t991, i32 %t992)
-  %t994 = call i32 @sym_pub(ptr %t987, ptr %t988, ptr %t989, i32 %t990, i32 161, i32 %t993)
-  store i32 %t994, ptr %o.addr
-  br label %L369_end
-L368_else:
-  br label %L369_end
-L369_end:
-  %t995 = load i32, ptr %eff_gc.addr
-  %t996 = icmp eq i32 %t995, 4
-  br i1 %t996, label %L370_sc_rhs, label %L371_sc_short
-L370_sc_rhs:
-  %t997 = load ptr, ptr %oc.addr
-  %t998 = call i32 @load32(ptr %t997, i32 8)
-  %t999 = icmp eq i32 %t998, 2
-  br label %L372_sc_end
-L371_sc_short:
-  br label %L372_sc_end
-L372_sc_end:
-  %t1000 = phi i1 [ %t999, %L370_sc_rhs ], [ false, %L371_sc_short ]
-  br i1 %t1000, label %L373_then, label %L374_else
-L373_then:
+  %t960 = load i32, ptr %eff_rt.addr
+  %t961 = icmp eq i32 %t960, 2
+  br i1 %t961, label %L352_then, label %L353_else
+L352_then:
+  store i32 0, ptr %jr.addr
+  store i32 4294967295, ptr %hit.addr
+  store i32 0, ptr %nsites.addr
+  br label %L355_wcond
+L355_wcond:
+  %t962 = load ptr, ptr %t.addr
+  %t963 = load i32, ptr %jr.addr
+  %t964 = call i32 @chk_tok_kind(ptr %t962, i32 %t963)
+  %t965 = icmp ne i32 %t964, 4
+  br i1 %t965, label %L356_wbody, label %L357_wend
+L356_wbody:
+  %t966 = load ptr, ptr %src.addr
+  %t967 = load ptr, ptr %t.addr
+  %t968 = load i32, ptr %jr.addr
+  %t969 = load ptr, ptr %oc.addr
+  %t970 = call i32 @load32(ptr %t969, i32 8)
+  %t971 = call i32 @chk_rt_site(ptr %t966, ptr %t967, i32 %t968, i32 %t970)
+  %t972 = icmp eq i32 %t971, 1
+  br i1 %t972, label %L358_then, label %L359_else
+L358_then:
+  %t973 = load i32, ptr %nsites.addr
+  %t974 = icmp eq i32 %t973, 0
+  br i1 %t974, label %L361_then, label %L362_else
+L361_then:
+  %t975 = load i32, ptr %jr.addr
+  store i32 %t975, ptr %hit.addr
+  br label %L363_end
+L362_else:
+  br label %L363_end
+L363_end:
+  %t976 = load i32, ptr %nsites.addr
+  %t977 = add i32 %t976, 1
+  store i32 %t977, ptr %nsites.addr
+  br label %L360_end
+L359_else:
+  br label %L360_end
+L360_end:
+  %t978 = load i32, ptr %jr.addr
+  %t979 = add i32 %t978, 1
+  store i32 %t979, ptr %jr.addr
+  br label %L355_wcond
+L357_wend:
+  %t980 = load ptr, ptr %tyt.addr
+  %t981 = load i32, ptr %nsites.addr
+  call void @store32(ptr %t980, i32 4100, i32 %t981)
+  %t982 = load i32, ptr %nsites.addr
+  %t983 = icmp ugt i32 %t982, 0
+  br i1 %t983, label %L364_then, label %L365_else
+L364_then:
+  %t984 = load ptr, ptr %src.addr
+  %t985 = load ptr, ptr %t.addr
+  %t986 = load ptr, ptr %out.addr
+  %t987 = load i32, ptr %o.addr
+  %t988 = load i32, ptr %hit.addr
+  %t989 = call i32 @sym_pub(ptr %t984, ptr %t985, ptr %t986, i32 %t987, i32 208, i32 %t988)
+  store i32 %t989, ptr %o.addr
+  br label %L366_end
+L365_else:
+  br label %L366_end
+L366_end:
+  br label %L354_end
+L353_else:
+  br label %L354_end
+L354_end:
+  %t990 = load i32, ptr %eff_gc.addr
+  %t991 = icmp eq i32 %t990, 3
+  br i1 %t991, label %L367_sc_rhs, label %L368_sc_short
+L367_sc_rhs:
+  %t992 = load i32, ptr %eff_port.addr
+  %t993 = icmp eq i32 %t992, 2
+  br label %L369_sc_end
+L368_sc_short:
+  br label %L369_sc_end
+L369_sc_end:
+  %t994 = phi i1 [ %t993, %L367_sc_rhs ], [ false, %L368_sc_short ]
+  br i1 %t994, label %L370_then, label %L371_else
+L370_then:
+  %t995 = load ptr, ptr %src.addr
+  %t996 = load ptr, ptr %t.addr
+  %t997 = load ptr, ptr %out.addr
+  %t998 = load i32, ptr %o.addr
+  %t999 = load i32, ptr %ln_gc.addr
+  %t1000 = load i32, ptr %ln_port.addr
+  %t1001 = call i32 @later_line(i32 %t999, i32 %t1000)
+  %t1002 = call i32 @sym_pub(ptr %t995, ptr %t996, ptr %t997, i32 %t998, i32 161, i32 %t1001)
+  store i32 %t1002, ptr %o.addr
+  br label %L372_end
+L371_else:
+  br label %L372_end
+L372_end:
+  %t1003 = load i32, ptr %eff_gc.addr
+  %t1004 = icmp eq i32 %t1003, 4
+  br i1 %t1004, label %L373_sc_rhs, label %L374_sc_short
+L373_sc_rhs:
+  %t1005 = load ptr, ptr %oc.addr
+  %t1006 = call i32 @load32(ptr %t1005, i32 8)
+  %t1007 = icmp eq i32 %t1006, 2
+  br label %L375_sc_end
+L374_sc_short:
+  br label %L375_sc_end
+L375_sc_end:
+  %t1008 = phi i1 [ %t1007, %L373_sc_rhs ], [ false, %L374_sc_short ]
+  br i1 %t1008, label %L376_then, label %L377_else
+L376_then:
   store i32 0, ptr %gl.addr
   store i32 0, ptr %ghit.addr
-  br label %L376_wcond
-L376_wcond:
-  %t1001 = load ptr, ptr %t.addr
-  %t1002 = load i32, ptr %gl.addr
-  %t1003 = call i32 @chk_tok_kind(ptr %t1001, i32 %t1002)
-  %t1004 = icmp ne i32 %t1003, 4
-  br i1 %t1004, label %L379_sc_rhs, label %L380_sc_short
-L379_sc_rhs:
-  %t1005 = load i32, ptr %ghit.addr
-  %t1006 = icmp eq i32 %t1005, 0
-  br label %L381_sc_end
-L380_sc_short:
-  br label %L381_sc_end
-L381_sc_end:
-  %t1007 = phi i1 [ %t1006, %L379_sc_rhs ], [ false, %L380_sc_short ]
-  br i1 %t1007, label %L377_wbody, label %L378_wend
-L377_wbody:
-  %t1008 = load ptr, ptr %t.addr
-  %t1009 = load i32, ptr %gl.addr
-  %t1010 = call i32 @chk_tok_kind(ptr %t1008, i32 %t1009)
-  %t1011 = icmp eq i32 %t1010, 0
-  br i1 %t1011, label %L382_sc_rhs, label %L383_sc_short
+  br label %L379_wcond
+L379_wcond:
+  %t1009 = load ptr, ptr %t.addr
+  %t1010 = load i32, ptr %gl.addr
+  %t1011 = call i32 @chk_tok_kind(ptr %t1009, i32 %t1010)
+  %t1012 = icmp ne i32 %t1011, 4
+  br i1 %t1012, label %L382_sc_rhs, label %L383_sc_short
 L382_sc_rhs:
-  %t1012 = load ptr, ptr %src.addr
-  %t1013 = load ptr, ptr %t.addr
-  %t1014 = load i32, ptr %gl.addr
-  %t1015 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.25, i64 0, i64 0
-  %t1016 = insertvalue { ptr, i64 } undef, ptr %t1015, 0
-  %t1017 = insertvalue { ptr, i64 } %t1016, i64 3, 1
-  %t1018 = call i1 @chk_tok_is(ptr %t1012, ptr %t1013, i32 %t1014, { ptr, i64 } %t1017)
+  %t1013 = load i32, ptr %ghit.addr
+  %t1014 = icmp eq i32 %t1013, 0
   br label %L384_sc_end
 L383_sc_short:
   br label %L384_sc_end
 L384_sc_end:
-  %t1019 = phi i1 [ %t1018, %L382_sc_rhs ], [ false, %L383_sc_short ]
+  %t1015 = phi i1 [ %t1014, %L382_sc_rhs ], [ false, %L383_sc_short ]
+  br i1 %t1015, label %L380_wbody, label %L381_wend
+L380_wbody:
+  %t1016 = load ptr, ptr %t.addr
+  %t1017 = load i32, ptr %gl.addr
+  %t1018 = call i32 @chk_tok_kind(ptr %t1016, i32 %t1017)
+  %t1019 = icmp eq i32 %t1018, 0
   br i1 %t1019, label %L385_sc_rhs, label %L386_sc_short
 L385_sc_rhs:
-  %t1020 = load ptr, ptr %t.addr
-  %t1021 = load i32, ptr %gl.addr
-  %t1022 = add i32 %t1021, 1
-  %t1023 = call i32 @chk_tok_kind(ptr %t1020, i32 %t1022)
-  %t1024 = icmp eq i32 %t1023, 0
+  %t1020 = load ptr, ptr %src.addr
+  %t1021 = load ptr, ptr %t.addr
+  %t1022 = load i32, ptr %gl.addr
+  %t1023 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.25, i64 0, i64 0
+  %t1024 = insertvalue { ptr, i64 } undef, ptr %t1023, 0
+  %t1025 = insertvalue { ptr, i64 } %t1024, i64 3, 1
+  %t1026 = call i1 @chk_tok_is(ptr %t1020, ptr %t1021, i32 %t1022, { ptr, i64 } %t1025)
   br label %L387_sc_end
 L386_sc_short:
   br label %L387_sc_end
 L387_sc_end:
-  %t1025 = phi i1 [ %t1024, %L385_sc_rhs ], [ false, %L386_sc_short ]
-  br i1 %t1025, label %L388_sc_rhs, label %L389_sc_short
+  %t1027 = phi i1 [ %t1026, %L385_sc_rhs ], [ false, %L386_sc_short ]
+  br i1 %t1027, label %L388_sc_rhs, label %L389_sc_short
 L388_sc_rhs:
-  %t1026 = load ptr, ptr %src.addr
-  %t1027 = load ptr, ptr %t.addr
-  %t1028 = load i32, ptr %gl.addr
-  %t1029 = add i32 %t1028, 1
-  %t1030 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.26, i64 0, i64 0
-  %t1031 = insertvalue { ptr, i64 } undef, ptr %t1030, 0
-  %t1032 = insertvalue { ptr, i64 } %t1031, i64 5, 1
-  %t1033 = call i1 @chk_tok_is(ptr %t1026, ptr %t1027, i32 %t1029, { ptr, i64 } %t1032)
-  br i1 %t1033, label %L392_sc_short, label %L391_sc_rhs
+  %t1028 = load ptr, ptr %t.addr
+  %t1029 = load i32, ptr %gl.addr
+  %t1030 = add i32 %t1029, 1
+  %t1031 = call i32 @chk_tok_kind(ptr %t1028, i32 %t1030)
+  %t1032 = icmp eq i32 %t1031, 0
+  br label %L390_sc_end
+L389_sc_short:
+  br label %L390_sc_end
+L390_sc_end:
+  %t1033 = phi i1 [ %t1032, %L388_sc_rhs ], [ false, %L389_sc_short ]
+  br i1 %t1033, label %L391_sc_rhs, label %L392_sc_short
 L391_sc_rhs:
   %t1034 = load ptr, ptr %src.addr
   %t1035 = load ptr, ptr %t.addr
   %t1036 = load i32, ptr %gl.addr
   %t1037 = add i32 %t1036, 1
-  %t1038 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.27, i64 0, i64 0
+  %t1038 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.26, i64 0, i64 0
   %t1039 = insertvalue { ptr, i64 } undef, ptr %t1038, 0
-  %t1040 = insertvalue { ptr, i64 } %t1039, i64 3, 1
+  %t1040 = insertvalue { ptr, i64 } %t1039, i64 5, 1
   %t1041 = call i1 @chk_tok_is(ptr %t1034, ptr %t1035, i32 %t1037, { ptr, i64 } %t1040)
+  br i1 %t1041, label %L395_sc_short, label %L394_sc_rhs
+L394_sc_rhs:
+  %t1042 = load ptr, ptr %src.addr
+  %t1043 = load ptr, ptr %t.addr
+  %t1044 = load i32, ptr %gl.addr
+  %t1045 = add i32 %t1044, 1
+  %t1046 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.27, i64 0, i64 0
+  %t1047 = insertvalue { ptr, i64 } undef, ptr %t1046, 0
+  %t1048 = insertvalue { ptr, i64 } %t1047, i64 3, 1
+  %t1049 = call i1 @chk_tok_is(ptr %t1042, ptr %t1043, i32 %t1045, { ptr, i64 } %t1048)
+  br label %L396_sc_end
+L395_sc_short:
+  br label %L396_sc_end
+L396_sc_end:
+  %t1050 = phi i1 [ %t1049, %L394_sc_rhs ], [ true, %L395_sc_short ]
   br label %L393_sc_end
 L392_sc_short:
   br label %L393_sc_end
 L393_sc_end:
-  %t1042 = phi i1 [ %t1041, %L391_sc_rhs ], [ true, %L392_sc_short ]
-  br label %L390_sc_end
-L389_sc_short:
-  br label %L390_sc_end
-L390_sc_end:
-  %t1043 = phi i1 [ %t1042, %L393_sc_end ], [ false, %L389_sc_short ]
-  br i1 %t1043, label %L394_then, label %L395_else
-L394_then:
-  %t1044 = load ptr, ptr %src.addr
-  %t1045 = load ptr, ptr %t.addr
-  %t1046 = load ptr, ptr %out.addr
-  %t1047 = load i32, ptr %o.addr
-  %t1048 = load i32, ptr %gl.addr
-  %t1049 = call i32 @sym_pub(ptr %t1044, ptr %t1045, ptr %t1046, i32 %t1047, i32 189, i32 %t1048)
-  store i32 %t1049, ptr %o.addr
-  store i32 1, ptr %ghit.addr
-  br label %L396_end
-L395_else:
-  br label %L396_end
-L396_end:
-  %t1050 = load i32, ptr %gl.addr
-  %t1051 = add i32 %t1050, 1
-  store i32 %t1051, ptr %gl.addr
-  br label %L376_wcond
-L378_wend:
-  br label %L375_end
-L374_else:
-  br label %L375_end
-L375_end:
-  %t1052 = load ptr, ptr %oc.addr
-  call void @store32(ptr %t1052, i32 12, i32 0)
-  %t1053 = load i32, ptr %v_fp.addr
-  %t1054 = icmp eq i32 %t1053, 2
-  br i1 %t1054, label %L397_then, label %L398_else
+  %t1051 = phi i1 [ %t1050, %L396_sc_end ], [ false, %L392_sc_short ]
+  br i1 %t1051, label %L397_then, label %L398_else
 L397_then:
-  %t1055 = load ptr, ptr %oc.addr
-  call void @store32(ptr %t1055, i32 12, i32 1)
+  %t1052 = load ptr, ptr %src.addr
+  %t1053 = load ptr, ptr %t.addr
+  %t1054 = load ptr, ptr %out.addr
+  %t1055 = load i32, ptr %o.addr
+  %t1056 = load i32, ptr %gl.addr
+  %t1057 = call i32 @sym_pub(ptr %t1052, ptr %t1053, ptr %t1054, i32 %t1055, i32 189, i32 %t1056)
+  store i32 %t1057, ptr %o.addr
+  store i32 1, ptr %ghit.addr
   br label %L399_end
 L398_else:
   br label %L399_end
 L399_end:
-  %t1056 = load ptr, ptr %src.addr
-  %t1057 = load ptr, ptr %t.addr
-  %t1058 = load ptr, ptr %ctab.addr
-  %t1059 = load ptr, ptr %nc.addr
-  %t1060 = call i32 @load32(ptr %t1059, i32 0)
-  %t1061 = load ptr, ptr %exs.addr
-  %t1062 = load i32, ptr %nexs.addr
-  %t1063 = load ptr, ptr %out.addr
-  %t1064 = load i32, ptr %o.addr
-  %t1065 = call i32 @chk_caps_verify(ptr %t1056, ptr %t1057, ptr %t1058, i32 %t1060, ptr %t1061, i32 %t1062, ptr %t1063, i32 %t1064)
-  store i32 %t1065, ptr %o.addr
+  %t1058 = load i32, ptr %gl.addr
+  %t1059 = add i32 %t1058, 1
+  store i32 %t1059, ptr %gl.addr
+  br label %L379_wcond
+L381_wend:
+  br label %L378_end
+L377_else:
+  br label %L378_end
+L378_end:
+  %t1060 = load ptr, ptr %oc.addr
+  call void @store32(ptr %t1060, i32 12, i32 0)
+  %t1061 = load i32, ptr %v_fp.addr
+  %t1062 = icmp eq i32 %t1061, 2
+  br i1 %t1062, label %L400_then, label %L401_else
+L400_then:
+  %t1063 = load ptr, ptr %oc.addr
+  call void @store32(ptr %t1063, i32 12, i32 1)
+  br label %L402_end
+L401_else:
+  br label %L402_end
+L402_end:
+  %t1064 = load ptr, ptr %src.addr
+  %t1065 = load ptr, ptr %t.addr
+  %t1066 = load ptr, ptr %ctab.addr
+  %t1067 = load ptr, ptr %nc.addr
+  %t1068 = call i32 @load32(ptr %t1067, i32 0)
+  %t1069 = load ptr, ptr %exs.addr
+  %t1070 = load i32, ptr %nexs.addr
+  %t1071 = load ptr, ptr %out.addr
+  %t1072 = load i32, ptr %o.addr
+  %t1073 = call i32 @chk_caps_verify(ptr %t1064, ptr %t1065, ptr %t1066, i32 %t1068, ptr %t1069, i32 %t1070, ptr %t1071, i32 %t1072)
+  store i32 %t1073, ptr %o.addr
   store i32 0, ptr %i.addr
-  br label %L400_wcond
-L400_wcond:
-  %t1066 = load ptr, ptr %t.addr
-  %t1067 = load i32, ptr %i.addr
-  %t1068 = call i32 @chk_tok_kind(ptr %t1066, i32 %t1067)
-  %t1069 = icmp ne i32 %t1068, 4
-  br i1 %t1069, label %L401_wbody, label %L402_wend
-L401_wbody:
+  br label %L403_wcond
+L403_wcond:
+  %t1074 = load ptr, ptr %t.addr
+  %t1075 = load i32, ptr %i.addr
+  %t1076 = call i32 @chk_tok_kind(ptr %t1074, i32 %t1075)
+  %t1077 = icmp ne i32 %t1076, 4
+  br i1 %t1077, label %L404_wbody, label %L405_wend
+L404_wbody:
   store i32 0, ptr %skipped.addr
-  %t1070 = load ptr, ptr %src.addr
-  %t1071 = load ptr, ptr %t.addr
-  %t1072 = load i32, ptr %i.addr
-  %t1073 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.28, i64 0, i64 0
-  %t1074 = insertvalue { ptr, i64 } undef, ptr %t1073, 0
-  %t1075 = insertvalue { ptr, i64 } %t1074, i64 4, 1
-  %t1076 = call i1 @chk_tok_is(ptr %t1070, ptr %t1071, i32 %t1072, { ptr, i64 } %t1075)
-  br i1 %t1076, label %L404_sc_short, label %L403_sc_rhs
-L403_sc_rhs:
-  %t1077 = load ptr, ptr %src.addr
-  %t1078 = load ptr, ptr %t.addr
-  %t1079 = load i32, ptr %i.addr
-  %t1080 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.29, i64 0, i64 0
-  %t1081 = insertvalue { ptr, i64 } undef, ptr %t1080, 0
-  %t1082 = insertvalue { ptr, i64 } %t1081, i64 6, 1
-  %t1083 = call i1 @chk_tok_is(ptr %t1077, ptr %t1078, i32 %t1079, { ptr, i64 } %t1082)
-  br label %L405_sc_end
-L404_sc_short:
-  br label %L405_sc_end
-L405_sc_end:
-  %t1084 = phi i1 [ %t1083, %L403_sc_rhs ], [ true, %L404_sc_short ]
+  %t1078 = load ptr, ptr %src.addr
+  %t1079 = load ptr, ptr %t.addr
+  %t1080 = load i32, ptr %i.addr
+  %t1081 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.28, i64 0, i64 0
+  %t1082 = insertvalue { ptr, i64 } undef, ptr %t1081, 0
+  %t1083 = insertvalue { ptr, i64 } %t1082, i64 4, 1
+  %t1084 = call i1 @chk_tok_is(ptr %t1078, ptr %t1079, i32 %t1080, { ptr, i64 } %t1083)
   br i1 %t1084, label %L407_sc_short, label %L406_sc_rhs
 L406_sc_rhs:
   %t1085 = load ptr, ptr %src.addr
   %t1086 = load ptr, ptr %t.addr
   %t1087 = load i32, ptr %i.addr
-  %t1088 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.30, i64 0, i64 0
+  %t1088 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.29, i64 0, i64 0
   %t1089 = insertvalue { ptr, i64 } undef, ptr %t1088, 0
-  %t1090 = insertvalue { ptr, i64 } %t1089, i64 5, 1
+  %t1090 = insertvalue { ptr, i64 } %t1089, i64 6, 1
   %t1091 = call i1 @chk_tok_is(ptr %t1085, ptr %t1086, i32 %t1087, { ptr, i64 } %t1090)
   br label %L408_sc_end
 L407_sc_short:
   br label %L408_sc_end
 L408_sc_end:
   %t1092 = phi i1 [ %t1091, %L406_sc_rhs ], [ true, %L407_sc_short ]
-  br i1 %t1092, label %L409_then, label %L410_else
-L409_then:
+  br i1 %t1092, label %L410_sc_short, label %L409_sc_rhs
+L409_sc_rhs:
   %t1093 = load ptr, ptr %src.addr
   %t1094 = load ptr, ptr %t.addr
   %t1095 = load i32, ptr %i.addr
-  %t1096 = call i32 @chk_skip_body(ptr %t1093, ptr %t1094, i32 %t1095)
-  store i32 %t1096, ptr %i.addr
-  store i32 1, ptr %skipped.addr
-  br label %L411_end
-L410_else:
-  br label %L411_end
-L411_end:
-  %t1097 = load ptr, ptr %src.addr
-  %t1098 = load ptr, ptr %t.addr
-  %t1099 = load i32, ptr %i.addr
-  %t1100 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.31, i64 0, i64 0
-  %t1101 = insertvalue { ptr, i64 } undef, ptr %t1100, 0
-  %t1102 = insertvalue { ptr, i64 } %t1101, i64 10, 1
-  %t1103 = call i1 @chk_tok_is(ptr %t1097, ptr %t1098, i32 %t1099, { ptr, i64 } %t1102)
-  br i1 %t1103, label %L412_then, label %L413_else
+  %t1096 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.30, i64 0, i64 0
+  %t1097 = insertvalue { ptr, i64 } undef, ptr %t1096, 0
+  %t1098 = insertvalue { ptr, i64 } %t1097, i64 5, 1
+  %t1099 = call i1 @chk_tok_is(ptr %t1093, ptr %t1094, i32 %t1095, { ptr, i64 } %t1098)
+  br label %L411_sc_end
+L410_sc_short:
+  br label %L411_sc_end
+L411_sc_end:
+  %t1100 = phi i1 [ %t1099, %L409_sc_rhs ], [ true, %L410_sc_short ]
+  br i1 %t1100, label %L412_then, label %L413_else
 L412_then:
-  %t1104 = load ptr, ptr %src.addr
-  %t1105 = load ptr, ptr %t.addr
-  %t1106 = load i32, ptr %i.addr
-  %t1107 = call i32 @chk_cap_end(ptr %t1104, ptr %t1105, i32 %t1106)
-  store i32 %t1107, ptr %i.addr
+  %t1101 = load ptr, ptr %src.addr
+  %t1102 = load ptr, ptr %t.addr
+  %t1103 = load i32, ptr %i.addr
+  %t1104 = call i32 @chk_skip_body(ptr %t1101, ptr %t1102, i32 %t1103)
+  store i32 %t1104, ptr %i.addr
   store i32 1, ptr %skipped.addr
   br label %L414_end
 L413_else:
   br label %L414_end
 L414_end:
-  %t1108 = load ptr, ptr %src.addr
-  %t1109 = load ptr, ptr %t.addr
-  %t1110 = load i32, ptr %i.addr
-  %t1111 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.32, i64 0, i64 0
-  %t1112 = insertvalue { ptr, i64 } undef, ptr %t1111, 0
-  %t1113 = insertvalue { ptr, i64 } %t1112, i64 6, 1
-  %t1114 = call i1 @chk_tok_is(ptr %t1108, ptr %t1109, i32 %t1110, { ptr, i64 } %t1113)
-  br i1 %t1114, label %L415_sc_rhs, label %L416_sc_short
-L415_sc_rhs:
-  %t1115 = load ptr, ptr %src.addr
-  %t1116 = load ptr, ptr %t.addr
-  %t1117 = load i32, ptr %i.addr
-  %t1118 = call i32 @chk_is_dom_block(ptr %t1115, ptr %t1116, i32 %t1117)
-  %t1119 = icmp eq i32 %t1118, 1
-  br label %L417_sc_end
-L416_sc_short:
-  br label %L417_sc_end
-L417_sc_end:
-  %t1120 = phi i1 [ %t1119, %L415_sc_rhs ], [ false, %L416_sc_short ]
-  br i1 %t1120, label %L418_then, label %L419_else
-L418_then:
-  br label %L421_wcond
-L421_wcond:
-  %t1121 = load ptr, ptr %t.addr
-  %t1122 = load i32, ptr %i.addr
-  %t1123 = call i32 @chk_tok_kind(ptr %t1121, i32 %t1122)
-  %t1124 = icmp ne i32 %t1123, 4
-  br i1 %t1124, label %L424_sc_rhs, label %L425_sc_short
-L424_sc_rhs:
-  %t1125 = load ptr, ptr %src.addr
-  %t1126 = load ptr, ptr %t.addr
-  %t1127 = load i32, ptr %i.addr
-  %t1128 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.33, i64 0, i64 0
-  %t1129 = insertvalue { ptr, i64 } undef, ptr %t1128, 0
-  %t1130 = insertvalue { ptr, i64 } %t1129, i64 1, 1
-  %t1131 = call i1 @chk_tok_is(ptr %t1125, ptr %t1126, i32 %t1127, { ptr, i64 } %t1130)
-  %t1132 = xor i1 %t1131, true
-  br label %L426_sc_end
-L425_sc_short:
-  br label %L426_sc_end
-L426_sc_end:
-  %t1133 = phi i1 [ %t1132, %L424_sc_rhs ], [ false, %L425_sc_short ]
-  br i1 %t1133, label %L422_wbody, label %L423_wend
-L422_wbody:
-  %t1134 = load i32, ptr %i.addr
-  %t1135 = add i32 %t1134, 1
-  store i32 %t1135, ptr %i.addr
-  br label %L421_wcond
-L423_wend:
+  %t1105 = load ptr, ptr %src.addr
+  %t1106 = load ptr, ptr %t.addr
+  %t1107 = load i32, ptr %i.addr
+  %t1108 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.31, i64 0, i64 0
+  %t1109 = insertvalue { ptr, i64 } undef, ptr %t1108, 0
+  %t1110 = insertvalue { ptr, i64 } %t1109, i64 10, 1
+  %t1111 = call i1 @chk_tok_is(ptr %t1105, ptr %t1106, i32 %t1107, { ptr, i64 } %t1110)
+  br i1 %t1111, label %L415_then, label %L416_else
+L415_then:
+  %t1112 = load ptr, ptr %src.addr
+  %t1113 = load ptr, ptr %t.addr
+  %t1114 = load i32, ptr %i.addr
+  %t1115 = call i32 @chk_cap_end(ptr %t1112, ptr %t1113, i32 %t1114)
+  store i32 %t1115, ptr %i.addr
   store i32 1, ptr %skipped.addr
-  br label %L420_end
-L419_else:
-  br label %L420_end
-L420_end:
-  %t1136 = load ptr, ptr %src.addr
-  %t1137 = load ptr, ptr %t.addr
-  %t1138 = load i32, ptr %i.addr
-  %t1139 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.34, i64 0, i64 0
-  %t1140 = insertvalue { ptr, i64 } undef, ptr %t1139, 0
-  %t1141 = insertvalue { ptr, i64 } %t1140, i64 6, 1
-  %t1142 = call i1 @chk_tok_is(ptr %t1136, ptr %t1137, i32 %t1138, { ptr, i64 } %t1141)
-  br i1 %t1142, label %L427_sc_rhs, label %L428_sc_short
+  br label %L417_end
+L416_else:
+  br label %L417_end
+L417_end:
+  %t1116 = load ptr, ptr %src.addr
+  %t1117 = load ptr, ptr %t.addr
+  %t1118 = load i32, ptr %i.addr
+  %t1119 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.32, i64 0, i64 0
+  %t1120 = insertvalue { ptr, i64 } undef, ptr %t1119, 0
+  %t1121 = insertvalue { ptr, i64 } %t1120, i64 6, 1
+  %t1122 = call i1 @chk_tok_is(ptr %t1116, ptr %t1117, i32 %t1118, { ptr, i64 } %t1121)
+  br i1 %t1122, label %L418_sc_rhs, label %L419_sc_short
+L418_sc_rhs:
+  %t1123 = load ptr, ptr %src.addr
+  %t1124 = load ptr, ptr %t.addr
+  %t1125 = load i32, ptr %i.addr
+  %t1126 = call i32 @chk_is_dom_block(ptr %t1123, ptr %t1124, i32 %t1125)
+  %t1127 = icmp eq i32 %t1126, 1
+  br label %L420_sc_end
+L419_sc_short:
+  br label %L420_sc_end
+L420_sc_end:
+  %t1128 = phi i1 [ %t1127, %L418_sc_rhs ], [ false, %L419_sc_short ]
+  br i1 %t1128, label %L421_then, label %L422_else
+L421_then:
+  br label %L424_wcond
+L424_wcond:
+  %t1129 = load ptr, ptr %t.addr
+  %t1130 = load i32, ptr %i.addr
+  %t1131 = call i32 @chk_tok_kind(ptr %t1129, i32 %t1130)
+  %t1132 = icmp ne i32 %t1131, 4
+  br i1 %t1132, label %L427_sc_rhs, label %L428_sc_short
 L427_sc_rhs:
-  %t1143 = load ptr, ptr %src.addr
-  %t1144 = load ptr, ptr %t.addr
-  %t1145 = load i32, ptr %i.addr
-  %t1146 = call i32 @chk_is_dom_for(ptr %t1143, ptr %t1144, i32 %t1145)
-  %t1147 = icmp eq i32 %t1146, 1
+  %t1133 = load ptr, ptr %src.addr
+  %t1134 = load ptr, ptr %t.addr
+  %t1135 = load i32, ptr %i.addr
+  %t1136 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.33, i64 0, i64 0
+  %t1137 = insertvalue { ptr, i64 } undef, ptr %t1136, 0
+  %t1138 = insertvalue { ptr, i64 } %t1137, i64 1, 1
+  %t1139 = call i1 @chk_tok_is(ptr %t1133, ptr %t1134, i32 %t1135, { ptr, i64 } %t1138)
+  %t1140 = xor i1 %t1139, true
   br label %L429_sc_end
 L428_sc_short:
   br label %L429_sc_end
 L429_sc_end:
-  %t1148 = phi i1 [ %t1147, %L427_sc_rhs ], [ false, %L428_sc_short ]
-  br i1 %t1148, label %L430_then, label %L431_else
-L430_then:
-  br label %L433_wcond
-L433_wcond:
-  %t1149 = load ptr, ptr %t.addr
-  %t1150 = load i32, ptr %i.addr
-  %t1151 = call i32 @chk_tok_kind(ptr %t1149, i32 %t1150)
-  %t1152 = icmp ne i32 %t1151, 4
-  br i1 %t1152, label %L436_sc_rhs, label %L437_sc_short
-L436_sc_rhs:
-  %t1153 = load ptr, ptr %src.addr
-  %t1154 = load ptr, ptr %t.addr
-  %t1155 = load i32, ptr %i.addr
-  %t1156 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.35, i64 0, i64 0
-  %t1157 = insertvalue { ptr, i64 } undef, ptr %t1156, 0
-  %t1158 = insertvalue { ptr, i64 } %t1157, i64 1, 1
-  %t1159 = call i1 @chk_tok_is(ptr %t1153, ptr %t1154, i32 %t1155, { ptr, i64 } %t1158)
-  %t1160 = xor i1 %t1159, true
-  br label %L438_sc_end
-L437_sc_short:
-  br label %L438_sc_end
-L438_sc_end:
-  %t1161 = phi i1 [ %t1160, %L436_sc_rhs ], [ false, %L437_sc_short ]
-  br i1 %t1161, label %L434_wbody, label %L435_wend
-L434_wbody:
-  %t1162 = load i32, ptr %i.addr
-  %t1163 = add i32 %t1162, 1
-  store i32 %t1163, ptr %i.addr
-  br label %L433_wcond
-L435_wend:
+  %t1141 = phi i1 [ %t1140, %L427_sc_rhs ], [ false, %L428_sc_short ]
+  br i1 %t1141, label %L425_wbody, label %L426_wend
+L425_wbody:
+  %t1142 = load i32, ptr %i.addr
+  %t1143 = add i32 %t1142, 1
+  store i32 %t1143, ptr %i.addr
+  br label %L424_wcond
+L426_wend:
   store i32 1, ptr %skipped.addr
-  br label %L432_end
-L431_else:
-  br label %L432_end
-L432_end:
-  %t1164 = load i32, ptr %skipped.addr
-  %t1165 = icmp eq i32 %t1164, 0
-  br i1 %t1165, label %L439_then, label %L440_else
-L439_then:
-  %t1166 = load ptr, ptr %src.addr
-  %t1167 = load ptr, ptr %t.addr
-  %t1168 = load i32, ptr %i.addr
-  %t1169 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.36, i64 0, i64 0
-  %t1170 = insertvalue { ptr, i64 } undef, ptr %t1169, 0
-  %t1171 = insertvalue { ptr, i64 } %t1170, i64 5, 1
-  %t1172 = call i1 @chk_tok_is(ptr %t1166, ptr %t1167, i32 %t1168, { ptr, i64 } %t1171)
-  br i1 %t1172, label %L442_then, label %L443_else
+  br label %L423_end
+L422_else:
+  br label %L423_end
+L423_end:
+  %t1144 = load ptr, ptr %src.addr
+  %t1145 = load ptr, ptr %t.addr
+  %t1146 = load i32, ptr %i.addr
+  %t1147 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.34, i64 0, i64 0
+  %t1148 = insertvalue { ptr, i64 } undef, ptr %t1147, 0
+  %t1149 = insertvalue { ptr, i64 } %t1148, i64 6, 1
+  %t1150 = call i1 @chk_tok_is(ptr %t1144, ptr %t1145, i32 %t1146, { ptr, i64 } %t1149)
+  br i1 %t1150, label %L430_sc_rhs, label %L431_sc_short
+L430_sc_rhs:
+  %t1151 = load ptr, ptr %src.addr
+  %t1152 = load ptr, ptr %t.addr
+  %t1153 = load i32, ptr %i.addr
+  %t1154 = call i32 @chk_is_dom_for(ptr %t1151, ptr %t1152, i32 %t1153)
+  %t1155 = icmp eq i32 %t1154, 1
+  br label %L432_sc_end
+L431_sc_short:
+  br label %L432_sc_end
+L432_sc_end:
+  %t1156 = phi i1 [ %t1155, %L430_sc_rhs ], [ false, %L431_sc_short ]
+  br i1 %t1156, label %L433_then, label %L434_else
+L433_then:
+  br label %L436_wcond
+L436_wcond:
+  %t1157 = load ptr, ptr %t.addr
+  %t1158 = load i32, ptr %i.addr
+  %t1159 = call i32 @chk_tok_kind(ptr %t1157, i32 %t1158)
+  %t1160 = icmp ne i32 %t1159, 4
+  br i1 %t1160, label %L439_sc_rhs, label %L440_sc_short
+L439_sc_rhs:
+  %t1161 = load ptr, ptr %src.addr
+  %t1162 = load ptr, ptr %t.addr
+  %t1163 = load i32, ptr %i.addr
+  %t1164 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.35, i64 0, i64 0
+  %t1165 = insertvalue { ptr, i64 } undef, ptr %t1164, 0
+  %t1166 = insertvalue { ptr, i64 } %t1165, i64 1, 1
+  %t1167 = call i1 @chk_tok_is(ptr %t1161, ptr %t1162, i32 %t1163, { ptr, i64 } %t1166)
+  %t1168 = xor i1 %t1167, true
+  br label %L441_sc_end
+L440_sc_short:
+  br label %L441_sc_end
+L441_sc_end:
+  %t1169 = phi i1 [ %t1168, %L439_sc_rhs ], [ false, %L440_sc_short ]
+  br i1 %t1169, label %L437_wbody, label %L438_wend
+L437_wbody:
+  %t1170 = load i32, ptr %i.addr
+  %t1171 = add i32 %t1170, 1
+  store i32 %t1171, ptr %i.addr
+  br label %L436_wcond
+L438_wend:
+  store i32 1, ptr %skipped.addr
+  br label %L435_end
+L434_else:
+  br label %L435_end
+L435_end:
+  %t1172 = load i32, ptr %skipped.addr
+  %t1173 = icmp eq i32 %t1172, 0
+  br i1 %t1173, label %L442_then, label %L443_else
 L442_then:
-  %t1173 = load ptr, ptr %src.addr
-  %t1174 = load ptr, ptr %t.addr
-  %t1175 = load ptr, ptr %ctab.addr
-  %t1176 = load ptr, ptr %nc.addr
-  %t1177 = call i32 @load32(ptr %t1176, i32 0)
-  %t1178 = load i32, ptr %i.addr
-  %t1179 = load ptr, ptr %out.addr
-  %t1180 = load i32, ptr %o.addr
-  %t1181 = call i32 @chk_guard(ptr %t1173, ptr %t1174, ptr %t1175, i32 %t1177, i32 %t1178, ptr %t1179, i32 %t1180)
-  store i32 %t1181, ptr %o.addr
-  br label %L444_end
-L443_else:
-  br label %L444_end
-L444_end:
-  %t1182 = load ptr, ptr %src.addr
-  %t1183 = load ptr, ptr %t.addr
-  %t1184 = load i32, ptr %i.addr
-  %t1185 = getelementptr inbounds [7 x i8], ptr @.str.check_arena.37, i64 0, i64 0
-  %t1186 = insertvalue { ptr, i64 } undef, ptr %t1185, 0
-  %t1187 = insertvalue { ptr, i64 } %t1186, i64 7, 1
-  %t1188 = call i1 @chk_tok_is(ptr %t1182, ptr %t1183, i32 %t1184, { ptr, i64 } %t1187)
-  br i1 %t1188, label %L445_then, label %L446_else
+  %t1174 = load ptr, ptr %src.addr
+  %t1175 = load ptr, ptr %t.addr
+  %t1176 = load i32, ptr %i.addr
+  %t1177 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.36, i64 0, i64 0
+  %t1178 = insertvalue { ptr, i64 } undef, ptr %t1177, 0
+  %t1179 = insertvalue { ptr, i64 } %t1178, i64 5, 1
+  %t1180 = call i1 @chk_tok_is(ptr %t1174, ptr %t1175, i32 %t1176, { ptr, i64 } %t1179)
+  br i1 %t1180, label %L445_then, label %L446_else
 L445_then:
-  %t1189 = load ptr, ptr %src.addr
-  %t1190 = load ptr, ptr %t.addr
-  %t1191 = load ptr, ptr %ctab.addr
-  %t1192 = load ptr, ptr %nc.addr
-  %t1193 = call i32 @load32(ptr %t1192, i32 0)
-  %t1194 = load i32, ptr %i.addr
-  %t1195 = load ptr, ptr %out.addr
-  %t1196 = load i32, ptr %o.addr
-  %t1197 = call i32 @chk_cap_law_is(ptr %t1189, ptr %t1190, ptr %t1191, i32 %t1193, i32 %t1194, i32 10, ptr %t1195, i32 %t1196)
-  store i32 %t1197, ptr %o.addr
+  %t1181 = load ptr, ptr %src.addr
+  %t1182 = load ptr, ptr %t.addr
+  %t1183 = load ptr, ptr %ctab.addr
+  %t1184 = load ptr, ptr %nc.addr
+  %t1185 = call i32 @load32(ptr %t1184, i32 0)
+  %t1186 = load i32, ptr %i.addr
+  %t1187 = load ptr, ptr %out.addr
+  %t1188 = load i32, ptr %o.addr
+  %t1189 = call i32 @chk_guard(ptr %t1181, ptr %t1182, ptr %t1183, i32 %t1185, i32 %t1186, ptr %t1187, i32 %t1188)
+  store i32 %t1189, ptr %o.addr
   br label %L447_end
 L446_else:
   br label %L447_end
 L447_end:
-  %t1198 = load ptr, ptr %src.addr
-  %t1199 = load ptr, ptr %t.addr
-  %t1200 = load i32, ptr %i.addr
-  %t1201 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.38, i64 0, i64 0
-  %t1202 = insertvalue { ptr, i64 } undef, ptr %t1201, 0
-  %t1203 = insertvalue { ptr, i64 } %t1202, i64 9, 1
-  %t1204 = call i1 @chk_tok_is(ptr %t1198, ptr %t1199, i32 %t1200, { ptr, i64 } %t1203)
-  br i1 %t1204, label %L448_then, label %L449_else
+  %t1190 = load ptr, ptr %src.addr
+  %t1191 = load ptr, ptr %t.addr
+  %t1192 = load i32, ptr %i.addr
+  %t1193 = getelementptr inbounds [7 x i8], ptr @.str.check_arena.37, i64 0, i64 0
+  %t1194 = insertvalue { ptr, i64 } undef, ptr %t1193, 0
+  %t1195 = insertvalue { ptr, i64 } %t1194, i64 7, 1
+  %t1196 = call i1 @chk_tok_is(ptr %t1190, ptr %t1191, i32 %t1192, { ptr, i64 } %t1195)
+  br i1 %t1196, label %L448_then, label %L449_else
 L448_then:
-  %t1205 = load ptr, ptr %src.addr
-  %t1206 = load ptr, ptr %t.addr
-  %t1207 = load ptr, ptr %ctab.addr
-  %t1208 = load ptr, ptr %nc.addr
-  %t1209 = call i32 @load32(ptr %t1208, i32 0)
-  %t1210 = load i32, ptr %i.addr
-  %t1211 = load ptr, ptr %out.addr
-  %t1212 = load i32, ptr %o.addr
-  %t1213 = call i32 @chk_cap_law_is(ptr %t1205, ptr %t1206, ptr %t1207, i32 %t1209, i32 %t1210, i32 14, ptr %t1211, i32 %t1212)
-  store i32 %t1213, ptr %o.addr
+  %t1197 = load ptr, ptr %src.addr
+  %t1198 = load ptr, ptr %t.addr
+  %t1199 = load ptr, ptr %ctab.addr
+  %t1200 = load ptr, ptr %nc.addr
+  %t1201 = call i32 @load32(ptr %t1200, i32 0)
+  %t1202 = load i32, ptr %i.addr
+  %t1203 = load ptr, ptr %out.addr
+  %t1204 = load i32, ptr %o.addr
+  %t1205 = call i32 @chk_cap_law_is(ptr %t1197, ptr %t1198, ptr %t1199, i32 %t1201, i32 %t1202, i32 10, ptr %t1203, i32 %t1204)
+  store i32 %t1205, ptr %o.addr
   br label %L450_end
 L449_else:
   br label %L450_end
 L450_end:
-  %t1214 = load ptr, ptr %src.addr
-  %t1215 = load ptr, ptr %t.addr
-  %t1216 = load i32, ptr %i.addr
-  %t1217 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.39, i64 0, i64 0
-  %t1218 = insertvalue { ptr, i64 } undef, ptr %t1217, 0
-  %t1219 = insertvalue { ptr, i64 } %t1218, i64 10, 1
-  %t1220 = call i1 @chk_tok_is(ptr %t1214, ptr %t1215, i32 %t1216, { ptr, i64 } %t1219)
-  br i1 %t1220, label %L451_then, label %L452_else
+  %t1206 = load ptr, ptr %src.addr
+  %t1207 = load ptr, ptr %t.addr
+  %t1208 = load i32, ptr %i.addr
+  %t1209 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.38, i64 0, i64 0
+  %t1210 = insertvalue { ptr, i64 } undef, ptr %t1209, 0
+  %t1211 = insertvalue { ptr, i64 } %t1210, i64 9, 1
+  %t1212 = call i1 @chk_tok_is(ptr %t1206, ptr %t1207, i32 %t1208, { ptr, i64 } %t1211)
+  br i1 %t1212, label %L451_then, label %L452_else
 L451_then:
-  %t1221 = load ptr, ptr %src.addr
-  %t1222 = load ptr, ptr %t.addr
-  %t1223 = load ptr, ptr %ctab.addr
-  %t1224 = load ptr, ptr %nc.addr
-  %t1225 = call i32 @load32(ptr %t1224, i32 0)
-  %t1226 = load i32, ptr %i.addr
-  %t1227 = load ptr, ptr %out.addr
-  %t1228 = load i32, ptr %o.addr
-  %t1229 = call i32 @chk_cap_top_law_is(ptr %t1221, ptr %t1222, ptr %t1223, i32 %t1225, i32 %t1226, i32 15, ptr %t1227, i32 %t1228)
-  store i32 %t1229, ptr %o.addr
+  %t1213 = load ptr, ptr %src.addr
+  %t1214 = load ptr, ptr %t.addr
+  %t1215 = load ptr, ptr %ctab.addr
+  %t1216 = load ptr, ptr %nc.addr
+  %t1217 = call i32 @load32(ptr %t1216, i32 0)
+  %t1218 = load i32, ptr %i.addr
+  %t1219 = load ptr, ptr %out.addr
+  %t1220 = load i32, ptr %o.addr
+  %t1221 = call i32 @chk_cap_law_is(ptr %t1213, ptr %t1214, ptr %t1215, i32 %t1217, i32 %t1218, i32 14, ptr %t1219, i32 %t1220)
+  store i32 %t1221, ptr %o.addr
   br label %L453_end
 L452_else:
   br label %L453_end
 L453_end:
-  %t1230 = load ptr, ptr %src.addr
-  %t1231 = load ptr, ptr %t.addr
-  %t1232 = load i32, ptr %i.addr
-  %t1233 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.40, i64 0, i64 0
-  %t1234 = insertvalue { ptr, i64 } undef, ptr %t1233, 0
-  %t1235 = insertvalue { ptr, i64 } %t1234, i64 6, 1
-  %t1236 = call i1 @chk_tok_is(ptr %t1230, ptr %t1231, i32 %t1232, { ptr, i64 } %t1235)
-  br i1 %t1236, label %L454_then, label %L455_else
+  %t1222 = load ptr, ptr %src.addr
+  %t1223 = load ptr, ptr %t.addr
+  %t1224 = load i32, ptr %i.addr
+  %t1225 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.39, i64 0, i64 0
+  %t1226 = insertvalue { ptr, i64 } undef, ptr %t1225, 0
+  %t1227 = insertvalue { ptr, i64 } %t1226, i64 10, 1
+  %t1228 = call i1 @chk_tok_is(ptr %t1222, ptr %t1223, i32 %t1224, { ptr, i64 } %t1227)
+  br i1 %t1228, label %L454_then, label %L455_else
 L454_then:
-  %t1237 = load ptr, ptr %src.addr
-  %t1238 = load ptr, ptr %t.addr
-  %t1239 = load ptr, ptr %ctab.addr
-  %t1240 = load ptr, ptr %nc.addr
-  %t1241 = call i32 @load32(ptr %t1240, i32 0)
-  %t1242 = load i32, ptr %i.addr
-  %t1243 = load ptr, ptr %out.addr
-  %t1244 = load i32, ptr %o.addr
-  %t1245 = call i32 @chk_cap_top_law_is(ptr %t1237, ptr %t1238, ptr %t1239, i32 %t1241, i32 %t1242, i32 15, ptr %t1243, i32 %t1244)
-  store i32 %t1245, ptr %o.addr
+  %t1229 = load ptr, ptr %src.addr
+  %t1230 = load ptr, ptr %t.addr
+  %t1231 = load ptr, ptr %ctab.addr
+  %t1232 = load ptr, ptr %nc.addr
+  %t1233 = call i32 @load32(ptr %t1232, i32 0)
+  %t1234 = load i32, ptr %i.addr
+  %t1235 = load ptr, ptr %out.addr
+  %t1236 = load i32, ptr %o.addr
+  %t1237 = call i32 @chk_cap_top_law_is(ptr %t1229, ptr %t1230, ptr %t1231, i32 %t1233, i32 %t1234, i32 15, ptr %t1235, i32 %t1236)
+  store i32 %t1237, ptr %o.addr
   br label %L456_end
 L455_else:
   br label %L456_end
 L456_end:
-  %t1246 = load ptr, ptr %src.addr
-  %t1247 = load ptr, ptr %t.addr
-  %t1248 = load i32, ptr %i.addr
-  %t1249 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.41, i64 0, i64 0
-  %t1250 = insertvalue { ptr, i64 } undef, ptr %t1249, 0
-  %t1251 = insertvalue { ptr, i64 } %t1250, i64 3, 1
-  %t1252 = call i1 @chk_tok_is(ptr %t1246, ptr %t1247, i32 %t1248, { ptr, i64 } %t1251)
-  br i1 %t1252, label %L457_sc_rhs, label %L458_sc_short
-L457_sc_rhs:
-  %t1253 = load i32, ptr %i.addr
-  %t1254 = icmp ugt i32 %t1253, 0
-  br i1 %t1254, label %L460_sc_rhs, label %L461_sc_short
+  %t1238 = load ptr, ptr %src.addr
+  %t1239 = load ptr, ptr %t.addr
+  %t1240 = load i32, ptr %i.addr
+  %t1241 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.40, i64 0, i64 0
+  %t1242 = insertvalue { ptr, i64 } undef, ptr %t1241, 0
+  %t1243 = insertvalue { ptr, i64 } %t1242, i64 6, 1
+  %t1244 = call i1 @chk_tok_is(ptr %t1238, ptr %t1239, i32 %t1240, { ptr, i64 } %t1243)
+  br i1 %t1244, label %L457_then, label %L458_else
+L457_then:
+  %t1245 = load ptr, ptr %src.addr
+  %t1246 = load ptr, ptr %t.addr
+  %t1247 = load ptr, ptr %ctab.addr
+  %t1248 = load ptr, ptr %nc.addr
+  %t1249 = call i32 @load32(ptr %t1248, i32 0)
+  %t1250 = load i32, ptr %i.addr
+  %t1251 = load ptr, ptr %out.addr
+  %t1252 = load i32, ptr %o.addr
+  %t1253 = call i32 @chk_cap_top_law_is(ptr %t1245, ptr %t1246, ptr %t1247, i32 %t1249, i32 %t1250, i32 15, ptr %t1251, i32 %t1252)
+  store i32 %t1253, ptr %o.addr
+  br label %L459_end
+L458_else:
+  br label %L459_end
+L459_end:
+  %t1254 = load ptr, ptr %src.addr
+  %t1255 = load ptr, ptr %t.addr
+  %t1256 = load i32, ptr %i.addr
+  %t1257 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.41, i64 0, i64 0
+  %t1258 = insertvalue { ptr, i64 } undef, ptr %t1257, 0
+  %t1259 = insertvalue { ptr, i64 } %t1258, i64 3, 1
+  %t1260 = call i1 @chk_tok_is(ptr %t1254, ptr %t1255, i32 %t1256, { ptr, i64 } %t1259)
+  br i1 %t1260, label %L460_sc_rhs, label %L461_sc_short
 L460_sc_rhs:
-  %t1255 = load ptr, ptr %src.addr
-  %t1256 = load ptr, ptr %t.addr
-  %t1257 = load i32, ptr %i.addr
-  %t1258 = sub i32 %t1257, 1
-  %t1259 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.42, i64 0, i64 0
-  %t1260 = insertvalue { ptr, i64 } undef, ptr %t1259, 0
-  %t1261 = insertvalue { ptr, i64 } %t1260, i64 2, 1
-  %t1262 = call i1 @chk_tok_is(ptr %t1255, ptr %t1256, i32 %t1258, { ptr, i64 } %t1261)
+  %t1261 = load i32, ptr %i.addr
+  %t1262 = icmp ugt i32 %t1261, 0
+  br i1 %t1262, label %L463_sc_rhs, label %L464_sc_short
+L463_sc_rhs:
+  %t1263 = load ptr, ptr %src.addr
+  %t1264 = load ptr, ptr %t.addr
+  %t1265 = load i32, ptr %i.addr
+  %t1266 = sub i32 %t1265, 1
+  %t1267 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.42, i64 0, i64 0
+  %t1268 = insertvalue { ptr, i64 } undef, ptr %t1267, 0
+  %t1269 = insertvalue { ptr, i64 } %t1268, i64 2, 1
+  %t1270 = call i1 @chk_tok_is(ptr %t1263, ptr %t1264, i32 %t1266, { ptr, i64 } %t1269)
+  br label %L465_sc_end
+L464_sc_short:
+  br label %L465_sc_end
+L465_sc_end:
+  %t1271 = phi i1 [ %t1270, %L463_sc_rhs ], [ false, %L464_sc_short ]
+  %t1272 = xor i1 %t1271, true
   br label %L462_sc_end
 L461_sc_short:
   br label %L462_sc_end
 L462_sc_end:
-  %t1263 = phi i1 [ %t1262, %L460_sc_rhs ], [ false, %L461_sc_short ]
-  %t1264 = xor i1 %t1263, true
-  br label %L459_sc_end
-L458_sc_short:
-  br label %L459_sc_end
-L459_sc_end:
-  %t1265 = phi i1 [ %t1264, %L462_sc_end ], [ false, %L458_sc_short ]
-  br i1 %t1265, label %L463_then, label %L464_else
-L463_then:
+  %t1273 = phi i1 [ %t1272, %L465_sc_end ], [ false, %L461_sc_short ]
+  br i1 %t1273, label %L466_then, label %L467_else
+L466_then:
   store i32 0, ptr %skip_ty.addr
-  %t1266 = load i32, ptr %prof.addr
-  %t1267 = icmp uge i32 %t1266, 2
-  br i1 %t1267, label %L466_sc_rhs, label %L467_sc_short
-L466_sc_rhs:
-  %t1268 = load ptr, ptr %src.addr
-  %t1269 = load ptr, ptr %t.addr
-  %t1270 = load i32, ptr %i.addr
-  %t1271 = add i32 %t1270, 3
-  %t1272 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.43, i64 0, i64 0
-  %t1273 = insertvalue { ptr, i64 } undef, ptr %t1272, 0
-  %t1274 = insertvalue { ptr, i64 } %t1273, i64 4, 1
-  %t1275 = call i1 @chk_tok_is(ptr %t1268, ptr %t1269, i32 %t1271, { ptr, i64 } %t1274)
-  br label %L468_sc_end
-L467_sc_short:
-  br label %L468_sc_end
-L468_sc_end:
-  %t1276 = phi i1 [ %t1275, %L466_sc_rhs ], [ false, %L467_sc_short ]
-  br i1 %t1276, label %L469_then, label %L470_else
-L469_then:
+  %t1274 = load i32, ptr %prof.addr
+  %t1275 = icmp uge i32 %t1274, 2
+  br i1 %t1275, label %L469_sc_rhs, label %L470_sc_short
+L469_sc_rhs:
+  %t1276 = load ptr, ptr %src.addr
+  %t1277 = load ptr, ptr %t.addr
+  %t1278 = load i32, ptr %i.addr
+  %t1279 = add i32 %t1278, 3
+  %t1280 = getelementptr inbounds [4 x i8], ptr @.str.check_arena.43, i64 0, i64 0
+  %t1281 = insertvalue { ptr, i64 } undef, ptr %t1280, 0
+  %t1282 = insertvalue { ptr, i64 } %t1281, i64 4, 1
+  %t1283 = call i1 @chk_tok_is(ptr %t1276, ptr %t1277, i32 %t1279, { ptr, i64 } %t1282)
+  br label %L471_sc_end
+L470_sc_short:
+  br label %L471_sc_end
+L471_sc_end:
+  %t1284 = phi i1 [ %t1283, %L469_sc_rhs ], [ false, %L470_sc_short ]
+  br i1 %t1284, label %L472_then, label %L473_else
+L472_then:
   store i32 1, ptr %skip_ty.addr
-  br label %L471_end
-L470_else:
-  br label %L471_end
-L471_end:
-  %t1277 = load ptr, ptr %src.addr
-  %t1278 = load ptr, ptr %t.addr
-  %t1279 = load i32, ptr %i.addr
-  %t1280 = add i32 %t1279, 2
-  %t1281 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.44, i64 0, i64 0
-  %t1282 = insertvalue { ptr, i64 } undef, ptr %t1281, 0
-  %t1283 = insertvalue { ptr, i64 } %t1282, i64 1, 1
-  %t1284 = call i1 @chk_tok_is(ptr %t1277, ptr %t1278, i32 %t1280, { ptr, i64 } %t1283)
-  br i1 %t1284, label %L472_sc_rhs, label %L473_sc_short
-L472_sc_rhs:
+  br label %L474_end
+L473_else:
+  br label %L474_end
+L474_end:
   %t1285 = load ptr, ptr %src.addr
   %t1286 = load ptr, ptr %t.addr
   %t1287 = load i32, ptr %i.addr
-  %t1288 = add i32 %t1287, 3
-  %t1289 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.45, i64 0, i64 0
+  %t1288 = add i32 %t1287, 2
+  %t1289 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.44, i64 0, i64 0
   %t1290 = insertvalue { ptr, i64 } undef, ptr %t1289, 0
   %t1291 = insertvalue { ptr, i64 } %t1290, i64 1, 1
   %t1292 = call i1 @chk_tok_is(ptr %t1285, ptr %t1286, i32 %t1288, { ptr, i64 } %t1291)
-  br label %L474_sc_end
-L473_sc_short:
-  br label %L474_sc_end
-L474_sc_end:
-  %t1293 = phi i1 [ %t1292, %L472_sc_rhs ], [ false, %L473_sc_short ]
-  br i1 %t1293, label %L475_then, label %L476_else
-L475_then:
-  store i32 1, ptr %skip_ty.addr
-  br label %L477_end
-L476_else:
-  br label %L477_end
-L477_end:
-  %t1294 = load i32, ptr %skip_ty.addr
-  %t1295 = icmp eq i32 %t1294, 0
-  br i1 %t1295, label %L478_then, label %L479_else
+  br i1 %t1292, label %L475_sc_rhs, label %L476_sc_short
+L475_sc_rhs:
+  %t1293 = load ptr, ptr %src.addr
+  %t1294 = load ptr, ptr %t.addr
+  %t1295 = load i32, ptr %i.addr
+  %t1296 = add i32 %t1295, 3
+  %t1297 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.45, i64 0, i64 0
+  %t1298 = insertvalue { ptr, i64 } undef, ptr %t1297, 0
+  %t1299 = insertvalue { ptr, i64 } %t1298, i64 1, 1
+  %t1300 = call i1 @chk_tok_is(ptr %t1293, ptr %t1294, i32 %t1296, { ptr, i64 } %t1299)
+  br label %L477_sc_end
+L476_sc_short:
+  br label %L477_sc_end
+L477_sc_end:
+  %t1301 = phi i1 [ %t1300, %L475_sc_rhs ], [ false, %L476_sc_short ]
+  br i1 %t1301, label %L478_then, label %L479_else
 L478_then:
-  %t1296 = load ptr, ptr %src.addr
-  %t1297 = load ptr, ptr %t.addr
-  %t1298 = load ptr, ptr %syms.addr
-  %t1299 = load i32, ptr %n.addr
-  %t1300 = load i32, ptr %i.addr
-  %t1301 = add i32 %t1300, 3
-  %t1302 = load ptr, ptr %out.addr
-  %t1303 = load i32, ptr %o.addr
-  %t1304 = call i64 @check_type(ptr %t1296, ptr %t1297, ptr %t1298, i32 %t1299, i32 %t1301, ptr %t1302, i32 %t1303, i32 186)
-  store i64 %t1304, ptr %r6.addr
-  %t1305 = load i64, ptr %r6.addr
-  %t1307 = icmp eq i64 4294967296, 0
-  br i1 %t1307, label %L482_dtrap, label %L481_dok
-L482_dtrap:
-  call void @__loment_abort()
-  unreachable
-L481_dok:
-  %t1306 = urem i64 %t1305, 4294967296
-  br label %L483_dend
-L483_dend:
-  %t1308 = trunc i64 %t1306 to i32
-  store i32 %t1308, ptr %o.addr
+  store i32 1, ptr %skip_ty.addr
   br label %L480_end
 L479_else:
   br label %L480_end
 L480_end:
-  br label %L465_end
-L464_else:
-  br label %L465_end
-L465_end:
-  %t1309 = load i32, ptr %i.addr
-  %t1310 = icmp ugt i32 %t1309, 0
-  br i1 %t1310, label %L484_sc_rhs, label %L485_sc_short
-L484_sc_rhs:
-  %t1311 = load ptr, ptr %t.addr
-  %t1312 = load i32, ptr %i.addr
-  %t1313 = call i32 @chk_tok_kind(ptr %t1311, i32 %t1312)
-  %t1314 = icmp eq i32 %t1313, 0
-  br label %L486_sc_end
-L485_sc_short:
-  br label %L486_sc_end
-L486_sc_end:
-  %t1315 = phi i1 [ %t1314, %L484_sc_rhs ], [ false, %L485_sc_short ]
-  br i1 %t1315, label %L487_sc_rhs, label %L488_sc_short
+  %t1302 = load i32, ptr %skip_ty.addr
+  %t1303 = icmp eq i32 %t1302, 0
+  br i1 %t1303, label %L481_then, label %L482_else
+L481_then:
+  %t1304 = load ptr, ptr %src.addr
+  %t1305 = load ptr, ptr %t.addr
+  %t1306 = load ptr, ptr %syms.addr
+  %t1307 = load i32, ptr %n.addr
+  %t1308 = load i32, ptr %i.addr
+  %t1309 = add i32 %t1308, 3
+  %t1310 = load ptr, ptr %out.addr
+  %t1311 = load i32, ptr %o.addr
+  %t1312 = call i64 @check_type(ptr %t1304, ptr %t1305, ptr %t1306, i32 %t1307, i32 %t1309, ptr %t1310, i32 %t1311, i32 186)
+  store i64 %t1312, ptr %r6.addr
+  %t1313 = load i64, ptr %r6.addr
+  %t1315 = icmp eq i64 4294967296, 0
+  br i1 %t1315, label %L485_dtrap, label %L484_dok
+L485_dtrap:
+  call void @__loment_abort()
+  unreachable
+L484_dok:
+  %t1314 = urem i64 %t1313, 4294967296
+  br label %L486_dend
+L486_dend:
+  %t1316 = trunc i64 %t1314 to i32
+  store i32 %t1316, ptr %o.addr
+  br label %L483_end
+L482_else:
+  br label %L483_end
+L483_end:
+  br label %L468_end
+L467_else:
+  br label %L468_end
+L468_end:
+  %t1317 = load i32, ptr %i.addr
+  %t1318 = icmp ugt i32 %t1317, 0
+  br i1 %t1318, label %L487_sc_rhs, label %L488_sc_short
 L487_sc_rhs:
-  %t1316 = load ptr, ptr %src.addr
-  %t1317 = load ptr, ptr %t.addr
-  %t1318 = load i32, ptr %i.addr
-  %t1319 = add i32 %t1318, 1
-  %t1320 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.46, i64 0, i64 0
-  %t1321 = insertvalue { ptr, i64 } undef, ptr %t1320, 0
-  %t1322 = insertvalue { ptr, i64 } %t1321, i64 1, 1
-  %t1323 = call i1 @chk_tok_is(ptr %t1316, ptr %t1317, i32 %t1319, { ptr, i64 } %t1322)
+  %t1319 = load ptr, ptr %t.addr
+  %t1320 = load i32, ptr %i.addr
+  %t1321 = call i32 @chk_tok_kind(ptr %t1319, i32 %t1320)
+  %t1322 = icmp eq i32 %t1321, 0
   br label %L489_sc_end
 L488_sc_short:
   br label %L489_sc_end
 L489_sc_end:
-  %t1324 = phi i1 [ %t1323, %L487_sc_rhs ], [ false, %L488_sc_short ]
-  br i1 %t1324, label %L490_sc_rhs, label %L491_sc_short
+  %t1323 = phi i1 [ %t1322, %L487_sc_rhs ], [ false, %L488_sc_short ]
+  br i1 %t1323, label %L490_sc_rhs, label %L491_sc_short
 L490_sc_rhs:
-  %t1325 = load ptr, ptr %src.addr
-  %t1326 = load ptr, ptr %t.addr
-  %t1327 = load i32, ptr %i.addr
-  %t1328 = call i32 @chk_is_kw(ptr %t1325, ptr %t1326, i32 %t1327)
-  %t1329 = icmp eq i32 %t1328, 0
+  %t1324 = load ptr, ptr %src.addr
+  %t1325 = load ptr, ptr %t.addr
+  %t1326 = load i32, ptr %i.addr
+  %t1327 = add i32 %t1326, 1
+  %t1328 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.46, i64 0, i64 0
+  %t1329 = insertvalue { ptr, i64 } undef, ptr %t1328, 0
+  %t1330 = insertvalue { ptr, i64 } %t1329, i64 1, 1
+  %t1331 = call i1 @chk_tok_is(ptr %t1324, ptr %t1325, i32 %t1327, { ptr, i64 } %t1330)
   br label %L492_sc_end
 L491_sc_short:
   br label %L492_sc_end
 L492_sc_end:
-  %t1330 = phi i1 [ %t1329, %L490_sc_rhs ], [ false, %L491_sc_short ]
-  br i1 %t1330, label %L493_sc_rhs, label %L494_sc_short
+  %t1332 = phi i1 [ %t1331, %L490_sc_rhs ], [ false, %L491_sc_short ]
+  br i1 %t1332, label %L493_sc_rhs, label %L494_sc_short
 L493_sc_rhs:
-  %t1331 = load ptr, ptr %src.addr
-  %t1332 = load ptr, ptr %t.addr
-  %t1333 = load i32, ptr %i.addr
-  %t1334 = sub i32 %t1333, 1
-  %t1335 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.47, i64 0, i64 0
-  %t1336 = insertvalue { ptr, i64 } undef, ptr %t1335, 0
-  %t1337 = insertvalue { ptr, i64 } %t1336, i64 1, 1
-  %t1338 = call i1 @chk_tok_is(ptr %t1331, ptr %t1332, i32 %t1334, { ptr, i64 } %t1337)
-  %t1339 = xor i1 %t1338, true
+  %t1333 = load ptr, ptr %src.addr
+  %t1334 = load ptr, ptr %t.addr
+  %t1335 = load i32, ptr %i.addr
+  %t1336 = call i32 @chk_is_kw(ptr %t1333, ptr %t1334, i32 %t1335)
+  %t1337 = icmp eq i32 %t1336, 0
   br label %L495_sc_end
 L494_sc_short:
   br label %L495_sc_end
 L495_sc_end:
-  %t1340 = phi i1 [ %t1339, %L493_sc_rhs ], [ false, %L494_sc_short ]
-  br i1 %t1340, label %L496_sc_rhs, label %L497_sc_short
+  %t1338 = phi i1 [ %t1337, %L493_sc_rhs ], [ false, %L494_sc_short ]
+  br i1 %t1338, label %L496_sc_rhs, label %L497_sc_short
 L496_sc_rhs:
-  %t1341 = load ptr, ptr %src.addr
-  %t1342 = load ptr, ptr %t.addr
-  %t1343 = load i32, ptr %i.addr
-  %t1344 = sub i32 %t1343, 1
-  %t1345 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.48, i64 0, i64 0
-  %t1346 = insertvalue { ptr, i64 } undef, ptr %t1345, 0
-  %t1347 = insertvalue { ptr, i64 } %t1346, i64 1, 1
-  %t1348 = call i1 @chk_tok_is(ptr %t1341, ptr %t1342, i32 %t1344, { ptr, i64 } %t1347)
-  %t1349 = xor i1 %t1348, true
+  %t1339 = load ptr, ptr %src.addr
+  %t1340 = load ptr, ptr %t.addr
+  %t1341 = load i32, ptr %i.addr
+  %t1342 = sub i32 %t1341, 1
+  %t1343 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.47, i64 0, i64 0
+  %t1344 = insertvalue { ptr, i64 } undef, ptr %t1343, 0
+  %t1345 = insertvalue { ptr, i64 } %t1344, i64 1, 1
+  %t1346 = call i1 @chk_tok_is(ptr %t1339, ptr %t1340, i32 %t1342, { ptr, i64 } %t1345)
+  %t1347 = xor i1 %t1346, true
   br label %L498_sc_end
 L497_sc_short:
   br label %L498_sc_end
 L498_sc_end:
-  %t1350 = phi i1 [ %t1349, %L496_sc_rhs ], [ false, %L497_sc_short ]
-  br i1 %t1350, label %L499_sc_rhs, label %L500_sc_short
+  %t1348 = phi i1 [ %t1347, %L496_sc_rhs ], [ false, %L497_sc_short ]
+  br i1 %t1348, label %L499_sc_rhs, label %L500_sc_short
 L499_sc_rhs:
-  %t1351 = load ptr, ptr %src.addr
-  %t1352 = load ptr, ptr %t.addr
-  %t1353 = load i32, ptr %i.addr
-  %t1354 = sub i32 %t1353, 1
-  %t1355 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.49, i64 0, i64 0
-  %t1356 = insertvalue { ptr, i64 } undef, ptr %t1355, 0
-  %t1357 = insertvalue { ptr, i64 } %t1356, i64 5, 1
-  %t1358 = call i1 @chk_tok_is(ptr %t1351, ptr %t1352, i32 %t1354, { ptr, i64 } %t1357)
-  %t1359 = xor i1 %t1358, true
+  %t1349 = load ptr, ptr %src.addr
+  %t1350 = load ptr, ptr %t.addr
+  %t1351 = load i32, ptr %i.addr
+  %t1352 = sub i32 %t1351, 1
+  %t1353 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.48, i64 0, i64 0
+  %t1354 = insertvalue { ptr, i64 } undef, ptr %t1353, 0
+  %t1355 = insertvalue { ptr, i64 } %t1354, i64 1, 1
+  %t1356 = call i1 @chk_tok_is(ptr %t1349, ptr %t1350, i32 %t1352, { ptr, i64 } %t1355)
+  %t1357 = xor i1 %t1356, true
   br label %L501_sc_end
 L500_sc_short:
   br label %L501_sc_end
 L501_sc_end:
-  %t1360 = phi i1 [ %t1359, %L499_sc_rhs ], [ false, %L500_sc_short ]
-  br i1 %t1360, label %L502_sc_rhs, label %L503_sc_short
+  %t1358 = phi i1 [ %t1357, %L499_sc_rhs ], [ false, %L500_sc_short ]
+  br i1 %t1358, label %L502_sc_rhs, label %L503_sc_short
 L502_sc_rhs:
-  %t1361 = load ptr, ptr %src.addr
-  %t1362 = load ptr, ptr %t.addr
-  %t1363 = load i32, ptr %i.addr
-  %t1364 = sub i32 %t1363, 1
-  %t1365 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.50, i64 0, i64 0
-  %t1366 = insertvalue { ptr, i64 } undef, ptr %t1365, 0
-  %t1367 = insertvalue { ptr, i64 } %t1366, i64 9, 1
-  %t1368 = call i1 @chk_tok_is(ptr %t1361, ptr %t1362, i32 %t1364, { ptr, i64 } %t1367)
-  %t1369 = xor i1 %t1368, true
+  %t1359 = load ptr, ptr %src.addr
+  %t1360 = load ptr, ptr %t.addr
+  %t1361 = load i32, ptr %i.addr
+  %t1362 = sub i32 %t1361, 1
+  %t1363 = getelementptr inbounds [5 x i8], ptr @.str.check_arena.49, i64 0, i64 0
+  %t1364 = insertvalue { ptr, i64 } undef, ptr %t1363, 0
+  %t1365 = insertvalue { ptr, i64 } %t1364, i64 5, 1
+  %t1366 = call i1 @chk_tok_is(ptr %t1359, ptr %t1360, i32 %t1362, { ptr, i64 } %t1365)
+  %t1367 = xor i1 %t1366, true
   br label %L504_sc_end
 L503_sc_short:
   br label %L504_sc_end
 L504_sc_end:
-  %t1370 = phi i1 [ %t1369, %L502_sc_rhs ], [ false, %L503_sc_short ]
-  br i1 %t1370, label %L505_sc_rhs, label %L506_sc_short
+  %t1368 = phi i1 [ %t1367, %L502_sc_rhs ], [ false, %L503_sc_short ]
+  br i1 %t1368, label %L505_sc_rhs, label %L506_sc_short
 L505_sc_rhs:
-  %t1371 = load ptr, ptr %src.addr
-  %t1372 = load ptr, ptr %t.addr
-  %t1373 = load i32, ptr %i.addr
-  %t1374 = sub i32 %t1373, 1
-  %t1375 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.51, i64 0, i64 0
-  %t1376 = insertvalue { ptr, i64 } undef, ptr %t1375, 0
-  %t1377 = insertvalue { ptr, i64 } %t1376, i64 10, 1
-  %t1378 = call i1 @chk_tok_is(ptr %t1371, ptr %t1372, i32 %t1374, { ptr, i64 } %t1377)
-  %t1379 = xor i1 %t1378, true
+  %t1369 = load ptr, ptr %src.addr
+  %t1370 = load ptr, ptr %t.addr
+  %t1371 = load i32, ptr %i.addr
+  %t1372 = sub i32 %t1371, 1
+  %t1373 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.50, i64 0, i64 0
+  %t1374 = insertvalue { ptr, i64 } undef, ptr %t1373, 0
+  %t1375 = insertvalue { ptr, i64 } %t1374, i64 9, 1
+  %t1376 = call i1 @chk_tok_is(ptr %t1369, ptr %t1370, i32 %t1372, { ptr, i64 } %t1375)
+  %t1377 = xor i1 %t1376, true
   br label %L507_sc_end
 L506_sc_short:
   br label %L507_sc_end
 L507_sc_end:
-  %t1380 = phi i1 [ %t1379, %L505_sc_rhs ], [ false, %L506_sc_short ]
-  br i1 %t1380, label %L508_sc_rhs, label %L509_sc_short
+  %t1378 = phi i1 [ %t1377, %L505_sc_rhs ], [ false, %L506_sc_short ]
+  br i1 %t1378, label %L508_sc_rhs, label %L509_sc_short
 L508_sc_rhs:
-  %t1381 = load ptr, ptr %src.addr
-  %t1382 = load ptr, ptr %t.addr
-  %t1383 = load i32, ptr %i.addr
-  %t1384 = sub i32 %t1383, 1
-  %t1385 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.52, i64 0, i64 0
-  %t1386 = insertvalue { ptr, i64 } undef, ptr %t1385, 0
-  %t1387 = insertvalue { ptr, i64 } %t1386, i64 6, 1
-  %t1388 = call i1 @chk_tok_is(ptr %t1381, ptr %t1382, i32 %t1384, { ptr, i64 } %t1387)
-  %t1389 = xor i1 %t1388, true
+  %t1379 = load ptr, ptr %src.addr
+  %t1380 = load ptr, ptr %t.addr
+  %t1381 = load i32, ptr %i.addr
+  %t1382 = sub i32 %t1381, 1
+  %t1383 = getelementptr inbounds [10 x i8], ptr @.str.check_arena.51, i64 0, i64 0
+  %t1384 = insertvalue { ptr, i64 } undef, ptr %t1383, 0
+  %t1385 = insertvalue { ptr, i64 } %t1384, i64 10, 1
+  %t1386 = call i1 @chk_tok_is(ptr %t1379, ptr %t1380, i32 %t1382, { ptr, i64 } %t1385)
+  %t1387 = xor i1 %t1386, true
   br label %L510_sc_end
 L509_sc_short:
   br label %L510_sc_end
 L510_sc_end:
-  %t1390 = phi i1 [ %t1389, %L508_sc_rhs ], [ false, %L509_sc_short ]
-  br i1 %t1390, label %L511_sc_rhs, label %L512_sc_short
+  %t1388 = phi i1 [ %t1387, %L508_sc_rhs ], [ false, %L509_sc_short ]
+  br i1 %t1388, label %L511_sc_rhs, label %L512_sc_short
 L511_sc_rhs:
-  %t1391 = load ptr, ptr %src.addr
-  %t1392 = load ptr, ptr %t.addr
-  %t1393 = load i32, ptr %i.addr
-  %t1394 = sub i32 %t1393, 1
-  %t1395 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.53, i64 0, i64 0
-  %t1396 = insertvalue { ptr, i64 } undef, ptr %t1395, 0
-  %t1397 = insertvalue { ptr, i64 } %t1396, i64 6, 1
-  %t1398 = call i1 @chk_tok_is(ptr %t1391, ptr %t1392, i32 %t1394, { ptr, i64 } %t1397)
-  %t1399 = xor i1 %t1398, true
+  %t1389 = load ptr, ptr %src.addr
+  %t1390 = load ptr, ptr %t.addr
+  %t1391 = load i32, ptr %i.addr
+  %t1392 = sub i32 %t1391, 1
+  %t1393 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.52, i64 0, i64 0
+  %t1394 = insertvalue { ptr, i64 } undef, ptr %t1393, 0
+  %t1395 = insertvalue { ptr, i64 } %t1394, i64 6, 1
+  %t1396 = call i1 @chk_tok_is(ptr %t1389, ptr %t1390, i32 %t1392, { ptr, i64 } %t1395)
+  %t1397 = xor i1 %t1396, true
   br label %L513_sc_end
 L512_sc_short:
   br label %L513_sc_end
 L513_sc_end:
-  %t1400 = phi i1 [ %t1399, %L511_sc_rhs ], [ false, %L512_sc_short ]
-  br i1 %t1400, label %L514_sc_rhs, label %L515_sc_short
+  %t1398 = phi i1 [ %t1397, %L511_sc_rhs ], [ false, %L512_sc_short ]
+  br i1 %t1398, label %L514_sc_rhs, label %L515_sc_short
 L514_sc_rhs:
-  %t1401 = load ptr, ptr %oc.addr
-  %t1402 = call i32 @load32(ptr %t1401, i32 8)
-  %t1403 = icmp eq i32 %t1402, 2
-  br i1 %t1403, label %L517_sc_rhs, label %L518_sc_short
-L517_sc_rhs:
-  %t1404 = load ptr, ptr %src.addr
-  %t1405 = load ptr, ptr %t.addr
-  %t1406 = load i32, ptr %i.addr
-  %t1407 = sub i32 %t1406, 1
-  %t1408 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.54, i64 0, i64 0
-  %t1409 = insertvalue { ptr, i64 } undef, ptr %t1408, 0
-  %t1410 = insertvalue { ptr, i64 } %t1409, i64 3, 1
-  %t1411 = call i1 @chk_tok_is(ptr %t1404, ptr %t1405, i32 %t1407, { ptr, i64 } %t1410)
-  br label %L519_sc_end
-L518_sc_short:
-  br label %L519_sc_end
-L519_sc_end:
-  %t1412 = phi i1 [ %t1411, %L517_sc_rhs ], [ false, %L518_sc_short ]
-  %t1413 = xor i1 %t1412, true
+  %t1399 = load ptr, ptr %src.addr
+  %t1400 = load ptr, ptr %t.addr
+  %t1401 = load i32, ptr %i.addr
+  %t1402 = sub i32 %t1401, 1
+  %t1403 = getelementptr inbounds [6 x i8], ptr @.str.check_arena.53, i64 0, i64 0
+  %t1404 = insertvalue { ptr, i64 } undef, ptr %t1403, 0
+  %t1405 = insertvalue { ptr, i64 } %t1404, i64 6, 1
+  %t1406 = call i1 @chk_tok_is(ptr %t1399, ptr %t1400, i32 %t1402, { ptr, i64 } %t1405)
+  %t1407 = xor i1 %t1406, true
   br label %L516_sc_end
 L515_sc_short:
   br label %L516_sc_end
 L516_sc_end:
-  %t1414 = phi i1 [ %t1413, %L519_sc_end ], [ false, %L515_sc_short ]
-  br i1 %t1414, label %L520_then, label %L521_else
-L520_then:
-  %t1415 = load ptr, ptr %t.addr
-  %t1416 = load i32, ptr %i.addr
-  %t1417 = call i32 @tok_len(ptr %t1415, i32 %t1416)
-  store i32 %t1417, ptr %nl.addr
-  %t1418 = load i32, ptr %nl.addr
-  %t1419 = icmp ugt i32 %t1418, 0
-  br i1 %t1419, label %L523_then, label %L524_else
+  %t1408 = phi i1 [ %t1407, %L514_sc_rhs ], [ false, %L515_sc_short ]
+  br i1 %t1408, label %L517_sc_rhs, label %L518_sc_short
+L517_sc_rhs:
+  %t1409 = load ptr, ptr %oc.addr
+  %t1410 = call i32 @load32(ptr %t1409, i32 8)
+  %t1411 = icmp eq i32 %t1410, 2
+  br i1 %t1411, label %L520_sc_rhs, label %L521_sc_short
+L520_sc_rhs:
+  %t1412 = load ptr, ptr %src.addr
+  %t1413 = load ptr, ptr %t.addr
+  %t1414 = load i32, ptr %i.addr
+  %t1415 = sub i32 %t1414, 1
+  %t1416 = getelementptr inbounds [3 x i8], ptr @.str.check_arena.54, i64 0, i64 0
+  %t1417 = insertvalue { ptr, i64 } undef, ptr %t1416, 0
+  %t1418 = insertvalue { ptr, i64 } %t1417, i64 3, 1
+  %t1419 = call i1 @chk_tok_is(ptr %t1412, ptr %t1413, i32 %t1415, { ptr, i64 } %t1418)
+  br label %L522_sc_end
+L521_sc_short:
+  br label %L522_sc_end
+L522_sc_end:
+  %t1420 = phi i1 [ %t1419, %L520_sc_rhs ], [ false, %L521_sc_short ]
+  %t1421 = xor i1 %t1420, true
+  br label %L519_sc_end
+L518_sc_short:
+  br label %L519_sc_end
+L519_sc_end:
+  %t1422 = phi i1 [ %t1421, %L522_sc_end ], [ false, %L518_sc_short ]
+  br i1 %t1422, label %L523_then, label %L524_else
 L523_then:
-  %t1420 = load ptr, ptr %src.addr
-  %t1421 = load ptr, ptr %t.addr
-  %t1422 = load i32, ptr %i.addr
-  %t1423 = call i32 @chk_syscall_net(ptr %t1420, ptr %t1421, i32 %t1422)
-  %t1424 = icmp eq i32 %t1423, 1
-  br i1 %t1424, label %L526_sc_rhs, label %L527_sc_short
-L526_sc_rhs:
-  %t1425 = load ptr, ptr %src.addr
-  %t1426 = load ptr, ptr %t.addr
-  %t1427 = load ptr, ptr %exs.addr
-  %t1428 = load i32, ptr %nexs.addr
-  %t1429 = call i32 @chk_excl_net(ptr %t1425, ptr %t1426, ptr %t1427, i32 %t1428)
-  %t1430 = icmp eq i32 %t1429, 1
-  br label %L528_sc_end
-L527_sc_short:
-  br label %L528_sc_end
-L528_sc_end:
-  %t1431 = phi i1 [ %t1430, %L526_sc_rhs ], [ false, %L527_sc_short ]
-  br i1 %t1431, label %L529_then, label %L530_else
-L529_then:
-  %t1432 = load ptr, ptr %src.addr
-  %t1433 = load ptr, ptr %t.addr
-  %t1434 = load ptr, ptr %out.addr
-  %t1435 = load i32, ptr %o.addr
-  %t1436 = load i32, ptr %i.addr
-  %t1437 = call i32 @sym_pub(ptr %t1432, ptr %t1433, ptr %t1434, i32 %t1435, i32 105, i32 %t1436)
-  store i32 %t1437, ptr %o.addr
-  br label %L531_end
-L530_else:
-  br label %L531_end
-L531_end:
-  %t1438 = load ptr, ptr %src.addr
-  %t1439 = load ptr, ptr %t.addr
-  %t1440 = load i32, ptr %i.addr
-  %t1441 = call i32 @chk_builtin_arity(ptr %t1438, ptr %t1439, i32 %t1440)
-  store i32 %t1441, ptr %want_b.addr
-  %t1442 = load i32, ptr %want_b.addr
-  store i32 %t1442, ptr %wb2.addr
-  %t1443 = load i32, ptr %wb2.addr
-  %t1444 = icmp eq i32 %t1443, 999999
-  br i1 %t1444, label %L532_sc_rhs, label %L533_sc_short
-L532_sc_rhs:
-  %t1445 = load ptr, ptr %oc.addr
-  %t1446 = call i32 @load32(ptr %t1445, i32 8)
-  %t1447 = icmp ne i32 %t1446, 0
-  br label %L534_sc_end
-L533_sc_short:
-  br label %L534_sc_end
-L534_sc_end:
-  %t1448 = phi i1 [ %t1447, %L532_sc_rhs ], [ false, %L533_sc_short ]
-  br i1 %t1448, label %L535_sc_rhs, label %L536_sc_short
+  %t1423 = load ptr, ptr %t.addr
+  %t1424 = load i32, ptr %i.addr
+  %t1425 = call i32 @tok_len(ptr %t1423, i32 %t1424)
+  store i32 %t1425, ptr %nl.addr
+  %t1426 = load i32, ptr %nl.addr
+  %t1427 = icmp ugt i32 %t1426, 0
+  br i1 %t1427, label %L526_then, label %L527_else
+L526_then:
+  %t1428 = load ptr, ptr %src.addr
+  %t1429 = load ptr, ptr %t.addr
+  %t1430 = load i32, ptr %i.addr
+  %t1431 = call i32 @chk_syscall_net(ptr %t1428, ptr %t1429, i32 %t1430)
+  %t1432 = icmp eq i32 %t1431, 1
+  br i1 %t1432, label %L529_sc_rhs, label %L530_sc_short
+L529_sc_rhs:
+  %t1433 = load ptr, ptr %src.addr
+  %t1434 = load ptr, ptr %t.addr
+  %t1435 = load ptr, ptr %exs.addr
+  %t1436 = load i32, ptr %nexs.addr
+  %t1437 = call i32 @chk_excl_net(ptr %t1433, ptr %t1434, ptr %t1435, i32 %t1436)
+  %t1438 = icmp eq i32 %t1437, 1
+  br label %L531_sc_end
+L530_sc_short:
+  br label %L531_sc_end
+L531_sc_end:
+  %t1439 = phi i1 [ %t1438, %L529_sc_rhs ], [ false, %L530_sc_short ]
+  br i1 %t1439, label %L532_then, label %L533_else
+L532_then:
+  %t1440 = load ptr, ptr %src.addr
+  %t1441 = load ptr, ptr %t.addr
+  %t1442 = load ptr, ptr %out.addr
+  %t1443 = load i32, ptr %o.addr
+  %t1444 = load i32, ptr %i.addr
+  %t1445 = call i32 @sym_pub(ptr %t1440, ptr %t1441, ptr %t1442, i32 %t1443, i32 105, i32 %t1444)
+  store i32 %t1445, ptr %o.addr
+  br label %L534_end
+L533_else:
+  br label %L534_end
+L534_end:
+  %t1446 = load ptr, ptr %src.addr
+  %t1447 = load ptr, ptr %t.addr
+  %t1448 = load i32, ptr %i.addr
+  %t1449 = call i32 @chk_builtin_arity(ptr %t1446, ptr %t1447, i32 %t1448)
+  store i32 %t1449, ptr %want_b.addr
+  %t1450 = load i32, ptr %want_b.addr
+  store i32 %t1450, ptr %wb2.addr
+  %t1451 = load i32, ptr %wb2.addr
+  %t1452 = icmp eq i32 %t1451, 999999
+  br i1 %t1452, label %L535_sc_rhs, label %L536_sc_short
 L535_sc_rhs:
-  %t1449 = load ptr, ptr %src.addr
-  %t1450 = load ptr, ptr %t.addr
-  %t1451 = load i32, ptr %i.addr
-  %t1452 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.55, i64 0, i64 0
-  %t1453 = insertvalue { ptr, i64 } undef, ptr %t1452, 0
-  %t1454 = insertvalue { ptr, i64 } %t1453, i64 9, 1
-  %t1455 = call i1 @chk_tok_is(ptr %t1449, ptr %t1450, i32 %t1451, { ptr, i64 } %t1454)
+  %t1453 = load ptr, ptr %oc.addr
+  %t1454 = call i32 @load32(ptr %t1453, i32 8)
+  %t1455 = icmp ne i32 %t1454, 0
   br label %L537_sc_end
 L536_sc_short:
   br label %L537_sc_end
 L537_sc_end:
   %t1456 = phi i1 [ %t1455, %L535_sc_rhs ], [ false, %L536_sc_short ]
-  br i1 %t1456, label %L538_then, label %L539_else
-L538_then:
-  store i32 1, ptr %wb2.addr
-  br label %L540_end
-L539_else:
-  br label %L540_end
-L540_end:
-  %t1457 = load i32, ptr %wb2.addr
-  %t1458 = icmp ne i32 %t1457, 999999
-  br i1 %t1458, label %L541_then, label %L542_else
+  br i1 %t1456, label %L538_sc_rhs, label %L539_sc_short
+L538_sc_rhs:
+  %t1457 = load ptr, ptr %src.addr
+  %t1458 = load ptr, ptr %t.addr
+  %t1459 = load i32, ptr %i.addr
+  %t1460 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.55, i64 0, i64 0
+  %t1461 = insertvalue { ptr, i64 } undef, ptr %t1460, 0
+  %t1462 = insertvalue { ptr, i64 } %t1461, i64 9, 1
+  %t1463 = call i1 @chk_tok_is(ptr %t1457, ptr %t1458, i32 %t1459, { ptr, i64 } %t1462)
+  br label %L540_sc_end
+L539_sc_short:
+  br label %L540_sc_end
+L540_sc_end:
+  %t1464 = phi i1 [ %t1463, %L538_sc_rhs ], [ false, %L539_sc_short ]
+  br i1 %t1464, label %L541_then, label %L542_else
 L541_then:
-  %t1459 = load i32, ptr %wb2.addr
-  %t1460 = load ptr, ptr %src.addr
-  %t1461 = load ptr, ptr %t.addr
-  %t1462 = load i32, ptr %i.addr
-  %t1463 = add i32 %t1462, 1
-  %t1464 = call i32 @chk_count_args(ptr %t1460, ptr %t1461, i32 %t1463)
-  %t1465 = icmp ne i32 %t1459, %t1464
-  br i1 %t1465, label %L544_then, label %L545_else
-L544_then:
-  store i32 101, ptr %bcode.addr
-  %t1466 = load ptr, ptr %src.addr
-  %t1467 = load ptr, ptr %t.addr
-  %t1468 = load i32, ptr %i.addr
-  %t1469 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.56, i64 0, i64 0
-  %t1470 = insertvalue { ptr, i64 } undef, ptr %t1469, 0
-  %t1471 = insertvalue { ptr, i64 } %t1470, i64 9, 1
-  %t1472 = call i1 @chk_tok_is(ptr %t1466, ptr %t1467, i32 %t1468, { ptr, i64 } %t1471)
-  br i1 %t1472, label %L547_then, label %L548_else
-L547_then:
-  store i32 99, ptr %bcode.addr
-  br label %L549_end
-L548_else:
-  %t1473 = load ptr, ptr %src.addr
-  %t1474 = load ptr, ptr %t.addr
-  %t1475 = load i32, ptr %i.addr
-  %t1476 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.57, i64 0, i64 0
-  %t1477 = insertvalue { ptr, i64 } undef, ptr %t1476, 0
-  %t1478 = insertvalue { ptr, i64 } %t1477, i64 9, 1
-  %t1479 = call i1 @chk_tok_is(ptr %t1473, ptr %t1474, i32 %t1475, { ptr, i64 } %t1478)
-  br i1 %t1479, label %L550_then, label %L551_else
-L550_then:
-  store i32 100, ptr %bcode.addr
-  br label %L552_end
-L551_else:
-  br label %L552_end
-L552_end:
-  br label %L549_end
-L549_end:
-  %t1480 = load ptr, ptr %src.addr
-  %t1481 = load ptr, ptr %t.addr
-  %t1482 = load ptr, ptr %out.addr
-  %t1483 = load i32, ptr %o.addr
-  %t1484 = load i32, ptr %bcode.addr
-  %t1485 = load i32, ptr %i.addr
-  %t1486 = call i32 @sym_pub(ptr %t1480, ptr %t1481, ptr %t1482, i32 %t1483, i32 %t1484, i32 %t1485)
-  store i32 %t1486, ptr %o.addr
-  br label %L546_end
-L545_else:
-  br label %L546_end
-L546_end:
+  store i32 1, ptr %wb2.addr
   br label %L543_end
 L542_else:
-  %t1487 = load ptr, ptr %src.addr
-  %t1488 = load ptr, ptr %t.addr
-  %t1489 = load ptr, ptr %syms.addr
-  %t1490 = load i32, ptr %n.addr
-  %t1491 = load i32, ptr %i.addr
-  %t1492 = call i32 @chk_lookup_slot(ptr %t1487, ptr %t1488, ptr %t1489, i32 %t1490, i32 %t1491)
-  store i32 %t1492, ptr %slot.addr
-  %t1493 = load i32, ptr %slot.addr
-  %t1494 = icmp eq i32 %t1493, 0
-  br i1 %t1494, label %L553_sc_rhs, label %L554_sc_short
-L553_sc_rhs:
+  br label %L543_end
+L543_end:
+  %t1465 = load i32, ptr %wb2.addr
+  %t1466 = icmp ne i32 %t1465, 999999
+  br i1 %t1466, label %L544_then, label %L545_else
+L544_then:
+  %t1467 = load i32, ptr %wb2.addr
+  %t1468 = load ptr, ptr %src.addr
+  %t1469 = load ptr, ptr %t.addr
+  %t1470 = load i32, ptr %i.addr
+  %t1471 = add i32 %t1470, 1
+  %t1472 = call i32 @chk_count_args(ptr %t1468, ptr %t1469, i32 %t1471)
+  %t1473 = icmp ne i32 %t1467, %t1472
+  br i1 %t1473, label %L547_then, label %L548_else
+L547_then:
+  store i32 101, ptr %bcode.addr
+  %t1474 = load ptr, ptr %src.addr
+  %t1475 = load ptr, ptr %t.addr
+  %t1476 = load i32, ptr %i.addr
+  %t1477 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.56, i64 0, i64 0
+  %t1478 = insertvalue { ptr, i64 } undef, ptr %t1477, 0
+  %t1479 = insertvalue { ptr, i64 } %t1478, i64 9, 1
+  %t1480 = call i1 @chk_tok_is(ptr %t1474, ptr %t1475, i32 %t1476, { ptr, i64 } %t1479)
+  br i1 %t1480, label %L550_then, label %L551_else
+L550_then:
+  store i32 99, ptr %bcode.addr
+  br label %L552_end
+L551_else:
+  %t1481 = load ptr, ptr %src.addr
+  %t1482 = load ptr, ptr %t.addr
+  %t1483 = load i32, ptr %i.addr
+  %t1484 = getelementptr inbounds [9 x i8], ptr @.str.check_arena.57, i64 0, i64 0
+  %t1485 = insertvalue { ptr, i64 } undef, ptr %t1484, 0
+  %t1486 = insertvalue { ptr, i64 } %t1485, i64 9, 1
+  %t1487 = call i1 @chk_tok_is(ptr %t1481, ptr %t1482, i32 %t1483, { ptr, i64 } %t1486)
+  br i1 %t1487, label %L553_then, label %L554_else
+L553_then:
+  store i32 100, ptr %bcode.addr
+  br label %L555_end
+L554_else:
+  br label %L555_end
+L555_end:
+  br label %L552_end
+L552_end:
+  %t1488 = load ptr, ptr %src.addr
+  %t1489 = load ptr, ptr %t.addr
+  %t1490 = load ptr, ptr %out.addr
+  %t1491 = load i32, ptr %o.addr
+  %t1492 = load i32, ptr %bcode.addr
+  %t1493 = load i32, ptr %i.addr
+  %t1494 = call i32 @sym_pub(ptr %t1488, ptr %t1489, ptr %t1490, i32 %t1491, i32 %t1492, i32 %t1493)
+  store i32 %t1494, ptr %o.addr
+  br label %L549_end
+L548_else:
+  br label %L549_end
+L549_end:
+  br label %L546_end
+L545_else:
   %t1495 = load ptr, ptr %src.addr
   %t1496 = load ptr, ptr %t.addr
-  %t1497 = load i32, ptr %i.addr
-  %t1498 = call i32 @chk_let_named(ptr %t1495, ptr %t1496, i32 %t1497)
-  %t1499 = icmp eq i32 %t1498, 0
-  br label %L555_sc_end
-L554_sc_short:
-  br label %L555_sc_end
-L555_sc_end:
-  %t1500 = phi i1 [ %t1499, %L553_sc_rhs ], [ false, %L554_sc_short ]
-  br i1 %t1500, label %L556_sc_rhs, label %L557_sc_short
+  %t1497 = load ptr, ptr %syms.addr
+  %t1498 = load i32, ptr %n.addr
+  %t1499 = load i32, ptr %i.addr
+  %t1500 = call i32 @chk_lookup_slot(ptr %t1495, ptr %t1496, ptr %t1497, i32 %t1498, i32 %t1499)
+  store i32 %t1500, ptr %slot.addr
+  %t1501 = load i32, ptr %slot.addr
+  %t1502 = icmp eq i32 %t1501, 0
+  br i1 %t1502, label %L556_sc_rhs, label %L557_sc_short
 L556_sc_rhs:
-  %t1501 = load ptr, ptr %src.addr
-  %t1502 = load ptr, ptr %t.addr
-  %t1503 = load i32, ptr %i.addr
-  %t1504 = call i32 @chk_param_named_any(ptr %t1501, ptr %t1502, i32 %t1503)
-  %t1505 = icmp eq i32 %t1504, 0
+  %t1503 = load ptr, ptr %src.addr
+  %t1504 = load ptr, ptr %t.addr
+  %t1505 = load i32, ptr %i.addr
+  %t1506 = call i32 @chk_let_named(ptr %t1503, ptr %t1504, i32 %t1505)
+  %t1507 = icmp eq i32 %t1506, 0
   br label %L558_sc_end
 L557_sc_short:
   br label %L558_sc_end
 L558_sc_end:
-  %t1506 = phi i1 [ %t1505, %L556_sc_rhs ], [ false, %L557_sc_short ]
-  br i1 %t1506, label %L559_then, label %L560_else
-L559_then:
-  %t1507 = load ptr, ptr %src.addr
-  %t1508 = load ptr, ptr %t.addr
-  %t1509 = load ptr, ptr %out.addr
-  %t1510 = load i32, ptr %o.addr
+  %t1508 = phi i1 [ %t1507, %L556_sc_rhs ], [ false, %L557_sc_short ]
+  br i1 %t1508, label %L559_sc_rhs, label %L560_sc_short
+L559_sc_rhs:
+  %t1509 = load ptr, ptr %src.addr
+  %t1510 = load ptr, ptr %t.addr
   %t1511 = load i32, ptr %i.addr
-  %t1512 = call i32 @sym_pub(ptr %t1507, ptr %t1508, ptr %t1509, i32 %t1510, i32 96, i32 %t1511)
-  store i32 %t1512, ptr %o.addr
-  br label %L561_end
-L560_else:
-  %t1513 = load i32, ptr %slot.addr
-  %t1514 = icmp ne i32 %t1513, 0
+  %t1512 = call i32 @chk_param_named_any(ptr %t1509, ptr %t1510, i32 %t1511)
+  %t1513 = icmp eq i32 %t1512, 0
+  br label %L561_sc_end
+L560_sc_short:
+  br label %L561_sc_end
+L561_sc_end:
+  %t1514 = phi i1 [ %t1513, %L559_sc_rhs ], [ false, %L560_sc_short ]
   br i1 %t1514, label %L562_then, label %L563_else
 L562_then:
-  %t1515 = load ptr, ptr %syms.addr
-  %t1516 = load i32, ptr %slot.addr
-  %t1517 = sub i32 %t1516, 1
-  %t1518 = mul i32 %t1517, 20
-  %t1519 = add i32 %t1518, 8
-  %t1520 = call i32 @load32(ptr %t1515, i32 %t1519)
-  store i32 %t1520, ptr %want.addr
-  %t1521 = load ptr, ptr %src.addr
-  %t1522 = load ptr, ptr %t.addr
-  %t1523 = load i32, ptr %i.addr
-  %t1524 = add i32 %t1523, 1
-  %t1525 = call i32 @chk_count_args(ptr %t1521, ptr %t1522, i32 %t1524)
-  store i32 %t1525, ptr %got.addr
-  %t1526 = load i32, ptr %want.addr
-  %t1527 = load i32, ptr %got.addr
-  %t1528 = icmp ne i32 %t1526, %t1527
-  br i1 %t1528, label %L565_then, label %L566_else
+  %t1515 = load ptr, ptr %src.addr
+  %t1516 = load ptr, ptr %t.addr
+  %t1517 = load ptr, ptr %out.addr
+  %t1518 = load i32, ptr %o.addr
+  %t1519 = load i32, ptr %i.addr
+  %t1520 = call i32 @sym_pub(ptr %t1515, ptr %t1516, ptr %t1517, i32 %t1518, i32 96, i32 %t1519)
+  store i32 %t1520, ptr %o.addr
+  br label %L564_end
+L563_else:
+  %t1521 = load i32, ptr %slot.addr
+  %t1522 = icmp ne i32 %t1521, 0
+  br i1 %t1522, label %L565_then, label %L566_else
 L565_then:
+  %t1523 = load ptr, ptr %syms.addr
+  %t1524 = load i32, ptr %slot.addr
+  %t1525 = sub i32 %t1524, 1
+  %t1526 = mul i32 %t1525, 20
+  %t1527 = add i32 %t1526, 8
+  %t1528 = call i32 @load32(ptr %t1523, i32 %t1527)
+  store i32 %t1528, ptr %want.addr
   %t1529 = load ptr, ptr %src.addr
   %t1530 = load ptr, ptr %t.addr
-  %t1531 = load ptr, ptr %out.addr
-  %t1532 = load i32, ptr %o.addr
-  %t1533 = load i32, ptr %i.addr
-  %t1534 = call i32 @sym_pub(ptr %t1529, ptr %t1530, ptr %t1531, i32 %t1532, i32 103, i32 %t1533)
-  store i32 %t1534, ptr %o.addr
+  %t1531 = load i32, ptr %i.addr
+  %t1532 = add i32 %t1531, 1
+  %t1533 = call i32 @chk_count_args(ptr %t1529, ptr %t1530, i32 %t1532)
+  store i32 %t1533, ptr %got.addr
+  %t1534 = load i32, ptr %want.addr
+  %t1535 = load i32, ptr %got.addr
+  %t1536 = icmp ne i32 %t1534, %t1535
+  br i1 %t1536, label %L568_then, label %L569_else
+L568_then:
+  %t1537 = load ptr, ptr %src.addr
+  %t1538 = load ptr, ptr %t.addr
+  %t1539 = load ptr, ptr %out.addr
+  %t1540 = load i32, ptr %o.addr
+  %t1541 = load i32, ptr %i.addr
+  %t1542 = call i32 @sym_pub(ptr %t1537, ptr %t1538, ptr %t1539, i32 %t1540, i32 103, i32 %t1541)
+  store i32 %t1542, ptr %o.addr
+  br label %L570_end
+L569_else:
+  br label %L570_end
+L570_end:
   br label %L567_end
 L566_else:
   br label %L567_end
 L567_end:
   br label %L564_end
-L563_else:
-  br label %L564_end
 L564_end:
-  br label %L561_end
-L561_end:
-  br label %L543_end
-L543_end:
+  br label %L546_end
+L546_end:
+  br label %L528_end
+L527_else:
+  br label %L528_end
+L528_end:
   br label %L525_end
 L524_else:
   br label %L525_end
 L525_end:
-  br label %L522_end
-L521_else:
-  br label %L522_end
-L522_end:
-  %t1535 = load i32, ptr %i.addr
-  %t1536 = add i32 %t1535, 1
-  store i32 %t1536, ptr %i.addr
-  br label %L441_end
-L440_else:
-  br label %L441_end
-L441_end:
-  br label %L400_wcond
-L402_wend:
+  %t1543 = load i32, ptr %i.addr
+  %t1544 = add i32 %t1543, 1
+  store i32 %t1544, ptr %i.addr
+  br label %L444_end
+L443_else:
+  br label %L444_end
+L444_end:
+  br label %L403_wcond
+L405_wend:
   store i32 0, ptr %hbr.addr
   store i32 0, ptr %ib.addr
-  br label %L568_wcond
-L568_wcond:
-  %t1537 = load ptr, ptr %t.addr
-  %t1538 = load i32, ptr %ib.addr
-  %t1539 = call i32 @chk_tok_kind(ptr %t1537, i32 %t1538)
-  %t1540 = icmp ne i32 %t1539, 4
-  br i1 %t1540, label %L571_sc_rhs, label %L572_sc_short
-L571_sc_rhs:
-  %t1541 = load i32, ptr %hbr.addr
-  %t1542 = icmp eq i32 %t1541, 0
-  br label %L573_sc_end
-L572_sc_short:
-  br label %L573_sc_end
-L573_sc_end:
-  %t1543 = phi i1 [ %t1542, %L571_sc_rhs ], [ false, %L572_sc_short ]
-  br i1 %t1543, label %L569_wbody, label %L570_wend
-L569_wbody:
-  %t1544 = load ptr, ptr %src.addr
+  br label %L571_wcond
+L571_wcond:
   %t1545 = load ptr, ptr %t.addr
   %t1546 = load i32, ptr %ib.addr
-  %t1547 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.58, i64 0, i64 0
-  %t1548 = insertvalue { ptr, i64 } undef, ptr %t1547, 0
-  %t1549 = insertvalue { ptr, i64 } %t1548, i64 2, 1
-  %t1550 = call i1 @chk_tok_is(ptr %t1544, ptr %t1545, i32 %t1546, { ptr, i64 } %t1549)
-  br i1 %t1550, label %L574_then, label %L575_else
-L574_then:
-  %t1551 = load ptr, ptr %src.addr
-  %t1552 = load ptr, ptr %t.addr
-  %t1553 = load i32, ptr %ib.addr
-  %t1554 = add i32 %t1553, 2
-  %t1555 = call i32 @chk_find_paren(ptr %t1551, ptr %t1552, i32 %t1554)
-  store i32 %t1555, ptr %lbp.addr
-  %t1556 = load ptr, ptr %src.addr
-  %t1557 = load ptr, ptr %t.addr
-  %t1558 = load i32, ptr %lbp.addr
-  %t1559 = call i32 @chk_match_paren(ptr %t1556, ptr %t1557, i32 %t1558)
-  store i32 %t1559, ptr %rbp.addr
-  %t1560 = load ptr, ptr %src.addr
-  %t1561 = load ptr, ptr %t.addr
-  %t1562 = load i32, ptr %rbp.addr
-  %t1563 = add i32 %t1562, 1
-  %t1564 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.59, i64 0, i64 0
-  %t1565 = insertvalue { ptr, i64 } undef, ptr %t1564, 0
-  %t1566 = insertvalue { ptr, i64 } %t1565, i64 1, 1
-  %t1567 = call i1 @chk_tok_is(ptr %t1560, ptr %t1561, i32 %t1563, { ptr, i64 } %t1566)
-  br i1 %t1567, label %L577_sc_rhs, label %L578_sc_short
-L577_sc_rhs:
+  %t1547 = call i32 @chk_tok_kind(ptr %t1545, i32 %t1546)
+  %t1548 = icmp ne i32 %t1547, 4
+  br i1 %t1548, label %L574_sc_rhs, label %L575_sc_short
+L574_sc_rhs:
+  %t1549 = load i32, ptr %hbr.addr
+  %t1550 = icmp eq i32 %t1549, 0
+  br label %L576_sc_end
+L575_sc_short:
+  br label %L576_sc_end
+L576_sc_end:
+  %t1551 = phi i1 [ %t1550, %L574_sc_rhs ], [ false, %L575_sc_short ]
+  br i1 %t1551, label %L572_wbody, label %L573_wend
+L572_wbody:
+  %t1552 = load ptr, ptr %src.addr
+  %t1553 = load ptr, ptr %t.addr
+  %t1554 = load i32, ptr %ib.addr
+  %t1555 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.58, i64 0, i64 0
+  %t1556 = insertvalue { ptr, i64 } undef, ptr %t1555, 0
+  %t1557 = insertvalue { ptr, i64 } %t1556, i64 2, 1
+  %t1558 = call i1 @chk_tok_is(ptr %t1552, ptr %t1553, i32 %t1554, { ptr, i64 } %t1557)
+  br i1 %t1558, label %L577_then, label %L578_else
+L577_then:
+  %t1559 = load ptr, ptr %src.addr
+  %t1560 = load ptr, ptr %t.addr
+  %t1561 = load i32, ptr %ib.addr
+  %t1562 = add i32 %t1561, 2
+  %t1563 = call i32 @chk_find_paren(ptr %t1559, ptr %t1560, i32 %t1562)
+  store i32 %t1563, ptr %lbp.addr
+  %t1564 = load ptr, ptr %src.addr
+  %t1565 = load ptr, ptr %t.addr
+  %t1566 = load i32, ptr %lbp.addr
+  %t1567 = call i32 @chk_match_paren(ptr %t1564, ptr %t1565, i32 %t1566)
+  store i32 %t1567, ptr %rbp.addr
   %t1568 = load ptr, ptr %src.addr
   %t1569 = load ptr, ptr %t.addr
   %t1570 = load i32, ptr %rbp.addr
-  %t1571 = add i32 %t1570, 2
-  %t1572 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.60, i64 0, i64 0
+  %t1571 = add i32 %t1570, 1
+  %t1572 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.59, i64 0, i64 0
   %t1573 = insertvalue { ptr, i64 } undef, ptr %t1572, 0
   %t1574 = insertvalue { ptr, i64 } %t1573, i64 1, 1
   %t1575 = call i1 @chk_tok_is(ptr %t1568, ptr %t1569, i32 %t1571, { ptr, i64 } %t1574)
-  br label %L579_sc_end
-L578_sc_short:
-  br label %L579_sc_end
-L579_sc_end:
-  %t1576 = phi i1 [ %t1575, %L577_sc_rhs ], [ false, %L578_sc_short ]
-  br i1 %t1576, label %L580_sc_rhs, label %L581_sc_short
+  br i1 %t1575, label %L580_sc_rhs, label %L581_sc_short
 L580_sc_rhs:
-  %t1577 = load ptr, ptr %src.addr
-  %t1578 = load ptr, ptr %t.addr
-  %t1579 = load ptr, ptr %syms.addr
-  %t1580 = load i32, ptr %n.addr
-  %t1581 = load i32, ptr %rbp.addr
-  %t1582 = add i32 %t1581, 3
-  %t1583 = call i32 @chk_ty_borrowish(ptr %t1577, ptr %t1578, ptr %t1579, i32 %t1580, i32 %t1582)
-  %t1584 = icmp eq i32 %t1583, 1
+  %t1576 = load ptr, ptr %src.addr
+  %t1577 = load ptr, ptr %t.addr
+  %t1578 = load i32, ptr %rbp.addr
+  %t1579 = add i32 %t1578, 2
+  %t1580 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.60, i64 0, i64 0
+  %t1581 = insertvalue { ptr, i64 } undef, ptr %t1580, 0
+  %t1582 = insertvalue { ptr, i64 } %t1581, i64 1, 1
+  %t1583 = call i1 @chk_tok_is(ptr %t1576, ptr %t1577, i32 %t1579, { ptr, i64 } %t1582)
   br label %L582_sc_end
 L581_sc_short:
   br label %L582_sc_end
 L582_sc_end:
-  %t1585 = phi i1 [ %t1584, %L580_sc_rhs ], [ false, %L581_sc_short ]
-  br i1 %t1585, label %L583_then, label %L584_else
-L583_then:
+  %t1584 = phi i1 [ %t1583, %L580_sc_rhs ], [ false, %L581_sc_short ]
+  br i1 %t1584, label %L583_sc_rhs, label %L584_sc_short
+L583_sc_rhs:
+  %t1585 = load ptr, ptr %src.addr
+  %t1586 = load ptr, ptr %t.addr
+  %t1587 = load ptr, ptr %syms.addr
+  %t1588 = load i32, ptr %n.addr
+  %t1589 = load i32, ptr %rbp.addr
+  %t1590 = add i32 %t1589, 3
+  %t1591 = call i32 @chk_ty_borrowish(ptr %t1585, ptr %t1586, ptr %t1587, i32 %t1588, i32 %t1590)
+  %t1592 = icmp eq i32 %t1591, 1
+  br label %L585_sc_end
+L584_sc_short:
+  br label %L585_sc_end
+L585_sc_end:
+  %t1593 = phi i1 [ %t1592, %L583_sc_rhs ], [ false, %L584_sc_short ]
+  br i1 %t1593, label %L586_then, label %L587_else
+L586_then:
   store i32 1, ptr %hbr.addr
-  br label %L585_end
-L584_else:
-  br label %L585_end
-L585_end:
-  br label %L576_end
-L575_else:
-  br label %L576_end
-L576_end:
-  %t1586 = load i32, ptr %ib.addr
-  %t1587 = add i32 %t1586, 1
-  store i32 %t1587, ptr %ib.addr
-  br label %L568_wcond
-L570_wend:
-  %t1588 = load ptr, ptr %tyt.addr
-  %t1589 = load i32, ptr %hbr.addr
-  call void @store32(ptr %t1588, i32 3500, i32 %t1589)
+  br label %L588_end
+L587_else:
+  br label %L588_end
+L588_end:
+  br label %L579_end
+L578_else:
+  br label %L579_end
+L579_end:
+  %t1594 = load i32, ptr %ib.addr
+  %t1595 = add i32 %t1594, 1
+  store i32 %t1595, ptr %ib.addr
+  br label %L571_wcond
+L573_wend:
+  %t1596 = load ptr, ptr %tyt.addr
+  %t1597 = load i32, ptr %hbr.addr
+  call void @store32(ptr %t1596, i32 3500, i32 %t1597)
+  %t1598 = load ptr, ptr %src.addr
+  %t1599 = load ptr, ptr %t.addr
+  %t1600 = call i32 @chk_simple_unit(ptr %t1598, ptr %t1599)
+  store i32 %t1600, ptr %simple_unit.addr
   store i32 0, ptr %i.addr
-  br label %L586_wcond
-L586_wcond:
-  %t1590 = load ptr, ptr %t.addr
-  %t1591 = load i32, ptr %i.addr
-  %t1592 = call i32 @chk_tok_kind(ptr %t1590, i32 %t1591)
-  %t1593 = icmp ne i32 %t1592, 4
-  br i1 %t1593, label %L587_wbody, label %L588_wend
-L587_wbody:
-  %t1594 = load ptr, ptr %src.addr
-  %t1595 = load ptr, ptr %t.addr
-  %t1596 = load i32, ptr %i.addr
-  %t1597 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.61, i64 0, i64 0
-  %t1598 = insertvalue { ptr, i64 } undef, ptr %t1597, 0
-  %t1599 = insertvalue { ptr, i64 } %t1598, i64 2, 1
-  %t1600 = call i1 @chk_tok_is(ptr %t1594, ptr %t1595, i32 %t1596, { ptr, i64 } %t1599)
-  br i1 %t1600, label %L589_then, label %L590_else
-L589_then:
-  %t1601 = load ptr, ptr %src.addr
-  %t1602 = load ptr, ptr %t.addr
-  %t1603 = load i32, ptr %i.addr
-  %t1604 = add i32 %t1603, 2
-  %t1605 = call i32 @chk_find_paren(ptr %t1601, ptr %t1602, i32 %t1604)
-  store i32 %t1605, ptr %lp2.addr
-  %t1606 = load ptr, ptr %src.addr
-  %t1607 = load ptr, ptr %t.addr
-  %t1608 = load ptr, ptr %syms.addr
-  %t1609 = load i32, ptr %n.addr
-  %t1610 = load i32, ptr %i.addr
-  %t1611 = add i32 %t1610, 1
-  %t1612 = call i32 @chk_lookup_slot(ptr %t1606, ptr %t1607, ptr %t1608, i32 %t1609, i32 %t1611)
-  store i32 %t1612, ptr %slot2.addr
-  %t1613 = load ptr, ptr %src.addr
-  %t1614 = load ptr, ptr %t.addr
-  %t1615 = load i32, ptr %i.addr
-  %t1616 = add i32 %t1615, 2
-  %t1617 = call i32 @chk_find_brace(ptr %t1613, ptr %t1614, i32 %t1616)
-  store i32 %t1617, ptr %fbra.addr
-  %t1618 = load i32, ptr %slot2.addr
-  store i32 %t1618, ptr %fslot.addr
-  %t1619 = load i32, ptr %slot2.addr
-  %t1620 = icmp eq i32 %t1619, 0
-  br i1 %t1620, label %L592_then, label %L593_else
+  br label %L589_wcond
+L589_wcond:
+  %t1601 = load ptr, ptr %t.addr
+  %t1602 = load i32, ptr %i.addr
+  %t1603 = call i32 @chk_tok_kind(ptr %t1601, i32 %t1602)
+  %t1604 = icmp ne i32 %t1603, 4
+  br i1 %t1604, label %L590_wbody, label %L591_wend
+L590_wbody:
+  %t1605 = load ptr, ptr %src.addr
+  %t1606 = load ptr, ptr %t.addr
+  %t1607 = load i32, ptr %i.addr
+  %t1608 = getelementptr inbounds [2 x i8], ptr @.str.check_arena.61, i64 0, i64 0
+  %t1609 = insertvalue { ptr, i64 } undef, ptr %t1608, 0
+  %t1610 = insertvalue { ptr, i64 } %t1609, i64 2, 1
+  %t1611 = call i1 @chk_tok_is(ptr %t1605, ptr %t1606, i32 %t1607, { ptr, i64 } %t1610)
+  br i1 %t1611, label %L592_then, label %L593_else
 L592_then:
-  %t1621 = load ptr, ptr %src.addr
-  %t1622 = load ptr, ptr %t.addr
-  %t1623 = load ptr, ptr %syms.addr
-  %t1624 = load i32, ptr %n.addr
-  %t1625 = load i32, ptr %i.addr
-  %t1626 = add i32 %t1625, 1
-  %t1627 = call i32 @chk_lookup_method_any(ptr %t1621, ptr %t1622, ptr %t1623, i32 %t1624, i32 %t1626)
-  store i32 %t1627, ptr %fslot.addr
-  br label %L594_end
-L593_else:
-  br label %L594_end
-L594_end:
-  %t1628 = load ptr, ptr %src.addr
-  %t1629 = load ptr, ptr %t.addr
-  %t1630 = load i32, ptr %fbra.addr
-  %t1631 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.62, i64 0, i64 0
-  %t1632 = insertvalue { ptr, i64 } undef, ptr %t1631, 0
-  %t1633 = insertvalue { ptr, i64 } %t1632, i64 1, 1
-  %t1634 = call i1 @chk_tok_is(ptr %t1628, ptr %t1629, i32 %t1630, { ptr, i64 } %t1633)
-  br i1 %t1634, label %L595_sc_rhs, label %L596_sc_short
-L595_sc_rhs:
-  %t1635 = load i32, ptr %fslot.addr
-  %t1636 = icmp ne i32 %t1635, 0
-  br label %L597_sc_end
-L596_sc_short:
-  br label %L597_sc_end
-L597_sc_end:
-  %t1637 = phi i1 [ %t1636, %L595_sc_rhs ], [ false, %L596_sc_short ]
-  br i1 %t1637, label %L598_then, label %L599_else
-L598_then:
-  %t1638 = load ptr, ptr %src.addr
-  %t1639 = load ptr, ptr %t.addr
-  %t1640 = load ptr, ptr %syms.addr
-  %t1641 = load i32, ptr %n.addr
-  %t1642 = load ptr, ptr %tyt.addr
-  %t1643 = load i32, ptr %fslot.addr
-  %t1644 = sub i32 %t1643, 1
-  %t1645 = call i32 @chk_ret_ty(ptr %t1638, ptr %t1639, ptr %t1640, i32 %t1641, ptr %t1642, i32 %t1644)
-  store i32 %t1645, ptr %retc.addr
-  %t1646 = load ptr, ptr %src.addr
-  %t1647 = load ptr, ptr %t.addr
-  %t1648 = load i32, ptr %fbra.addr
-  %t1649 = call i32 @chk_skip_body(ptr %t1646, ptr %t1647, i32 %t1648)
-  store i32 %t1649, ptr %fend.addr
-  %t1650 = load ptr, ptr %src.addr
-  %t1651 = load ptr, ptr %t.addr
-  %t1652 = load ptr, ptr %syms.addr
-  %t1653 = load i32, ptr %n.addr
-  %t1654 = load ptr, ptr %env.addr
-  %t1655 = load i32, ptr %lp2.addr
-  %t1656 = load i32, ptr %fbra.addr
-  %t1657 = load ptr, ptr %oc.addr
-  %t1658 = call i32 @chk_env_params(ptr %t1650, ptr %t1651, ptr %t1652, i32 %t1653, ptr %t1654, i32 0, i32 %t1655, i32 %t1656, ptr %t1657)
-  store i32 %t1658, ptr %envc.addr
-  %t1659 = load ptr, ptr %oc.addr
-  %t1660 = load i32, ptr %o.addr
-  call void @store32(ptr %t1659, i32 0, i32 %t1660)
-  %t1661 = load ptr, ptr %tyt.addr
-  call void @store32(ptr %t1661, i32 0, i32 0)
-  %t1662 = load ptr, ptr %tyt.addr
-  call void @store32(ptr %t1662, i32 2048, i32 0)
-  %t1663 = load ptr, ptr %tyt.addr
-  call void @store32(ptr %t1663, i32 2044, i32 0)
-  %t1664 = load ptr, ptr %tyt.addr
-  %t1665 = load i32, ptr %envc.addr
-  call void @store32(ptr %t1664, i32 3528, i32 %t1665)
-  %t1666 = load ptr, ptr %tyt.addr
-  %t1667 = load i32, ptr %envc.addr
-  call void @store32(ptr %t1666, i32 3520, i32 %t1667)
-  %t1668 = load ptr, ptr %src.addr
-  %t1669 = load ptr, ptr %t.addr
-  %t1670 = load ptr, ptr %syms.addr
-  %t1671 = load i32, ptr %n.addr
-  %t1672 = load ptr, ptr %env.addr
-  %t1673 = load i32, ptr %envc.addr
-  %t1674 = load i32, ptr %fbra.addr
-  %t1675 = zext i32 %t1674 to i64
-  %t1676 = mul i64 %t1675, 4294967296
-  %t1677 = load i32, ptr %fend.addr
-  %t1678 = zext i32 %t1677 to i64
-  %t1679 = add i64 %t1676, %t1678
-  %t1680 = load i32, ptr %retc.addr
-  %t1681 = load ptr, ptr %out.addr
-  %t1682 = load ptr, ptr %oc.addr
-  call void @chk_body(ptr %t1668, ptr %t1669, ptr %t1670, i32 %t1671, ptr %t1672, i32 %t1673, i64 %t1679, i32 %t1680, ptr %t1681, ptr %t1682)
-  %t1683 = load ptr, ptr %oc.addr
-  %t1684 = call i32 @load32(ptr %t1683, i32 0)
-  store i32 %t1684, ptr %o.addr
-  %t1685 = load ptr, ptr %tyt.addr
-  call void @store32(ptr %t1685, i32 3576, i32 0)
-  %t1686 = load ptr, ptr %src.addr
-  %t1687 = load ptr, ptr %t.addr
-  %t1688 = load ptr, ptr %syms.addr
-  %t1689 = load i32, ptr %n.addr
-  %t1690 = load ptr, ptr %env.addr
-  %t1691 = load ptr, ptr %tyt.addr
-  %t1692 = call i32 @load32(ptr %t1691, i32 3520)
-  %t1693 = load i32, ptr %fbra.addr
-  %t1694 = load i32, ptr %fend.addr
-  %t1695 = load ptr, ptr %out.addr
-  %t1696 = load ptr, ptr %oc.addr
-  call void @chk_moves(ptr %t1686, ptr %t1687, ptr %t1688, i32 %t1689, ptr %t1690, i32 %t1692, i32 %t1693, i32 %t1694, ptr %t1695, ptr %t1696)
-  %t1697 = load ptr, ptr %src.addr
-  %t1698 = load ptr, ptr %t.addr
-  %t1699 = load ptr, ptr %syms.addr
-  %t1700 = load i32, ptr %n.addr
-  %t1701 = load ptr, ptr %env.addr
-  %t1702 = load ptr, ptr %tyt.addr
-  %t1703 = call i32 @load32(ptr %t1702, i32 3520)
-  %t1704 = load i32, ptr %fbra.addr
-  %t1705 = load i32, ptr %fend.addr
-  %t1706 = call i64 @chk_lh(i32 %t1704, i32 %t1705)
-  %t1707 = load i32, ptr %i.addr
+  %t1612 = load ptr, ptr %src.addr
+  %t1613 = load ptr, ptr %t.addr
+  %t1614 = load i32, ptr %i.addr
+  %t1615 = add i32 %t1614, 2
+  %t1616 = call i32 @chk_find_paren(ptr %t1612, ptr %t1613, i32 %t1615)
+  store i32 %t1616, ptr %lp2.addr
+  %t1617 = load ptr, ptr %src.addr
+  %t1618 = load ptr, ptr %t.addr
+  %t1619 = load ptr, ptr %syms.addr
+  %t1620 = load i32, ptr %n.addr
+  %t1621 = load i32, ptr %i.addr
+  %t1622 = add i32 %t1621, 1
+  %t1623 = call i32 @chk_lookup_slot(ptr %t1617, ptr %t1618, ptr %t1619, i32 %t1620, i32 %t1622)
+  store i32 %t1623, ptr %slot2.addr
+  %t1624 = load ptr, ptr %src.addr
+  %t1625 = load ptr, ptr %t.addr
+  %t1626 = load i32, ptr %i.addr
+  %t1627 = add i32 %t1626, 2
+  %t1628 = call i32 @chk_find_brace(ptr %t1624, ptr %t1625, i32 %t1627)
+  store i32 %t1628, ptr %fbra.addr
+  %t1629 = load i32, ptr %slot2.addr
+  store i32 %t1629, ptr %fslot.addr
+  %t1630 = load i32, ptr %slot2.addr
+  %t1631 = icmp eq i32 %t1630, 0
+  br i1 %t1631, label %L595_then, label %L596_else
+L595_then:
+  %t1632 = load ptr, ptr %src.addr
+  %t1633 = load ptr, ptr %t.addr
+  %t1634 = load ptr, ptr %syms.addr
+  %t1635 = load i32, ptr %n.addr
+  %t1636 = load i32, ptr %i.addr
+  %t1637 = add i32 %t1636, 1
+  %t1638 = call i32 @chk_lookup_method_any(ptr %t1632, ptr %t1633, ptr %t1634, i32 %t1635, i32 %t1637)
+  store i32 %t1638, ptr %fslot.addr
+  br label %L597_end
+L596_else:
+  br label %L597_end
+L597_end:
+  %t1639 = load ptr, ptr %src.addr
+  %t1640 = load ptr, ptr %t.addr
+  %t1641 = load i32, ptr %fbra.addr
+  %t1642 = getelementptr inbounds [1 x i8], ptr @.str.check_arena.62, i64 0, i64 0
+  %t1643 = insertvalue { ptr, i64 } undef, ptr %t1642, 0
+  %t1644 = insertvalue { ptr, i64 } %t1643, i64 1, 1
+  %t1645 = call i1 @chk_tok_is(ptr %t1639, ptr %t1640, i32 %t1641, { ptr, i64 } %t1644)
+  br i1 %t1645, label %L598_sc_rhs, label %L599_sc_short
+L598_sc_rhs:
+  %t1646 = load i32, ptr %fslot.addr
+  %t1647 = icmp ne i32 %t1646, 0
+  br label %L600_sc_end
+L599_sc_short:
+  br label %L600_sc_end
+L600_sc_end:
+  %t1648 = phi i1 [ %t1647, %L598_sc_rhs ], [ false, %L599_sc_short ]
+  br i1 %t1648, label %L601_then, label %L602_else
+L601_then:
+  %t1649 = load ptr, ptr %src.addr
+  %t1650 = load ptr, ptr %t.addr
+  %t1651 = load ptr, ptr %syms.addr
+  %t1652 = load i32, ptr %n.addr
+  %t1653 = load ptr, ptr %tyt.addr
+  %t1654 = load i32, ptr %fslot.addr
+  %t1655 = sub i32 %t1654, 1
+  %t1656 = call i32 @chk_ret_ty(ptr %t1649, ptr %t1650, ptr %t1651, i32 %t1652, ptr %t1653, i32 %t1655)
+  store i32 %t1656, ptr %retc.addr
+  %t1657 = load ptr, ptr %src.addr
+  %t1658 = load ptr, ptr %t.addr
+  %t1659 = load i32, ptr %fbra.addr
+  %t1660 = call i32 @chk_skip_body(ptr %t1657, ptr %t1658, i32 %t1659)
+  store i32 %t1660, ptr %fend.addr
+  %t1661 = load ptr, ptr %src.addr
+  %t1662 = load ptr, ptr %t.addr
+  %t1663 = load ptr, ptr %syms.addr
+  %t1664 = load i32, ptr %n.addr
+  %t1665 = load ptr, ptr %env.addr
+  %t1666 = load i32, ptr %lp2.addr
+  %t1667 = load i32, ptr %fbra.addr
+  %t1668 = load ptr, ptr %oc.addr
+  %t1669 = call i32 @chk_env_params(ptr %t1661, ptr %t1662, ptr %t1663, i32 %t1664, ptr %t1665, i32 0, i32 %t1666, i32 %t1667, ptr %t1668)
+  store i32 %t1669, ptr %envc.addr
+  %t1670 = load ptr, ptr %oc.addr
+  %t1671 = load i32, ptr %o.addr
+  call void @store32(ptr %t1670, i32 0, i32 %t1671)
+  %t1672 = load ptr, ptr %tyt.addr
+  call void @store32(ptr %t1672, i32 0, i32 0)
+  %t1673 = load ptr, ptr %tyt.addr
+  call void @store32(ptr %t1673, i32 2048, i32 0)
+  %t1674 = load ptr, ptr %tyt.addr
+  call void @store32(ptr %t1674, i32 2044, i32 0)
+  %t1675 = load ptr, ptr %tyt.addr
+  %t1676 = load i32, ptr %envc.addr
+  call void @store32(ptr %t1675, i32 3528, i32 %t1676)
+  %t1677 = load ptr, ptr %tyt.addr
+  %t1678 = load i32, ptr %envc.addr
+  call void @store32(ptr %t1677, i32 3520, i32 %t1678)
+  %t1679 = load ptr, ptr %src.addr
+  %t1680 = load ptr, ptr %t.addr
+  %t1681 = load ptr, ptr %syms.addr
+  %t1682 = load i32, ptr %n.addr
+  %t1683 = load ptr, ptr %env.addr
+  %t1684 = load i32, ptr %envc.addr
+  %t1685 = load i32, ptr %fbra.addr
+  %t1686 = zext i32 %t1685 to i64
+  %t1687 = mul i64 %t1686, 4294967296
+  %t1688 = load i32, ptr %fend.addr
+  %t1689 = zext i32 %t1688 to i64
+  %t1690 = add i64 %t1687, %t1689
+  %t1691 = load i32, ptr %retc.addr
+  %t1692 = load ptr, ptr %out.addr
+  %t1693 = load ptr, ptr %oc.addr
+  call void @chk_body(ptr %t1679, ptr %t1680, ptr %t1681, i32 %t1682, ptr %t1683, i32 %t1684, i64 %t1690, i32 %t1691, ptr %t1692, ptr %t1693)
+  %t1694 = load ptr, ptr %oc.addr
+  %t1695 = call i32 @load32(ptr %t1694, i32 0)
+  store i32 %t1695, ptr %o.addr
+  %t1696 = load ptr, ptr %tyt.addr
+  call void @store32(ptr %t1696, i32 3576, i32 0)
+  %t1697 = load i32, ptr %simple_unit.addr
+  %t1698 = icmp eq i32 %t1697, 0
+  br i1 %t1698, label %L604_then, label %L605_else
+L604_then:
+  %t1699 = load ptr, ptr %src.addr
+  %t1700 = load ptr, ptr %t.addr
+  %t1701 = load ptr, ptr %syms.addr
+  %t1702 = load i32, ptr %n.addr
+  %t1703 = load ptr, ptr %env.addr
+  %t1704 = load ptr, ptr %tyt.addr
+  %t1705 = call i32 @load32(ptr %t1704, i32 3520)
+  %t1706 = load i32, ptr %fbra.addr
+  %t1707 = load i32, ptr %fend.addr
   %t1708 = load ptr, ptr %out.addr
   %t1709 = load ptr, ptr %oc.addr
-  call void @chk_life(ptr %t1697, ptr %t1698, ptr %t1699, i32 %t1700, ptr %t1701, i32 %t1703, i64 %t1706, i32 %t1707, ptr %t1708, ptr %t1709)
+  call void @chk_moves(ptr %t1699, ptr %t1700, ptr %t1701, i32 %t1702, ptr %t1703, i32 %t1705, i32 %t1706, i32 %t1707, ptr %t1708, ptr %t1709)
   %t1710 = load ptr, ptr %src.addr
   %t1711 = load ptr, ptr %t.addr
   %t1712 = load ptr, ptr %syms.addr
@@ -118436,93 +118967,111 @@ L598_then:
   %t1716 = call i32 @load32(ptr %t1715, i32 3520)
   %t1717 = load i32, ptr %fbra.addr
   %t1718 = load i32, ptr %fend.addr
-  %t1719 = load ptr, ptr %out.addr
-  %t1720 = load ptr, ptr %oc.addr
-  call void @chk_bdom(ptr %t1710, ptr %t1711, ptr %t1712, i32 %t1713, ptr %t1714, i32 %t1716, i32 %t1717, i32 %t1718, ptr %t1719, ptr %t1720)
-  %t1721 = load ptr, ptr %oc.addr
-  %t1722 = call i32 @load32(ptr %t1721, i32 0)
-  store i32 %t1722, ptr %o.addr
+  %t1719 = call i64 @chk_lh(i32 %t1717, i32 %t1718)
+  %t1720 = load i32, ptr %i.addr
+  %t1721 = load ptr, ptr %out.addr
+  %t1722 = load ptr, ptr %oc.addr
+  call void @chk_life(ptr %t1710, ptr %t1711, ptr %t1712, i32 %t1713, ptr %t1714, i32 %t1716, i64 %t1719, i32 %t1720, ptr %t1721, ptr %t1722)
+  br label %L606_end
+L605_else:
+  br label %L606_end
+L606_end:
   %t1723 = load ptr, ptr %src.addr
   %t1724 = load ptr, ptr %t.addr
-  %t1725 = load i32, ptr %i.addr
-  %t1726 = call i32 @chk_fn_has_body(ptr %t1723, ptr %t1724, i32 %t1725)
-  %t1727 = icmp eq i32 %t1726, 1
-  br i1 %t1727, label %L601_sc_rhs, label %L602_sc_short
-L601_sc_rhs:
-  %t1728 = load ptr, ptr %src.addr
-  %t1729 = load ptr, ptr %t.addr
-  %t1730 = load i32, ptr %lp2.addr
-  %t1731 = load i32, ptr %fbra.addr
-  %t1732 = call i32 @chk_ret_unit(ptr %t1728, ptr %t1729, i32 %t1730, i32 %t1731)
-  %t1733 = icmp eq i32 %t1732, 0
-  br label %L603_sc_end
-L602_sc_short:
-  br label %L603_sc_end
-L603_sc_end:
-  %t1734 = phi i1 [ %t1733, %L601_sc_rhs ], [ false, %L602_sc_short ]
-  br i1 %t1734, label %L604_sc_rhs, label %L605_sc_short
-L604_sc_rhs:
-  %t1735 = load ptr, ptr %src.addr
-  %t1736 = load ptr, ptr %t.addr
-  %t1737 = load i32, ptr %fbra.addr
-  %t1738 = load i32, ptr %fend.addr
-  %t1739 = sub i32 %t1738, 1
-  %t1740 = call i32 @chk_falls(ptr %t1735, ptr %t1736, i32 %t1737, i32 %t1739)
-  %t1741 = icmp eq i32 %t1740, 1
-  br label %L606_sc_end
-L605_sc_short:
-  br label %L606_sc_end
-L606_sc_end:
-  %t1742 = phi i1 [ %t1741, %L604_sc_rhs ], [ false, %L605_sc_short ]
-  br i1 %t1742, label %L607_then, label %L608_else
-L607_then:
-  %t1743 = load ptr, ptr %src.addr
-  %t1744 = load ptr, ptr %t.addr
-  %t1745 = load ptr, ptr %out.addr
-  %t1746 = load i32, ptr %o.addr
-  %t1747 = load i32, ptr %i.addr
-  %t1748 = call i32 @sym_pub(ptr %t1743, ptr %t1744, ptr %t1745, i32 %t1746, i32 179, i32 %t1747)
-  store i32 %t1748, ptr %o.addr
-  br label %L609_end
-L608_else:
-  br label %L609_end
-L609_end:
-  %t1749 = load i32, ptr %fend.addr
-  store i32 %t1749, ptr %i.addr
-  br label %L600_end
-L599_else:
-  %t1750 = load i32, ptr %i.addr
-  %t1751 = add i32 %t1750, 1
-  store i32 %t1751, ptr %i.addr
-  br label %L600_end
-L600_end:
-  br label %L591_end
-L590_else:
-  %t1752 = load i32, ptr %i.addr
-  %t1753 = add i32 %t1752, 1
-  store i32 %t1753, ptr %i.addr
-  br label %L591_end
-L591_end:
-  br label %L586_wcond
-L588_wend:
-  %t1754 = load ptr, ptr %src.addr
-  %t1755 = load ptr, ptr %t.addr
-  %t1756 = load ptr, ptr %out.addr
-  %t1757 = load i32, ptr %o.addr
-  %t1758 = load ptr, ptr %scr.addr
-  %t1759 = call i32 @chk_command(ptr %t1754, ptr %t1755, ptr %t1756, i32 %t1757, ptr %t1758)
-  store i32 %t1759, ptr %o.addr
-  %t1760 = load i32, ptr %o.addr
-  %t1762 = icmp eq i32 8, 0
-  br i1 %t1762, label %L611_dtrap, label %L610_dok
-L611_dtrap:
+  %t1725 = load ptr, ptr %syms.addr
+  %t1726 = load i32, ptr %n.addr
+  %t1727 = load ptr, ptr %env.addr
+  %t1728 = load ptr, ptr %tyt.addr
+  %t1729 = call i32 @load32(ptr %t1728, i32 3520)
+  %t1730 = load i32, ptr %fbra.addr
+  %t1731 = load i32, ptr %fend.addr
+  %t1732 = load ptr, ptr %out.addr
+  %t1733 = load ptr, ptr %oc.addr
+  call void @chk_bdom(ptr %t1723, ptr %t1724, ptr %t1725, i32 %t1726, ptr %t1727, i32 %t1729, i32 %t1730, i32 %t1731, ptr %t1732, ptr %t1733)
+  %t1734 = load ptr, ptr %oc.addr
+  %t1735 = call i32 @load32(ptr %t1734, i32 0)
+  store i32 %t1735, ptr %o.addr
+  %t1736 = load ptr, ptr %src.addr
+  %t1737 = load ptr, ptr %t.addr
+  %t1738 = load i32, ptr %i.addr
+  %t1739 = call i32 @chk_fn_has_body(ptr %t1736, ptr %t1737, i32 %t1738)
+  %t1740 = icmp eq i32 %t1739, 1
+  br i1 %t1740, label %L607_sc_rhs, label %L608_sc_short
+L607_sc_rhs:
+  %t1741 = load ptr, ptr %src.addr
+  %t1742 = load ptr, ptr %t.addr
+  %t1743 = load i32, ptr %lp2.addr
+  %t1744 = load i32, ptr %fbra.addr
+  %t1745 = call i32 @chk_ret_unit(ptr %t1741, ptr %t1742, i32 %t1743, i32 %t1744)
+  %t1746 = icmp eq i32 %t1745, 0
+  br label %L609_sc_end
+L608_sc_short:
+  br label %L609_sc_end
+L609_sc_end:
+  %t1747 = phi i1 [ %t1746, %L607_sc_rhs ], [ false, %L608_sc_short ]
+  br i1 %t1747, label %L610_sc_rhs, label %L611_sc_short
+L610_sc_rhs:
+  %t1748 = load ptr, ptr %src.addr
+  %t1749 = load ptr, ptr %t.addr
+  %t1750 = load i32, ptr %fbra.addr
+  %t1751 = load i32, ptr %fend.addr
+  %t1752 = sub i32 %t1751, 1
+  %t1753 = call i32 @chk_falls(ptr %t1748, ptr %t1749, i32 %t1750, i32 %t1752)
+  %t1754 = icmp eq i32 %t1753, 1
+  br label %L612_sc_end
+L611_sc_short:
+  br label %L612_sc_end
+L612_sc_end:
+  %t1755 = phi i1 [ %t1754, %L610_sc_rhs ], [ false, %L611_sc_short ]
+  br i1 %t1755, label %L613_then, label %L614_else
+L613_then:
+  %t1756 = load ptr, ptr %src.addr
+  %t1757 = load ptr, ptr %t.addr
+  %t1758 = load ptr, ptr %out.addr
+  %t1759 = load i32, ptr %o.addr
+  %t1760 = load i32, ptr %i.addr
+  %t1761 = call i32 @sym_pub(ptr %t1756, ptr %t1757, ptr %t1758, i32 %t1759, i32 179, i32 %t1760)
+  store i32 %t1761, ptr %o.addr
+  br label %L615_end
+L614_else:
+  br label %L615_end
+L615_end:
+  %t1762 = load i32, ptr %fend.addr
+  store i32 %t1762, ptr %i.addr
+  br label %L603_end
+L602_else:
+  %t1763 = load i32, ptr %i.addr
+  %t1764 = add i32 %t1763, 1
+  store i32 %t1764, ptr %i.addr
+  br label %L603_end
+L603_end:
+  br label %L594_end
+L593_else:
+  %t1765 = load i32, ptr %i.addr
+  %t1766 = add i32 %t1765, 1
+  store i32 %t1766, ptr %i.addr
+  br label %L594_end
+L594_end:
+  br label %L589_wcond
+L591_wend:
+  %t1767 = load ptr, ptr %src.addr
+  %t1768 = load ptr, ptr %t.addr
+  %t1769 = load ptr, ptr %out.addr
+  %t1770 = load i32, ptr %o.addr
+  %t1771 = load ptr, ptr %scr.addr
+  %t1772 = call i32 @chk_command(ptr %t1767, ptr %t1768, ptr %t1769, i32 %t1770, ptr %t1771)
+  store i32 %t1772, ptr %o.addr
+  %t1773 = load i32, ptr %o.addr
+  %t1775 = icmp eq i32 8, 0
+  br i1 %t1775, label %L617_dtrap, label %L616_dok
+L617_dtrap:
   call void @__loment_abort()
   unreachable
-L610_dok:
-  %t1761 = udiv i32 %t1760, 8
-  br label %L612_dend
-L612_dend:
-  ret i32 %t1761
+L616_dok:
+  %t1774 = udiv i32 %t1773, 8
+  br label %L618_dend
+L618_dend:
+  ret i32 %t1774
 }
 ; cmd_span_is -> bool
 define i1 @cmd_span_is(ptr %src, i32 %p, i32 %n, { ptr, i64 } %s) {
@@ -119760,10 +120309,17 @@ define i32 @chk_arena_tyt() {
 entry:
   ret i32 138576
 }
+; chk_arena_hash -> u32
+define i32 @chk_arena_hash() {
+entry:
+  ret i32 142688
+}
 ; chk_arena_bytes -> u32
 define i32 @chk_arena_bytes() {
 entry:
-  ret i32 142688
+  %t1 = mul i32 8192, 4
+  %t2 = add i32 142688, %t1
+  ret i32 %t2
 }
 ; chk_err_bytes -> u32
 define i32 @chk_err_bytes() {

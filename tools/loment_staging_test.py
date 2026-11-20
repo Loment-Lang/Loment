@@ -208,6 +208,22 @@ def test_the_swap_path_opens_no_socket() -> None:
 
 
 @test
+def test_an_old_candidate_without_a_marker_is_reverified_not_discarded() -> None:
+    """升级前 stage 过的候选没有 `.admitted`：再次 stage 时重验并补记号，不丢掉它。"""
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        h = _home(t)
+        tree = _tree(t / "tree")
+        src = _candidate(t / "src", tree, f"v{BASE}-hot.6")
+        first = st.stage(src, tree, f"v{BASE}-hot.6")
+        (first / st.MARKER).unlink()
+        second = st.stage(src, tree, f"v{BASE}-hot.6")
+        assert second == first and (second / st.MARKER).is_file()
+        assert st.poll(BASE) == second
+        print("      旧候选没有记号：重验通过、补上记号，仍然是同一条")
+
+
+@test
 def test_a_directory_dropped_into_incoming_is_not_polled() -> None:
     """`#1695`：绕过 stage 直接写进 `incoming/` 的目录**没有准入记号**，轮询不认。"""
     with tempfile.TemporaryDirectory() as t:

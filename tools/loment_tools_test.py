@@ -2329,7 +2329,7 @@ def test_lomf_never_applies_on_a_guess():
 
 @test
 def test_m77_lspe_state_why_and_verify_are_real():
-    """`lspe state` 打台账；`why` 打派生链；`verify` 核旁挂（0.1.5.2 起不再是桩）。"""
+    """`lspe state` 打台账；`why` 打派生链；`verify` 核旁挂（0.1.6 起不再是桩）。"""
     src = str(EX / "demo.lomt")
     r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
                         "lspe", "state", src],
@@ -2349,7 +2349,7 @@ def test_m77_lspe_state_why_and_verify_are_real():
     assert ("claim" in s.stdout and "obligation" in s.stdout
             and "proof_hash" in s.stdout), s.stdout
 
-    # `why` 不给文件 = 用法错（不是"0.1.5.2 的桩"）。
+    # `why` 不给文件 = 用法错（不是"0.1.6 的桩"）。
     s = subprocess.run([sys.executable, str(ROOT / "tools" / "loment.py"),
                         "lspe", "why", "S47"],
                        capture_output=True, text=True, encoding="utf-8", shell=False)

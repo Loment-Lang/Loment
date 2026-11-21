@@ -172,7 +172,7 @@ const NAME_CAP: u32 = 8392704;      // = IN_CAP + NAME_RESERVE（`const` 只吃�
 //: 它的 0..65536 是路径区，再往后才是代码缓冲）。给启动器传进来的那条诊断文件路径用,
 //: 免得与输入 / 输出 / `--link` 三个落点抢 —— 那三块都是按 argv 长度算出来的。
 const DIAGB_OFF: u32 = 64512;
-const OUT_CAP: u32 = 4194304;
+const OUT_CAP: u32 = 8388608;
 const GB_CAP: u32 = 1048576;
 const OBJ_CAP: u32 = 4194304;
 const AR_CAP: u32 = 4194304;
@@ -370,10 +370,11 @@ const TLS_SENT: u32 = 805306368;   // 0x30000000
 //
 // 现在钉在 `TEXT_VADDR + OUT_CAP`：那个间隔**就是代码缓冲本身的容量**，不是拍出来的数。
 // 于是文本段的容量变成了 `OUT_CAP`，而它**有守卫**（驱动里那段，与 `TB_LBL_MAX` 那几个
-// 同一个纪律：满了就点名退出，不往下写）。
+// 同一个纪律：满了就点名退出，不往下写）。2026-11-21 从 4 MiB 抬到 8 MiB：自举侧编出来的
+// `lomenterr` / 正则驱动器那份代码已到 4 228 966 B（CI 实测），4 MiB 窗口顶破了。
 // **必须与 `tools/lomelf.py` 的 `TEXT_CAP` / `ELF_DATA_VADDR` 同一个数** —— 两边产物要
 // 逐字节相同（`loment_elf_test` 的镜像那几格钉着）。
-const DATA_VADDR: u32 = 8388608;   // 0x800000 = TEXT_VADDR + OUT_CAP
+const DATA_VADDR: u32 = 12582912;  // 0xC00000 = TEXT_VADDR + OUT_CAP (8 MiB)
 const NO: u32 = 4294967295;
 const PHI: u64 = 4294967296;
 

@@ -150,7 +150,7 @@ properties in the artifact still hold**".
 - **Not implemented.** There is no `lomenter` binary and no `docs/297` code path; today the
   optimiser story is `--opt` (clang `-O2`) or the LVM tiers.
 
-### 8.8 DGT: compile-time digraphs (**planned, 0.1.5.2**)
+### 8.8 DGT: compile-time digraphs (**planned, 0.1.6**)
 
 `digraph<K>` is planned as a **compile-time graph class value** with a capability lattice,
 layout specialisation and static verification (`#1196` umbrella). It is **not a `choose`

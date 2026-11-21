@@ -1,0 +1,8 @@
+choose write grammar tur2027.1Alpha
+module scope_dup_neg
+
+fn f() -> u32 {
+    let x: u32 = 1;
+    let x: u32 = 2;
+    return x;
+}

@@ -2331,12 +2331,14 @@ fn chk_env_has(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
 
 /// 局部环境 (形参 + let) 查类型: 条目 = 名字 token | 类型编码 (8 字节)。
 fn chk_env_get(src: ptr, t: ptr, env: ptr, envc: u32, name_tok: u32) -> u32 {
-    let i: u32 = 0;
-    while i < envc {
+    // **从最近的一格往回找**：块作用域版次里内层 `let` 遮蔽外层，最内层的声明胜。
+    // 旧版次里同名声明是同一个变量；参考实现的后写覆盖让"最后声明"胜，反向搜与它同侧。
+    let i: u32 = envc;
+    while i > 0 {
+        i = i - 1;
         if same(src, t, load32(env, i * 8), name_tok) {
             return load32(env, i * 8 + 4);
         }
-        i = i + 1;
     }
     return 0;
 }
@@ -5950,6 +5952,12 @@ fn chk_ret_unit(src: ptr, t: ptr, from: u32, to: u32) -> u32 {
 /// `[cur, e)` 里**一条语句**结束之后的位置（指向下一条语句的第一个 token）。
 /// 控制语句没有结尾 `;`：跳到它（含 `else` 链）的块尾之后。
 fn chk_stmt_end(src: ptr, t: ptr, cur: u32, e: u32) -> u32 {
+    // **独立块**（`tur2027.1Alpha`）：一条语句就是整块；后面那条"找顶层 `;`"
+    // 会一路扫到下一条语句的分号，`chk_falls` 的判据就错位（实测：块后的 `return`
+    // 被吞掉，函数被误判"掉出末尾"）。
+    if chk_tok_is(src, t, cur, "{") {
+        return chk_skip_body(src, t, cur);
+    }
     // `lgc start { … }` 也是一条**带块**的语句（`docs/309`）—— 不把它算进这一支，
     // 下面那条"找顶层 `;`"会一路扫到**下一条**语句的分号，`chk_falls` 的判据就错位。
     // `lgc start;` / `lgc end;` 没有块：它们照常落到下面那条。
@@ -6008,6 +6016,11 @@ fn chk_falls(src: ptr, t: ptr, b: u32, e: u32) -> u32 {
     }
     if chk_tok_is(src, t, last, "return") {
         return 0;
+    }
+    if chk_tok_is(src, t, last, "{") {
+        // 块的末尾就是函数的末尾 —— 块里不掉，函数就不掉（同 `domain` 块）。
+        let cle: u32 = chk_skip_body(src, t, last) - 1;
+        return chk_falls(src, t, last, cle);
     }
     if chk_tok_is(src, t, last, "domain") && chk_is_dom_for(src, t, last) == 1 {
         // docs/315：循环**会**掉出去（区间可能是空的）—— 与 while 同判。
@@ -6095,6 +6108,14 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let tyt: ptr = chk_tyt_of(oc);
     let j: u32 = b + 1;
     let c: u32 = envc;
+    // **块作用域版次**（`tur2027.1Alpha`）：每个 `{ … }` 是词法作用域。
+    let prof: u32 = load32(oc, 8);
+    let scoped: u32 = 0;
+    if prof >= 3 { scoped = 1; }
+    let block_start: u32 = envc;
+    let save_c: u32 = 0;
+    let save_has: u32 = 0;
+    let block_pending: u32 = 0;   // 分支头刚把 j 挪到 `{`，下一个 `{` 一定是块
     // 数值字面量的**不支持形式**（`0b1010` / `1_000` / `1.5`，issue #12）—— 走一遍 token
     // 报到字面量自己身上，而不是等它被切成两个 token 后在下游出洋相。
     let q: u32 = b;
@@ -6105,6 +6126,27 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         q = q + 1;
     }
     while j < e && chk_tok_kind(t, j) != 4 {
+        // **独立块 / 分支体**（`tur2027.1Alpha`）：递归检查整块，`let` 只活在块里。
+        // 只看**语句位**的 `{`（前一个 token 是 `)` / `else` / `;` / `{` / `}`，或刚进体）；
+        // `S { … }` 结构体字面量前是标识符，不进这一支。
+        if scoped == 1 && chk_tok_is(src, t, j, "{") {
+            let prevb: u32 = 0;
+            if j == b + 1 { prevb = 1; }
+            if j > b && (chk_tok_is(src, t, j - 1, "{") || chk_tok_is(src, t, j - 1, "}")
+                    || chk_tok_is(src, t, j - 1, ";") || chk_tok_is(src, t, j - 1, ")")
+                    || chk_tok_is(src, t, j - 1, "else")) { prevb = 1; }
+            if prevb == 1 || save_has == 1 || block_pending == 1 {
+                let close: u32 = chk_match_brace(src, t, j);
+                chk_body(src, t, syms, n, env, c,
+                         ((j) as u64) * 4294967296 + (close as u64), ret, p, oc);
+                if save_has == 1 { c = save_c; save_has = 0; }
+                block_pending = 0;
+                j = close + 1;
+                continue;
+            }
+            j = j + 1;
+            continue;
+        }
         // 结构 token 直接跳过: `while x {` 的 `{` 若落到"赋值"分支, 会一路扫到体内第一个
         // `=` 并把它当成赋值语句, 报出"赋值目标不是左值"(ok.lomt 的 `14@84:{` 假报)。
         if chk_tok_is(src, t, j, "{") || chk_tok_is(src, t, j, "}")
@@ -6120,6 +6162,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 vn = vn + 1;
                 vq = vq + 2;
             }
+            if scoped == 1 { save_c = c; save_has = 1; }
             let vi: u32 = 0;
             while vi < vn {
                 c = chk_env_add(t, env, c, j + 3 + vi * 2, 0);
@@ -6138,6 +6181,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, "{") {
                 k = k + 1;
             }
+            if scoped == 1 { block_pending = 1; }
             j = k;
         } else if load32(oc, 8) != 0 && chk_tok_is(src, t, j, "defer") {
             // Tur 2 的 `defer f(a, b);`（`docs/296` §2.3）：只收**函数调用**。参考实现在
@@ -6152,24 +6196,31 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             } else {
                 j = e;
             }
-        } else if load32(oc, 8) == 2 && chk_tok_kind(t, j) == 0
+        } else if load32(oc, 8) >= 2 && chk_tok_kind(t, j) == 0
                 && chk_tok_is(src, t, j, "lgc") {
             // `lgc`（`docs/309`）：形状在前置趟已经判过（E019）。这里只把游标挪到
             // **头的末尾** —— 窗口停在 `{`（体里的语句照常逐条检查），无块的两条跳过 `;`。
             let act: u32 = j + 1;
             if chk_tok_is(src, t, act, "end") {
-                j = act + 2;
+                if chk_tok_is(src, t, act + 1, "{") {
+                    if scoped == 1 { block_pending = 1; }
+                    j = act + 1;             // 停在 `{`：alpha 下它是一层块
+                } else {
+                    j = act + 2;             // `lgc end;`
+                }
             } else if chk_tok_is(src, t, act + 1, "(") {
                 let k: u32 = act + 2;
                 while chk_tok_kind(t, k) != 4 && !chk_tok_is(src, t, k, ")") {
                     k = k + 1;
                 }
                 if chk_tok_is(src, t, k + 1, "{") {
+                    if scoped == 1 { block_pending = 1; }
                     j = k + 1;
                 } else {
                     j = k + 2;
                 }
             } else if chk_tok_is(src, t, act + 1, "{") {
+                if scoped == 1 { block_pending = 1; }
                 j = act + 1;
             } else {
                 j = act + 2;                  // `lgc start;`
@@ -6417,6 +6468,18 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                 }
             }
+            if scoped == 1 {
+                // 同一个块里第二次声明同名 = E013；嵌套块遮蔽是允许的。
+                let q: u32 = block_start;
+                let dup: u32 = 0;
+                while q < c {
+                    if same(src, t, load32(env, q * 8), nm) { dup = 1; }
+                    q = q + 1;
+                }
+                // 细分码（`docs/353`）：这一支只在 alpha 的块作用域里跑，所以同块重名
+                // 是 E0241，不再退回族码 E013 —— 参考实现那边是同一个码。
+                if dup == 1 { chk_pub(src, t, oc, p, 241, nm); }
+            }
             c = chk_env_add(t, env, c, nm, dty);
             store32(tyt, 3520, c);   // 最新环境条数 (chk_moves 在 chk_body 之后跑, 读这个)
             if semi <= e {
@@ -6474,11 +6537,13 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     if pr2 != 0 && chk_tok_is(src, t, j + 6, "(") {
                         let pty2: u32 = chk_ty_range(src, t, syms, n, tyt,
                                                      chk_lhlo(pr2), chk_lhhi(pr2));
+                        if scoped == 1 { save_c = c; save_has = 1; }
                         c = chk_env_add(t, env, c, j + 7, pty2);
                     }
                 }
             }
             if lb3 < e {
+                if scoped == 1 { block_pending = 1; }
                 j = lb3;
             } else {
                 j = e;
@@ -6497,6 +6562,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                     chk_pub(src, t, oc, p, ccode, j);
                 }
+                if scoped == 1 { block_pending = 1; }
                 j = lb;
             } else {
                 j = j + 1;
@@ -6525,6 +6591,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     chk_pub(src, t, oc, p, E_TMISMATCH, j);
                     j = j + 1;
                 } else {
+                    if scoped == 1 { save_c = c; save_has = 1; }
                     c = chk_env_add(t, env, c, j + 1, TY_U32);
                     c = chk_env_add(t, env, c, j + 3, et);
                     let lb2: u32 = chk_find_at(src, t, j + 7, e, "{");
@@ -6557,6 +6624,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     chk_pub(src, t, oc, p, E_TMISMATCH, j);
                     j = j + 1;
                 } else {
+                    if scoped == 1 { save_c = c; save_has = 1; }
                     c = chk_env_add(t, env, c, j + 1, et);
                     let lb2: u32 = chk_find_at(src, t, j + 5, e, "{");
                     if lb2 < e {
@@ -6577,6 +6645,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 // 只登记成"未知类型"：名字能解析；元素类型与数组/切片判定由 codegen
                 // 用 `expr_type`（返回类型 token）做，非数组在那边 `cg_fail`。
                 let lb2: u32 = chk_find_at(src, t, j + 3, e, "{");
+                if scoped == 1 { save_c = c; save_has = 1; }
                 c = chk_env_add(t, env, c, j + 1, 0);
                 if lb2 < e {
                     j = lb2;
@@ -6609,6 +6678,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             if vt == 0 {
                 vt = TY_U32;
             }
+            if scoped == 1 { save_c = c; save_has = 1; }
             c = chk_env_add(t, env, c, var, vt);
             if lb2 < e {
                 j = lb2;
@@ -6956,7 +7026,7 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32, tur2: u32) -> u32 {
         // **不同的码**（参考 19 / 自举 23）—— 400 层裸块那正是 issue #44 的复现。
         // `o == 0`：参考实现是"**第一个**解析错就中止"，所以只报第一条 —— 400 层裸块
         // 若每层都报，用户会看到几十条一模一样的诊断。
-        if chk_tok_is(src, t, i, "{") && i > 0 && o == 0
+        if tur2 < 3 && chk_tok_is(src, t, i, "{") && i > 0 && o == 0
                 && (chk_tok_is(src, t, i - 1, "{") || chk_tok_is(src, t, i - 1, "}")
                     || chk_tok_is(src, t, i - 1, ";")) {
             o = sym_pub(src, t, out, o, E_PARSE, i);
@@ -7127,7 +7197,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     while chk_tok_kind(t, ntks) != 4 {
         ntks = ntks + 1;
     }
-    let nt2: u32 = desugar_lspe_pass(src, t, 0, ntks, t, 0);
+    let nt2: u32 = desugar_lspe_pass(src, t, 0, ntks, t, 0, prof);
     // 效应语法面（`docs/346` A2）：打开时，声明与 `effects` 行在 token 层擦除（只删不插，
     // 与 `desugar_lspe_pass` 同一手法）；`perform` / `handle` / `resume` 不擦，先由
     // `chk_effects_prepass` 点名报 E023 —— 静默删掉它们等于改语义。
@@ -7598,7 +7668,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // 与参考实现同一条：判在**检查器**里（自举侧的发射器没有报错通道，放那边两边就不同构），
     // 且排在**运行期站点**那条之后（参考实现把它 append 在 `check()` 的末尾）。
     // 只在 Tur 2026.3 判：旧版次里 `lgc` 是普通标识符，不是语句。
-    if eff_gc == 4 && load32(oc, 8) == 2 {
+    if eff_gc == 4 && load32(oc, 8) >= 2 {
         let gl: u32 = 0;
         let ghit: u32 = 0;
         while chk_tok_kind(t, gl) != 4 && ghit == 0 {
@@ -7745,7 +7815,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     && !chk_tok_is(src, t, i - 1, "generation")
                     && !chk_tok_is(src, t, i - 1, "retire")
                     && !chk_tok_is(src, t, i - 1, "revoke")
-                    && !(load32(oc, 8) == 2 && chk_tok_is(src, t, i - 1, "lgc")) {
+                    && !(load32(oc, 8) >= 2 && chk_tok_is(src, t, i - 1, "lgc")) {
                 let nl: u32 = tok_len(t, i);
                 if nl > 0 {
                     // **行为轴**（`docs/218` §7 第 2 件，2026-10-11）：声明了不碰网络的

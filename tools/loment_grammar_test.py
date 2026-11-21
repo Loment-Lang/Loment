@@ -69,6 +69,10 @@ LOCKED_ALIASES = {
     "tur": "tur2026.1", "tur1": "tur2026.1", "tur2": "tur2026.2",
     "tur3": "tur2026.3",
     "tur2026.1": "tur2026.1", "tur2026.2": "tur2026.2", "tur2026.3": "tur2026.3",
+    # 2026-11-18: `tur2027.1Alpha`（块作用域）。**显式选用**的 alpha 版次，
+    # 默认仍是 `tur2026.3`。这一笔是"改锁"。
+    "tur2027.1Alpha": "tur2027.1Alpha", "2027.1Alpha": "tur2027.1Alpha",
+    "tur2027.1alpha": "tur2027.1Alpha", "2027.1alpha": "tur2027.1Alpha",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1878,8 +1882,10 @@ def test_the_default_edition_is_the_newest_open_one():
     `break` / `orelse` / `defer` / `lgc` 都在最新版里。显式钉旧版次仍然可以
     （`tur` / `tur1` / `tur2026.1`）—— 那是**作者明确要的**，不是默认。
     """
-    assert potato_from.DEFAULT_EDITION == potato_from.TUR_EDITIONS[-1], (
-        "默认版次不是最新那一版 —— 用户 2026-11-06 的口径是「永远用最新」")
+    _stable = [e for e in potato_from.TUR_EDITIONS
+               if e not in potato_from.ALPHA_EDITIONS]
+    assert potato_from.DEFAULT_EDITION == _stable[-1], (
+        "默认版次不是最新那个**稳定**版次 —— alpha 只做显式选用（2026-11-18 裁定）")
     body = "module m\n\ndef f() -> u32 { return 1 and 1; }\n"
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
@@ -1979,13 +1985,14 @@ def test_tur2026_2_is_frozen():
     """
     assert potato_from.FROZEN_EDITIONS == ("tur2026.1", "tur2026.2"), (
         "封版清单被改了；开新版次不应该改这里")
-    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS + ("tur2026.3",), (
-        "TUR_EDITIONS 应当是「两个封版 + 一个开的 2026.3」—— 开新版次要显式改这条判据")
+    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS + (
+        "tur2026.3", "tur2027.1Alpha"), (
+        "TUR_EDITIONS 应当是「两个封版 + 2026.3 + alpha」—— 开新版次要显式改这条判据")
     digest = hashlib.sha256(
         chr(10).join(potato_from.TUR2026_2_FEATURES).encode()).hexdigest()
     assert digest == FROZEN_TUR2026_2_SHA256, (
         "tur2026.2 的特性面变了 —— 加语法请开 tur2026.3，不是改这一版")
-    for future in ("tur2027.1",):
+    for future in ("tur2028.1",):
         assert future not in potato_from.GRAMMAR_ALIASES, (
             f"{future} 还没开；开的时候要同时改锁表、NATIVE_GRAMMARS、docs/304 与这条判据")
     print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")

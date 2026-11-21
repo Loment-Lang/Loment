@@ -9,7 +9,7 @@ concrete enough to attach issues to.
 |---|---|
 | **0.1.5** | The umbrella release: safety infrastructure plus a large defect sweep. LSPE, Potato v16, LMS, LVM stabilisation, `natural`, the C surface grammar's filed defects, LibL/LibC. |
 | **0.1.5.1** | LMS — the safe memory manager, seven levels (`docs/247`). |
-| **0.1.5.2** | Capability domains in depth: revocation, the subject a guard does not check, information flow, an observable audit, composition, a conformance suite, the descriptor as a pinned contract (`docs/146`). |
+| **0.1.6** | Capability domains in depth: revocation, the subject a guard does not check, information flow, an observable audit, composition, a conformance suite, the descriptor as a pinned contract (`docs/146`). |
 | **0.1.5.3** | LSPE — the counter-asker and the police: questions, answers, defer/refuse, strict mode, the pre-flight sheet, acknowledgements, cross-build memory (`docs/262`). |
 | **0.1.5.4** | LSPE — the ledger invariants and self-audit: I1–I5, E036/E037, the remaining engines, the coverage ratchet, release wiring. |
 | **1.0.0** | The version order from 0.1.4.6 onward, as a single planning umbrella. |

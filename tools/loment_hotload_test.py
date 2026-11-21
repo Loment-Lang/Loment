@@ -191,7 +191,7 @@ def test_gate_records_the_callers_frame_pointer() -> None:
     assert b[25:31] == bytes.fromhex("0f8400000000"), b[25:31].hex()
     assert b[31:33] == bytes.fromhex("5dc3"), b[31:33].hex()
     epoch = struct.unpack_from("<Q", b, 10)[0]
-    assert epoch >= 0x800000, hex(epoch)   # 共享数据段
+    assert epoch >= 0xC00000, hex(epoch)   # 共享数据段（数据段起址，2026-11-21 起）
     print(f"      闸 33 字节，帧指针存进 epoch+8（epoch 在 {epoch:#x}）")
 
 
@@ -303,7 +303,7 @@ def test_executes_in_a_real_process() -> None:
             vals[m[0]] = int(m[1], 0)
     assert vals.get("BEFORE") == 3, r.stdout
     assert vals.get("AFTER") == 4, r.stdout
-    assert 0x800000 <= vals.get("EPOCH", 0) < 0x900000, r.stdout
+    assert 0xC00000 <= vals.get("EPOCH", 0) < 0xD00000, r.stdout
     assert vals.get("SLOT") == am["base"] + am["funcs"]["add"]["tramp"] * 16, r.stdout
     print("      真进程：翻转前后 3 -> 4，epoch 落在共享数据段，槽地址对得上")
 

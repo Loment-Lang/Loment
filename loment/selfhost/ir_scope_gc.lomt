@@ -1,0 +1,17 @@
+choose write grammar tur2027.1Alpha
+module ir_scope_gc
+choose gc_auto_alpha
+choose runtime
+
+fn scope_gc(n: u32) -> u32 {
+    let p: ptr = alloc(4);
+    store8(p, 0, 1);
+    let s: u32 = load8(p, 0);
+    {
+        let p: ptr = alloc(4);
+        store8(p, 0, 2);
+        s = s + load8(p, 0);
+    }
+    s = s + load8(p, 0);
+    return s;
+}

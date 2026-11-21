@@ -332,6 +332,11 @@ def _st(s) -> str:
             base += " " + _ex(s.expr)
         return base + ")"
     if n == "Return":
+        # 裸 `return;`（`lvm.lomt` 的 `cap_check` / `frame_retire` 用它）：参考实现的
+        # AST 是 `Return(expr=None)`，Loment 版 parser 对它的 dump 是 `(ret )` ——
+        # 两边**逐字符**比，所以这里照抄那个形状（不是 `(ret)`）。
+        if s.expr is None:
+            return "(ret )"
         return f"(ret {_ex(s.expr)})"
     if n == "ExprStmt":
         return _ex(s.expr)

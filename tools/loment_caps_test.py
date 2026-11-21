@@ -127,8 +127,14 @@ def test(fn):
 #: 2026-11-20（`docs/350` §12.6）：检查器加名字表哈希索引，多一个真上界
 #: `CHK_HASH_SLOTS`（越界由 `declare` 的容量判据在更早处拒）。条数 270 → **271**，
 #: 沉默数不变（这一处有话）。
-CAPACITY_SITES = 271
-SILENT_SITES = 178
+#:
+#: 2026-11-21（`docs/362`–`docs/365`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
+#: 续延栈进了口径 —— `MAX_OBJS` / `MAX_RET` / `MAX_FOBJ` / `CONT_REC` / `MAX_CONT` 五处。
+#: 与 main 的 `CHK_HASH_SLOTS` 合并后：条数 271 → **276**、沉默 178 → **179**
+#: （新增的那处沉默是归还窗口的**滚动**：满了丢最旧的一条，不是写穿，来路写在
+#: `EXPLAINED`）。
+CAPACITY_SITES = 276
+SILENT_SITES = 179
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
@@ -218,6 +224,7 @@ SILENT_NAMES = frozenset((
     "MAXW",
     "MAX_DIALECT",
     "MAX_LANG",
+    "MAX_RET",
     "MEM_CAP",
     "MIN_RECLEN",
     "MMAX",

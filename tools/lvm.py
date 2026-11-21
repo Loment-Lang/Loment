@@ -14,8 +14,10 @@ phi 的两趟模型。
 
 from __future__ import annotations
 
+import bisect
 import os
 import re
+import struct
 import sys
 import time
 from pathlib import Path
@@ -23,12 +25,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomelf  # noqa: E402
 
-#: 解释器自己的地址空间。全局从 `GLOBAL_BASE` 起、堆紧跟着、栈从顶上往下。
-MEM_SIZE = 16 * 1024 * 1024
+#: 解释器自己的地址空间。**与自举镜像同一套布局**（`docs/365` 的跨实现快照）：
+#: 4 MiB / 帧 32 KiB / 栈从顶上下压 / 全局从 64 KiB 起。
+MEM_SIZE = 4 * 1024 * 1024
 GLOBAL_BASE = 0x10000
 STACK_TOP = MEM_SIZE
 #: 每一层调用一段自己的栈区（按深度算基址 —— 见 `run` 里那段注释）。
-FRAME_SIZE = 4096
+FRAME_SIZE = 32768
+#: 帧内**值表之后的槽区起点**（自举镜像的 `FR_SLOTS = 8 + 1024*16 + 128`）。
+#: 两边必须一样：跨实现快照里的 alloca 地址是绝对地址。
+FRAME_SLOTS = 16520
+#: 堆的上限 = 栈底（`MEM_SIZE - MAX_DEPTH * FRAME_SIZE`），与镜像的 `STACK_LIMIT` 同。
+STACK_LIMIT = MEM_SIZE - 32 * FRAME_SIZE
 
 #: 每个标量占 8 字节（与 `lomelf` 的栈槽模型同口径，`SCALAR_SIZE`）。
 SLOT = 8
@@ -38,11 +46,9 @@ SLOT = 8
 #: 执行的指令条数**（与镜像同口径），撞上就点名报函数 / 块 / 第几条，而不是等下去。
 STEP_CAP = 50_000_000
 
-#: **调用深度上限**（`docs/262`，issue #353）。不设的话，地址空间算出来能放 ~4080 层，
-#: 而**宿主 Python 的栈**在 ~200 层就先炸 —— 于是程序死在一个 `RecursionError` 上，
-#: 那不是 VM 的话，也不是使用者看得懂的话。取 128：**比镜像的 `MAX_DEPTH = 32` 宽松**
-#: （孪生那边不会因此更严），又远低于宿主栈。语料实测最大深度 **10**。
-MAX_DEPTH = 128
+#: **调用深度上限**。与镜像的 `MAX_DEPTH = 32` 取同一个数：跨实现快照的帧基址是
+#: `MEM_SIZE - 深度 * FRAME_SIZE`，两边必须一致。语料实测最大深度 **10**。
+MAX_DEPTH = 32
 
 #: **合成文件**的 fd 从这儿起（`docs/243` §3.4）。解释器没有真的文件描述符，
 #: 所以真 fd 与合成 fd 不会撞；这个数两边实现**必须一样**（自举镜像里也写 1000）。
@@ -122,6 +128,407 @@ class LvmError(Exception):
     """解释器自己的错（**不是**"语言不支持" —— 那种要另说，见 `docs/243` §1）。"""
 
 
+# ---------------------------------------------------------------- LVM-A 基质（docs/362）
+#
+# `docs/360` 把 LVM 的下一层写成一台**抽象机**：状态是显式的，六个原语里前四个
+# （site / cap_check / gen_check / fault）是运行期指令。这一节落的是**第一档基质**
+# `sw_cap` —— 本世代可交付的那一档。默认关（`--substrate none`），关着时**一个字节都不写**，
+# 行为与从前逐字节相同（`docs/357` P8 / `docs/358` C10 的同一条纪律）。
+#
+# 对象表管三样东西：`base`/`limit`（W2 完备边界）、`gen`（W3 对象代）、`kind`（审计）。
+# 能力（`Cap`）不是机器字，是解释器内部的 `(obj_id, gen)`：`docs/360` §3.1 的 `Cap`
+# 在软件基质上就是**一对整数**，因为 LVM 的 `ptr` 仍是 64 位裸地址。
+
+FAULT_BOUNDS = 1      # F01：访问越出对象
+FAULT_DANGLING = 2    # F02：访问已经归还的对象
+FAULT_NULL = 3        # F03：空指针解引用
+FAULT_CODES = {
+    FAULT_BOUNDS: "F01 bounds violation",
+    FAULT_DANGLING: "F02 dangling reference",
+    FAULT_NULL: "F03 null dereference",
+}
+
+
+class _Fault(Exception):
+    """一条**语言事件**（`docs/356` §5.2）。站点与 witness 都带着，退出码 = 100 + kind。"""
+
+    def __init__(self, kind: int, site, witness: str, detail: dict | None = None) -> None:
+        self.kind, self.site, self.witness = kind, site, witness
+        self.detail = detail or {}
+
+
+#: `docs/366`：段错误详细化的标题与建议。首行保持不变（判据按它比），这一段跟在后面 ——
+#: 形状抄 `loment/tools/lomenterr.lomt`：`error[码]: 标题 / --> 位置 / 源码行 + 插入符 / = 事实`。
+_FAULT_TITLE = {
+    FAULT_BOUNDS: ("F01", "访问越界（bounds）"),
+    FAULT_DANGLING: ("F02", "悬垂引用（dangling）"),
+    FAULT_NULL: ("F03", "空指针解引用（null）"),
+}
+_FAULT_TIP = {
+    FAULT_BOUNDS: "检查下标与对象长度：这一次访问跨过了对象的上限。原生档在这条路径上是 UB，"
+                  "LVM 把它变成这句话；上限表见 docs/263。",
+    FAULT_DANGLING: "对象已经归还（代已加一），旧指针不能再解引用。归还之后再读/写是悬垂："
+                    "原生档是 UB；sw_cap 按对象代抓，sw_tag 只按标签（可能漏，docs/320 §1.2 ⑧）。",
+    FAULT_NULL: "指针是 0。空指针解引用在任何档都是错；先判空，或查清这个指针为什么没被赋过值。",
+}
+
+
+class _ObjSnap:
+    """故障现场的对象**快照**。
+
+    ⚠ 不能把 `_Obj` 本体放进 detail：异常栈解开时帧的 `finally` 会把这一帧的 alloca
+    全部归还，等到顶层渲染时再看那个对象，它已经是「已归还、代加一」的另一个状态。
+    第一版就是直接放了本体，于是越界被印成"已归还"。
+    """
+
+    __slots__ = ("oid", "base", "limit", "kind", "gen", "alive", "tag")
+
+    def __init__(self, o) -> None:
+        self.oid, self.base, self.limit = o.oid, o.base, o.limit
+        self.kind, self.gen, self.alive, self.tag = o.kind, o.gen, o.alive, o.tag
+
+    def size(self) -> int:
+        return self.limit - self.base
+
+
+def _snap(o) -> _ObjSnap | None:
+    return None if o is None else _ObjSnap(o)
+
+
+def _obj_line(o) -> str:
+    state = "活着" if o.alive else "**已归还**"
+    return (f"对象 #{o.oid}（{o.kind}）：base={o.base} limit={o.limit}"
+            f"（{o.size()} 字节），第 {o.gen} 代，{state}")
+
+
+def render_fault(kind: int, site, detail: dict) -> str:
+    """把一次故障渲染成 Lomenterr 形状的多行诊断（`docs/366`）。"""
+    fn, blk, idx = site
+    code, title = _FAULT_TITLE.get(kind, ("F0?", "故障"))
+    out = [f"error[{code}]: {title}",
+           f"  --> IR:{fn}:{blk}#{idx}"]
+    ins = detail.get("ins") or ""
+    op = detail.get("op") or ""
+    width = detail.get("width", 0)
+    if ins:
+        out.append("   |")
+        out.append(f"   |   {ins}")
+        if op and op in ins:
+            col = ins.rindex(op)
+            out.append(f"   |   {' ' * col}{'^' * max(4, len(op))}  这里访问 {width} 字节")
+    out.append("   |")
+    reason = detail.get("reason")
+    obj = detail.get("obj")
+    dead = detail.get("dead")
+    live = detail.get("live")
+    if obj is not None:
+        out.append(f"   = {_obj_line(obj)}")
+    if dead is not None and dead is not obj:
+        out.append(f"   = 已归还的那一个：{_obj_line(dead)}")
+    addr = detail.get("addr")
+    if reason == "null":
+        fact = f"指针是 0（空指针），试图访问 {width} 字节"
+    elif reason == "unmapped":
+        fact = f"没有任何对象覆盖地址 {addr}（访问 {width} 字节）—— 地址不在对象表里"
+    elif reason == "retired":
+        asked = detail.get("asked") or (None, None)
+        fact = (f"能力指向 #{asked[0]} 第 {asked[1]} 代；那个对象已经归还，"
+                f"现在是第 {obj.gen} 代" if obj is not None
+                else f"能力指向的对象 #{asked[0]} 已经不在对象表里（快照/放置不一致）")
+        if live is not None:
+            fact += f"。地址 {addr} 现在住着 #{live.oid}（{live.kind}，第 {live.gen} 代）"
+    elif reason == "retired-addr":
+        fact = (f"地址 {addr} 落在已归还的对象 #{dead.oid}（第 {dead.gen} 代）里；"
+                f"这次访问 {width} 字节")
+    elif reason == "over":
+        off = detail.get("offset", 0)
+        over = off + width - obj.size() if obj is not None else 0
+        fact = (f"地址 {addr} 在对象内，偏移 {off}；访问 {width} 字节越过上限 {over} 字节"
+                f"（右越界）")
+    elif reason == "under":
+        off = detail.get("offset", 0)
+        fact = f"地址 {addr} 在对象起点**之前**（偏移 {off}）；访问 {width} 字节"
+    else:
+        fact = f"地址 {addr}，访问 {width} 字节"
+    out.append(f"   = 事实：{fact}")
+    depth = detail.get("depth")
+    where = f"   = 站点：函数 {fn} / 块 {blk} / 第 {idx} 条指令"
+    if depth:
+        where += f"；栈深 {depth}"
+    out.append(where)
+    out.append(f"   = 建议：{_FAULT_TIP.get(kind, '')}")
+    return "\n".join(out)
+
+
+def fault_exit(kind: int, site, witness: str, detail: dict | None = None) -> int:
+    """`fault()` 的共同出口：**100 + kind** + 一行站点（与 `llvm.trap` 的 132 同形）。
+
+    首行保持稳定（孪生/故障判据按它比）；`docs/366` 的详细块跟在后面。
+    """
+    fn, blk, idx = site
+    print(f"lvm: {FAULT_CODES[kind]} at {fn}:{blk}#{idx} ({witness})", file=sys.stderr)
+    if detail:
+        print(render_fault(kind, site, detail), file=sys.stderr)
+    return 100 + kind
+
+
+class _Obj:
+    __slots__ = ("oid", "base", "limit", "gen", "alive", "kind", "tag")
+
+    def __init__(self, oid: int, base: int, size: int, kind: str) -> None:
+        self.oid, self.base, self.limit, self.kind = oid, base, base + size, kind
+        self.gen = 0
+        self.alive = True
+        #: `sw_tag` 的 4 位标签（1..15；0 留给"无能力"）。`sw_cap` 不用它。
+        self.tag = 0
+
+    def size(self) -> int:
+        return self.limit - self.base
+
+
+class SwCap:
+    """`sw_cap` 基质：对象表 + 能力检查 + 对象代。
+
+    对象从五处来：全局（启动时一次）、`command_main` 的 argv、`brk` 授出的区、
+    `alloca`（每执行一次一个）、`__loment_alloc`（分配器返回之后登记）。
+    归还发生在 `__loment_free` 返回之后与栈帧返回时 ——
+    代加一，对象离开「活的」索引，但**留在表里**，好让旧能力按 `(obj_id, gen)` 对出 F02。
+
+    ⚠ **边界（诚实写在这里，不留给读者猜）**：`ptr` 在 IR 里是 64 位裸地址。能力只活在
+    解释器的 SSA 侧（`%name -> (obj_id, gen)`）与指针存储的影子表里；一旦地址被洗成整数
+    再变回指针（`ptrtoint` → 算术 → `inttoptr`，语言里 `as u64` 就是这条），能力就丢了，
+    只能按**地址**找对象。地址被下一次 `alloc` 复用之后，旧指针与一个新指针**长得一模一样**
+    —— 这一档的对象代抓不住它。非概率的对象代要求指针本身携带代（胖指针 / 槽表），
+    那是 `docs/360` §3.3 的 `hw_cap` 与 `docs/320` S1 的事，不在本档。
+    """
+
+    #: 对象表上限。越过它就是**基质自己的失败**，不是程序的行为 —— 响亮地拒。
+    MAX_OBJECTS = 1 << 20
+    #: 按地址回查已归还对象时最多看最近的多少条。更早的不是"对"，是"没查"。
+    RETIRED_SCAN = 4096
+
+    #: `sw_cap`：对象代（精确）。`sw_tag`：4 位标签（概率，MTE 形状）。
+    def __init__(self, mode: str = "cap") -> None:
+        self.mode = mode
+        self.objs: dict[int, _Obj] = {}
+        self.next_oid = 1
+        #: `sw_tag` 的标签序列：1..15 轮转。第 16 次分配回到 1 —— 这正是
+        #: 「4 位只有 15 个非零值」的后果，判据拿它造一次**碰撞**。
+        self.tag_seq = 0
+        #: 活对象按 `base` 索引；`bases` 保持升序，查地址用二分。
+        self.live: dict[int, int] = {}
+        self.bases: list[int] = []
+        #: 已归还对象，最近的在末尾。只为「裸地址回查」保留一个有限窗口。
+        self.retired: list[_Obj] = []
+        #: 指针存储的影子表：地址 -> 存进去的那个指针的能力。
+        self.shadow: dict[int, tuple[int, int, int]] = {}
+
+    # ------------------------------------------------------------ 对象
+    def new_obj(self, base: int, size: int, kind: str) -> int:
+        if len(self.objs) >= self.MAX_OBJECTS:
+            raise LvmError(f"sw_cap 对象表满了（上限 {self.MAX_OBJECTS}）")
+        prev = self.live.get(base)
+        if prev is not None:
+            if self.objs[prev].kind == "global":
+                # 基座的不变量：全局在启动时一次摆好，之后任何分配都不该压在它头上。
+                raise LvmError(f"sw_cap：新对象与全局重叠（base={base:#x}）")
+            self.retire_oid(prev)
+        oid = self.next_oid
+        self.next_oid += 1
+        o = _Obj(oid, base, size, kind)
+        if self.mode == "tag":
+            o.tag = 1 + (self.tag_seq % 15)
+            self.tag_seq += 1
+        self.objs[oid] = o
+        self.live[base] = oid
+        bisect.insort(self.bases, base)
+        return oid
+
+    def cap_of(self, oid: int) -> tuple[int, int, int]:
+        o = self.objs[oid]
+        return (o.oid, o.gen, o.tag)
+
+    def retire_oid(self, oid: int) -> None:
+        o = self.objs.get(oid)
+        if o is None or not o.alive:
+            return
+        o.alive = False
+        o.gen += 1
+        self.retired.append(o)
+        if len(self.retired) > self.RETIRED_SCAN:
+            self.retired.pop(0)
+        if self.live.get(o.base) == oid:
+            del self.live[o.base]
+            i = bisect.bisect_left(self.bases, o.base)
+            if i < len(self.bases) and self.bases[i] == o.base:
+                self.bases.pop(i)
+        self._drop_shadow(o.base, o.limit)
+
+    def grant_brk(self, base: int, want: int) -> None:
+        """`brk(want)` 授出的那段内存 —— 命令单元的 `_start` 就是这么拿到 cmdline 缓冲的。"""
+        oid = self.live.get(base)
+        o = self.objs.get(oid) if oid is not None else None
+        if o is not None and o.alive and o.kind == "brk":
+            o.limit = max(o.limit, want)
+            return
+        self.new_obj(base, max(0, want - base), "brk")
+
+    def retire_addr(self, addr: int) -> None:
+        """`__loment_free(addr)` 之后归还**堆对象**。
+
+        ⚠ 只认 `kind == "heap"` 且 `base == addr`：`free` 的实参就是载荷首地址，而分配器
+        自己会挡双重释放 / 非载荷指针。这里若退而按地址找，第二次 `free` 会找到外层
+        `@__loment_heap` 全局，把整块 arena 当成"已归还" —— 一个安静的灾难。
+        """
+        oid = self.live.get(addr)
+        if oid is None:
+            return
+        if self.objs[oid].kind != "heap":
+            return
+        self.retire_oid(oid)
+
+    def _drop_shadow(self, base: int, limit: int) -> None:
+        stale = [a for a in self.shadow if base <= a < limit]
+        for a in stale:
+            del self.shadow[a]
+
+    # ------------------------------------------------------------ 查
+    def lookup_live(self, addr: int) -> _Obj | None:
+        """**最内层**活对象（全局里嵌着堆对象，堆对象优先）。"""
+        i = bisect.bisect_right(self.bases, addr) - 1
+        while i >= 0:
+            o = self.objs[self.live[self.bases[i]]]
+            if o.base <= addr < o.limit:
+                return o
+            i -= 1
+        return None
+
+    def lookup_retired(self, addr: int) -> _Obj | None:
+        for o in reversed(self.retired):
+            if o.base <= addr < o.limit:
+                return o
+        return None
+
+    def innermost_dead(self, addr: int) -> _Obj | None:
+        """地址上**最内层**的已归还对象。
+
+        ⚠ 这一条是必须的：堆对象住在 `@__loment_heap` 这个全局里面，全局是**活的**、
+        永远覆盖整块 arena。只按「有没有活对象盖住」判，归还之后每一个地址都还能
+        落进那个外层全局 —— 悬垂永远抓不住。所以「最内层」的归属比存活更重要。
+        """
+        live = self.lookup_live(addr)
+        # 热路径：地址落在**内层**活对象里时，已归还表不必看 —— 悬垂只会发生在
+        # 内层对象没了、外层容器（全局 / `brk`）还在的时候。
+        if live is not None and live.kind not in ("global", "brk"):
+            return None
+        dead = self.lookup_retired(addr)
+        if dead is not None and (live is None or dead.base > live.base):
+            return dead
+        return None
+
+    def cap_for_addr(self, addr: int) -> tuple[int, int, int] | None:
+        o = self.lookup_live(addr)
+        if o is None:
+            return None
+        # 最内层的归属是已归还对象时，这个地址"没有主人" —— 外层 arena 全局不算数。
+        if self.innermost_dead(addr) is not None:
+            return None
+        return (o.oid, o.gen, o.tag)
+
+    # ------------------------------------------------------------ 检查
+    def check(self, addr: int, width: int, cap: tuple[int, int, int] | None,
+              site, ctx: dict | None = None) -> None:
+        """`P2 cap_check` + `P3 gen_check` 的合一：一次访问前问一句「凭什么碰」。
+
+        `ctx` 是渲染用的现场（指令文本、指针操作数、栈深）—— 不影响判决，只影响
+        `docs/366` 那段详细诊断。判据只比首行，所以缺了它也不改变行为。
+        """
+        detail = dict(ctx or {})
+        detail.update(addr=addr, width=width)
+        if addr == 0 and width > 0:
+            detail["reason"] = "null"
+            raise _Fault(FAULT_NULL, site, f"size={width}", detail)
+        if self.mode == "tag":
+            self._check_tag(addr, width, cap, site, detail)
+            return
+        if cap is not None:
+            o = self.objs.get(cap[0])
+            if o is None or not o.alive or o.gen != cap[1]:
+                detail.update(obj=_snap(o), asked=(cap[0], cap[1]), reason="retired",
+                              live=_snap(self.lookup_live(addr)))
+                raise _Fault(FAULT_DANGLING, site,
+                             f"object {cap[0]} gen {cap[1]} -> retired", detail)
+            off = addr - o.base
+            if off < 0 or off + width > o.size():
+                detail.update(obj=_snap(o), offset=off,
+                              reason="under" if off < 0 else "over")
+                raise _Fault(FAULT_BOUNDS, site,
+                             f"offset={off} size={width} limit={o.size()}", detail)
+            return
+        dead = self.innermost_dead(addr)
+        if dead is not None:
+            detail.update(dead=_snap(dead), reason="retired-addr",
+                          live=_snap(self.lookup_live(addr)))
+            raise _Fault(FAULT_DANGLING, site,
+                         f"address={addr} was freed (object {dead.oid})", detail)
+        o = self.lookup_live(addr)
+        if o is not None:
+            if addr + width > o.limit:
+                detail.update(obj=_snap(o), offset=addr - o.base, reason="over")
+                raise _Fault(FAULT_BOUNDS, site,
+                             f"address={addr} size={width} limit={o.size()}", detail)
+            return
+        detail["reason"] = "unmapped"
+        raise _Fault(FAULT_BOUNDS, site,
+                     f"no object covers address={addr} size={width}", detail)
+
+    def _check_tag(self, addr: int, width: int, cap, site, detail: dict) -> None:
+        """`sw_tag`：比较**4 位标签**，不是对象代。同标签的重用会漏 —— 那是声明的降级。
+
+        `docs/320` §1.2 ⑧：MTE 是检测，不是保证。这里的 15 个非零标签就是那个概率。
+        """
+        live = self.lookup_live(addr)
+        if cap is not None and live is not None and cap[2] == live.tag:
+            if addr + width > live.limit:
+                detail.update(obj=_snap(live), offset=addr - live.base, reason="over")
+                raise _Fault(FAULT_BOUNDS, site,
+                             f"address={addr} size={width} limit={live.size()}", detail)
+            return
+        if cap is not None:
+            o = self.objs.get(cap[0])
+            if o is not None and o.alive:
+                off = addr - o.base
+                if off < 0 or off + width > o.size():
+                    detail.update(obj=_snap(o), offset=off,
+                                  reason="under" if off < 0 else "over")
+                    raise _Fault(FAULT_BOUNDS, site,
+                                 f"offset={off} size={width} limit={o.size()}", detail)
+                return
+            detail.update(obj=_snap(o), asked=(cap[0], None), reason="retired",
+                          live=_snap(live))
+            if live is not None:
+                raise _Fault(FAULT_DANGLING, site,
+                             f"tag {cap[2]} != live tag {live.tag}", detail)
+            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed", detail)
+        if live is not None:
+            dead = self.innermost_dead(addr)
+            if dead is not None:
+                detail.update(dead=_snap(dead), reason="retired-addr", live=_snap(live))
+                raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed", detail)
+            if addr + width > live.limit:
+                detail.update(obj=_snap(live), offset=addr - live.base, reason="over")
+                raise _Fault(FAULT_BOUNDS, site,
+                             f"address={addr} size={width} limit={live.size()}", detail)
+            return
+        dead = self.lookup_retired(addr)
+        if dead is not None:
+            detail.update(dead=_snap(dead), reason="retired-addr")
+            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed", detail)
+        detail["reason"] = "unmapped"
+        raise _Fault(FAULT_BOUNDS, site,
+                     f"no object covers address={addr} size={width}", detail)
+
+
 # ---------------------------------------------------------------- 入口形状（#1026）
 #: `docs/243` §3.5 的那张表。编译器发**四种**入口形状，而 VM 原先只认 `_start` ——
 #: 其余三种会被报成"没有 `_start`"，那是一句**真而无用**的话（程序是好的，引擎不是）。
@@ -192,9 +599,12 @@ def entry_values(vm, kind: str, name: str) -> list:
                 "`command_main` 的签名不是 `(ptr, i32)` —— 入口是 "
                 "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）")
         data = _cmdline(vm.argv)
-        addr = vm.mem.alloc(max(1, len(data)))
+        size = max(1, len(data))
+        addr = vm.mem.alloc(size)
         if data:
             vm.mem.put(addr, data)
+        if vm.sub is not None:
+            vm.sub.new_obj(addr, size, "argv")
         return [addr, len(vm.argv)]
     raise LvmError(entry_refusal(kind, name))
 
@@ -355,7 +765,7 @@ class Mem:
         self.heap = (self.heap + align - 1) // align * align
         a = self.heap
         self.heap += n
-        if self.heap >= self.sp:
+        if self.heap >= STACK_LIMIT:
             raise LvmError("堆撞上栈 —— 地址空间用完了")
         return a
 
@@ -368,11 +778,16 @@ class Frame:
         self.base = base          # 帧底（往上是本帧的槽）
         self.slots: dict[str, int] = {}
         self.vals: dict[str, object] = {}
-        self.next = base
+        #: `sw_cap` 基质用的两张旁表（关着时恒为空，没有代价）：
+        #: SSA 名 -> 能力 `(obj_id, gen, tag)`；本帧登记过、返回时要归还的对象。
+        self.caps: dict[str, tuple[int, int, int]] = {}
+        self.objs: list[int] = []
+        #: 槽从**值表之后**起（`FRAME_SLOTS`），与自举镜像的 `FR_SLOTS` 同址。
+        self.next = base + FRAME_SLOTS
 
     def slot(self) -> int:
-        a = self.next
-        self.next += SLOT
+        a = (self.next + SLOT - 1) // SLOT * SLOT
+        self.next = a + SLOT
         return a
 
 
@@ -446,8 +861,16 @@ class Profile:
 class Vm:
     def __init__(self, globals_: list, funcs: list, externs: list, out,
                  profile: Profile | None = None, argv: list[str] | None = None,
-                 counters: "Counters | None" = None) -> None:
+                 counters: "Counters | None" = None, sub: "SwCap | None" = None) -> None:
         self.mem = Mem()
+        #: 基质（`docs/362`）。`None` = 今天的 LVM，**一个字节都不写**。
+        self.sub = sub
+        #: 处在运行期内部函数（`__loment_*`）里时 > 0 —— 它们是**基座自己的代码**：
+        #: 分配器要写已归还的块、要碰块头，按定义不受能力检查约束（`docs/360` W2 的
+        #: "对象表必须覆盖所有可达内存"说的是 guest，不是基座）。
+        self.priv = 0
+        #: 全局名 -> 能力。启动时登记，永不归还。
+        self.global_caps: dict[str, tuple[int, int]] = {}
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
         #: 代码地址（C2 虚表 / 函数值）：`ptrtoint @fn` 与 `call %fp` 要在同一张表上。
@@ -481,6 +904,9 @@ class Vm:
             align = max(1, min(8, lomelf.size_of(g.ty) or 1))
             g.addr = self.mem.alloc(len(data), align)
             self.mem.put(g.addr, data)
+            if self.sub is not None:
+                oid = self.sub.new_obj(g.addr, len(data), "global")
+                self.global_caps[g.name] = self.sub.cap_of(oid)
 
     # ------------------------------------------------------------ 值
 
@@ -537,15 +963,35 @@ class _Trap(Exception):
     要说得出**死在哪一条**（#1027）。
     """
 
-    def __init__(self, site) -> None:
+    def __init__(self, site, detail: dict | None = None) -> None:
         self.site = site
         self.code = 132
+        self.detail = detail or {}
 
 
-def trap_exit(site) -> int:
-    """`llvm.trap` 的共同出口：**132**（与原生 `SIGILL` 同一个数）+ 一行站点。"""
+def trap_exit(site, detail: dict | None = None) -> int:
+    """`llvm.trap` 的共同出口：**132**（与原生 `SIGILL` 同一个数）+ 一行站点。
+
+    首行保持稳定；`docs/366` 的详细块跟在后面（同 Lomenterr 的形状）。
+    """
     fn, blk, idx = site
     print(f"lvm: llvm.trap at {fn}:{blk}#{idx}", file=sys.stderr)
+    if detail:
+        ins = detail.get("ins") or ""
+        out = ["error[trap]: 程序主动崩溃（llvm.trap → 退出码 132）",
+               f"  --> IR:{fn}:{blk}#{idx}"]
+        if ins:
+            out += ["   |", f"   |   {ins}"]
+        out.append("   |")
+        depth = detail.get("depth")
+        where = f"   = 站点：函数 {fn} / 块 {blk} / 第 {idx} 条指令"
+        if depth:
+            where += f"；栈深 {depth}"
+        out.append(where)
+        out.append("   = 建议：这是程序自己的崩溃器（LMS 第 5 级「拒不了就崩」）；"
+                   "要看为什么走到这里，打开剖面（--profile）或在该站点前打印状态。"
+                   "原生档走同一条路径时是 SIGILL（132）。")
+        print("\n".join(out), file=sys.stderr)
     return 132
 
 
@@ -581,6 +1027,8 @@ class Executor(Vm):
             want = a[0]
             if want == 0 or (self.mem.heap <= want < self.mem.sp):
                 if want:
+                    if self.sub is not None:
+                        self.sub.grant_brk(self.mem.heap, want)
                     self.mem.heap = want
                 return self.mem.heap
             return self.mem.heap
@@ -659,7 +1107,7 @@ class Executor(Vm):
             name = callee[1:]
         args = [s for s in lomelf.split_top(m2.group(2)) if s]
         if name == "llvm.trap":
-            raise _Trap(self.site)
+            raise _Trap(self.site, self._diag(fr, text, "", 0))
         if name in self.externs:
             raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/243` §5）")
         fn = self.funcs.get(name)
@@ -672,7 +1120,18 @@ class Executor(Vm):
             raise LvmError("实参个数与形参不符")
         if self.profile is not None and self.site is not None:
             self.profile.call_site(self.site, name)
-        return self.run(fn, args, fr)
+        # `sw_cap` 的两个对象生命周期事件。**在返回之后**登记 / 归还：分配器自己
+        # 要写块头、写已归还的块（那是它的活），进去之前它还不知道这块归谁。
+        hook_alloc = self.sub is not None and name == "__loment_alloc"
+        hook_free = self.sub is not None and name == "__loment_free"
+        alloc_size = self.operand(fr, args[0])[1] if hook_alloc else 0
+        free_ptr = self.operand(fr, args[0])[1] if hook_free else 0
+        ret = self.run(fn, args, fr)
+        if hook_alloc:
+            self.sub.new_obj(int(ret), max(0, int(alloc_size)), "heap")
+        elif hook_free:
+            self.sub.retire_addr(int(free_ptr))
+        return ret
 
     # ------------------------------------------------------------ 执行
     def run_entry(self, fn, values: list):
@@ -693,9 +1152,16 @@ class Executor(Vm):
         if base <= self.mem.heap:
             self.depth -= 1
             raise LvmError("栈溢出")
+        # 运行期内部函数（分配器 / 收集器）是**基座自己的代码**：它们写块头、
+        # 扫已归还的块。能力检查在它们里面没有意义（`docs/362` §2）。
+        internal = self.sub is not None and fn.name.startswith("__loment_")
+        if internal:
+            self.priv += 1
         try:
             return self._run_body(fn, argtexts, caller, base, entry_vals)
         finally:
+            if internal:
+                self.priv -= 1
             self.depth -= 1
 
     def _run_body(self, fn, argtexts: list[str], caller: Frame | None, base: int,
@@ -711,9 +1177,23 @@ class Executor(Vm):
                 continue
             _ty, v = self.operand(caller, argtexts[k])
             fr.vals[pname] = v
+            if self.sub is not None and not self.priv:
+                # 能力随实参进形参（`docs/362` §2.2）：不然一个指针一过函数边界就
+                # 只剩地址，堆对象的界与代都问不出来。
+                cap = self._cap_of(caller, argtexts[k])
+                if cap is not None:
+                    fr.caps[pname] = cap
+        try:
+            return self._run_loop(fn, fr)
+        finally:
+            # 栈帧返回 = 这一帧的 `alloca` 对象全部归还（`docs/362` §2）。
+            if self.sub is not None:
+                for oid in fr.objs:
+                    self.sub.retire_oid(oid)
+
+    def _run_loop(self, fn, fr: Frame):
         label = fn.blocks[0].label
         prev = None
-        ret = 0
         steps = 0
         while True:
             blk = next((b for b in fn.blocks if b.label == label), None)
@@ -726,13 +1206,13 @@ class Executor(Vm):
             #: `%prev = phi [0, %link], [%cur, %lcont]` 读到**新的** `%cur`（它刚被
             #: 前一条 phi 改成 0），`free` 的空闲链因此每轮都被重置成单块 —— 实测
             #: `gc_auto` 的空闲块永远不复用，arena 提前耗尽（#1027）。
-            _pending_phi: list[tuple[str, object]] = []
+            _pending_phi: list[tuple[str, object, tuple[int, int] | None]] = []
             for idx, ins in enumerate(blk.instrs):
-                if self.profile is not None:
+                if self.profile is not None or self.sub is not None:
+                    # 剖面与 `sw_cap` 都需要**每条指令**的站点；两者都关着时，
+                    # 只有 `call` 记（`llvm.trap` 用），不给每条指令付一次元组的代价。
                     self.site = (fn.name, blk.label, idx)
                 elif ins.text.startswith("call "):
-                    # 只有 `llvm.trap` 需要站点；它是**调用**，所以只在调用点记 ——
-                    # 不给每条指令付一次元组的代价（T1 关掉时"一个字节都不写"）。
                     self.site = (fn.name, blk.label, idx)
                 steps += 1
                 if self.counters is not None:
@@ -746,11 +1226,16 @@ class Executor(Vm):
                         f"第 {idx} 条 —— {ins.text[:60]}")
                 if ins.text.startswith("phi "):
                     if ins.dest:
-                        _pending_phi.append((ins.dest, self._phi(fr, ins.text, prev)))
+                        val, cap = self._phi(fr, ins.text, prev)
+                        _pending_phi.append((ins.dest, val, cap))
                     continue
                 if _pending_phi:
-                    for _d, _v in _pending_phi:
+                    for _d, _v, _c in _pending_phi:
                         fr.vals[_d] = _v
+                        if _c is None:
+                            fr.caps.pop(_d, None)
+                        else:
+                            fr.caps[_d] = _c
                     _pending_phi = []
                 if ins.text.startswith("br "):
                     label, _pred, edge = self._br(fr, ins.text, blk.label)
@@ -765,8 +1250,7 @@ class Executor(Vm):
                     prev = blk.label
                     break
                 if ins.text.startswith("ret"):
-                    ret = self._ret(fr, ins.text)
-                    return ret
+                    return self._ret(fr, ins.text)
                 if ins.text.startswith("unreachable"):
                     raise LvmError("执行到 unreachable")
                 # ⚠ **没有目的值的指令也要执行**（`store` 就是：它 `dest is None`）。
@@ -775,10 +1259,17 @@ class Executor(Vm):
                 v = self._eval(fr, ins.text)
                 if ins.dest:
                     fr.vals[ins.dest] = v
+                    if self.sub is not None:
+                        self._track_cap(fr, ins, v)
             else:
                 raise LvmError(f"{fn.name}: 块 {label} 没有终结指令")
 
     # ------------------------------------------------------------ 单条指令
+    def _diag(self, fr: Frame, text: str, op: str, width: int) -> dict:
+        """故障渲染的现场（`docs/366`）：指令文本、指针操作数、宽度、栈深。"""
+        return {"ins": text, "op": op, "width": width,
+                "depth": (STACK_TOP - fr.base) // FRAME_SIZE}
+
     def _eval(self, fr: Frame, text: str):
         if text.startswith("alloca"):
             ty, _ = lomelf.parse_type(text[len("alloca "):])
@@ -789,7 +1280,11 @@ class Executor(Vm):
         if text.startswith("load "):
             body = text[len("load "):]
             ty, i = lomelf.parse_type(body)
-            _bty, addr = self.operand(fr, body[i:].lstrip(", ").strip())
+            ptr_s = body[i:].lstrip(", ").strip()
+            _bty, addr = self.operand(fr, ptr_s)
+            if self.sub is not None and not self.priv:
+                self.sub.check(addr, lomelf.size_of(ty), self._cap_of(fr, ptr_s),
+                               self.site, self._diag(fr, text, ptr_s, lomelf.size_of(ty)))
             return self.load(ty, addr)
         if text.startswith("store "):
             body = text[len("store "):]
@@ -798,6 +1293,16 @@ class Executor(Vm):
             val_s, ptr_s = lomelf.split_top(body[i:].lstrip(", "))
             _vty, val = self.operand(fr, ty + " " + val_s)
             _pty, addr = self.operand(fr, ptr_s)
+            if self.sub is not None and not self.priv:
+                self.sub.check(addr, lomelf.size_of(ty), self._cap_of(fr, ptr_s),
+                               self.site, self._diag(fr, text, ptr_s, lomelf.size_of(ty)))
+                if ty == "ptr":
+                    # 指针进内存，能力跟着进影子表（`docs/362` §2.3）。
+                    cap = self._cap_of(fr, val_s)
+                    if cap is None:
+                        self.sub.shadow.pop(addr, None)
+                    else:
+                        self.sub.shadow[addr] = cap
             self.store(ty, addr, val)
             return None
         if text.startswith("getelementptr"):
@@ -839,6 +1344,71 @@ class Executor(Vm):
             _t2, b = self.operand(fr, ty + " " + b_s)
             return arith(op, a, b, ty)
         raise LvmError(f"这个指令 T0 没实现: {text!r}")
+
+    # ------------------------------------------------------------ sw_cap 的能力传播
+    def _cap_of(self, fr: Frame, text: str) -> tuple[int, int] | None:
+        """一个操作数文本 -> 它的能力。**没有就只能按地址找**（返回 `None`）。"""
+        if self.sub is None or self.priv:
+            return None
+        try:
+            _ty, v = lomelf.parse_operand(text)
+        except lomelf.ElfError:
+            v = text.strip()                  # `store` 的值那一格不带类型
+        if v.startswith("%"):
+            return fr.caps.get(v)
+        if v.startswith("@"):
+            return self.global_caps.get(v[1:])
+        return None
+
+    def _gep_base(self, text: str) -> str:
+        body = text[len("getelementptr"):].strip()
+        if body.startswith("inbounds"):
+            body = body[len("inbounds"):].strip()
+        _ty, i = lomelf.parse_type(body)
+        return lomelf.split_top(body[i:].lstrip(", "))[0]
+
+    def _track_cap(self, fr: Frame, ins, value) -> None:
+        """一条指令写完结果之后，把能力记到 SSA 名上（`docs/362` §2.2 的传播表）。"""
+        if self.sub is None or self.priv:
+            return
+        text = ins.text
+        if text.startswith("alloca"):
+            ty, _ = lomelf.parse_type(text[len("alloca "):])
+            oid = self.sub.new_obj(int(value), lomelf.size_of(ty), "alloca")
+            fr.objs.append(oid)
+            fr.caps[ins.dest] = self.sub.cap_of(oid)
+            return
+        if text.startswith("getelementptr"):
+            cap = self._cap_of(fr, self._gep_base(text))
+            if cap is not None:
+                fr.caps[ins.dest] = cap
+            return
+        if text.startswith("load "):
+            ty, i = lomelf.parse_type(text[len("load "):])
+            if ty == "ptr":
+                # ⚠ 影子的**键是槽地址**（指针从哪儿读出来），不是被读出的值。
+                # 2026-11-21 才发现：原先拿 `int(value)` 当键，于是能力过不了栈槽 ——
+                # 一个 `let p: ptr` 用一次就丢；UAF 只有"洗成整数"那条路还会被抓。
+                slot_s = text[len("load ") + i:].lstrip(", ").strip()
+                _sty, slot = self.operand(fr, slot_s)
+                cap = self.sub.shadow.get(int(slot))
+                if cap is None:
+                    cap = self.sub.cap_for_addr(int(value))
+                if cap is not None:
+                    fr.caps[ins.dest] = cap
+            return
+        if text.startswith("call "):
+            body = text[len("call "):]
+            retty, _ = lomelf.parse_type(body)
+            if retty == "ptr":
+                cap = self.sub.cap_for_addr(int(value))
+                if cap is not None:
+                    fr.caps[ins.dest] = cap
+            return
+        if text.startswith("inttoptr "):
+            cap = self.sub.cap_for_addr(int(value))
+            if cap is not None:
+                fr.caps[ins.dest] = cap
 
     def _gep(self, fr: Frame, text: str) -> int:
         body = text[len("getelementptr"):].strip()
@@ -896,6 +1466,11 @@ class Executor(Vm):
         _t, addr = self.operand(fr, "ptr " + m.group(2))
         ty, rhs = m.group(3), m.group(4)
         _t2, val = self.operand(fr, ty + " " + rhs)
+        if self.sub is not None and not self.priv:
+            self.sub.check(addr, lomelf.size_of(ty),
+                           self._cap_of(fr, "ptr " + m.group(2)), self.site,
+                           self._diag(fr, text, "ptr " + m.group(2),
+                                      lomelf.size_of(ty)))
         old = self.load(ty, addr)
         self.store(ty, addr, mask(old + val, ty))
         return old
@@ -916,6 +1491,7 @@ class Executor(Vm):
 
     # ------------------------------------------------------------ 控制流
     def _phi(self, fr: Frame, text: str, prev: str | None):
+        """返回 `(值, 能力)`。能力只有 `ty == "ptr"` 时才可能有（`docs/362` §2.2）。"""
         ty, entries = lomelf.parse_phi(text)
         for val_s, block in entries:
             if block == prev:
@@ -926,7 +1502,12 @@ class Executor(Vm):
                     _t, v = self.operand(fr, val_s)
                 except lomelf.ElfError:
                     _t, v = self.operand(fr, f"{ty} {val_s}")
-                return v
+                if self.sub is None or self.priv or ty != "ptr":
+                    return v, None
+                cap = self._cap_of(fr, val_s)
+                if cap is None:
+                    cap = self.sub.cap_for_addr(int(v))
+                return v, cap
         raise LvmError(f"phi 没有来自 {prev} 的入边: {text!r}")
 
     def _br(self, fr: Frame, text: str, cur: str) -> tuple[str, str, int]:
@@ -962,11 +1543,820 @@ class Executor(Vm):
         return v
 
 
+# ---------------------------------------------------------------- 显式栈引擎（docs/363 P5）
+#
+# `docs/360` §3.1：**guest 状态就是全部状态。** 递归 T0 的 guest 状态有一半分住在
+# Python 的调用栈里 —— 那不是 guest 的，取不到也存不下来。这一档把调用栈搬到**显式**的
+# `stack` 列表里：PC 是 `(帧, 块, 指令序号)`，值是帧里的字典，对象在基质表里。
+# 于是 checkpoint = 序列化这台机器，resume = 反序列化后接着跑。
+#
+# 默认仍是递归引擎（零风险）；只有 `--checkpoint-at` / `--resume` 走这一档。
+# 判据 `tools/lvm_cp_test.py` 拿整份语料钉「两个引擎同答」。
+
+#: 共同快照格式（`docs/365`）：与自举镜像**同一套布局**。
+#: 头 16 B + ctx 256 B + 全局表 + 对象表 + 续延栈 2112 B + 4 MiB 内存 + 参考侧扩展。
+CP_MAGIC = b"LVMC"
+CP_VERSION = 1
+CP_HEADER = 16
+CTX_SIZE = 256
+CONT_REC = 16          # u32 / 帧
+MAX_CONT = 33          # MAX_DEPTH + 1
+FRAME_VALS = 8         # 帧内值表起点（自举的 FR_VALS）
+VAL_REC = 16           # 值表一条：name_off/name_len/vlo/vhi
+EXT_MAGIC = b"LVEX"
+EXT_VERSION = 1
+
+#: 自举镜像 ctx 的格号（跨实现快照要写它的布局）。
+CTX_NSRC, CTX_NG, CTX_NF, CTX_NP, CTX_NB, CTX_NI = 0, 4, 8, 12, 16, 20
+CTX_HEAP, CTX_DEPTH, CTX_STEPS = 24, 28, 96
+CTX_PROF_FD, CTX_NEDGE = 104, 108
+CTX_ARG0, CTX_ARG0N, CTX_VFD_POS, CTX_VFD_OPEN = 112, 116, 120, 124
+CTX_SUB, CTX_PRIV = 172, 188
+CTX_NOBJ, CTX_NFOBJ, CTX_NRET = 192, 196, 200
+CTX_MODE, CTX_CKPT_AT, CTX_IFHASH = 220, 248, 252
+
+#: 对象 kind 的跨实现编码（与自举的 `OBJ_*` 同数；argv 是参考侧多出来的一档）。
+KIND_CODE = {"global": 1, "brk": 2, "alloca": 3, "heap": 4, "argv": 5}
+CODE_KIND = {v: k for k, v in KIND_CODE.items()}
+
+
+def fnv32(data: bytes) -> int:
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def _u16(v: int) -> bytes:
+    return struct.pack("<H", v & 0xFFFF)
+
+
+def _u32(v: int) -> bytes:
+    return struct.pack("<I", v & 0xFFFFFFFF)
+
+
+def _u64(v: int) -> bytes:
+    return struct.pack("<Q", v & 0xFFFFFFFFFFFFFFFF)
+
+
+def cp_frame_count(blob: bytes) -> int:
+    """快照里的调用深度（测试用；格式是共同格式的 ctx）。"""
+    return struct.unpack_from("<I", blob, CP_HEADER + CTX_DEPTH)[0]
+
+
+def cp_substrate(blob: bytes) -> int:
+    return struct.unpack_from("<I", blob, 12)[0]
+
+
+def ir_layout(text: str, funcs: list) -> tuple[dict, dict]:
+    """IR 文本 -> `(SSA 名 -> 跨度, SSA 名 -> 类型)`。
+
+    跨度必须与自举镜像解析出来的**逐字节一致**：它拿 `name_off/name_len` 当值表的键。
+    """
+    data = text.encode("utf-8")
+    spans: dict[tuple[str, str], tuple[int, int]] = {}
+    types: dict[tuple[str, str], str] = {}
+    define_re = re.compile(rb"^define\b[^\n]*?@([-A-Za-z0-9_.]+)\s*\(([^)]*)\)", re.M)
+    name_re = re.compile(rb"%[-A-Za-z0-9_.]+")
+    dest_re = re.compile(rb"^[ \t]*(%[-A-Za-z0-9_.]+)[ \t]*=")
+    for m in define_re.finditer(data):
+        fn = m.group(1).decode()
+        params = m.group(2)
+        pbase = m.start(2)
+        for nm in name_re.finditer(params):
+            spans[(fn, nm.group(0).decode())] = (pbase + nm.start(), len(nm.group(0)))
+        # 函数体：从 `{` 之后逐行扫 dest
+        body_start = data.find(b"{", m.end())
+        if body_start < 0:
+            continue
+        pos = body_start + 1
+        while pos < len(data):
+            nl = data.find(b"\n", pos)
+            if nl < 0:
+                nl = len(data)
+            line = data[pos:nl]
+            if line.strip() == b"}":
+                break
+            dm = dest_re.match(line)
+            if dm:
+                spans[(fn, dm.group(1).decode())] = (pos + dm.start(1), len(dm.group(1)))
+            pos = nl + 1
+    for fn in funcs:
+        for ty, name in fn.params:
+            types[(fn.name, name)] = ty
+        for blk in fn.blocks:
+            for ins in blk.instrs:
+                if not ins.dest:
+                    continue
+                ty = lomelf.result_type(ins.text)
+                if ty is not None:
+                    types[(fn.name, ins.dest)] = ty
+    return spans, types
+
+
+class _Suspend(Exception):
+    """跑到 checkpoint 点：把快照带出来，交给调用方落盘。"""
+
+    def __init__(self, blob: bytes) -> None:
+        self.blob = blob
+
+
+#: 自举镜像的 `NONE`（块/函数下标的空值）。
+NONE = 0xFFFFFFFF
+
+
+class _Reader:
+    """共同快照的游标（截断一律点名拒）。"""
+
+    __slots__ = ("b", "o")
+
+    def __init__(self, b: bytes) -> None:
+        self.b = b
+        self.o = 0
+
+    def take(self, n: int) -> bytes:
+        if self.o + n > len(self.b):
+            raise LvmError("checkpoint：文件截断了")
+        d = self.b[self.o:self.o + n]
+        self.o += n
+        return d
+
+    def u16(self) -> int:
+        return struct.unpack("<H", self.take(2))[0]
+
+    def u32(self) -> int:
+        return struct.unpack("<I", self.take(4))[0]
+
+    def u64(self) -> int:
+        return struct.unpack("<Q", self.take(8))[0]
+
+    def done(self) -> bool:
+        return self.o >= len(self.b)
+
+
+class _IterFrame(Frame):
+    """显式栈里的一帧：递归引擎里那组 Python 局部变量搬到这里。"""
+
+    def __init__(self, mem: Mem, base: int, fn) -> None:
+        super().__init__(mem, base)
+        self.fn = fn
+        self.label = fn.blocks[0].label
+        self.idx = 0
+        self.prev: str | None = None
+        self.steps = 0
+        self.pending: list[tuple[str, object, tuple[int, int] | None]] = []
+        self.wait_dest: str | None = None
+        self.wait_retty: str = "void"
+        self.wait_hook: tuple[str, int] | None = None
+        self.internal = fn.name.startswith("__loment_")
+
+
+class ExplicitExecutor(Executor):
+    """T0 的显式栈引擎：把 Python 的调用栈换成 guest 自己的栈。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.stack: list[_IterFrame] = []
+        self.executed = 0
+        self.cp_at: int | None = None
+        #: 共同快照要的 IR 侧信息（由 `run_checkpointed` 装）。
+        self.ir_text = ""
+        self.ir_bytes = b""
+        self.ir_fnv = 0
+        self.func_list: list = []
+        self.fn_index: dict[str, int] = {}
+        self.block_index: dict[str, dict[str, int]] = {}
+        self.global_blocks: list = []
+        self.name_spans: dict = {}
+        self.value_types: dict = {}
+        self._block_cache: dict[str, dict] = {}
+
+    # ------------------------------------------------------------ 入口
+    def run(self, fn, argtexts: list[str], caller: Frame | None,
+            entry_vals: list | None = None):
+        if caller is not None:
+            raise LvmError("显式栈引擎不接受递归调用（内部错）")
+        self._push(fn, None, entry_vals, None, [])
+        return self._loop()
+
+    def run_resumed(self):
+        return self._loop()
+
+    def _blocks(self, fn) -> dict:
+        got = self._block_cache.get(fn.name)
+        if got is None:
+            got = {b.label: b for b in fn.blocks}
+            self._block_cache[fn.name] = got
+        return got
+
+    def _push(self, fn, argtexts, entry_vals, caller, argvals, argcaps=None):
+        depth = len(self.stack) + 1
+        if depth > MAX_DEPTH:
+            raise LvmError(f"栈溢出（调用深度上限 {MAX_DEPTH}）")
+        base = STACK_TOP - depth * FRAME_SIZE
+        if base <= self.mem.heap:
+            raise LvmError("栈溢出")
+        fr = _IterFrame(self.mem, base, fn)
+        for k, (pty, pname) in enumerate(fn.params):
+            if argvals is not None:
+                v = argvals[k][1]
+            elif entry_vals is not None:
+                v = entry_vals[k] if k < len(entry_vals) else 0
+            else:
+                v = 0
+            fr.vals[pname] = v
+            if self.sub is not None and not fr.internal:
+                cap = None
+                if argcaps is not None:
+                    cap = argcaps[k]
+                elif pty == "ptr" and entry_vals is not None:
+                    cap = self.sub.cap_for_addr(int(v))
+                if cap is not None:
+                    fr.caps[pname] = cap
+        if fr.internal:
+            self.priv += 1
+        self.stack.append(fr)
+        return fr
+
+    # ------------------------------------------------------------ 主循环
+    def _loop(self):
+        while self.stack:
+            fr = self.stack[-1]
+            if self.cp_at is not None and self.executed >= self.cp_at:
+                raise _Suspend(self.snapshot())
+            block = self._blocks(fr.fn).get(fr.label)
+            if block is None:
+                raise LvmError(f"{fr.fn.name}: 没有块 {fr.label}")
+            if fr.idx >= len(block.instrs):
+                raise LvmError(f"{fr.fn.name}: 块 {fr.label} 没有终结指令")
+            ins = block.instrs[fr.idx]
+            if fr.idx == 0 and self.profile is not None:
+                self.profile.block(fr.fn.name, fr.label)
+            if self.profile is not None or self.sub is not None:
+                self.site = (fr.fn.name, fr.label, fr.idx)
+            elif ins.text.startswith("call "):
+                self.site = (fr.fn.name, fr.label, fr.idx)
+            self.executed += 1
+            fr.steps += 1
+            if self.counters is not None:
+                self.counters.instructions += 1
+                self.counters.dispatches += 1
+                self.counters.decodes += 1
+            if fr.steps > STEP_CAP:
+                raise LvmError(
+                    f"步数上限 {STEP_CAP}：{fr.fn.name} 的块 {fr.label}，"
+                    f"第 {fr.idx} 条 —— {ins.text[:60]}")
+            text = ins.text
+            if text.startswith("phi "):
+                if ins.dest:
+                    val, cap = self._phi(fr, text, fr.prev)
+                    fr.pending.append((ins.dest, val, cap))
+                fr.idx += 1
+                continue
+            if fr.pending:
+                for d, v, c in fr.pending:
+                    fr.vals[d] = v
+                    if c is None:
+                        fr.caps.pop(d, None)
+                    else:
+                        fr.caps[d] = c
+                fr.pending = []
+            if text.startswith("br "):
+                label, _pred, edge = self._br(fr, text, fr.label)
+                if self.profile is not None:
+                    self.profile.edge(fr.fn.name, fr.label, fr.idx, edge)
+                fr.prev = fr.label
+                fr.label = label
+                fr.idx = 0
+                continue
+            if text.startswith("switch "):
+                label, edge = self._switch(fr, text)
+                if self.profile is not None:
+                    self.profile.edge(fr.fn.name, fr.label, fr.idx, edge)
+                fr.prev = fr.label
+                fr.label = label
+                fr.idx = 0
+                continue
+            if text.startswith("ret"):
+                value = self._ret(fr, text)
+                if self._return(fr, value):
+                    return value
+                continue
+            if text.startswith("unreachable"):
+                raise LvmError("执行到 unreachable")
+            if text.startswith("call "):
+                self._do_call(fr, ins)
+                continue
+            v = self._eval(fr, text)
+            if ins.dest:
+                fr.vals[ins.dest] = v
+                if self.sub is not None:
+                    self._track_cap(fr, ins, v)
+            fr.idx += 1
+        return 0
+
+    # ------------------------------------------------------------ 调用
+    def _do_call(self, fr: _IterFrame, ins) -> None:
+        text = ins.text
+        m = _CALL_ASM.match(text)
+        if m:
+            name = m.group(_ASM_NAME)
+            if name != "syscall":
+                raise LvmError(f"这一档不支持的 asm: {name!r}（`docs/245`）")
+            argtext = m.group(_ASM_ARGS)
+            a = [self.operand(fr, s)[1] for s in lomelf.split_top(argtext)]
+            v = self.syscall(a[0], a[1:])
+            if ins.dest:
+                fr.vals[ins.dest] = v
+            fr.idx += 1
+            return
+        body = text[len("call "):].strip()
+        if body.startswith("void"):
+            retty, body = None, body[4:].strip()
+        else:
+            retty, i = lomelf.parse_type(body)
+            body = body[i:].strip()
+        m2 = re.match(r"([@%][-A-Za-z0-9_.]+)\((.*)\)\s*$", body, re.S)
+        if not m2:
+            raise LvmError(f"解析不了调用: {text!r}")
+        callee = m2.group(1)
+        if callee.startswith("%"):
+            _, addr = self.operand(fr, "ptr " + callee)
+            name = self.addr_fn.get(addr)
+            if name is None:
+                raise LvmError(f"间接调用的代码地址不在函数表里: {addr}")
+        else:
+            name = callee[1:]
+        args = [s for s in lomelf.split_top(m2.group(2)) if s]
+        if name == "llvm.trap":
+            raise _Trap(self.site, self._diag(fr, text, "", 0))
+        if name in self.externs:
+            raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/243` §5）")
+        fn = self.funcs.get(name)
+        if fn is None:
+            raise LvmError(f"没有这个函数: {name}")
+        if len(args) != len(fn.params):
+            raise LvmError("实参个数与形参不符")
+        if self.profile is not None and self.site is not None:
+            self.profile.call_site(self.site, name)
+        argvals = [self.operand(fr, s) for s in args]
+        argcaps = ([self._cap_of(fr, s) for s in args]
+                   if self.sub is not None else [None] * len(args))
+        fr.wait_dest = ins.dest
+        fr.wait_retty = "void" if retty is None else retty
+        fr.wait_hook = None
+        if self.sub is not None and name == "__loment_alloc":
+            fr.wait_hook = ("alloc", int(argvals[0][1]))
+        elif self.sub is not None and name == "__loment_free":
+            fr.wait_hook = ("free", int(argvals[0][1]))
+        fr.idx += 1
+        self._push(fn, None, None, fr, argvals, argcaps)
+
+    def _return(self, fr: _IterFrame, value) -> bool:
+        if self.sub is not None and not fr.internal:
+            for oid in fr.objs:
+                self.sub.retire_oid(oid)
+        if fr.internal:
+            self.priv -= 1
+        self.stack.pop()
+        if not self.stack:
+            return True
+        caller = self.stack[-1]
+        hook = caller.wait_hook
+        if hook is not None:
+            kind, arg = hook
+            if kind == "alloc":
+                self.sub.new_obj(int(value), max(0, int(arg)), "heap")
+            else:
+                self.sub.retire_addr(int(arg))
+        if caller.wait_dest is not None:
+            caller.vals[caller.wait_dest] = value
+            if (self.sub is not None and not self.priv
+                    and caller.wait_retty == "ptr"):
+                cap = self.sub.cap_for_addr(int(value))
+                if cap is not None:
+                    caller.caps[caller.wait_dest] = cap
+        caller.wait_dest = None
+        caller.wait_retty = "void"
+        caller.wait_hook = None
+        return False
+
+    # ------------------------------------------------------------ 共同快照（docs/365）
+    def _align8(self, v: int) -> int:
+        return (v + 7) // 8 * 8
+
+    def _place_value(self, fr: _IterFrame, val) -> tuple[int, int]:
+        """宿主值 -> `(lo, hi)`。聚合先落到本帧槽区，记成 `(addr, size)`。"""
+        if isinstance(val, bytes):
+            fr.next = self._align8(fr.next)
+            addr = fr.next
+            self.mem.put(addr, bytes(val))
+            fr.next = addr + len(val)
+            return addr, len(val)
+        v = int(val) & 0xFFFFFFFFFFFFFFFF
+        return v & 0xFFFFFFFF, v >> 32
+
+    def _span_name(self, off: int, ln: int) -> str | None:
+        if not ln:
+            return None
+        return self.ir_bytes[off:off + ln].decode("utf-8", "replace")
+
+    def _wait_span(self, fr: _IterFrame) -> tuple[int, int]:
+        if not fr.wait_dest:
+            return 0, 0
+        sp = self.name_spans.get((fr.fn.name, fr.wait_dest))
+        if sp is None:
+            raise LvmError(f"checkpoint：找不到 {fr.wait_dest} 的 IR 跨度")
+        return sp
+
+    def _prepare_tables(self) -> list:
+        """把每帧的值表与聚合暂存写进 guest 内存；返回待写回的 phi 条目。"""
+        pending = []
+        for d, fr in enumerate(self.stack, 1):
+            base = fr.base
+            n = 0
+            for name, val in sorted(fr.vals.items()):
+                sp = self.name_spans.get((fr.fn.name, name))
+                if sp is None:
+                    raise LvmError(f"checkpoint：找不到 SSA 名 {name} 的 IR 跨度（{fr.fn.name}）")
+                if n >= 1024:
+                    raise LvmError("checkpoint：一帧里的值超过自举镜像的 1024 格")
+                lo, hi = self._place_value(fr, val)
+                struct.pack_into("<IIII", self.mem.buf, base + FRAME_VALS + n * VAL_REC,
+                                 sp[0], sp[1], lo, hi)
+                n += 1
+            for name, val, cap in fr.pending:
+                lo, hi = self._place_value(fr, val)
+                pending.append((d, name, lo, hi, cap))
+            struct.pack_into("<II", self.mem.buf, base, n, fr.next - base)
+        return pending
+
+    def _sub_code(self) -> int:
+        if self.sub is None:
+            return 0
+        return 2 if self.sub.mode == "tag" else 1
+
+    def _extension(self, pending: list) -> bytes:
+        out = bytearray(EXT_MAGIC + _u32(EXT_VERSION))
+        out += _u32(len(pending))
+        for d, name, lo, hi, cap in pending:
+            nb = name.encode("utf-8")
+            out += _u32(d) + _u32(len(nb)) + nb + _u64(lo) + _u64(hi)
+            if cap is None:
+                out += _u32(0)
+            else:
+                out += _u32(1) + _u32(cap[0]) + _u32(cap[1]) + _u32(cap[2])
+        out += _u32(len(self.stack))
+        for fr in self.stack:
+            for txt in (fr.fn.name, fr.label, fr.prev or ""):
+                nb = txt.encode("utf-8")
+                out += _u32(len(nb)) + nb
+        caps = []
+        for d, fr in enumerate(self.stack, 1):
+            for name, c in sorted(fr.caps.items()):
+                caps.append((d, name, c))
+        out += _u32(len(caps))
+        for d, name, c in caps:
+            nb = name.encode("utf-8")
+            out += _u32(d) + _u32(len(nb)) + nb + _u32(c[0]) + _u32(c[1]) + _u32(c[2])
+        sh = sorted(self.sub.shadow.items()) if self.sub is not None else []
+        out += _u32(len(sh))
+        for a, c in sh:
+            out += _u32(a) + _u32(c[0]) + _u32(c[1]) + _u32(c[2])
+        out += _u32(len(self.vfds))
+        for fd, (fdta, pos) in sorted(self.vfds.items()):
+            out += _u32(fd) + _u32(pos) + _u32(len(fdta)) + bytes(fdta)
+        out += _u32(len(self.argv))
+        for s in self.argv:
+            nb = s.encode("utf-8")
+            out += _u32(len(nb)) + nb
+        return bytes(out)
+
+    def snapshot(self) -> bytes:
+        """共同快照：与自举镜像同一套布局（`docs/365`）。"""
+        if not self.ir_text:
+            raise LvmError("checkpoint：这台引擎没有绑定 IR 文本")
+        pending = self._prepare_tables()
+        ctx = bytearray(CTX_SIZE)
+        cset = lambda off, v: struct.pack_into("<I", ctx, off, int(v) & 0xFFFFFFFF)  # noqa: E731
+        cset(CTX_NSRC, len(self.ir_bytes))
+        cset(CTX_NG, len(self.globals))
+        cset(CTX_NF, len(self.func_list))
+        cset(CTX_NP, sum(len(f.params) for f in self.func_list))
+        cset(CTX_NB, sum(len(f.blocks) for f in self.func_list))
+        cset(CTX_NI, sum(len(b.instrs) for f in self.func_list for b in f.blocks))
+        cset(CTX_HEAP, self.mem.heap)
+        cset(CTX_DEPTH, len(self.stack))
+        cset(CTX_STEPS, self.executed)
+        cset(CTX_PROF_FD, 0)
+        cset(CTX_NEDGE, 0)
+        cset(CTX_ARG0, 0)
+        cset(CTX_ARG0N, 0)
+        if self.vfds:
+            _fd, (fdta, pos) = next(iter(sorted(self.vfds.items())))
+            cset(CTX_VFD_POS, pos)
+            cset(CTX_VFD_OPEN, 1)
+        cset(CTX_SUB, 1 if self.sub is not None else 0)
+        cset(CTX_PRIV, self.priv)
+        live = [o for o in (self.sub.objs.values() if self.sub else []) if o.alive]
+        cset(CTX_NOBJ, len(live))
+        cset(CTX_NFOBJ, sum(1 for o in live if o.kind == "alloca"))
+        cset(CTX_NRET, len(self.sub.retired) if self.sub else 0)
+        cset(CTX_MODE, 1)
+        cset(CTX_CKPT_AT, 0)
+        cset(CTX_IFHASH, self.ir_fnv)
+
+        out = bytearray(CP_MAGIC + _u32(CP_VERSION) + _u32(self.ir_fnv)
+                        + _u32(self._sub_code()) + ctx)
+        out += _u32(len(self.globals))
+        for name, g in self.globals.items():
+            nb = name.encode("utf-8")
+            out += _u32(len(nb)) + nb + _u32(g.addr)
+        objs = []
+        if self.sub is not None:
+            objs = [o for o in self.sub.objs.values() if o.alive]
+            seen = set()
+            for o in self.sub.retired:
+                if o.oid not in seen:
+                    seen.add(o.oid)
+                    objs.append(o)
+        out += _u32(len(objs))
+        for o in objs:
+            out += (_u32(o.oid) + _u32(o.base) + _u32(o.limit) + _u32(o.gen)
+                    + _u32(1 if o.alive else 0) + _u32(KIND_CODE.get(o.kind, 4))
+                    + _u32(o.tag))
+        out += _u32(self.sub.next_oid if self.sub else 1)
+        out += _u32(self.sub.tag_seq if self.sub else 0)
+        cont = bytearray(MAX_CONT * CONT_REC * 4)
+        for d, fr in enumerate(self.stack, 1):
+            base = STACK_TOP - d * FRAME_SIZE
+            fi = self.fn_index[fr.fn.name]
+            bi = self.block_index[fr.fn.name][fr.label]
+            prev = (NONE if fr.prev is None
+                    else self.block_index[fr.fn.name][fr.prev])
+            cfr = (STACK_TOP - (d - 1) * FRAME_SIZE) if d > 1 else NONE
+            ro, rl = self._wait_span(self.stack[d - 2]) if d > 1 else (0, 0)
+            do_, dl = self._wait_span(fr)
+            hook = 0
+            a0 = 0
+            if fr.wait_hook is not None:
+                hook = 1 if fr.wait_hook[0] == "alloc" else 2
+                a0 = int(fr.wait_hook[1]) & 0xFFFFFFFFFFFFFFFF
+            rec = [fi, base, cfr, ro, rl, bi, fr.idx, do_, dl,
+                   1 if fr.internal else 0, hook,
+                   a0 & 0xFFFFFFFF, a0 >> 32, prev, fr.steps, 0]
+            for k, v in enumerate(rec):
+                struct.pack_into("<I", cont, (d * CONT_REC + k) * 4, v)
+        out += cont
+        out += bytes(self.mem.buf)
+        out += self._extension(pending)
+        return bytes(out)
+
+    def restore(self, blob: bytes) -> None:
+        r = _Reader(blob)
+        if r.take(4) != CP_MAGIC:
+            raise LvmError("checkpoint：魔数不对")
+        ver = r.u32()
+        if ver != CP_VERSION:
+            raise LvmError(f"checkpoint：不认识的版本 {ver}")
+        if r.u32() != self.ir_fnv:
+            raise LvmError("checkpoint：IR 与快照不匹配（字节码换了）")
+        flags = r.u32()
+        ctx = r.take(CTX_SIZE)
+        self.mem.heap = struct.unpack_from("<I", ctx, CTX_HEAP)[0]
+        depth = struct.unpack_from("<I", ctx, CTX_DEPTH)[0]
+        self.executed = struct.unpack_from("<I", ctx, CTX_STEPS)[0]
+        if depth > MAX_DEPTH:
+            raise LvmError("checkpoint：深度超过上限")
+        nglob = r.u32()
+        gaddr = {}
+        for _ in range(nglob):
+            name = r.take(r.u32()).decode("utf-8", "replace")
+            gaddr[name] = r.u32()
+        for name, g in self.globals.items():
+            if name in gaddr:
+                g.addr = gaddr[name]
+        nobj = r.u32()
+        objs = []
+        for _ in range(nobj):
+            oid = r.u32()
+            base = r.u32()
+            limit = r.u32()
+            gen = r.u32()
+            alive = r.u32()
+            kind = CODE_KIND.get(r.u32(), "heap")
+            tag = r.u32()
+            objs.append((oid, base, limit, gen, alive, kind, tag))
+        next_oid = r.u32()
+        tag_seq = r.u32()
+        cont = r.take(MAX_CONT * CONT_REC * 4)
+        mem = r.take(MEM_SIZE)
+        if len(mem) != MEM_SIZE:
+            raise LvmError("checkpoint：内存长度不对")
+        self.mem.buf = bytearray(mem)
+        if flags == 0:
+            self.sub = None
+        else:
+            s = SwCap("tag" if flags == 2 else "cap")
+            s.next_oid = next_oid
+            s.tag_seq = tag_seq
+            for oid, base, limit, gen, alive, kind, tag in objs:
+                o = _Obj(oid, base, limit - base, kind)
+                o.gen = gen
+                o.alive = bool(alive)
+                o.tag = tag
+                s.objs[oid] = o
+                if o.alive:
+                    s.live[o.base] = oid
+            s.bases = sorted(s.live)
+            s.retired = [s.objs[oid] for oid, *_ in objs if not alive]
+            self.sub = s
+            self.global_caps = {}
+            for name, g in self.globals.items():
+                cap = s.cap_for_addr(g.addr)
+                if cap is not None:
+                    self.global_caps[name] = cap
+        pending, caps, shadow, vfds, argv = [], {}, [], {}, []
+        frame_names: list = []
+        if not r.done():
+            if r.take(4) != EXT_MAGIC:
+                raise LvmError("checkpoint：扩展魔数不对")
+            if r.u32() != EXT_VERSION:
+                raise LvmError("checkpoint：扩展版本不对")
+            for _ in range(r.u32()):
+                d = r.u32()
+                name = r.take(r.u32()).decode("utf-8", "replace")
+                lo = r.u64()
+                hi = r.u64()
+                cap = None
+                if r.u32():
+                    cap = (r.u32(), r.u32(), r.u32())
+                pending.append((d, name, lo, hi, cap))
+            frame_names = []
+            for _ in range(r.u32()):
+                fn_name = r.take(r.u32()).decode("utf-8", "replace")
+                blk_name = r.take(r.u32()).decode("utf-8", "replace")
+                prev_name = r.take(r.u32()).decode("utf-8", "replace")
+                frame_names.append((fn_name, blk_name, prev_name))
+            for _ in range(r.u32()):
+                d = r.u32()
+                name = r.take(r.u32()).decode("utf-8", "replace")
+                caps.setdefault(d, {})[name] = (r.u32(), r.u32(), r.u32())
+            for _ in range(r.u32()):
+                shadow.append((r.u32(), (r.u32(), r.u32(), r.u32())))
+            for _ in range(r.u32()):
+                fd = r.u32()
+                pos = r.u32()
+                vfds[fd] = [r.take(r.u32()), pos]
+            for _ in range(r.u32()):
+                argv.append(r.take(r.u32()).decode("utf-8", "replace"))
+        if self.sub is not None:
+            self.sub.shadow = dict(shadow)
+        self.vfds = vfds
+        self.next_vfd = (max(vfds) + 1) if vfds else VFD_BASE
+        if argv:
+            self.argv = argv
+        self.stack = []
+        for d in range(1, depth + 1):
+            rec = struct.unpack_from("<16I", cont, d * CONT_REC * 4)
+            (fi, _frb, _cfr, _ro, _rl, bi, j, do_, dl, _priv, hook,
+             a0lo, a0hi, prev, steps, _sp) = rec
+            if d <= len(frame_names):
+                fn_name, blk_name, prev_name = frame_names[d - 1]
+                fn = self.funcs.get(fn_name)
+                if fn is None:
+                    raise LvmError(f"checkpoint：没有函数 {fn_name!r}")
+                blk = next((b for b in fn.blocks if b.label == blk_name), None)
+                if blk is None:
+                    raise LvmError(f"checkpoint：{fn_name} 里没有块 {blk_name!r}")
+                prev_label = prev_name or None
+            else:
+                if bi >= len(self.global_blocks):
+                    raise LvmError("checkpoint：块下标越界")
+                fn, blk = self.global_blocks[bi]
+                prev_label = (None if prev == NONE
+                              else self.global_blocks[prev][1].label)
+            fr = _IterFrame(self.mem, STACK_TOP - d * FRAME_SIZE, fn)
+            fr.label = blk.label
+            fr.idx = j
+            fr.prev = prev_label
+            fr.steps = steps
+            fr.next = fr.base + struct.unpack_from("<I", self.mem.buf, fr.base + 4)[0]
+            n = struct.unpack_from("<I", self.mem.buf, fr.base)[0]
+            if n > 1024:
+                raise LvmError("checkpoint：一帧里的值超过 1024 格")
+            fr.vals = {}
+            for k in range(n):
+                no, nl, lo, hi = struct.unpack_from(
+                    "<IIII", self.mem.buf, fr.base + FRAME_VALS + k * VAL_REC)
+                name = self._span_name(no, nl)
+                ty = self.value_types.get((fn.name, name))
+                if ty is not None and lomelf.is_agg(ty):
+                    fr.vals[name] = bytes(self.mem.buf[lo:lo + hi])
+                else:
+                    fr.vals[name] = lo | (hi << 32)
+            fr.caps = dict(caps.get(d, {}))
+            fr.objs = [o.oid for o in (self.sub.objs.values() if self.sub else [])
+                       if o.kind == "alloca" and fr.base <= o.base < fr.base + FRAME_SIZE]
+            fr.wait_dest = self._span_name(do_, dl) if dl else None
+            fr.wait_retty = "void"
+            if j > 0 and j <= len(blk.instrs):
+                ins = blk.instrs[j - 1]
+                if ins.text.startswith("call "):
+                    ty = lomelf.result_type(ins.text)
+                    fr.wait_retty = "void" if ty is None else ty
+            a0 = (a0hi << 32) | a0lo
+            fr.wait_hook = (("alloc", a0) if hook == 1
+                            else ("free", a0) if hook == 2 else None)
+            fr.internal = fn.name.startswith("__loment_")
+            fr.pending = []
+            for pd, name, lo, hi, cap in pending:
+                if pd != d:
+                    continue
+                ty = self.value_types.get((fn.name, name))
+                if ty is not None and lomelf.is_agg(ty):
+                    val = bytes(self.mem.buf[lo:lo + hi])
+                else:
+                    val = lo | (hi << 32)
+                fr.pending.append((name, val, cap))
+            self.stack.append(fr)
+        self.priv = sum(1 for f in self.stack if f.internal)
+        self.cp_at = None
+
+
+def run_checkpointed(text: str, out, substrate: str = "none",
+                     at: int | None = None, resume: bytes | None = None,
+                     argv: list[str] | None = None
+                     ) -> tuple[int, bytes | None]:
+    """跑一份 IR，可选在**第 at 条指令之前**停住并交出快照；或从快照继续。
+
+    `docs/360` §7 B4 的落点。返回 `(退出码, 快照或 None)`。这一档**不记剖面/计数**：
+    它们记的是解释器自己的账，不是 guest 状态；要记它们就别用 checkpoint。
+    """
+    if substrate not in ("none", "sw_cap", "sw_tag"):
+        raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
+    shape = entry_kind(text)
+    if shape is None:
+        raise LvmError(NO_ENTRY)
+    kind, name = shape
+    if kind in ("interrupt", "thread_spawn"):
+        raise LvmError(entry_refusal(kind, name))
+    globals_, funcs, externs = lomelf.parse_ll(text)
+    sub = (SwCap("cap") if substrate == "sw_cap"
+           else SwCap("tag") if substrate == "sw_tag" else None)
+    vm = ExplicitExecutor(globals_, funcs, externs, out, None, argv, None, sub)
+    vm.ir_text = text
+    vm.ir_bytes = text.encode("utf-8")
+    vm.ir_fnv = fnv32(vm.ir_bytes)
+    vm.func_list = funcs
+    vm.fn_index = {f.name: i for i, f in enumerate(funcs)}
+    vm.block_index = {}
+    vm.global_blocks = []
+    gidx = 0
+    for f in funcs:
+        vm.block_index[f.name] = {}
+        for b in f.blocks:
+            vm.block_index[f.name][b.label] = gidx
+            vm.global_blocks.append((f, b))
+            gidx += 1
+    vm.name_spans, vm.value_types = ir_layout(text, funcs)
+    if resume is not None:
+        vm.restore(resume)
+        want = {"none": None, "sw_cap": "cap", "sw_tag": "tag"}[substrate]
+        got = vm.sub.mode if vm.sub is not None else None
+        if got != want:
+            raise LvmError("checkpoint：基质与快照不匹配（resume 要带同一档）")
+    # `at` 是**本次**命令行的：恢复之后才设，避免被快照里的旧停点覆盖。
+    vm.cp_at = at
+    try:
+        if resume is not None:
+            value = vm.run_resumed()
+            return ((value & 0xFF) if kind != "_start" else 0), None
+        start = next((f for f in funcs if f.name == name), None)
+        if start is None:
+            raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
+        args = entry_values(vm, kind, name)
+        if kind == "_start":
+            vm.run(start, [], None)
+        else:
+            return (vm.run_entry(start, args) & 0xFF), None
+    except _Exit as e:
+        return e.code, None
+    except _Trap as e:
+        return trap_exit(e.site, e.detail), None
+    except _Fault as e:
+        return fault_exit(e.kind, e.site, e.witness, e.detail), None
+    except _Suspend as e:
+        return 0, e.blob
+    return 0, None
+
+
 # ---------------------------------------------------------------- 前门
 
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
-           values=None, deopts=None, counters: "Counters | None" = None) -> int:
+           values=None, deopts=None, counters: "Counters | None" = None,
+           substrate: str = "none") -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -982,15 +2372,21 @@ def run_ir(text: str, out, profile: Profile | None = None,
     喂给原生产物的同一个名字，好让两边逐字节可比）。
     """
     if tier == "t2":
+        if substrate != "none":
+            raise LvmError("基质（sw_cap / sw_tag）只在 t0 落地（`docs/362`/`docs/364`）；t2/t3 还没有它")
         import lvm_t2                                       # noqa: PLC0415
 
         return lvm_t2.run_ir_t2(text, out, profile, argv, values, counters=counters)
     if tier == "t3":
+        if substrate != "none":
+            raise LvmError("基质（sw_cap / sw_tag）只在 t0 落地（`docs/362`/`docs/364`）；t2/t3 还没有它")
         import lvm_t3                                       # noqa: PLC0415
 
         return lvm_t3.run_ir_t3(text, out, profile, argv, values, deopts, counters)
     if tier != "t0":
         raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2 / t3）")
+    if substrate not in ("none", "sw_cap", "sw_tag"):
+        raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
     shape = entry_kind(text)
     if shape is None:
         raise LvmError(NO_ENTRY)
@@ -1000,7 +2396,9 @@ def run_ir(text: str, out, profile: Profile | None = None,
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
-    vm = Executor(globals_, funcs, externs, out, profile, argv, counters)
+    sub = (SwCap("cap") if substrate == "sw_cap"
+           else SwCap("tag") if substrate == "sw_tag" else None)
+    vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
         raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
@@ -1015,19 +2413,22 @@ def run_ir(text: str, out, profile: Profile | None = None,
     except _Exit as e:
         return e.code
     except _Trap as e:
-        return trap_exit(e.site)
+        return trap_exit(e.site, e.detail)
+    except _Fault as e:
+        return fault_exit(e.kind, e.site, e.witness, e.detail)
     return 0
 
 
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
-               values=None, deopts=None, counters: "Counters | None" = None) -> int:
+               values=None, deopts=None, counters: "Counters | None" = None,
+               substrate: str = "none") -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts, counters)
+                  values, deopts, counters, substrate)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -1075,6 +2476,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
                     help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
                          "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
+    ap.add_argument("--substrate", choices=("none", "sw_cap", "sw_tag"), default="none",
+                    help="LVM-A 的执行基质（docs/362/364）：none（默认，今天的行为）、"
+                         "sw_cap（对象表 + 边界 + 对象代）、sw_tag（4 位标签，概率检测）；"
+                         "只在 --tier t0")
+    ap.add_argument("--checkpoint-at", type=int, default=None, metavar="N",
+                    help="P5（docs/363）：在第 N 条指令之前停住，把 guest 状态写进 "
+                         "--checkpoint-out（只走显式栈引擎）")
+    ap.add_argument("--checkpoint-out", metavar="PATH", default=None,
+                    help="P5：快照写到 PATH；resume 就是再跑一次并给 --resume")
+    ap.add_argument("--resume", metavar="PATH", default=None,
+                    help="P5：从 PATH 的快照继续；入口仍要给（用来重新解析同一份 IR）")
     a = ap.parse_args(argv)
     # `lvm_compact` 会经 `lvm_t2` 反过来 import 本模块 —— 只能在 `main()` 里、模块装完之后拿。
     import lvm_compact  # noqa: PLC0415
@@ -1096,6 +2508,33 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if a.compact_out is not None or a.compact is not None:
             print("lvm: --cache 与 --compact/--compact-out 不能同时给", file=sys.stderr)
+            return 2
+    if a.substrate != "none":
+        if a.tier != "t0":
+            print("lvm: --substrate sw_cap 只在 --tier t0 下有效（docs/362）",
+                  file=sys.stderr)
+            return 2
+        if a.compact is not None or a.compact_out is not None or a.cache is not None:
+            print("lvm: --substrate 与紧凑形/缓存不能同时给（它们是另一个引擎）",
+                  file=sys.stderr)
+            return 2
+    checkpointing = a.resume is not None or a.checkpoint_at is not None
+    if checkpointing:
+        if a.checkpoint_at is not None and a.checkpoint_out is None:
+            print("lvm: --checkpoint-at 需要 --checkpoint-out", file=sys.stderr)
+            return 2
+        if a.checkpoint_at is None and a.checkpoint_out is not None:
+            print("lvm: --checkpoint-out 只在 --checkpoint-at 下有意义", file=sys.stderr)
+            return 2
+        if a.tier != "t0" or a.compact is not None or a.compact_out is not None \
+                or a.cache is not None:
+            print("lvm: checkpoint 只在纯 T0 下有效（docs/363）", file=sys.stderr)
+            return 2
+        if (a.profile_out is not None or a.counters_out is not None
+                or a.values_out is not None or a.values_in is not None
+                or a.deopt_out is not None):
+            print("lvm: checkpoint 不记剖面/计数/值观察 —— 那些是解释器的账，不是 guest 状态",
+                  file=sys.stderr)
             return 2
     if a.entry is None and a.compact is None:
         print("lvm: 需要一个入口（.lomt / --ir 的 .ll），或 --compact PATH",
@@ -1137,13 +2576,21 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
         # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
-        if a.compact_out is not None:
+        if checkpointing:
+            ir = (Path(a.entry).read_text(encoding="utf-8") if a.ir
+                  else compile_source(Path(a.entry).resolve(), root))
+            blob = Path(a.resume).read_bytes() if a.resume is not None else None
+            rc, cp = run_checkpointed(ir, buf, a.substrate, a.checkpoint_at, blob,
+                                      [a.entry])
+            if cp is not None:
+                Path(a.checkpoint_out).write_bytes(cp)
+        elif a.compact_out is not None:
             # 只编不跑：入口 -> IR -> 紧凑形。这是 docs/250 那条"写进文件"的路。
             ir = (Path(a.entry).read_text(encoding="utf-8") if a.ir
                   else compile_source(Path(a.entry).resolve(), root))
             Path(a.compact_out).write_bytes(lvm_compact.encode_ir(ir))
             return 0
-        if a.compact is not None:
+        elif a.compact is not None:
             rc = lvm_compact.run_compact(Path(a.compact).read_bytes(), buf, prof,
                                          [a.compact], fusion, hot)
         elif a.cache is not None:
@@ -1166,7 +2613,8 @@ def main(argv: list[str] | None = None) -> int:
                                       a.fusion_out is not None or a.fusion_profile is not None,
                                       fusion, hot, counters=counters)
             else:
-                rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters)
+                rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters,
+                            a.substrate)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
@@ -1176,7 +2624,7 @@ def main(argv: list[str] | None = None) -> int:
                                       fusion, hot, counters=counters)
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
-                                a.tier, values, deopts, counters)
+                                a.tier, values, deopts, counters, a.substrate)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())

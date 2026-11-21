@@ -20,6 +20,9 @@
 * **H `sw_tag` 抓未复用的悬垂** —— 地址上没有活对象时也是 F02。
 * **I `sw_tag` 的复用是概率检测** —— 复用长度扫一遍，`sw_cap` 全抓、`sw_tag` 至少漏一次
   （`docs/364`；声明里 `no_dangling` 只能是 `floored`）。
+* **J 段错误详细化** —— F01/F02/F03 都按 Lomenterr 的形状渲染：`error[码]` / `--> 站点` /
+  指令 + 插入符 / `= 对象` / `= 事实` / `= 建议`（`docs/366`；首行保持稳定）。
+* **K `llvm.trap` 也详细化** —— 132 的那一行之后跟同一形状的块（站点 + 建议）。
 
 ⚠ **夹具走真前端**（`.lomt` -> `lomentc` -> IR -> 跑）：不手写 IR。这一格要证明的是
 "用户能写出来的错误会被抓住"，手写的 IR 会绕过前端、测到一个不会发生的输入。
@@ -106,6 +109,19 @@ fn _start() {
     let q: ptr = r64(slot, 0) as ptr;
     let v: u32 = load32(q, 0);
     syscall4(60, v as u64, 0, 0);
+}
+"""
+
+#: 空指针：把 0 洗成 `ptr` 再写 —— 只有运行期知道它是 0。
+_NULL = """module cap_null
+choose runtime
+use bytes
+
+fn _start() {
+    let z: u64 = 0;
+    let p: ptr = z as ptr;
+    store32(p, 0, 1);
+    syscall4(60, 0, 0, 0);
 }
 """
 
@@ -309,6 +325,53 @@ def test_sw_tag_reuse_is_probabilistic() -> None:
             hits.append((n, tag[0]))
     assert hits, "17 个复用长度里没有一次标签碰撞 —— 4 位标签没被模拟"
     print(f"      sw_cap 全抓；sw_tag 在 {hits} 漏掉（4 位标签，概率检测）")
+
+
+def test_faults_render_a_lomenterr_shaped_diagnostic() -> None:
+    """判 J（`docs/366`）：三种故障都按 Lomenterr 的形状渲染，首行保持稳定。"""
+    cases = (("oob", _OOB, "F01", "右越界", True),
+             ("uaf", _UAF, "F02", "悬垂", True),
+             ("null", _NULL, "F03", "空指针", False))
+    for name, src, code, word, has_obj in cases:
+        ir = _compile(src, name)
+        rc, _out, err = _run(ir, "sw_cap")
+        assert isinstance(rc, int) and rc >= 101, (name, rc, err[:200])
+        first = err.splitlines()[0] if err else ""
+        assert re.search(r" at \S+:\S+#\d+ \(", first), (name, first)
+        assert f"error[{code}]:" in err, (name, err)
+        assert "  --> IR:" in err, (name, err)
+        assert "   |" in err and "^" in err and "这里访问" in err, (name, err)
+        assert "= 事实：" in err, (name, err)
+        assert "= 站点：函数 " in err, (name, err)
+        assert "= 建议：" in err, (name, err)
+        assert word in err, (name, word)
+        if has_obj:
+            assert "对象 #" in err and "base=" in err and "limit=" in err, (name, err)
+        else:
+            assert "指针是 0" in err, (name, err)
+    print("      F01/F02/F03：error[码] / --> / 指令+插入符 / = 对象 / = 事实 / = 建议")
+
+
+def test_trap_renders_a_diagnostic() -> None:
+    """判 K：`llvm.trap` 的 132 之后跟同一形状的块（`docs/366`）。"""
+    ir = """declare void @llvm.trap()
+
+define void @_start() {
+entry:
+  call void @llvm.trap()
+  ret void
+}
+"""
+    out, err = io.BytesIO(), io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = lvm.run_ir(ir, out, None, ["prog"], "t0")
+    text = err.getvalue()
+    assert rc == 132, (rc, text)
+    assert text.splitlines()[0].startswith("lvm: llvm.trap at _start:entry#0"), text
+    assert "error[trap]:" in text and "  --> IR:_start:entry#0" in text, text
+    assert "call void @llvm.trap()" in text, text
+    assert "= 站点：函数 _start" in text and "= 建议：" in text, text
+    print("      llvm.trap：首行不变，后面是同一形状的详细块")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

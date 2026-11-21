@@ -641,6 +641,30 @@ def test_cap_faults_match_reference() -> None:
     print("      三条故障：两边的退出码与 `F0k + 站点` 逐字节同")
 
 
+def test_cap_faults_render_details_on_both_sides() -> None:
+    """判 O（`docs/366`）：同一个越界，两边的详细块**形状**都在；首行仍是故障行。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for name, text in list(_CAP_PROBES.items())[:1]:
+            ll = _ref_ir_text(text, name, td)
+            rrc, _rout, rerr = _ref_cap(ll, "prog")
+            mrc, _mout, merr = _run_mirror_cap(mir, ll)
+            assert rrc == mrc, f"[{name}] 退出码不同：参考 {rrc} / 镜像 {mrc}"
+            for side, err in (("参考", rerr), ("镜像", merr.decode("utf-8", "replace"))):
+                assert err.splitlines()[0].startswith("lvm: F0"), (side, err[:200])
+                for want in ("error[F01]:", "  --> IR:", "这里访问", "= 事实：",
+                             "= 站点：函数 ", "= 建议："):
+                    assert want in err, (side, want, err[:300])
+            assert "= 对象 #" in rerr or "最近的活对象" in rerr, rerr[:400]
+            assert "= 对象 #" in merr.decode("utf-8", "replace") or \
+                "最近的活对象" in merr.decode("utf-8", "replace"), merr[:400]
+    print("      越界：两边都是首行 + Lomenterr 形状的详细块")
+
+
 def test_cap_legal_programs_match() -> None:
     """判 J：合法语料在 `sw_cap` 下两边同答 —— 加了检查，没加行为。"""
     if not (_clang() and (sys.platform != "win32" or _wsl())):

@@ -976,8 +976,65 @@ fn wnum32(a: ptr, fd: u64, v: u32) {
     let _n: u64 = write_all(fd, ptr_add(a, WNUM_SCRATCH), 1);
 }
 
+//: 段错误详细化的"为什么"（`docs/366`）。
+const FR_NULL: u32 = 1;
+const FR_OVER: u32 = 2;
+const FR_UNMAPPED: u32 = 3;
+const FR_RETIRED: u32 = 4;
+
+fn wspace(n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        wstr(2, " ");
+        i = i + 1;
+    }
+}
+
+fn wcarets(n: u32) {
+    let i: u32 = 0;
+    while i < n {
+        wstr(2, "^");
+        i = i + 1;
+    }
+}
+
+fn obj_kind_word(k: u32) {
+    if k == OBJ_GLOBAL {
+        wstr(2, "global");
+    } else if k == OBJ_BRK {
+        wstr(2, "brk");
+    } else if k == OBJ_ALLOCA {
+        wstr(2, "alloca");
+    } else {
+        wstr(2, "heap");
+    }
+}
+
+fn w_fn_name(a: ptr, fi: u32) {
+    let fo: u32 = rd(a, F_OFF, fi * 8);
+    let fl: u32 = rd(a, F_OFF, fi * 8 + 1);
+    // 表里的函数名带 `@`（与 IR 同形）；站点打印**不带**。
+    if fl > 1 {
+        let _n: u64 = write_all(2, ptr_add(a, fo + 1), (fl - 1) as u64);
+    }
+}
+
+fn w_blk_name(a: ptr, bi: u32) {
+    let bo: u32 = rd(a, B_OFF, bi * 5);
+    let bl: u32 = rd(a, B_OFF, bi * 5 + 1);
+    let _n: u64 = write_all(2, ptr_add(a, bo), bl as u64);
+}
+
 /// 一条 F01/F02/F03：**100 + kind** 退出码 + `函数:块#序号`（与 `llvm.trap` 同形）。
-fn cap_fault(a: ptr, kind: u32, addr: u32, sz: u32) -> u32 {
+
+/// `docs/366`：首行保持稳定（孪生/故障判据按它比），Lomenterr 形状的详细块跟在后面。
+/// `io/il` 是当前指令的跨度，`oo/ol` 是指针操作数的跨度（插入符画在它下面）。
+fn cap_fault(a: ptr, kind: u32, addr: u32, sz: u32, reason: u32,
+             io: u32, il: u32, oo: u32, ol: u32) -> u32 {
+    let fi: u32 = ctx_get(a, C_SITE_FI);
+    let bi: u32 = ctx_get(a, C_SITE_BI);
+    let j: u32 = ctx_get(a, C_SITE_J);
+    // ---- 首行（稳定）
     wstr(2, "lvm: ");
     if kind == 1 {
         wstr(2, "F01 bounds violation");
@@ -987,25 +1044,144 @@ fn cap_fault(a: ptr, kind: u32, addr: u32, sz: u32) -> u32 {
         wstr(2, "F03 null dereference");
     }
     wstr(2, " at ");
-    let fi: u32 = ctx_get(a, C_SITE_FI);
-    let fo: u32 = rd(a, F_OFF, fi * 8);
-    let fl: u32 = rd(a, F_OFF, fi * 8 + 1);
-    // 表里的函数名带 `@`（与 IR 同形）；站点打印与 `llvm.trap` 一样**不带**。
-    if fl > 1 {
-        let _n1: u64 = write_all(2, ptr_add(a, fo + 1), (fl - 1) as u64);
-    }
+    w_fn_name(a, fi);
     wstr(2, ":");
-    let bi: u32 = ctx_get(a, C_SITE_BI);
-    let bo: u32 = rd(a, B_OFF, bi * 5);
-    let bl: u32 = rd(a, B_OFF, bi * 5 + 1);
-    let _n2: u64 = write_all(2, ptr_add(a, bo), bl as u64);
+    w_blk_name(a, bi);
     wstr(2, "#");
-    wnum32(a, 2, ctx_get(a, C_SITE_J));
+    wnum32(a, 2, j);
     wstr(2, " (addr=");
     wnum32(a, 2, addr);
     wstr(2, " size=");
     wnum32(a, 2, sz);
     wstr(2, ")\n");
+    // ---- 详细块（Lomenterr 形状）
+    wstr(2, "error[");
+    if kind == 1 {
+        wstr(2, "F01");
+    } else if kind == 2 {
+        wstr(2, "F02");
+    } else {
+        wstr(2, "F03");
+    }
+    wstr(2, "]: ");
+    if kind == 1 {
+        wstr(2, "访问越界（bounds）\n");
+    } else if kind == 2 {
+        wstr(2, "悬垂引用（dangling）\n");
+    } else {
+        wstr(2, "空指针解引用（null）\n");
+    }
+    wstr(2, "  --> IR:");
+    w_fn_name(a, fi);
+    wstr(2, ":");
+    w_blk_name(a, bi);
+    wstr(2, "#");
+    wnum32(a, 2, j);
+    wstr(2, "\n   |\n   |   ");
+    let _i1: u64 = write_all(2, ptr_add(a, io), il as u64);
+    wstr(2, "\n   |   ");
+    if ol > 0 && oo >= io {
+        wspace(oo - io);
+        wcarets(ol);
+        wstr(2, "  这里访问 ");
+        wnum32(a, 2, sz);
+        wstr(2, " 字节\n");
+    }
+    wstr(2, "   |\n");
+    // 对象：按 reason 找活表 / 归还窗口
+    let live: u32 = obj_find_live(a, addr);
+    let dead: u32 = obj_find_retired(a, addr);
+    if reason == FR_OVER && live != NONE {
+        let b: u32 = obj_base(a, live);
+        let l: u32 = obj_limit(a, live);
+        wstr(2, "   = 对象 #");
+        wnum32(a, 2, live + 1);
+        wstr(2, "（");
+        obj_kind_word(obj_kind(a, live));
+        wstr(2, "）：base=");
+        wnum32(a, 2, b);
+        wstr(2, " limit=");
+        wnum32(a, 2, l);
+        wstr(2, "（");
+        wnum32(a, 2, l - b);
+        wstr(2, " 字节），第 ");
+        wnum32(a, 2, rd(a, OBJ_OFF, live * 5 + 2));
+        wstr(2, " 代，活着\n");
+        wstr(2, "   = 事实：地址 ");
+        wnum32(a, 2, addr);
+        wstr(2, " 在对象内，偏移 ");
+        wnum32(a, 2, addr - b);
+        wstr(2, "；访问 ");
+        wnum32(a, 2, sz);
+        wstr(2, " 字节越过上限 ");
+        wnum32(a, 2, addr - b + sz - (l - b));
+        wstr(2, " 字节（右越界）\n");
+    } else if reason == FR_RETIRED && dead != NONE {
+        let db: u32 = rd(a, RET_OFF, dead * 5);
+        let dl: u32 = rd(a, RET_OFF, dead * 5 + 1);
+        wstr(2, "   = 已归还的那一个：对象（");
+        obj_kind_word(rd(a, RET_OFF, dead * 5 + 4));
+        wstr(2, "）：base=");
+        wnum32(a, 2, db);
+        wstr(2, " limit=");
+        wnum32(a, 2, dl);
+        wstr(2, "（");
+        wnum32(a, 2, dl - db);
+        wstr(2, " 字节），第 ");
+        wnum32(a, 2, rd(a, RET_OFF, dead * 5 + 2));
+        wstr(2, " 代，**已归还**\n");
+        wstr(2, "   = 事实：地址 ");
+        wnum32(a, 2, addr);
+        wstr(2, " 落在已归还的那一块里；这次访问 ");
+        wnum32(a, 2, sz);
+        wstr(2, " 字节\n");
+    } else if reason == FR_UNMAPPED {
+        wstr(2, "   = 事实：没有任何对象覆盖地址 ");
+        wnum32(a, 2, addr);
+        wstr(2, "（访问 ");
+        wnum32(a, 2, sz);
+        wstr(2, " 字节）—— 地址不在对象表里\n");
+        let prev: u32 = obj_find_prev(a, addr);
+        if prev != NONE {
+            let pb: u32 = obj_base(a, prev);
+            let pl: u32 = obj_limit(a, prev);
+            wstr(2, "   = 最近的活对象：#");
+            wnum32(a, 2, prev + 1);
+            wstr(2, "（");
+            obj_kind_word(obj_kind(a, prev));
+            wstr(2, "）：base=");
+            wnum32(a, 2, pb);
+            wstr(2, " limit=");
+            wnum32(a, 2, pl);
+            wstr(2, "；地址在它结束之后 ");
+            let gap: u32 = 0;
+            if addr > pl {
+                gap = addr - pl;
+            }
+            wnum32(a, 2, gap);
+            wstr(2, " 字节\n");
+        }
+    } else {
+        wstr(2, "   = 事实：指针是 0（空指针），试图访问 ");
+        wnum32(a, 2, sz);
+        wstr(2, " 字节\n");
+    }
+    wstr(2, "   = 站点：函数 ");
+    w_fn_name(a, fi);
+    wstr(2, " / 块 ");
+    w_blk_name(a, bi);
+    wstr(2, " / 第 ");
+    wnum32(a, 2, j);
+    wstr(2, " 条指令；栈深 ");
+    wnum32(a, 2, ctx_get(a, C_DEPTH));
+    wstr(2, "\n   = 建议：");
+    if kind == 1 {
+        wstr(2, "检查下标与对象长度：这一次访问跨过了对象的上限。原生档在这条路径上是 UB，LVM 把它变成这句话；上限表见 docs/263。\n");
+    } else if kind == 2 {
+        wstr(2, "对象已经归还（代已加一），旧指针不能再解引用。原生档是 UB；按地址的基质只认地址归属（docs/362 §5.1）。\n");
+    } else {
+        wstr(2, "指针是 0。先判空，或查清这个指针为什么没被赋过值。\n");
+    }
     let code: u64 = 100 as u64 + kind as u64;
     return die(code);
 }
@@ -1107,6 +1283,24 @@ fn obj_find_live(a: ptr, addr: u32) -> u32 {
     return found;
 }
 
+/// 最后一个 `base <= addr` 的活对象（二分）。地址**越过**某个对象时，用它说清"最近的是谁"。
+fn obj_find_prev(a: ptr, addr: u32) -> u32 {
+    let lo: u32 = 0;
+    let hi: u32 = ctx_get(a, C_NOBJ);
+    while lo < hi {
+        let mid: u32 = (lo + hi) / 2;
+        if obj_base(a, mid) <= addr {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return NONE;
+    }
+    return lo - 1;
+}
+
 fn obj_find_retired(a: ptr, addr: u32) -> u32 {
     let nr: u32 = ctx_get(a, C_NRET);
     let i: u32 = nr;
@@ -1123,19 +1317,20 @@ fn obj_find_retired(a: ptr, addr: u32) -> u32 {
 }
 
 /// 一次访存前的 `cap_check`（`docs/360` P2/P3 的地址那一半）。
-fn cap_check(a: ptr, addr: u32, sz: u32) {
+/// `io/il` 与 `oo/ol` 只喂 `docs/366` 的详细诊断，不参与判决。
+fn cap_check(a: ptr, addr: u32, sz: u32, io: u32, il: u32, oo: u32, ol: u32) {
     if ctx_get(a, C_SUB) == 0 || ctx_get(a, C_PRIV) != 0 {
         return;
     }
     if addr == 0 && sz > 0 {
-        let _c0: u32 = cap_fault(a, 3, addr, sz);
+        let _c0: u32 = cap_fault(a, 3, addr, sz, FR_NULL, io, il, oo, ol);
     }
     let live: u32 = obj_find_live(a, addr);
     if live != NONE {
         let lk: u32 = obj_kind(a, live);
         if lk != OBJ_GLOBAL && lk != OBJ_BRK {
             if addr + sz > obj_limit(a, live) {
-                let _c1: u32 = cap_fault(a, 1, addr, sz);
+                let _c1: u32 = cap_fault(a, 1, addr, sz, FR_OVER, io, il, oo, ol);
             }
             return;
         }
@@ -1143,16 +1338,16 @@ fn cap_check(a: ptr, addr: u32, sz: u32) {
     let dead: u32 = obj_find_retired(a, addr);
     if dead != NONE {
         if live == NONE || rd(a, RET_OFF, dead * 5) > obj_base(a, live) {
-            let _c2: u32 = cap_fault(a, 2, addr, sz);
+            let _c2: u32 = cap_fault(a, 2, addr, sz, FR_RETIRED, io, il, oo, ol);
         }
     }
     if live != NONE {
         if addr + sz > obj_limit(a, live) {
-            let _c3: u32 = cap_fault(a, 1, addr, sz);
+            let _c3: u32 = cap_fault(a, 1, addr, sz, FR_OVER, io, il, oo, ol);
         }
         return;
     }
-    let _c4: u32 = cap_fault(a, 1, addr, sz);
+    let _c4: u32 = cap_fault(a, 1, addr, sz, FR_UNMAPPED, io, il, oo, ol);
 }
 
 /// 栈帧返回：这一帧登记过的对象全部归还。
@@ -2492,7 +2687,7 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
         let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
         let addr: u64 = operand_text(a, m, fr, p, e);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
-        cap_check(a, addr as u32, sz);
+        cap_check(a, addr as u32, sz, io, il, p, e - p);
         if is_agg(a, hi32(ts), lo32(ts)) {
             let d: u32 = fr_agg(a, m, fr, do_, dl, sz);
             mc(m, d, addr as u32, sz);
@@ -2508,9 +2703,10 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
         let q: u32 = seg_end(a, p, e);
         let vs: u64 = trim_span(a, p, q);
         let val: u64 = operand(a, m, fr, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
-        let addr: u64 = operand_text(a, m, fr, seg_next(a, q, e), e);
+        let ps: u32 = seg_next(a, q, e);
+        let addr: u64 = operand_text(a, m, fr, ps, e);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
-        cap_check(a, addr as u32, sz);
+        cap_check(a, addr as u32, sz, io, il, ps, e - ps);
         if is_agg(a, hi32(ts), lo32(ts)) {
             mc(m, addr as u32, val as u32, sz);
         } else {

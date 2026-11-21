@@ -518,7 +518,7 @@ SHARD_COST = {
     "lvm_profile_test": 22.9,
     "lvm_stability_test": 10.0,
     # 2026-11-20（`docs/362`）：本机 Windows 实测 19.0s（7 条判据；判 E 要编 10 份语料两次）。
-    "lvm_cap_test": 32.0,      # 2026-11-21：本机 32.1s（`sw_tag` 要扫 17 个复用长度）
+    "lvm_cap_test": 33.5,      # 2026-11-21：本机 33.0s（`sw_tag` 扫复用长度 + 详细化三条）
     # 2026-11-21（`docs/364`）：`sw_tag` 快照一条。
 
     # 2026-11-20（`docs/363`）：显式栈引擎要编语料两次 + 32 个采样点各存/取一次。
@@ -530,7 +530,7 @@ SHARD_COST = {
     "lvm_a0_test": 12.0,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
-    "lvm_twin_test": 76.0,     # 2026-11-21：本机 Windows 实测 76.0s（跨实现三条，含命令行）
+    "lvm_twin_test": 91.5,     # 2026-11-21：本机 Windows 实测 91.1s（跨实现 + 详细块形状）
     "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,

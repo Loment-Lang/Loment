@@ -152,14 +152,123 @@ FAULT_CODES = {
 class _Fault(Exception):
     """一条**语言事件**（`docs/356` §5.2）。站点与 witness 都带着，退出码 = 100 + kind。"""
 
-    def __init__(self, kind: int, site, witness: str) -> None:
+    def __init__(self, kind: int, site, witness: str, detail: dict | None = None) -> None:
         self.kind, self.site, self.witness = kind, site, witness
+        self.detail = detail or {}
 
 
-def fault_exit(kind: int, site, witness: str) -> int:
-    """`fault()` 的共同出口：**100 + kind** + 一行站点（与 `llvm.trap` 的 132 同形）。"""
+#: `docs/366`：段错误详细化的标题与建议。首行保持不变（判据按它比），这一段跟在后面 ——
+#: 形状抄 `loment/tools/lomenterr.lomt`：`error[码]: 标题 / --> 位置 / 源码行 + 插入符 / = 事实`。
+_FAULT_TITLE = {
+    FAULT_BOUNDS: ("F01", "访问越界（bounds）"),
+    FAULT_DANGLING: ("F02", "悬垂引用（dangling）"),
+    FAULT_NULL: ("F03", "空指针解引用（null）"),
+}
+_FAULT_TIP = {
+    FAULT_BOUNDS: "检查下标与对象长度：这一次访问跨过了对象的上限。原生档在这条路径上是 UB，"
+                  "LVM 把它变成这句话；上限表见 docs/263。",
+    FAULT_DANGLING: "对象已经归还（代已加一），旧指针不能再解引用。归还之后再读/写是悬垂："
+                    "原生档是 UB；sw_cap 按对象代抓，sw_tag 只按标签（可能漏，docs/320 §1.2 ⑧）。",
+    FAULT_NULL: "指针是 0。空指针解引用在任何档都是错；先判空，或查清这个指针为什么没被赋过值。",
+}
+
+
+class _ObjSnap:
+    """故障现场的对象**快照**。
+
+    ⚠ 不能把 `_Obj` 本体放进 detail：异常栈解开时帧的 `finally` 会把这一帧的 alloca
+    全部归还，等到顶层渲染时再看那个对象，它已经是「已归还、代加一」的另一个状态。
+    第一版就是直接放了本体，于是越界被印成"已归还"。
+    """
+
+    __slots__ = ("oid", "base", "limit", "kind", "gen", "alive", "tag")
+
+    def __init__(self, o) -> None:
+        self.oid, self.base, self.limit = o.oid, o.base, o.limit
+        self.kind, self.gen, self.alive, self.tag = o.kind, o.gen, o.alive, o.tag
+
+    def size(self) -> int:
+        return self.limit - self.base
+
+
+def _snap(o) -> _ObjSnap | None:
+    return None if o is None else _ObjSnap(o)
+
+
+def _obj_line(o) -> str:
+    state = "活着" if o.alive else "**已归还**"
+    return (f"对象 #{o.oid}（{o.kind}）：base={o.base} limit={o.limit}"
+            f"（{o.size()} 字节），第 {o.gen} 代，{state}")
+
+
+def render_fault(kind: int, site, detail: dict) -> str:
+    """把一次故障渲染成 Lomenterr 形状的多行诊断（`docs/366`）。"""
+    fn, blk, idx = site
+    code, title = _FAULT_TITLE.get(kind, ("F0?", "故障"))
+    out = [f"error[{code}]: {title}",
+           f"  --> IR:{fn}:{blk}#{idx}"]
+    ins = detail.get("ins") or ""
+    op = detail.get("op") or ""
+    width = detail.get("width", 0)
+    if ins:
+        out.append("   |")
+        out.append(f"   |   {ins}")
+        if op and op in ins:
+            col = ins.rindex(op)
+            out.append(f"   |   {' ' * col}{'^' * max(4, len(op))}  这里访问 {width} 字节")
+    out.append("   |")
+    reason = detail.get("reason")
+    obj = detail.get("obj")
+    dead = detail.get("dead")
+    live = detail.get("live")
+    if obj is not None:
+        out.append(f"   = {_obj_line(obj)}")
+    if dead is not None and dead is not obj:
+        out.append(f"   = 已归还的那一个：{_obj_line(dead)}")
+    addr = detail.get("addr")
+    if reason == "null":
+        fact = f"指针是 0（空指针），试图访问 {width} 字节"
+    elif reason == "unmapped":
+        fact = f"没有任何对象覆盖地址 {addr}（访问 {width} 字节）—— 地址不在对象表里"
+    elif reason == "retired":
+        asked = detail.get("asked") or (None, None)
+        fact = (f"能力指向 #{asked[0]} 第 {asked[1]} 代；那个对象已经归还，"
+                f"现在是第 {obj.gen} 代" if obj is not None
+                else f"能力指向的对象 #{asked[0]} 已经不在对象表里（快照/放置不一致）")
+        if live is not None:
+            fact += f"。地址 {addr} 现在住着 #{live.oid}（{live.kind}，第 {live.gen} 代）"
+    elif reason == "retired-addr":
+        fact = (f"地址 {addr} 落在已归还的对象 #{dead.oid}（第 {dead.gen} 代）里；"
+                f"这次访问 {width} 字节")
+    elif reason == "over":
+        off = detail.get("offset", 0)
+        over = off + width - obj.size() if obj is not None else 0
+        fact = (f"地址 {addr} 在对象内，偏移 {off}；访问 {width} 字节越过上限 {over} 字节"
+                f"（右越界）")
+    elif reason == "under":
+        off = detail.get("offset", 0)
+        fact = f"地址 {addr} 在对象起点**之前**（偏移 {off}）；访问 {width} 字节"
+    else:
+        fact = f"地址 {addr}，访问 {width} 字节"
+    out.append(f"   = 事实：{fact}")
+    depth = detail.get("depth")
+    where = f"   = 站点：函数 {fn} / 块 {blk} / 第 {idx} 条指令"
+    if depth:
+        where += f"；栈深 {depth}"
+    out.append(where)
+    out.append(f"   = 建议：{_FAULT_TIP.get(kind, '')}")
+    return "\n".join(out)
+
+
+def fault_exit(kind: int, site, witness: str, detail: dict | None = None) -> int:
+    """`fault()` 的共同出口：**100 + kind** + 一行站点（与 `llvm.trap` 的 132 同形）。
+
+    首行保持稳定（孪生/故障判据按它比）；`docs/366` 的详细块跟在后面。
+    """
     fn, blk, idx = site
     print(f"lvm: {FAULT_CODES[kind]} at {fn}:{blk}#{idx} ({witness})", file=sys.stderr)
+    if detail:
+        print(render_fault(kind, site, detail), file=sys.stderr)
     return 100 + kind
 
 
@@ -327,37 +436,53 @@ class SwCap:
         return (o.oid, o.gen, o.tag)
 
     # ------------------------------------------------------------ 检查
-    def check(self, addr: int, width: int, cap: tuple[int, int, int] | None, site) -> None:
-        """`P2 cap_check` + `P3 gen_check` 的合一：一次访问前问一句「凭什么碰」。"""
+    def check(self, addr: int, width: int, cap: tuple[int, int, int] | None,
+              site, ctx: dict | None = None) -> None:
+        """`P2 cap_check` + `P3 gen_check` 的合一：一次访问前问一句「凭什么碰」。
+
+        `ctx` 是渲染用的现场（指令文本、指针操作数、栈深）—— 不影响判决，只影响
+        `docs/366` 那段详细诊断。判据只比首行，所以缺了它也不改变行为。
+        """
+        detail = dict(ctx or {})
+        detail.update(addr=addr, width=width)
         if addr == 0 and width > 0:
-            raise _Fault(FAULT_NULL, site, f"size={width}")
+            detail["reason"] = "null"
+            raise _Fault(FAULT_NULL, site, f"size={width}", detail)
         if self.mode == "tag":
-            self._check_tag(addr, width, cap, site)
+            self._check_tag(addr, width, cap, site, detail)
             return
         if cap is not None:
             o = self.objs.get(cap[0])
             if o is None or not o.alive or o.gen != cap[1]:
+                detail.update(obj=_snap(o), asked=(cap[0], cap[1]), reason="retired",
+                              live=_snap(self.lookup_live(addr)))
                 raise _Fault(FAULT_DANGLING, site,
-                             f"object {cap[0]} gen {cap[1]} -> retired")
+                             f"object {cap[0]} gen {cap[1]} -> retired", detail)
             off = addr - o.base
             if off < 0 or off + width > o.size():
+                detail.update(obj=_snap(o), offset=off,
+                              reason="under" if off < 0 else "over")
                 raise _Fault(FAULT_BOUNDS, site,
-                             f"offset={off} size={width} limit={o.size()}")
+                             f"offset={off} size={width} limit={o.size()}", detail)
             return
         dead = self.innermost_dead(addr)
         if dead is not None:
+            detail.update(dead=_snap(dead), reason="retired-addr",
+                          live=_snap(self.lookup_live(addr)))
             raise _Fault(FAULT_DANGLING, site,
-                         f"address={addr} was freed (object {dead.oid})")
+                         f"address={addr} was freed (object {dead.oid})", detail)
         o = self.lookup_live(addr)
         if o is not None:
             if addr + width > o.limit:
+                detail.update(obj=_snap(o), offset=addr - o.base, reason="over")
                 raise _Fault(FAULT_BOUNDS, site,
-                             f"address={addr} size={width} limit={o.size()}")
+                             f"address={addr} size={width} limit={o.size()}", detail)
             return
+        detail["reason"] = "unmapped"
         raise _Fault(FAULT_BOUNDS, site,
-                     f"no object covers address={addr} size={width}")
+                     f"no object covers address={addr} size={width}", detail)
 
-    def _check_tag(self, addr: int, width: int, cap, site) -> None:
+    def _check_tag(self, addr: int, width: int, cap, site, detail: dict) -> None:
         """`sw_tag`：比较**4 位标签**，不是对象代。同标签的重用会漏 —— 那是声明的降级。
 
         `docs/320` §1.2 ⑧：MTE 是检测，不是保证。这里的 15 个非零标签就是那个概率。
@@ -365,32 +490,43 @@ class SwCap:
         live = self.lookup_live(addr)
         if cap is not None and live is not None and cap[2] == live.tag:
             if addr + width > live.limit:
+                detail.update(obj=_snap(live), offset=addr - live.base, reason="over")
                 raise _Fault(FAULT_BOUNDS, site,
-                             f"address={addr} size={width} limit={live.size()}")
+                             f"address={addr} size={width} limit={live.size()}", detail)
             return
         if cap is not None:
             o = self.objs.get(cap[0])
             if o is not None and o.alive:
                 off = addr - o.base
                 if off < 0 or off + width > o.size():
+                    detail.update(obj=_snap(o), offset=off,
+                                  reason="under" if off < 0 else "over")
                     raise _Fault(FAULT_BOUNDS, site,
-                                 f"offset={off} size={width} limit={o.size()}")
+                                 f"offset={off} size={width} limit={o.size()}", detail)
                 return
+            detail.update(obj=_snap(o), asked=(cap[0], None), reason="retired",
+                          live=_snap(live))
             if live is not None:
                 raise _Fault(FAULT_DANGLING, site,
-                             f"tag {cap[2]} != live tag {live.tag}")
-            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed")
+                             f"tag {cap[2]} != live tag {live.tag}", detail)
+            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed", detail)
         if live is not None:
-            if self.innermost_dead(addr) is not None:
-                raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed")
+            dead = self.innermost_dead(addr)
+            if dead is not None:
+                detail.update(dead=_snap(dead), reason="retired-addr", live=_snap(live))
+                raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed", detail)
             if addr + width > live.limit:
+                detail.update(obj=_snap(live), offset=addr - live.base, reason="over")
                 raise _Fault(FAULT_BOUNDS, site,
-                             f"address={addr} size={width} limit={live.size()}")
+                             f"address={addr} size={width} limit={live.size()}", detail)
             return
-        if self.lookup_retired(addr) is not None:
-            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed")
+        dead = self.lookup_retired(addr)
+        if dead is not None:
+            detail.update(dead=_snap(dead), reason="retired-addr")
+            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed", detail)
+        detail["reason"] = "unmapped"
         raise _Fault(FAULT_BOUNDS, site,
-                     f"no object covers address={addr} size={width}")
+                     f"no object covers address={addr} size={width}", detail)
 
 
 # ---------------------------------------------------------------- 入口形状（#1026）
@@ -827,15 +963,35 @@ class _Trap(Exception):
     要说得出**死在哪一条**（#1027）。
     """
 
-    def __init__(self, site) -> None:
+    def __init__(self, site, detail: dict | None = None) -> None:
         self.site = site
         self.code = 132
+        self.detail = detail or {}
 
 
-def trap_exit(site) -> int:
-    """`llvm.trap` 的共同出口：**132**（与原生 `SIGILL` 同一个数）+ 一行站点。"""
+def trap_exit(site, detail: dict | None = None) -> int:
+    """`llvm.trap` 的共同出口：**132**（与原生 `SIGILL` 同一个数）+ 一行站点。
+
+    首行保持稳定；`docs/366` 的详细块跟在后面（同 Lomenterr 的形状）。
+    """
     fn, blk, idx = site
     print(f"lvm: llvm.trap at {fn}:{blk}#{idx}", file=sys.stderr)
+    if detail:
+        ins = detail.get("ins") or ""
+        out = ["error[trap]: 程序主动崩溃（llvm.trap → 退出码 132）",
+               f"  --> IR:{fn}:{blk}#{idx}"]
+        if ins:
+            out += ["   |", f"   |   {ins}"]
+        out.append("   |")
+        depth = detail.get("depth")
+        where = f"   = 站点：函数 {fn} / 块 {blk} / 第 {idx} 条指令"
+        if depth:
+            where += f"；栈深 {depth}"
+        out.append(where)
+        out.append("   = 建议：这是程序自己的崩溃器（LMS 第 5 级「拒不了就崩」）；"
+                   "要看为什么走到这里，打开剖面（--profile）或在该站点前打印状态。"
+                   "原生档走同一条路径时是 SIGILL（132）。")
+        print("\n".join(out), file=sys.stderr)
     return 132
 
 
@@ -951,7 +1107,7 @@ class Executor(Vm):
             name = callee[1:]
         args = [s for s in lomelf.split_top(m2.group(2)) if s]
         if name == "llvm.trap":
-            raise _Trap(self.site)
+            raise _Trap(self.site, self._diag(fr, text, "", 0))
         if name in self.externs:
             raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/243` §5）")
         fn = self.funcs.get(name)
@@ -1109,6 +1265,11 @@ class Executor(Vm):
                 raise LvmError(f"{fn.name}: 块 {label} 没有终结指令")
 
     # ------------------------------------------------------------ 单条指令
+    def _diag(self, fr: Frame, text: str, op: str, width: int) -> dict:
+        """故障渲染的现场（`docs/366`）：指令文本、指针操作数、宽度、栈深。"""
+        return {"ins": text, "op": op, "width": width,
+                "depth": (STACK_TOP - fr.base) // FRAME_SIZE}
+
     def _eval(self, fr: Frame, text: str):
         if text.startswith("alloca"):
             ty, _ = lomelf.parse_type(text[len("alloca "):])
@@ -1123,7 +1284,7 @@ class Executor(Vm):
             _bty, addr = self.operand(fr, ptr_s)
             if self.sub is not None and not self.priv:
                 self.sub.check(addr, lomelf.size_of(ty), self._cap_of(fr, ptr_s),
-                               self.site)
+                               self.site, self._diag(fr, text, ptr_s, lomelf.size_of(ty)))
             return self.load(ty, addr)
         if text.startswith("store "):
             body = text[len("store "):]
@@ -1134,7 +1295,7 @@ class Executor(Vm):
             _pty, addr = self.operand(fr, ptr_s)
             if self.sub is not None and not self.priv:
                 self.sub.check(addr, lomelf.size_of(ty), self._cap_of(fr, ptr_s),
-                               self.site)
+                               self.site, self._diag(fr, text, ptr_s, lomelf.size_of(ty)))
                 if ty == "ptr":
                     # 指针进内存，能力跟着进影子表（`docs/362` §2.3）。
                     cap = self._cap_of(fr, val_s)
@@ -1307,7 +1468,9 @@ class Executor(Vm):
         _t2, val = self.operand(fr, ty + " " + rhs)
         if self.sub is not None and not self.priv:
             self.sub.check(addr, lomelf.size_of(ty),
-                           self._cap_of(fr, "ptr " + m.group(2)), self.site)
+                           self._cap_of(fr, "ptr " + m.group(2)), self.site,
+                           self._diag(fr, text, "ptr " + m.group(2),
+                                      lomelf.size_of(ty)))
         old = self.load(ty, addr)
         self.store(ty, addr, mask(old + val, ty))
         return old
@@ -1726,7 +1889,7 @@ class ExplicitExecutor(Executor):
             name = callee[1:]
         args = [s for s in lomelf.split_top(m2.group(2)) if s]
         if name == "llvm.trap":
-            raise _Trap(self.site)
+            raise _Trap(self.site, self._diag(fr, text, "", 0))
         if name in self.externs:
             raise LvmError(f"`{name}` 是 extern —— T0 不接 FFI（`docs/243` §5）")
         fn = self.funcs.get(name)
@@ -2180,9 +2343,9 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     except _Exit as e:
         return e.code, None
     except _Trap as e:
-        return trap_exit(e.site), None
+        return trap_exit(e.site, e.detail), None
     except _Fault as e:
-        return fault_exit(e.kind, e.site, e.witness), None
+        return fault_exit(e.kind, e.site, e.witness, e.detail), None
     except _Suspend as e:
         return 0, e.blob
     return 0, None
@@ -2250,9 +2413,9 @@ def run_ir(text: str, out, profile: Profile | None = None,
     except _Exit as e:
         return e.code
     except _Trap as e:
-        return trap_exit(e.site)
+        return trap_exit(e.site, e.detail)
     except _Fault as e:
-        return fault_exit(e.kind, e.site, e.witness)
+        return fault_exit(e.kind, e.site, e.witness, e.detail)
     return 0
 
 

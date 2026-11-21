@@ -2126,9 +2126,18 @@ PE_STATE_VA = PE_IMAGE_BASE + PE_STATE_RVA
 PE_LIT_OFF = 0x1000              # 字面量在 .idata 内的偏移
 PE_LIT_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_LIT_OFF
 PE_CMDLINE = b"/proc/self/cmdline\x00"
+#: `uname(63)` 的六个字段，各 65 字节（`struct utsname` 的形状）。**合成 `Linux`**：
+#: guest 的身份由 guest ABI 决定，与宿主无关（`docs/243` §3.4、`docs/311` §2 的 S 类）。
+#: 放在 `.idata` 的固定偏移上，所以 shim 里的取址是编译期常量。
+PE_UNAME = b"".join(f[:64].ljust(65, b"\x00")
+                    for f in (b"Linux", b"loment", b"0.1.5", b"#1 LVM T0",
+                              b"x86_64", b"(none)"))
+PE_UNAME_OFF = PE_LIT_OFF + len(PE_CMDLINE)
+PE_UNAME_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_UNAME_OFF
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
               "FindFirstFileA", "FindNextFileA", "Sleep",
+              "GetCurrentProcessId",
               # 系统与进程信息（`docs/303` §2.3/§2.6）：全部平 C API、无回调。
               "GlobalMemoryStatusEx", "OpenProcess", "CreateToolhelp32Snapshot",
               "Process32First", "Process32Next", "Thread32First", "Thread32Next",
@@ -2177,6 +2186,7 @@ WIN32_CALLS = (
 PE_IMPORT_DESC_BYTES = 20 * (len(PE_DLLS) + 1)
 PE_STD_INPUT, PE_STD_OUTPUT, PE_STD_ERROR = -10, -11, -12
 SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK, SYS_EXIT = 0, 1, 3, 12, 60
+SYS_GETPID, SYS_UNAME, SYS_TIME, SYS_CLOCK_GETTIME = 39, 63, 201, 228
 SYS_GETDENTS64, SYS_OPENAT, SYS_NEWFSTATAT = 217, 257, 262
 SYS_POLL, SYS_SELECT = 7, 23
 SYS_SOCKET, SYS_CONNECT, SYS_ACCEPT, SYS_ACCEPT4 = 41, 42, 43, 288
@@ -2231,6 +2241,11 @@ PE_SYSCALLS = (
     (SYS_BRK, "mem", "__ws_brk"),
     (SYS_GETDENTS64, "file", "__ws_getdents"),
     (SYS_NEWFSTATAT, "file", "__ws_fstatat"),
+    # 三个"这台机器的事实"与一个"目标平台"（`docs/311` §4.1；`lgc` 的预算靠 228 收紧）。
+    (SYS_GETPID, "proc", "__ws_getpid"),
+    (SYS_UNAME, "proc", "__ws_uname"),
+    (SYS_TIME, "proc", "__ws_time"),
+    (SYS_CLOCK_GETTIME, "proc", "__ws_clock_gettime"),
     (SYS_POLL, "net", "__ws_poll"),
     (SYS_SELECT, "net", "__ws_select"),
     (SYS_SOCKET, "net", "__ws_socket"),
@@ -2410,7 +2425,7 @@ def build_pe_idata() -> tuple[bytes, dict]:
         name_blobs.append((off, b))
         off += len(b)
 
-    out = bytearray(max(off - d, PE_LIT_OFF + len(PE_CMDLINE)))
+    out = bytearray(max(off - d, PE_LIT_OFF + len(PE_CMDLINE) + len(PE_UNAME)))
     slots, k = {}, 0
     for gi, (_name, funcs) in enumerate(PE_DLLS):
         struct.pack_into("<IIIII", out, gi * 20, ilts[gi], 0, 0, name_rvas[gi], iats[gi])
@@ -2424,6 +2439,7 @@ def build_pe_idata() -> tuple[bytes, dict]:
     for at, b in name_blobs:
         out[at - d:at - d + len(b)] = b
     out[PE_LIT_OFF:PE_LIT_OFF + len(PE_CMDLINE)] = PE_CMDLINE   # shim 用常量取址，无需回填
+    out[PE_UNAME_OFF:PE_UNAME_OFF + len(PE_UNAME)] = PE_UNAME
     return bytes(out), slots
 
 
@@ -2619,6 +2635,74 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
     a.emit(mov_rr(RCX, RDI))
     api("ExitProcess")
     a.emit(b"\x0F\x0B")                         # ud2（不该回来）
+
+    # ---- getpid() ---------------------------------------------------------
+    # pid_t 是 i32；Windows 的 PID 也在那个范围里。返回值上 32 位清零（与 Linux 的
+    # `return (long)pid` 同形）。
+    a.label("__ws_getpid")
+    api("GetCurrentProcessId")
+    a.emit(b"\x89\xC0")                         # mov eax, eax
+    jmp_l("__ws_ret")
+
+    # ---- uname(struct utsname *p) ----------------------------------------
+    # **合成，不转宿主**：guest 的 ABI 是 Linux，PE 产物照样答 `Linux`（`docs/311` §2）。
+    a.label("__ws_uname")
+    movi(RSI, PE_UNAME_VA)
+    movi32(RCX, len(PE_UNAME))
+    a.emit(b"\xF3\xA4")                         # rep movsb（rdi 就是入口的实参）
+    xor_eax()
+    jmp_l("__ws_ret")
+
+    # ---- time(tloc) -------------------------------------------------------
+    # GetSystemTimeAsFileTime：100 纳秒，从 1601-01-01 起。减去 1601→1970 的差，
+    # 再除以 10^7 得 Unix 秒。`tloc != 0` 时照 Linux 的语义写回。
+    a.label("__ws_time")
+    lea_rsp(RCX, 0x60)
+    api("GetSystemTimeAsFileTime")
+    ld(RAX, RSP, 0x60)
+    movi(RCX, 116444736000000000)
+    sub_rr(RAX, RCX)
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    movi32(RCX, 10000000)
+    a.emit(b"\x48\xF7\xF1")                     # div rcx（rax=秒）
+    test_rr(RDI, RDI)
+    jcc_l("e", "__ws_time_ret")                 # tloc == NULL：不写回
+    st(RDI, 0, RAX)
+    a.label("__ws_time_ret")
+    jmp_l("__ws_ret")
+
+    # ---- clock_gettime(clockid, struct timespec *) ------------------------
+    # Linux x86-64 的 timespec = 两个 i64（秒、纳秒）。**clockid 要分流**：`0`
+    # (CLOCK_REALTIME) 是墙钟，`1` (CLOCK_MONOTONIC) 是开机后的单调钟 —— 实测 ELF 侧
+    # 两者相差一个数量级（本机 1795… vs 23372…），拿单调钟回答 realtime 会让
+    # "同一份源在 PE 与 ELF 上"的形状不同。其余 id（含 4/7）按单调钟。
+    a.label("__ws_clock_gettime")
+    cmp_edi(0)
+    jcc_l("e", "__ws_cg_real")
+    api("GetTickCount64")                       # rax = 毫秒
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    movi32(RCX, 1000)
+    a.emit(b"\x48\xF7\xF1")                     # div rcx → rax=秒, rdx=毫秒余
+    st(RSI, 0, RAX)
+    a.emit(b"\x48\x69\xD2\x40\x42\x0F\x00")     # imul rdx, rdx, 1000000
+    st(RSI, 8, RDX)
+    xor_eax()
+    jmp_l("__ws_ret")
+
+    a.label("__ws_cg_real")
+    lea_rsp(RCX, 0x60)
+    api("GetSystemTimeAsFileTime")
+    ld(RAX, RSP, 0x60)                          # 100ns since 1601
+    movi(RCX, 116444736000000000)
+    sub_rr(RAX, RCX)
+    a.emit(b"\x31\xD2")                         # xor edx, edx
+    movi32(RCX, 10000000)
+    a.emit(b"\x48\xF7\xF1")                     # div rcx → rax=秒, rdx=100ns 余
+    st(RSI, 0, RAX)
+    a.emit(b"\x48\x6B\xD2\x64")                 # imul rdx, rdx, 100
+    st(RSI, 8, RDX)
+    xor_eax()
+    jmp_l("__ws_ret")
 
     # ---- fd -> HANDLE（子程序：in edi, out rax；0 = 无效）------------------
     a.label("__ws_handle")

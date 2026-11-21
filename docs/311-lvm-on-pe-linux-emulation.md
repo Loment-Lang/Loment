@@ -1,9 +1,10 @@
 # 311 · LVM 在 PE 上模拟 Linux：一份 guest ABI，三种落地
 
-> 状态：**设计（未落地）** · 2026-11-06
+> 状态：**P0 已实装**（2026-11-21），P1–P4 是计划 · 2026-11-06
 > 上游：`docs/243` §3.4（VM 该如实回答还是自己合成）、`docs/217` / `docs/221`（PE shim 的翻译哲学）、
 > `docs/309` §2.5（PE 上没有 228 的实测后果）、`docs/231`（select）、`docs/234`（socketpair/epoll）
-> 判据：新增的三层，见 §5（今天都还不存在）
+> 判据：`loment_pe_test::test_pe_uname_and_clock_surface`（P0 的四个号：形状 PE 与 ELF 同）·
+> 其余三层见 §5（尚未落地）
 
 ---
 
@@ -29,10 +30,10 @@ Loment 的产物有四种形态，系统调用面有三种独立实现：
 
 | 号 | 名 | ELF | PE shim | LVM（Python） | LVM（自举） |
 |---|---|---|---|---|---|
-| 39 | `getpid` | ✓ | **−38** | 转宿主 `os.getpid()` | 转宿主 `syscall4(39)` |
-| 63 | `uname` | ✓ `Linux` | **−38** | 合成 `Linux` | 合成 `Linux` |
-| 201 | `time` | ✓ | **−38** | 转宿主 | 转宿主 |
-| 228 | `clock_gettime` | ✓ | **−38** | 转宿主 `monotonic_ns` | 转宿主 `syscall4(228)` |
+| 39 | `getpid` | ✓ | ✓ `GetCurrentProcessId` | 转宿主 `os.getpid()` | 转宿主 `syscall4(39)` |
+| 63 | `uname` | ✓ `Linux` | ✓ `Linux`（合成） | 合成 `Linux` | 合成 `Linux` |
+| 201 | `time` | ✓ | ✓ `GetSystemTimeAsFileTime` | 转宿主 | 转宿主 |
+| 228 | `clock_gettime` | ✓ | ✓ 按 clockid 分流 | 转宿主（0 = 墙钟） | 转宿主 `syscall4(228)` |
 | 未知号 | —— | **−38** | **−38** | **`die(2)`** | **`die(2)`** |
 
 两条后果，都是"静默"的：
@@ -147,7 +148,7 @@ LVM 已经是"一台 Linux 机器"的模拟器：自带内存、`brk`、合成 f
 
 ## 4. 要补的缺口
 
-### 4.1 PE shim：补三个号
+### 4.1 PE shim：补四个号 39/63/201/228（**已实装**，2026-11-21）
 
 | 号 | 名字 | 实现 | 归一化 |
 |---|---|---|---|
@@ -157,6 +158,13 @@ LVM 已经是"一台 Linux 机器"的模拟器：自带内存、`brk`、合成 f
 
 228 是**必须**的：`lgc` 的预算今天在 PE 上是"不收紧"（`docs/309` §2.5）。补上之后，
 同一份 `lgc` 源在 Windows 原生与 Linux 上行为一致 —— 这是这条线第一个能拿出去说的结果。
+
+**落地记录（2026-11-21）**：四个号都进了 `PE_SYSCALLS` / `lom/net.lom`（契约 2026-11-21.1）。
+228 按 clockid 分流：`0` 是墙钟（`GetSystemTimeAsFileTime`），其余是单调钟（`GetTickCount64`）——
+实测 ELF 侧两者差一个数量级（`1795…` vs `23372…`），一律回单调钟会让形状不同。
+`uname` 与 LVM 同一条口径：**合成 `Linux`**，宿主是什么都不变。
+判据 `loment_pe_test::test_pe_uname_and_clock_surface`：PE 原生与 WSL 里的 ELF 各自过八条
+形状检查，`bootprobe` 在 PE 上打出 `M76 sysname=Linux`。
 
 > 这三个号的实现都在 `emit_win_shim` 里，且都必须**从 `PE_SYSCALLS` 那张表生成**，
 > 不新增手写机器码路径（`loment_pe_test::test_pe_dispatch_table_is_the_single_source` 已经在钉这条）。
@@ -246,7 +254,7 @@ Linux 侧只有 `test_elf_net_programs_run_on_linux` 那一条会跑）。这条
 
 | 阶段 | 内容 | 完成时能说什么 | 依赖 |
 |---|---|---|---|
-| **P0** | PE shim 补 39 / 201 / 228（表驱动生成） | `lgc` 的预算在 PE 上真的收紧；`uname`/`time` 不再 −38 | 无 |
+| **P0** | PE shim 补 39 / 63 / 201 / 228（表驱动生成）· **已落地 2026-11-21** | `lgc` 的预算在 PE 上真的收紧；`uname`/`time` 不再 −38 | 无 |
 | **P1** | LVM 未知号改 −ENOSYS + `--syscall-report`；核 `lvm_test` 的既有断言 | guest 探测号拿到 Linux 的答案 | P0 |
 | **P2** | `GUEST_ABI` 表 + `HostProfile` + L1/L2 判据 | CI 上能红："VM 转发了 PE 没有的号" | P1 |
 | **P3** | `lvm.lomt` 编 PE 跑语料（L4） | LVM-on-PE 与 LVM-on-ELF 逐字节 | P2 |

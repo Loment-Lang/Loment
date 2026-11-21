@@ -5,11 +5,12 @@
 * **独立验证器**：只读产物与封印，**零 import 工具链**，自己扫 IR 重算。
 * **同产物创世衰减**：capset ⊆ 父、预算 ≤ 父、深度/子数/总数不超封印、派生确定。
 
-七条：
+九条：
 
 * **A** 真产物的封印能验证通过；站点数 > 0。
 * **B** 篡改产物 / 台账 / 总哈希 —— 三种都红。
 * **C** `hw_cap` 在本机**降级**（guarantees 空、规律 floored）仍然自洽；伪造硬件保证则红。
+* **C2** `sw_tag` 的 `no_dangling` 只能是 `floored`（声明跟着基质降级）。
 * **D** 时间桥梁：同一份产物在 `sw_cap` 与 `hw_cap` 封印下 `artifact.sha256` 相同（B5）。
 * **E** 创世衰减：越权/超预算/超深度被拒；同父同差量逐字节同。
 * **F** 验证器零 import：子进程里挡住编译器/链接器/LSPE，它照样给出判决。
@@ -124,6 +125,20 @@ def test_hw_cap_degrades_or_refuses() -> None:
     assert not got["ok"], "伪造的 hw_cap 保证被接受了"
     assert any("honour" in r for r in got["reasons"]), got
     print("      hw_cap 在本机：降级自洽；伪造硬件保证 -> 红")
+
+
+def test_sw_tag_declares_no_dangling_floored() -> None:
+    """判 C2：`sw_tag` 的 `no_dangling` 只能是 `floored` —— 声明跟着基质降级。"""
+    ir = _ir()
+    seal = lvm_seal.build_seal(ir, "sw_tag")
+    laws = {l["id"]: l["verdict"] for l in seal["laws"]}
+    assert laws["no_segv"] == "checked", laws
+    assert laws["no_dangling"] == "floored", laws
+    assert "P3.gen" not in seal["substrate"]["guarantees"], seal["substrate"]
+    assert "P3.probabilistic" in seal["substrate"]["assumptions"], seal["substrate"]
+    got = lvm_seal.verify(ir, seal)
+    assert got["ok"], got["reasons"]
+    print("      sw_tag：no_segv checked / no_dangling floored / P3 进 assumptions")
 
 
 def test_time_bridge_keeps_artifact_hash() -> None:

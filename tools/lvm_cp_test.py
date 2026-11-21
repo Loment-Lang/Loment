@@ -12,7 +12,7 @@
 * **同答** —— 整份语料在递归引擎与显式栈引擎下 `rc + stdout` 逐字节相同；
 * **可存可取** —— 任意指令边界（含**调用栈里有被调者**的时刻）快照，恢复后答案不变。
 
-六条：
+七条：
 
 * **A** 两个引擎在语料上同答。
 * **B** 逐点 checkpoint/resume：一段循环里每个采样点都能接着跑。
@@ -20,6 +20,7 @@
 * **D** 链式快照：K1 -> K2 -> 跑完，答案不变。
 * **E** 快照确定：同一 K 两次逐字节相同；换一份 IR 恢复被**点名拒**。
 * **F** 只走纯 T0：剖面 / 计数 / t2 / 紧凑形都在 CLI 上点名拒。
+* **G** `sw_tag` 的对象表与 4 位标签一起进快照（`docs/364`）。
 
 用法: python tools/lvm_cp_test.py
 """
@@ -67,6 +68,25 @@ choose runtime
 
 fn _start() {
     syscall4(60, 7, 0, 0);
+}
+"""
+
+#: 带堆分配/释放的循环：`sw_tag` 的对象与 4 位标签必须一起进快照。
+_ALLOC_LOOP = """module cp_alloc
+choose runtime
+use bytes
+
+fn _start() {
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 6 {
+        let p: ptr = alloc(16);
+        store32(p, 0, i + 1);
+        s = s + load32(p, 0);
+        free(p);
+        i = i + 1;
+    }
+    syscall4(60, s as u64, 0, 0);
 }
 """
 
@@ -186,6 +206,22 @@ def test_snapshot_deterministic_and_ir_bound() -> None:
     else:
         raise AssertionError("换了一份 IR 还能恢复 —— 快照没有绑定字节码")
     print("      同一 K 两次逐字节同；换 IR 恢复被点名拒")
+
+
+def test_checkpoint_carries_substrate_state() -> None:
+    """判 G：`sw_tag` 的对象表与标签一起进快照；中途存、恢复，答案不变。"""
+    ir = _compile(_ALLOC_LOOP, "cp_alloc")
+    rc0, out0, _ = _run(ir, substrate="sw_tag")
+    for at in (20, 40, 60, 80, 100, 140, 180):
+        rc1, _o1, blob = _run(ir, at=at, substrate="sw_tag")
+        if blob is None:
+            continue
+        rc2, out2, blob2 = _run(ir, resume=blob, substrate="sw_tag")
+        assert blob2 is None, f"at={at}: 恢复之后又停了"
+        assert (rc2, out2) == (rc0, out0), f"at={at}: 恢复后答案变了（{rc2}）"
+        print(f"      sw_tag + checkpoint at={at}：对象与标签都过了快照，rc 不变")
+        return
+    raise AssertionError("没有找到停点 —— 夹具太短")
 
 
 def test_checkpoint_only_on_plain_t0() -> None:

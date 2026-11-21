@@ -8,13 +8,18 @@
 > **同一份 IR，`sw_none` 与 `sw_cap` 在合法程序上逐字节同答；在不合法程序上
 > `sw_cap` 给一个定义好的 fault（码 + 站点），`sw_none` 给不出。**
 
-五条：
+九条：
 
 * **A 默认关** —— 不加 `--substrate` 时与从前逐字节相同（`docs/357` P8）。
 * **B 动态下标越界** —— `a[10]` 在 `[u32; 4]` 上：`none` 静默，`sw_cap` 是 F01 + 站点。
 * **C 悬垂** —— `free` 之后经内存洗白再读：`none` 读到 0，`sw_cap` 是 F02 + 站点。
 * **D 堆对象越界** —— `alloc(16)` 之后写 `+16`：`none` 静默，`sw_cap` 是 F01。
-* **E 语料零误报** —— `loment_elf_test.CORPUS` 每一份在两种基质下同答。
+* **E 语料零误报** —— `loment_elf_test.CORPUS` 每一份在 `none / sw_cap / sw_tag` 三档下同答。
+* **F 站点确定** —— 同一输入两次，故障行逐字节同。
+* **G 只走 T0** —— t2/t3 点名拒。
+* **H `sw_tag` 抓未复用的悬垂** —— 地址上没有活对象时也是 F02。
+* **I `sw_tag` 的复用是概率检测** —— 复用长度扫一遍，`sw_cap` 全抓、`sw_tag` 至少漏一次
+  （`docs/364`；声明里 `no_dangling` 只能是 `floored`）。
 
 ⚠ **夹具走真前端**（`.lomt` -> `lomentc` -> IR -> 跑）：不手写 IR。这一格要证明的是
 "用户能写出来的错误会被抓住"，手写的 IR 会绕过前端、测到一个不会发生的输入。
@@ -226,10 +231,84 @@ def test_corpus_has_no_false_positives() -> None:
         ir = lomentc.emit_llvm(mod, ROOT, deps)
         a = _run(ir, "none")
         b = _run(ir, "sw_cap")
-        assert a == b, f"{rel}: none={a!r} sw_cap={b!r}"
+        c = _run(ir, "sw_tag")
+        assert a == b == c, f"{rel}: none={a!r} sw_cap={b!r} sw_tag={c!r}"
         checked += 1
     assert checked >= len(ELF.CORPUS) - 1, f"只比了 {checked} 份语料"
-    print(f"      {checked} 份语料：两种基质逐字节同答（含同样跑不了的那几份）")
+    print(f"      {checked} 份语料：三档基质逐字节同答（含同样跑不了的那几份）")
+
+
+#: 标签碰撞：`p` 的地址被复用 N 次，最后一次留在手上。`sw_tag` 只比 4 位标签，
+#: 总有一个 N 让新对象拿到与 `p` 相同的标签 —— 那时悬垂就漏了。
+_TAG_TMPL = """module tag_coll
+choose runtime
+use bytes
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    let alias: ptr = r64(slot, 0) as ptr;
+    free(alias);
+    let k: u32 = 0;
+    while k < @N@ {
+        let q: ptr = alloc(16);
+        free(q);
+        k = k + 1;
+    }
+    let last: ptr = alloc(16);
+    store32(last, 0, 9);
+    let v: u32 = load32(p, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+
+def test_sw_tag_catches_unreused_dangling() -> None:
+    """判 H：`sw_tag` 抓得住**没有复用**的悬垂（地址上没有任何活对象）。"""
+    ir = _compile(_UAF, "cap_uaf")
+    rc, _out, err = _run(ir, "sw_tag")
+    assert rc == 100 + lvm.FAULT_DANGLING, f"退出码不是 100+F02：{rc}"
+    assert "F02" in err and _site_in(err), err
+    print("      未复用的悬垂：sw_tag 也是 F02 + 站点")
+
+
+def test_sw_tag_reuse_is_probabilistic() -> None:
+    """判 I：同一个地址被复用之后 —— `sw_cap` 全抓，`sw_tag` 会漏（4 位标签）。
+
+    这是**声明**的判据：`sw_tag` 的 `no_dangling` 只能是 `floored`（`docs/360` §3.3）。
+    """
+    hits = []
+    for n in range(0, 17):
+        ir = _compile(_TAG_TMPL.replace("@N@", str(n)), f"tag_coll_{n}")
+        cap = _run(ir, "sw_cap")
+        tag = _run(ir, "sw_tag")
+        assert cap[0] == 100 + lvm.FAULT_DANGLING, (
+            f"N={n}: sw_cap 没抓到复用过的悬垂（rc={cap[0]}）")
+        if tag[0] != 100 + lvm.FAULT_DANGLING:
+            hits.append((n, tag[0]))
+    assert hits, "17 个复用长度里没有一次标签碰撞 —— 4 位标签没被模拟"
+    print(f"      sw_cap 全抓；sw_tag 在 {hits} 漏掉（4 位标签，概率检测）")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

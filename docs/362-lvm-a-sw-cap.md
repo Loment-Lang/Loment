@@ -110,7 +110,7 @@
 2. **只在 T0。** `tools/lvm_t2.py` / `tools/lvm_t3.py` / 紧凑形都还没有它；
    `--substrate sw_cap` 对它们**点名拒**。自举镜像 `loment/tools/lvm.lomt` 有**按地址**的
    那一半（没有 SSA 能力表），三条故障与语料由 `lvm_twin_test::test_cap_*` 钉住；
-   checkpoint/封印在 `docs/363`。
+   checkpoint/封印在 `docs/363`，自举 checkpoint 与 `sw_tag` 在 `docs/364`。
 3. **没有封印字段。** `docs/360` §3.4 的 `substrate` 剖面还没有进 Potato；
    今天是 CLI 开关 + 旁挂封印（`tools/lvm_seal.py`），不是默认产物里的字段。
 4. **解释器体积预算（B8）与 `hw_cap` 的真跑没有。** `docs/360` §7 的八条里，

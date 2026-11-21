@@ -218,14 +218,15 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "lvm_t3_test",
                  # LVM 的失败面（`docs/262`）：三档都不挂死、五种拒绝都点名、上限写在纸上。
                  "lvm_stability_test",
-                 # LVM-A 的第一档基质（`docs/362`）：对象表 + 能力 + 对象代。合法程序
-                 # 两种基质同答；越界 / 悬垂 / 堆越界各给一个带站点的 fault（退出码 100+kind）。
+                 # LVM-A 的基质（`docs/362` / `docs/364`）：`sw_cap` 对象代（精确）与
+                 # `sw_tag` 4 位标签（概率）。合法程序三档同答；越界/悬垂/堆越界带站点；
+                 # 复用碰撞里 sw_cap 全抓、sw_tag 至少漏一次（声明降级的判据）。
                  "lvm_cap_test",
-                 # LVM-A 的底层设施（`docs/363`）：显式栈引擎 + checkpoint/resume（P5）。
-                 # 两个引擎同答；任意指令边界存/取；调用栈进快照；链式快照；只走纯 T0。
+                 # LVM-A 的底层设施（`docs/363` / `docs/364`）：显式栈引擎 + checkpoint/resume。
+                 # 两个引擎同答；任意指令边界存/取；调用栈进快照；链式；`sw_tag` 状态也进快照。
                  "lvm_cp_test",
                  # 盘古的三件（`docs/363`）：封印 / 零 import 验证器 / 同产物创世衰减。
-                 # 篡改三种都红；hw_cap 降级与伪造；B5 同字节码；派生四条拒绝面。
+                 # 篡改三种都红；hw_cap 降级与伪造；B5 同字节码；`sw_tag` 的 no_dangling 必须 floored。
                  "lvm_seal_test",
                  # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
                  # ⚠ 挂在独占那一片之外：它跑 T0 的重的那份（~7s），但**不写仓库共享位置**。
@@ -517,7 +518,9 @@ SHARD_COST = {
     "lvm_profile_test": 22.9,
     "lvm_stability_test": 10.0,
     # 2026-11-20（`docs/362`）：本机 Windows 实测 19.0s（7 条判据；判 E 要编 10 份语料两次）。
-    "lvm_cap_test": 19.0,
+    "lvm_cap_test": 32.0,      # 2026-11-21：本机 32.1s（`sw_tag` 要扫 17 个复用长度）
+    # 2026-11-21（`docs/364`）：`sw_tag` 快照一条。
+
     # 2026-11-20（`docs/363`）：显式栈引擎要编语料两次 + 32 个采样点各存/取一次。
     "lvm_cp_test": 21.0,
     # 封印/验证器/派生都是纯标准库；大头是判 F 的子进程与判 A/B 的编译。
@@ -527,7 +530,7 @@ SHARD_COST = {
     "lvm_a0_test": 12.0,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
-    "lvm_twin_test": 40.0,     # 2026-11-20：加了 sw_cap 的两条（镜像建一次，多跑十几趟）
+    "lvm_twin_test": 55.0,     # 2026-11-21：加自举 checkpoint（多两趟镜像）
     "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,

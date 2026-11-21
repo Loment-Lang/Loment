@@ -215,6 +215,21 @@ const C_PRIV: u32 = 188;             // __loment_* 的深入层数（特权帧�
 const C_NOBJ: u32 = 192;             // 活对象条数
 const C_NFOBJ: u32 = 196;            // 帧对象栈顶
 const C_NRET: u32 = 200;             // 已归还对象条数
+//: 绑定一次调用时写下的事件（`bind_call` -> 调用者读取）。
+const C_BIND_PRIV: u32 = 204;
+const C_BIND_HOOK: u32 = 208;        // 0 = 无、1 = __loment_alloc、2 = __loment_free
+const C_BIND_A0LO: u32 = 212;
+const C_BIND_A0HI: u32 = 216;
+//: checkpoint（`docs/364`）：显式栈引擎的游标与快照参数。
+const C_MODE: u32 = 220;             // 1 = 显式栈引擎
+const C_CB: u32 = 224;               // 当前块（快照用；与续延记录同步）
+const C_CJ: u32 = 228;               // 当前块内序号
+const C_CPREV: u32 = 232;            // phi 的前驱块
+const C_CFR: u32 = 236;              // 当前帧基址
+const C_RO: u32 = 240;               // 聚合返回值的落点（本帧）
+const C_RL: u32 = 244;
+const C_CKPT_AT: u32 = 248;          // >0：在第这么多条指令之前停住
+const C_IFHASH: u32 = 252;           // 输入文本的 FNV-1a（快照绑定字节码）
 
 //: 对象表从 T2 表之后起（旧 `ARENA_T2` = 14137600）。排序数组 + 二分。
 const OBJ_OFF: u32 = 14137600;
@@ -227,8 +242,14 @@ const FOBJ_OFF: u32 = 14240000;      // RET_OFF + 1024 * 20
 const MAX_FOBJ: u32 = 4096;
 //: 每层深度的帧对象栈起点（MAX_DEPTH + 1 格）。
 const FBASE_OFF: u32 = 14256384;     // FOBJ_OFF + 4096 * 4
-//: 十进制输出的 1 字节暂存（格区尾部；`CTX_OFF + 252`）。
-const WNUM_SCRATCH: u32 = 9935100;
+//: checkpoint（`docs/364`）：每层一帧的续延记录，16 个 u32（64 字节）。
+const CONT_OFF: u32 = 14256516;      // FBASE_OFF + 33 * 4
+const CONT_REC: u32 = 16;
+const MAX_CONT: u32 = 33;            // MAX_DEPTH + 1
+const CONT_END: u32 = 14258628;      // CONT_OFF + 33 * 64
+//: 快照头 16 字节 + 数字暂存。头：magic(4) / version / irhash / 保留。
+const SNAP_HDR: u32 = 14258628;
+const WNUM_SCRATCH: u32 = 14258660;  // SNAP_HDR + 32（只在报错时写 1 字节）
 
 const OBJ_GLOBAL: u32 = 1;
 const OBJ_BRK: u32 = 2;
@@ -2528,7 +2549,9 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
     return fail_tok(a, "这个指令 T0 没实现:", io, il) as u64;
 }
 
-fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> u64 {
+/// 绑定一次调用：解析名字/实参、建好被调帧、把事件写进格区。**不执行。**
+/// 返回 `(fi << 32) | fr`；失败一律点名拒。递归引擎与显式栈引擎共用这一份。
+fn bind_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> u64 {
     let e: u32 = io + il;
     let p: u32 = after_op(a, io, e);
     let p2: u32 = 0;
@@ -2539,7 +2562,6 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
         p2 = skip_sp(a, hi32(ts) + lo32(ts), e);
     }
     let nt: u64 = wspan(a, p2, e);                       // @name
-    // `sw_cap` 的两个生命周期事件与特权帧判断（`docs/363`）：名字是不带 `@` 的那一段。
     let no: u32 = hi32(nt) + 1;
     let nlen: u32 = lo32(nt) - 1;
     let is_priv: bool = has_at(a, no, no + nlen, "__loment_");
@@ -2588,6 +2610,29 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
     }
     wr(a, FBASE_OFF, d * 4, ctx_get(a, C_NFOBJ));
     if is_priv {
+        ctx_set(a, C_BIND_PRIV, 1);
+    } else {
+        ctx_set(a, C_BIND_PRIV, 0);
+    }
+    if is_alloc {
+        ctx_set(a, C_BIND_HOOK, 1);
+    } else if is_free {
+        ctx_set(a, C_BIND_HOOK, 2);
+    } else {
+        ctx_set(a, C_BIND_HOOK, 0);
+    }
+    ctx_set(a, C_BIND_A0LO, lo32(a0));
+    ctx_set(a, C_BIND_A0HI, hi32(a0));
+    return ((fi as u64) << 32) | (fr as u64);
+}
+
+fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> u64 {
+    let b: u64 = bind_call(a, m, io, il, caller, do_, dl);
+    let fi: u32 = hi32(b);
+    let fr: u32 = lo32(b);
+    let d: u32 = ctx_get(a, C_DEPTH);
+    let is_priv: bool = ctx_get(a, C_BIND_PRIV) != 0;
+    if is_priv {
         ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
     }
     let r: u64 = exec_body(a, m, fi, fr, caller, do_, dl);
@@ -2595,10 +2640,12 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
         ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) - 1);
     }
     if ctx_get(a, C_SUB) != 0 {
-        if is_alloc {
+        let hook: u32 = ctx_get(a, C_BIND_HOOK);
+        let a0: u64 = ((ctx_get(a, C_BIND_A0HI) as u64) << 32)
+                      | (ctx_get(a, C_BIND_A0LO) as u64);
+        if hook == 1 {
             obj_new(a, r as u32, (r as u32) + (a0 as u32), OBJ_HEAP);
-        }
-        if is_free {
+        } else if hook == 2 {
             obj_retire_base(a, a0 as u32);
         }
     }
@@ -2818,6 +2865,319 @@ fn do_ret(a: ptr, m: ptr, fr: u32, cfr: u32, to: u32, tl: u32, ro: u32, rl: u32)
     return operand(a, m, fr, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
 }
 
+// ---------------------------------------------------------------- checkpoint（docs/364）
+//
+// 递归引擎的 guest 状态有一半分住在 Loment 自己的调用栈里；这一档把它搬进
+// `CONT_OFF` 的续延记录：每层一帧 16 个 u32。快照 = ctx（256 B）+ 对象表 + 续延栈 +
+// 4 MiB guest 内存；IR 表不存，恢复时重解析同一份输入。
+
+fn cont_set(a: ptr, d: u32, i: u32, v: u32) {
+    wr(a, CONT_OFF, d * CONT_REC + i, v);
+}
+
+fn cont_get(a: ptr, d: u32, i: u32) -> u32 {
+    return rd(a, CONT_OFF, d * CONT_REC + i);
+}
+
+fn push_cont(a: ptr, d: u32, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32,
+             bi: u32, do_: u32, dl: u32, priv: u32, hook: u32, a0: u64) {
+    cont_set(a, d, 0, fi);
+    cont_set(a, d, 1, fr);
+    cont_set(a, d, 2, cfr);
+    cont_set(a, d, 3, ro);
+    cont_set(a, d, 4, rl);
+    cont_set(a, d, 5, bi);
+    cont_set(a, d, 6, 0);
+    cont_set(a, d, 7, do_);
+    cont_set(a, d, 8, dl);
+    cont_set(a, d, 9, priv);
+    cont_set(a, d, 10, hook);
+    cont_set(a, d, 11, lo32(a0));
+    cont_set(a, d, 12, hi32(a0));
+    cont_set(a, d, 13, NONE);
+}
+
+fn store_val(a: ptr, m: ptr, fr: u32, do_: u32, dl: u32, v: u64) {
+    if dl > 0 {
+        let ex: u32 = vfind(a, m, fr, do_, dl);
+        if ex == NONE {
+            vput(a, m, fr, do_, dl, v);
+        } else {
+            vset(a, m, fr, ex, v);
+        }
+    }
+}
+
+/// 显式栈引擎：与 `exec_body` 同语义，但调用**压栈**而不是递归。
+fn exec_stack(a: ptr, m: ptr, fresh: u32) {
+    if fresh == 1 {
+        let fi: u32 = fn_find_lit(a, "@_start");
+        if fi == NONE {
+            fail("这份 IR 里没有 `_start`");
+        }
+        let fr: u32 = MEM_SIZE - FRAME_SIZE;
+        wr(m, fr, 0, 0);
+        wr(m, fr, 1, FR_SLOTS);
+        ctx_set(a, C_DEPTH, 1);
+        ctx_set(a, C_NFOBJ, 0);
+        wr(a, FBASE_OFF, 4, 0);
+        push_cont(a, 1, fi, fr, NONE, 0, 0, rd(a, F_OFF, fi * 8 + 6), 0, 0, 0, 0, 0);
+    }
+    while ctx_get(a, C_DEPTH) > 0 {
+        let d: u32 = ctx_get(a, C_DEPTH);
+        let fi: u32 = cont_get(a, d, 0);
+        let fr: u32 = cont_get(a, d, 1);
+        let cfr: u32 = cont_get(a, d, 2);
+        let ro: u32 = cont_get(a, d, 3);
+        let rl: u32 = cont_get(a, d, 4);
+        let bi: u32 = cont_get(a, d, 5);
+        let j: u32 = cont_get(a, d, 6);
+        let do_: u32 = cont_get(a, d, 7);
+        let dl: u32 = cont_get(a, d, 8);
+        let at: u32 = ctx_get(a, C_CKPT_AT);
+        if load32(a, SNAP_HDR + 60) != 0 && ctx_get(a, C_STEPS) >= at {
+            snapshot_write(a, m);
+            let _x: u32 = die(0);
+        }
+        let io: u32 = rd(a, B_OFF, bi * 5 + 2);
+        let ni: u32 = rd(a, B_OFF, bi * 5 + 3);
+        if j >= ni {
+            fail("块没有终结指令");
+        }
+        if j == 0 {
+            bump_block(a, bi);
+        }
+        ctx_set(a, C_SITE_FI, fi);
+        ctx_set(a, C_SITE_BI, bi);
+        ctx_set(a, C_SITE_J, j);
+        let ii: u32 = io + j;
+        let k: u32 = rd(a, I_OFF, ii * 8 + 4);
+        let sub: u32 = rd(a, I_OFF, ii * 8 + 5);
+        let to: u32 = rd(a, I_OFF, ii * 8 + 2);
+        let tl: u32 = rd(a, I_OFF, ii * 8 + 3);
+        let dst: u32 = rd(a, I_OFF, ii * 8);
+        let dl2: u32 = rd(a, I_OFF, ii * 8 + 1);
+        ctx_set(a, 84, to);
+        ctx_set(a, 88, tl);
+        let ns: u32 = ctx_get(a, C_STEPS) + 1;
+        if ns > STEP_CAP {
+            wstr(2, "lvm: 执行超过 ");
+            write_num(a, 2, STEP_CAP);
+            wstr(2, " 条指令，卡在 ");
+            let fno: u32 = rd(a, F_OFF, fi * 8);
+            write_all(2, ptr_add(a, fno), rd(a, F_OFF, fi * 8 + 1) as u64);
+            wstr(2, " 的 [");
+            write_all(2, ptr_add(a, to), tl as u64);
+            wstr(2, "]
+");
+            let _s: u32 = die(2);
+        }
+        ctx_set(a, C_STEPS, ns);
+        let prev: u32 = cont_get(a, d, 13);
+        if k == K_BR_UNCOND {
+            bump_edge(a, ii, 0);
+            cont_set(a, d, 13, bi);
+            cont_set(a, d, 5, sub);
+            cont_set(a, d, 6, 0);
+        } else if k == K_BR_COND {
+            let e: u32 = to + tl;
+            let ts: u64 = ty_span(a, after_op(a, to, e), e);
+            let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+            let vs: u64 = trim_span(a, p, seg_end(a, p, e));
+            let c: u64 = operand(a, m, fr, hi32(ts), lo32(ts), hi32(vs), lo32(vs));
+            cont_set(a, d, 13, bi);
+            if c != 0 {
+                bump_edge(a, ii, 0);
+                cont_set(a, d, 5, sub >> 16);
+            } else {
+                bump_edge(a, ii, 1);
+                cont_set(a, d, 5, sub & 65535);
+            }
+            cont_set(a, d, 6, 0);
+        } else if k == K_SWITCH {
+            let sv: u32 = switch_of(a, m, fr, to, tl, fi);
+            bump_edge(a, ii, sv & 65535);
+            cont_set(a, d, 13, bi);
+            cont_set(a, d, 5, sv >> 16);
+            cont_set(a, d, 6, 0);
+        } else if k == K_RET {
+            let v: u64 = do_ret(a, m, fr, cfr, to, tl, ro, rl);
+            let priv: u32 = cont_get(a, d, 9);
+            if priv != 0 {
+                ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) - 1);
+            }
+            if ctx_get(a, C_SUB) != 0 {
+                let hook: u32 = cont_get(a, d, 10);
+                let a0: u64 = ((cont_get(a, d, 12) as u64) << 32)
+                              | (cont_get(a, d, 11) as u64);
+                if hook == 1 {
+                    obj_new(a, v as u32, (v as u32) + (a0 as u32), OBJ_HEAP);
+                } else if hook == 2 {
+                    obj_retire_base(a, a0 as u32);
+                }
+            }
+            ctx_set(a, C_DEPTH, d - 1);
+            if d > 1 {
+                let cd: u32 = d - 1;
+                store_val(a, m, cont_get(a, cd, 1), cont_get(a, cd, 7),
+                          cont_get(a, cd, 8), v);
+            }
+        } else if k == K_PHI {
+            if dl2 > 0 {
+                let v: u64 = phi_of(a, m, fr, to, tl, prev);
+                store_val(a, m, fr, dst, dl2, v);
+            }
+            cont_set(a, d, 6, j + 1);
+        } else if k == K_CALL {
+            cont_set(a, d, 5, bi);
+            cont_set(a, d, 6, j + 1);
+            cont_set(a, d, 7, dst);
+            cont_set(a, d, 8, dl2);
+            let b: u64 = bind_call(a, m, to, tl, fr, dst, dl2);
+            let nfi: u32 = hi32(b);
+            let priv: u32 = ctx_get(a, C_BIND_PRIV);
+            let hook: u32 = ctx_get(a, C_BIND_HOOK);
+            let a0: u64 = ((ctx_get(a, C_BIND_A0HI) as u64) << 32)
+                          | (ctx_get(a, C_BIND_A0LO) as u64);
+            if priv != 0 {
+                ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
+            }
+            push_cont(a, d + 1, nfi, lo32(b), fr, dst, dl2,
+                      rd(a, F_OFF, nfi * 8 + 6), 0, 0, priv, hook, a0);
+        } else if k == K_ASMCALL {
+            let v: u64 = do_asm(a, m, fr, to, tl);
+            store_val(a, m, fr, dst, dl2, v);
+            cont_set(a, d, 6, j + 1);
+        } else {
+            let v: u64 = eval_instr(a, m, fr, cfr, to, tl, k, sub, dst, dl2);
+            store_val(a, m, fr, dst, dl2, v);
+            cont_set(a, d, 6, j + 1);
+        }
+    }
+}
+
+fn fnv32(a: ptr, n: u32) -> u32 {
+    let h: u32 = 2166136261;
+    let i: u32 = 0;
+    while i < n {
+        h = (h ^ (load8(a, i) as u32)) * 16777619;
+        i = i + 1;
+    }
+    return h;
+}
+
+fn read_exact(fd: u64, p: ptr, n: u32) -> u32 {
+    let off: u32 = 0;
+    while off < n {
+        let got: i64 = syscall4(0, fd, ((p as u64) + (off as u64)), (n - off) as u64);
+        if got <= 0 {
+            return 0;
+        }
+        off = off + (got as u32);
+    }
+    return 1;
+}
+
+/// 快照：头 16 B + ctx 256 B + 对象表 118916 B + 续延栈 2112 B + guest 内存 4 MiB。
+fn snapshot_write(a: ptr, m: ptr) {
+    let po: u32 = load32(a, SNAP_HDR + 40);
+    let pl: u32 = load32(a, SNAP_HDR + 44);
+    if pl == 0 {
+        fail("checkpoint：没给输出路径（ckpt-out=...）");
+    }
+    let fd: i64 = syscall4(2, ptr_add(a, ARGV_OFF + po) as u64, 577, 420);
+    if fd < 0 {
+        fail("checkpoint：写不了快照");
+    }
+    let f: u64 = fd as u64;
+    store8(a, SNAP_HDR, 76);          // L
+    store8(a, SNAP_HDR + 1, 86);      // V
+    store8(a, SNAP_HDR + 2, 77);      // M
+    store8(a, SNAP_HDR + 3, 67);      // C
+    store32(a, SNAP_HDR + 4, 1);      // version
+    store32(a, SNAP_HDR + 8, ctx_get(a, C_IFHASH));
+    store32(a, SNAP_HDR + 12, 0);
+    let _a: u64 = write_all(f, ptr_add(a, SNAP_HDR), 16);
+    let _b: u64 = write_all(f, ptr_add(a, CTX_OFF), 256);
+    // 全局表的 `+4` 是**地址**（`place_globals` 写的）。恢复时会跳过 place_globals，
+    // 所以这张表必须跟着走；否则全局操作数会把"初始化 span"当地址用。
+    let _g: u64 = write_all(f, ptr_add(a, G_OFF), 6144);
+    let _c: u64 = write_all(f, ptr_add(a, OBJ_OFF),
+                            (FBASE_OFF + 132 - OBJ_OFF) as u64);
+    let _d: u64 = write_all(f, ptr_add(a, CONT_OFF),
+                            (MAX_CONT * CONT_REC * 4) as u64);
+    let _e: u64 = write_all(f, m, MEM_SIZE as u64);
+    let _f: i64 = syscall4(3, f, 0, 0);
+}
+
+fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
+    let fd: i64 = syscall4(2, ptr_add(a, ARGV_OFF + po) as u64, 0, 0);
+    if fd < 0 {
+        fail("checkpoint：读不了快照");
+    }
+    let f: u64 = fd as u64;
+    if read_exact(f, ptr_add(a, SNAP_HDR), 16) == 0 {
+        fail("checkpoint：快照头读不全");
+    }
+    if load8(a, SNAP_HDR) != 76 || load8(a, SNAP_HDR + 1) != 86
+            || load8(a, SNAP_HDR + 2) != 77 || load8(a, SNAP_HDR + 3) != 67 {
+        fail("checkpoint：魔数不对");
+    }
+    if load32(a, SNAP_HDR + 4) != 1 {
+        fail("checkpoint：不认识的版本");
+    }
+    if load32(a, SNAP_HDR + 8) != ctx_get(a, C_IFHASH) {
+        fail("checkpoint：IR 与快照不匹配（字节码换了）");
+    }
+    if read_exact(f, ptr_add(a, CTX_OFF), 256) == 0 {
+        fail("checkpoint：ctx 读不全");
+    }
+    if read_exact(f, ptr_add(a, G_OFF), 6144) == 0 {
+        fail("checkpoint：全局表读不全");
+    }
+    if read_exact(f, ptr_add(a, OBJ_OFF), FBASE_OFF + 132 - OBJ_OFF) == 0 {
+        fail("checkpoint：对象表读不全");
+    }
+    if read_exact(f, ptr_add(a, CONT_OFF), MAX_CONT * CONT_REC * 4) == 0 {
+        fail("checkpoint：续延栈读不全");
+    }
+    if read_exact(f, m, MEM_SIZE) == 0 {
+        fail("checkpoint：内存读不全");
+    }
+    let _c: i64 = syscall4(3, f, 0, 0);
+}
+
+/// `argv_n` 的那一格若以 `prefix` 开头，返回值的 span；否则 `0`。
+fn arg_tail(ab: ptr, f: u64, prefix: str) -> u64 {
+    let off: u32 = hi32(f);
+    let len: u32 = lo32(f);
+    let pl: u32 = str_len(prefix) as u32;
+    if len > pl && has_at(ab, off, off + len, prefix) {
+        return (((off + pl) as u64) << 32) | ((len - pl) as u64);
+    }
+    return 0;
+}
+
+/// 这一格是不是解释器自己的选项（不是剖面/统计的文件名）。
+fn is_opt_arg(ab: ptr, f: u64) -> bool {
+    if lo32(f) == 0 {
+        return false;
+    }
+    if eqw(ab, hi32(f), lo32(f), "sw_cap") {
+        return true;
+    }
+    if lo32(arg_tail(ab, f, "ckpt=")) > 0 {
+        return true;
+    }
+    if lo32(arg_tail(ab, f, "ckpt-out=")) > 0 {
+        return true;
+    }
+    if lo32(arg_tail(ab, f, "resume=")) > 0 {
+        return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------- T1：剖面（`docs/247`）
 
 fn wlit(fd: u64, s: str) -> u64 {
@@ -3002,7 +3362,7 @@ const COP_OFF: u32 = 11507968;                 // CC_OFF + 32768*48；操作数�
 const CX_OFF: u32 = 13605120;                  // COP_OFF + 131072*16；附加池
 const CSL_OFF: u32 = 13867264;                 // CX_OFF + 65536*4；槽名表 2 u32
 const FS2_OFF: u32 = 14129408;                 // CSL_OFF + 32768*8；每函数 4 u32
-const ARENA_T2: u64 = 14256516;                // FS2_OFF + 512*16 + sw_cap 对象表（docs/363）
+const ARENA_T2: u64 = 14258692;                // SNAP_HDR + 64（含 sw_cap 对象表与续延栈，docs/364）
 
 //: 编译记录 12 格
 const CR_KIND: u32 = 0;
@@ -4168,19 +4528,53 @@ fn run(a: ptr) -> u32 {
     if n < 0 {
         return fail("读不了输入");
     }
-    // 基质（`docs/363`）：任意一个附加实参等于 `sw_cap` 就开。它也可以落在第 2 格
-    // （那一格平常是剖面文件），所以下面开文件前要跳过它。
+    ctx_set(a, C_NSRC, n as u32);
+    ctx_set(a, C_IFHASH, fnv32(a, n as u32));
+    // 附加实参（位置 2..10）：`sw_cap` / `ckpt=N` / `ckpt-out=PATH` / `resume=PATH`。
+    // 它们可以落在任何一格（第 2 格平常是剖面文件），所以开文件前要跳过。
     let f2: u64 = argv_n(ab, 8192, 2);
     let f3: u64 = argv_n(ab, 8192, 3);
     let f4: u64 = argv_n(ab, 8192, 4);
-    let f5: u64 = argv_n(ab, 8192, 5);
     ctx_set(a, C_SUB, 0);
-    if lo32(f2) > 0 && eqw(ab, hi32(f2), lo32(f2), "sw_cap") { ctx_set(a, C_SUB, 1); }
-    if lo32(f3) > 0 && eqw(ab, hi32(f3), lo32(f3), "sw_cap") { ctx_set(a, C_SUB, 1); }
-    if lo32(f4) > 0 && eqw(ab, hi32(f4), lo32(f4), "sw_cap") { ctx_set(a, C_SUB, 1); }
-    if lo32(f5) > 0 && eqw(ab, hi32(f5), lo32(f5), "sw_cap") { ctx_set(a, C_SUB, 1); }
+    ctx_set(a, C_MODE, 0);
+    ctx_set(a, C_CKPT_AT, 0);
+    store32(a, SNAP_HDR + 40, 0);
+    store32(a, SNAP_HDR + 44, 0);
+    store32(a, SNAP_HDR + 48, 0);
+    store32(a, SNAP_HDR + 52, 0);
+    store32(a, SNAP_HDR + 56, 0);
+    store32(a, SNAP_HDR + 60, 0);        // 本次命令行给了 `ckpt=` 没有（0 也是合法停点）
+    let ai: u32 = 2;
+    while ai <= 10 {
+        let f: u64 = argv_n(ab, 8192, ai);
+        if lo32(f) > 0 {
+            if eqw(ab, hi32(f), lo32(f), "sw_cap") {
+                ctx_set(a, C_SUB, 1);
+            }
+            let c: u64 = arg_tail(ab, f, "ckpt=");
+            if lo32(c) > 0 {
+                ctx_set(a, C_CKPT_AT, dec_u64(ab, hi32(c), hi32(c) + lo32(c)) as u32);
+                store32(a, SNAP_HDR + 60, 1);
+                ctx_set(a, C_MODE, 1);
+            }
+            let o: u64 = arg_tail(ab, f, "ckpt-out=");
+            if lo32(o) > 0 {
+                store32(a, SNAP_HDR + 40, hi32(o));
+                store32(a, SNAP_HDR + 44, lo32(o));
+                ctx_set(a, C_MODE, 1);
+            }
+            let r: u64 = arg_tail(ab, f, "resume=");
+            if lo32(r) > 0 {
+                store32(a, SNAP_HDR + 48, hi32(r));
+                store32(a, SNAP_HDR + 52, lo32(r));
+                store32(a, SNAP_HDR + 56, 1);
+                ctx_set(a, C_MODE, 1);
+            }
+        }
+        ai = ai + 1;
+    }
     // T1（`docs/247`）：第二个实参（有的话）= 剖面写到哪个文件。**不给就不记**。
-    if lo32(f2) != 0 && !eqw(ab, hi32(f2), lo32(f2), "sw_cap") {
+    if lo32(f2) != 0 && !is_opt_arg(ab, f2) {
         // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577，mode 0644 = 420
         let pfd: i64 = syscall4(2, ptr_add(ab, hi32(f2)) as u64, 577, 420);
         if pfd < 0 {
@@ -4188,18 +4582,31 @@ fn run(a: ptr) -> u32 {
         }
         ctx_set(a, C_PROF_FD, pfd as u32);
     }
-    ctx_set(a, C_NSRC, n as u32);
-    ctx_set(a, C_HEAP, GLOBAL_BASE);
-    ctx_set(a, C_DEPTH, 0);
-    ctx_set(a, C_NOBJ, 0);
-    ctx_set(a, C_NFOBJ, 0);
-    ctx_set(a, C_NRET, 0);
-    ctx_set(a, C_PRIV, 0);
+    if load32(a, SNAP_HDR + 56) == 0 {
+        ctx_set(a, C_HEAP, GLOBAL_BASE);
+        ctx_set(a, C_DEPTH, 0);
+        ctx_set(a, C_NOBJ, 0);
+        ctx_set(a, C_NFOBJ, 0);
+        ctx_set(a, C_NRET, 0);
+        ctx_set(a, C_PRIV, 0);
+        ctx_set(a, C_STEPS, 0);
+    }
     ctx_set(a, C_TIER, 0);
     parse_all(a, n as u32);
-    place_globals(a, m);
+    if load32(a, SNAP_HDR + 56) == 1 {
+        let cli_sub: u32 = ctx_get(a, C_SUB);
+        let cli_at: u32 = ctx_get(a, C_CKPT_AT);
+        snapshot_read(a, m, load32(a, SNAP_HDR + 48), load32(a, SNAP_HDR + 52));
+        if ctx_get(a, C_SUB) != cli_sub {
+            return fail("checkpoint：基质与快照不匹配（resume 要带同一档）");
+        }
+        // 快照里的 `ckpt=` 是**上一次**的；恢复时以本次命令行为准（不写就是跑到完）。
+        ctx_set(a, C_CKPT_AT, cli_at);
+    } else {
+        place_globals(a, m);
+    }
     // T2（`docs/259` §7，#586）：第三个实参写 `t2` 就先把操作数/类型折成表再跑。
-    if lo32(f4) > 0 && !eqw(ab, hi32(f4), lo32(f4), "sw_cap") {
+    if lo32(f4) > 0 && !is_opt_arg(ab, f4) {
         let sfd: i64 = syscall4(2, ptr_add(ab, hi32(f4)) as u64, 577, 420);
         if sfd >= 0 {
             ctx_set(a, C_STATS_FD, sfd as u32);
@@ -4211,6 +4618,23 @@ fn run(a: ptr) -> u32 {
     }
     if ctx_get(a, C_SUB) != 0 && ctx_get(a, C_TIER) == 1 {
         return fail("sw_cap 只在 T0（docs/363）");
+    }
+    if ctx_get(a, C_MODE) == 1 {
+        if ctx_get(a, C_PROF_FD) != 0 || ctx_get(a, C_STATS_FD) != 0 {
+            return fail("checkpoint 不记剖面/计数（docs/364）");
+        }
+        if ctx_get(a, C_TIER) != 0 {
+            return fail("checkpoint 只在 T0（docs/364）");
+        }
+        let fresh: u32 = 0;
+        if load32(a, SNAP_HDR + 56) == 0 {
+            fresh = 1;
+        }
+        ctx_set(a, C_MISS, 0);
+        ctx_set(a, C_EXEC, 1);
+        exec_stack(a, m, fresh);
+        ctx_set(a, C_EXEC, 0);
+        return 0;
     }
     let fi: u32 = fn_find_lit(a, "@_start");
     if fi == NONE {

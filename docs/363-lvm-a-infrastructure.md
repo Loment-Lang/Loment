@@ -1,10 +1,11 @@
 # 363 · LVM-A 的底层基础设施：P5 快照、封印、独立验证器、创世衰减
 
-> 状态: **已实装**（2026-11-20），参考实现 + 自举对齐
+> 状态: **已实装**（2026-11-20），参考实现 + 自举对齐；自举 checkpoint 与 `sw_tag` 在 `docs/364`
 > 上游: `docs/360`（时间桥梁）· `docs/359`（本世代的墙）· `docs/358`（只信产物）·
 > `docs/357`（盘古的三件增量）· `docs/362`（`sw_cap` 第一实现）· `docs/264`（跨档同答）
-> 判据: `tools/lvm_cp_test.py`（6 条）· `tools/lvm_seal_test.py`（8 条）·
-> `tools/lvm_twin_test.py` 的 `test_cap_*`（2 条）
+> 判据: `tools/lvm_cp_test.py`（7 条，含 `docs/364` 的 `sw_tag` 快照）·
+> `tools/lvm_seal_test.py`（9 条）· `tools/lvm_twin_test.py` 的 `test_cap_*`（2 条，
+> 加自举 checkpoint 一条在 `docs/364`）
 > 一句话: **盘古要的底层不是七层架构，是四件能跑的东西：快照、封印、独立复查、派生衰减。**
 
 ---
@@ -181,8 +182,8 @@ struct Seal {
 
 | 套件 | 条数 | 钉什么 |
 |---|---|---|
-| `lvm_cp_test` | 6 | 两引擎同答 / 任意边界存取 / 调用栈进快照 / 链式 / 确定与绑定 / 只走 T0 |
-| `lvm_seal_test` | 8 | 往返 / 三种篡改 / 硬件降级与伪造 / B5 同字节码 / 创世四条拒绝面 / 零 import / 验证器标价 / 站点完备 |
+| `lvm_cp_test` | 7 | 两引擎同答 / 任意边界存取 / 调用栈进快照 / 链式 / 确定与绑定 / 只走 T0 |
+| `lvm_seal_test` | 9 | 往返 / 三种篡改 / 硬件降级与伪造 / B5 同字节码 / 创世四条拒绝面 / 零 import / 验证器标价 / 站点完备 |
 | `lvm_twin_test::test_cap_*` | 2 | 三条故障同 code+site / 合法语料同答 |
 
 ---
@@ -207,4 +208,5 @@ struct Seal {
 * `docs/358` —— 本文是它的对象（Seal / Universe）与两个操作（`verify` / `derive`）的第一实现。
 * `docs/357` —— 三件增量各自落在 §2 / §3 / §5；独立验证器是「避免 LSPE 自我证明」那一页。
 * `docs/362` —— `sw_cap` 的 T0 实现；本文补它的 P5、封印与自举镜像。
+* `docs/364` —— 自举 checkpoint 与 `sw_tag`；本文的 P5 与基质剖面在自举侧的延伸。
 * `docs/264` —— 跨档同答；本文把「档」扩到「基质」，并加了 checkpoint 这条轴。

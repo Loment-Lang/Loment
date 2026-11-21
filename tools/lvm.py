@@ -163,12 +163,14 @@ def fault_exit(kind: int, site, witness: str) -> int:
 
 
 class _Obj:
-    __slots__ = ("oid", "base", "limit", "gen", "alive", "kind")
+    __slots__ = ("oid", "base", "limit", "gen", "alive", "kind", "tag")
 
     def __init__(self, oid: int, base: int, size: int, kind: str) -> None:
         self.oid, self.base, self.limit, self.kind = oid, base, base + size, kind
         self.gen = 0
         self.alive = True
+        #: `sw_tag` 的 4 位标签（1..15；0 留给"无能力"）。`sw_cap` 不用它。
+        self.tag = 0
 
     def size(self) -> int:
         return self.limit - self.base
@@ -195,16 +197,21 @@ class SwCap:
     #: 按地址回查已归还对象时最多看最近的多少条。更早的不是"对"，是"没查"。
     RETIRED_SCAN = 4096
 
-    def __init__(self) -> None:
+    #: `sw_cap`：对象代（精确）。`sw_tag`：4 位标签（概率，MTE 形状）。
+    def __init__(self, mode: str = "cap") -> None:
+        self.mode = mode
         self.objs: dict[int, _Obj] = {}
         self.next_oid = 1
+        #: `sw_tag` 的标签序列：1..15 轮转。第 16 次分配回到 1 —— 这正是
+        #: 「4 位只有 15 个非零值」的后果，判据拿它造一次**碰撞**。
+        self.tag_seq = 0
         #: 活对象按 `base` 索引；`bases` 保持升序，查地址用二分。
         self.live: dict[int, int] = {}
         self.bases: list[int] = []
         #: 已归还对象，最近的在末尾。只为「裸地址回查」保留一个有限窗口。
         self.retired: list[_Obj] = []
         #: 指针存储的影子表：地址 -> 存进去的那个指针的能力。
-        self.shadow: dict[int, tuple[int, int]] = {}
+        self.shadow: dict[int, tuple[int, int, int]] = {}
 
     # ------------------------------------------------------------ 对象
     def new_obj(self, base: int, size: int, kind: str) -> int:
@@ -219,10 +226,17 @@ class SwCap:
         oid = self.next_oid
         self.next_oid += 1
         o = _Obj(oid, base, size, kind)
+        if self.mode == "tag":
+            o.tag = 1 + (self.tag_seq % 15)
+            self.tag_seq += 1
         self.objs[oid] = o
         self.live[base] = oid
         bisect.insort(self.bases, base)
         return oid
+
+    def cap_of(self, oid: int) -> tuple[int, int, int]:
+        o = self.objs[oid]
+        return (o.oid, o.gen, o.tag)
 
     def retire_oid(self, oid: int) -> None:
         o = self.objs.get(oid)
@@ -302,17 +316,23 @@ class SwCap:
             return dead
         return None
 
-    def cap_for_addr(self, addr: int) -> tuple[int, int] | None:
+    def cap_for_addr(self, addr: int) -> tuple[int, int, int] | None:
+        o = self.lookup_live(addr)
+        if o is None:
+            return None
+        # 最内层的归属是已归还对象时，这个地址"没有主人" —— 外层 arena 全局不算数。
         if self.innermost_dead(addr) is not None:
             return None
-        o = self.lookup_live(addr)
-        return (o.oid, o.gen) if o is not None else None
+        return (o.oid, o.gen, o.tag)
 
     # ------------------------------------------------------------ 检查
-    def check(self, addr: int, width: int, cap: tuple[int, int] | None, site) -> None:
+    def check(self, addr: int, width: int, cap: tuple[int, int, int] | None, site) -> None:
         """`P2 cap_check` + `P3 gen_check` 的合一：一次访问前问一句「凭什么碰」。"""
         if addr == 0 and width > 0:
             raise _Fault(FAULT_NULL, site, f"size={width}")
+        if self.mode == "tag":
+            self._check_tag(addr, width, cap, site)
+            return
         if cap is not None:
             o = self.objs.get(cap[0])
             if o is None or not o.alive or o.gen != cap[1]:
@@ -333,6 +353,41 @@ class SwCap:
                 raise _Fault(FAULT_BOUNDS, site,
                              f"address={addr} size={width} limit={o.size()}")
             return
+        raise _Fault(FAULT_BOUNDS, site,
+                     f"no object covers address={addr} size={width}")
+
+    def _check_tag(self, addr: int, width: int, cap, site) -> None:
+        """`sw_tag`：比较**4 位标签**，不是对象代。同标签的重用会漏 —— 那是声明的降级。
+
+        `docs/320` §1.2 ⑧：MTE 是检测，不是保证。这里的 15 个非零标签就是那个概率。
+        """
+        live = self.lookup_live(addr)
+        if cap is not None and live is not None and cap[2] == live.tag:
+            if addr + width > live.limit:
+                raise _Fault(FAULT_BOUNDS, site,
+                             f"address={addr} size={width} limit={live.size()}")
+            return
+        if cap is not None:
+            o = self.objs.get(cap[0])
+            if o is not None and o.alive:
+                off = addr - o.base
+                if off < 0 or off + width > o.size():
+                    raise _Fault(FAULT_BOUNDS, site,
+                                 f"offset={off} size={width} limit={o.size()}")
+                return
+            if live is not None:
+                raise _Fault(FAULT_DANGLING, site,
+                             f"tag {cap[2]} != live tag {live.tag}")
+            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed")
+        if live is not None:
+            if self.innermost_dead(addr) is not None:
+                raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed")
+            if addr + width > live.limit:
+                raise _Fault(FAULT_BOUNDS, site,
+                             f"address={addr} size={width} limit={live.size()}")
+            return
+        if self.lookup_retired(addr) is not None:
+            raise _Fault(FAULT_DANGLING, site, f"address={addr} was freed")
         raise _Fault(FAULT_BOUNDS, site,
                      f"no object covers address={addr} size={width}")
 
@@ -713,7 +768,7 @@ class Vm:
             self.mem.put(g.addr, data)
             if self.sub is not None:
                 oid = self.sub.new_obj(g.addr, len(data), "global")
-                self.global_caps[g.name] = (oid, 0)
+                self.global_caps[g.name] = self.sub.cap_of(oid)
 
     # ------------------------------------------------------------ 值
 
@@ -1158,7 +1213,7 @@ class Executor(Vm):
             ty, _ = lomelf.parse_type(text[len("alloca "):])
             oid = self.sub.new_obj(int(value), lomelf.size_of(ty), "alloca")
             fr.objs.append(oid)
-            fr.caps[ins.dest] = (oid, 0)
+            fr.caps[ins.dest] = self.sub.cap_of(oid)
             return
         if text.startswith("getelementptr"):
             cap = self._cap_of(fr, self._gep_base(text))
@@ -1166,12 +1221,16 @@ class Executor(Vm):
                 fr.caps[ins.dest] = cap
             return
         if text.startswith("load "):
-            ty, _ = lomelf.parse_type(text[len("load "):])
+            ty, i = lomelf.parse_type(text[len("load "):])
             if ty == "ptr":
-                addr = int(value)
-                cap = self.sub.shadow.get(addr)
+                # ⚠ 影子的**键是槽地址**（指针从哪儿读出来），不是被读出的值。
+                # 2026-11-21 才发现：原先拿 `int(value)` 当键，于是能力过不了栈槽 ——
+                # 一个 `let p: ptr` 用一次就丢；UAF 只有"洗成整数"那条路还会被抓。
+                slot_s = text[len("load ") + i:].lstrip(", ").strip()
+                _sty, slot = self.operand(fr, slot_s)
+                cap = self.sub.shadow.get(int(slot))
                 if cap is None:
-                    cap = self.sub.cap_for_addr(addr)
+                    cap = self.sub.cap_for_addr(int(value))
                 if cap is not None:
                     fr.caps[ins.dest] = cap
             return
@@ -1601,12 +1660,14 @@ class ExplicitExecutor(Executor):
             return None
         s = self.sub
         return {
-            "objs": [[o.oid, o.base, o.limit, o.gen, 1 if o.alive else 0, o.kind]
+            "mode": s.mode,
+            "tag_seq": s.tag_seq,
+            "objs": [[o.oid, o.base, o.limit, o.gen, 1 if o.alive else 0, o.kind, o.tag]
                      for _, o in sorted(s.objs.items())],
             "next_oid": s.next_oid,
             "retired": [o.oid for o in s.retired],
-            "shadow": [[a, c[0], c[1]] for a, c in sorted(s.shadow.items())],
-            "globals": [[k, c[0], c[1]] for k, c in sorted(self.global_caps.items())],
+            "shadow": [[a, c[0], c[1], c[2]] for a, c in sorted(s.shadow.items())],
+            "globals": [[k, c[0], c[1], c[2]] for k, c in sorted(self.global_caps.items())],
         }
 
     def _snap_frame(self, fr: _IterFrame) -> dict:
@@ -1618,9 +1679,9 @@ class ExplicitExecutor(Executor):
             "steps": fr.steps,
             "next": fr.next,
             "vals": [[k, _enc_val(v)] for k, v in sorted(fr.vals.items())],
-            "caps": [[k, c[0], c[1]] for k, c in sorted(fr.caps.items())],
+            "caps": [[k, c[0], c[1], c[2]] for k, c in sorted(fr.caps.items())],
             "objs": list(fr.objs),
-            "pending": [[d, _enc_val(v), None if c is None else [c[0], c[1]]]
+            "pending": [[d, _enc_val(v), None if c is None else [c[0], c[1], c[2]]]
                         for d, v, c in fr.pending],
             "wait_dest": fr.wait_dest,
             "wait_retty": fr.wait_retty,
@@ -1630,7 +1691,7 @@ class ExplicitExecutor(Executor):
     def snapshot(self) -> bytes:
         """序列化 guest 状态。**唯一**的宿主状态是序列化格式本身。"""
         data = {
-            "v": 1,
+            "v": 2,
             "ir": self.ir_sha,
             "executed": self.executed,
             "stack": [self._snap_frame(f) for f in self.stack],
@@ -1652,7 +1713,7 @@ class ExplicitExecutor(Executor):
             data = json.loads(zlib.decompress(blob[len(CP_MAGIC):]).decode("utf-8"))
         except (zlib.error, json.JSONDecodeError, UnicodeDecodeError) as e:
             raise LvmError(f"checkpoint：解不开（{e}）") from e
-        if data.get("v") != 1:
+        if data.get("v") != 2:
             raise LvmError(f"checkpoint：不认识的版本 {data.get('v')!r}")
         if data.get("ir") != self.ir_sha:
             raise LvmError("checkpoint：IR 与快照不匹配（字节码换了）")
@@ -1671,19 +1732,22 @@ class ExplicitExecutor(Executor):
         self.priv = sum(1 for f in self.stack if f.internal)
 
     def _restore_sub(self, d) -> SwCap:
-        s = SwCap()
-        for oid, base, limit, gen, alive, kind in d["objs"]:
+        s = SwCap(str(d.get("mode", "cap")))
+        s.tag_seq = int(d.get("tag_seq", 0))
+        for oid, base, limit, gen, alive, kind, tag in d["objs"]:
             o = _Obj(int(oid), int(base), int(limit) - int(base), str(kind))
             o.gen = int(gen)
             o.alive = bool(alive)
+            o.tag = int(tag)
             s.objs[o.oid] = o
             if o.alive:
                 s.live[o.base] = o.oid
         s.next_oid = int(d["next_oid"])
         s.bases = sorted(s.live)
         s.retired = [s.objs[int(oid)] for oid in d["retired"] if int(oid) in s.objs]
-        s.shadow = {int(a): (int(o), int(g)) for a, o, g in d["shadow"]}
-        self.global_caps = {k: (int(o), int(g)) for k, o, g in d["globals"]}
+        s.shadow = {int(a): (int(o), int(g), int(t)) for a, o, g, t in d["shadow"]}
+        self.global_caps = {k: (int(o), int(g), int(t))
+                            for k, o, g, t in d["globals"]}
         return s
 
     def _restore_frame(self, d) -> _IterFrame:
@@ -1697,11 +1761,11 @@ class ExplicitExecutor(Executor):
         fr.steps = int(d["steps"])
         fr.next = int(d["next"])
         fr.vals = {k: _dec_val(v) for k, v in d["vals"]}
-        fr.caps = {k: (int(o), int(g)) for k, o, g in d["caps"]}
+        fr.caps = {k: (int(o), int(g), int(t)) for k, o, g, t in d["caps"]}
         fr.objs = [int(x) for x in d["objs"]]
         fr.pending = [
             (x[0], _dec_val(x[1]),
-             None if x[2] is None else (int(x[2][0]), int(x[2][1])))
+             None if x[2] is None else (int(x[2][0]), int(x[2][1]), int(x[2][2])))
             for x in d["pending"]
         ]
         fr.wait_dest = d["wait_dest"]
@@ -1719,8 +1783,8 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     `docs/360` §7 B4 的落点。返回 `(退出码, 快照或 None)`。这一档**不记剖面/计数**：
     它们记的是解释器自己的账，不是 guest 状态；要记它们就别用 checkpoint。
     """
-    if substrate not in ("none", "sw_cap"):
-        raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap）")
+    if substrate not in ("none", "sw_cap", "sw_tag"):
+        raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
     shape = entry_kind(text)
     if shape is None:
         raise LvmError(NO_ENTRY)
@@ -1728,12 +1792,17 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     if kind in ("interrupt", "thread_spawn"):
         raise LvmError(entry_refusal(kind, name))
     globals_, funcs, externs = lomelf.parse_ll(text)
-    sub = SwCap() if substrate == "sw_cap" else None
+    sub = (SwCap("cap") if substrate == "sw_cap"
+           else SwCap("tag") if substrate == "sw_tag" else None)
     vm = ExplicitExecutor(globals_, funcs, externs, out, None, argv, None, sub)
     vm.ir_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     vm.cp_at = at
     if resume is not None:
         vm.restore(resume)
+        want = {"none": None, "sw_cap": "cap", "sw_tag": "tag"}[substrate]
+        got = vm.sub.mode if vm.sub is not None else None
+        if got != want:
+            raise LvmError("checkpoint：基质与快照不匹配（resume 要带同一档）")
     try:
         if resume is not None:
             value = vm.run_resumed()
@@ -1779,20 +1848,20 @@ def run_ir(text: str, out, profile: Profile | None = None,
     """
     if tier == "t2":
         if substrate != "none":
-            raise LvmError("`sw_cap` 基质只在 t0 落地（`docs/362`）；t2/t3 还没有它")
+            raise LvmError("基质（sw_cap / sw_tag）只在 t0 落地（`docs/362`/`docs/364`）；t2/t3 还没有它")
         import lvm_t2                                       # noqa: PLC0415
 
         return lvm_t2.run_ir_t2(text, out, profile, argv, values, counters=counters)
     if tier == "t3":
         if substrate != "none":
-            raise LvmError("`sw_cap` 基质只在 t0 落地（`docs/362`）；t2/t3 还没有它")
+            raise LvmError("基质（sw_cap / sw_tag）只在 t0 落地（`docs/362`/`docs/364`）；t2/t3 还没有它")
         import lvm_t3                                       # noqa: PLC0415
 
         return lvm_t3.run_ir_t3(text, out, profile, argv, values, deopts, counters)
     if tier != "t0":
         raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2 / t3）")
-    if substrate not in ("none", "sw_cap"):
-        raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap）")
+    if substrate not in ("none", "sw_cap", "sw_tag"):
+        raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
     shape = entry_kind(text)
     if shape is None:
         raise LvmError(NO_ENTRY)
@@ -1802,7 +1871,8 @@ def run_ir(text: str, out, profile: Profile | None = None,
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
-    sub = SwCap() if substrate == "sw_cap" else None
+    sub = (SwCap("cap") if substrate == "sw_cap"
+           else SwCap("tag") if substrate == "sw_tag" else None)
     vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
@@ -1881,9 +1951,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
                     help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
                          "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
-    ap.add_argument("--substrate", choices=("none", "sw_cap"), default="none",
-                    help="LVM-A 的执行基质（docs/362）：none（默认，今天的行为）、"
-                         "sw_cap（对象表 + 边界 + 对象代；只在 --tier t0）")
+    ap.add_argument("--substrate", choices=("none", "sw_cap", "sw_tag"), default="none",
+                    help="LVM-A 的执行基质（docs/362/364）：none（默认，今天的行为）、"
+                         "sw_cap（对象表 + 边界 + 对象代）、sw_tag（4 位标签，概率检测）；"
+                         "只在 --tier t0")
     ap.add_argument("--checkpoint-at", type=int, default=None, metavar="N",
                     help="P5（docs/363）：在第 N 条指令之前停住，把 guest 状态写进 "
                          "--checkpoint-out（只走显式栈引擎）")

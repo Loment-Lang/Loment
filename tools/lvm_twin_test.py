@@ -547,17 +547,19 @@ def _ref_cap(ll: Path, argv0: str) -> tuple[int, bytes, str]:
     return rc, buf.getvalue(), err.getvalue()
 
 
-def _run_mirror_cap(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes, bytes]:
-    """镜像 + `sw_cap` 实参 -> `(rc, stdout, stderr)`。输入路径与 `_mirror_input_path` 同名。"""
+def _run_mirror_args(mir: Path, ll: Path, extra: list[str],
+                     timeout: int = 180) -> tuple[int, bytes, bytes]:
+    """镜像 + 任意附加实参 -> `(rc, stdout, stderr)`。输入路径与 `_mirror_input_path` 同名。"""
+    args = " ".join(extra)
     if sys.platform != "win32":
-        r = subprocess.run([str(mir), str(ll), "sw_cap"], capture_output=True,
+        r = subprocess.run([str(mir), str(ll), *extra], capture_output=True,
                            timeout=timeout, shell=False)
         return r.returncode, r.stdout, r.stderr
     tag = f"/tmp/lvm_twin_{os.getpid()}"
     script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.err; "
               f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
               f"chmod +x {tag}.bin && cd /tmp && "
-              f"timeout {timeout} {tag}.bin {tag}.ll sw_cap > {tag}.out 2> {tag}.err; echo -n $?")
+              f"timeout {timeout} {tag}.bin {tag}.ll {args} > {tag}.out 2> {tag}.err; echo -n $?")
     r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, timeout=timeout + 180, shell=False)
     import base64  # noqa: PLC0415
@@ -572,6 +574,10 @@ def _run_mirror_cap(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes
     return (rc,
             base64.b64decode(out) if out.strip() else b"",
             base64.b64decode(err) if err.strip() else b"")
+
+
+def _run_mirror_cap(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes, bytes]:
+    return _run_mirror_args(mir, ll, ["sw_cap"], timeout)
 
 
 def _fault_line(err: str) -> str:
@@ -621,6 +627,64 @@ def test_cap_legal_programs_match() -> None:
             ran += 1
     assert ran >= len(CORPUS) - 2, f"只跑成了 {ran} 份"
     print(f"      {ran} 份合法语料：sw_cap 下两边 stdout + rc 逐字节同")
+
+
+_CKPT_PROG = """module cap_ckpt
+choose runtime
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn _start() {
+    print("A");
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 10 {
+        s = add(s, i);
+        i = i + 1;
+    }
+    print("B");
+    syscall4(60, s as u64, 0, 0);
+}
+"""
+
+
+def test_checkpoint_matches_reference() -> None:
+    """判 K：同一份 IR、同一个停点 —— 两边各自存/取，最后的 rc + stdout 相同。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CKPT_PROG, "cap_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        for at in (0, 40):
+            b1, b2 = io.BytesIO(), io.BytesIO()
+            _rc1, blob = lvm.run_checkpointed(ir, b1, "none", at, None, ["prog"])
+            assert blob is not None, f"参考实现在 {at} 条指令处没有停"
+            rc2, blob2 = lvm.run_checkpointed(ir, b2, "none", None, blob, ["prog"])
+            assert blob2 is None
+            ref = (rc2, b1.getvalue() + b2.getvalue())
+            assert ref == (base_rc, base.getvalue()), (
+                f"参考自己就不一致（at={at}）：{(base_rc, base.getvalue())} vs {ref}")
+
+            snap = f"/tmp/lvm_ckpt_{os.getpid()}_{at}.snap"
+            subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                           capture_output=True, timeout=60, shell=False)
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={snap}"])
+            mrc2, mout2, merr2 = _run_mirror_args(mir, ll, [f"resume={snap}"])
+            assert (mrc1, mrc2) == (0, ref[0]), (
+                f"镜像存/取退出码不对（at={at}）：{mrc1}/{mrc2}（参考 {ref[0]}）"
+                f" err1={merr1[-120:]!r} err2={merr2[-120:]!r}")
+            assert mout1 + mout2 == ref[1], (
+                f"镜像 stdout 不同（at={at}）：{mout1 + mout2!r} vs {ref[1]!r}")
+    print("      停点 0 与 40：两边各自存/取，最后的 rc + stdout 相同")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -352,10 +352,26 @@ Targets(T) = { f | f 的类型与 T 匹配，且 f 在程序里被取址 }
 - **判据**：`test_class_c3_function_pointer_targets_are_closed_world`（两个目标、
   LVM 跑出确定退出码）与 `test_class_c3_empty_target_set_is_rejected`。
 
-### 10.4 还没做的
+### 10.4 C4a 落地状态（自举侧，非虚类）
 
-- **C4 自举侧类**：`loment/selfhost/` 还没有 class/vtable/super/abstract 的
-  解析、检查与发射；Potato 的 `class`/`vtables` 字段与种子/容量/双子判据也还没落。
+- **checker**：`class` 名在第零遍登记成 `K_STRUCT`（与参考实现的降级同口径）；
+  第一遍扫类体字段并登记非虚方法（`K_METHOD`，接收者是类名 token 的类型编码）。
+  方法查找沿 `extends` 父类链回退；字段访问/字面量也沿父类链找父类前缀字段。
+- **codegen**：类表条目与 `struct` 同表，父类字段前缀按"父类先展开"多轮拼好；
+  类方法在函数表里是 `fkind = 4`，名字 `<类>_<方法>`，发射序排在普通函数之后。
+  继承来的方法按子类名复制成 `fkind = 5` 的条目（体仍指父类的 `fn` token）。
+- **`choose class_on`**：在自举侧是**核心维度**（`switches.lomt` 的 `sw_is_core`
+  与 `checker.lomt` 的 `chk_core_dim` 都登记），不会掉进开关表报"未定义的开关"。
+- **判据**：`loment_p8_test::test_class_c4a_selfhost_nonvirtual_twin`，三份夹具
+  （单类/父类字段前缀/继承方法副本）与参考实现的 IR **逐字节**相同；自举 checker
+  对三份都零诊断。
+- **还没做（C4b）**：vtable/`virtual`/`override`/`super`/`abstract` 的自举降级、
+  Potato 的 `class`/`vtables` 字段与容量扫描。C4a 已重算种子；C4b 落地后再重算
+  一次。C4b 之前，自举侧仍然只认 C1 子集。
+
+### 10.5 还没做的
+
+- **C4b**：见 10.4 最后一条。
 - **C5 用 Loment 类重写 LSPE 框架**：当前 `loment/lspe/framework.py` 已是 Python
   类继承派发；按 `docs/344` 的字面要求（Loment 类 + 间接调用）仍依赖 C4。
 

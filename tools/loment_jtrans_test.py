@@ -432,6 +432,11 @@ def test_java_out_of_subset_is_named():
         ("public record T(int x) { }", "record"),
         ("public class T { public static int f() { Object o = T.class; return 1; } }", "class"),
         ("public class T { public static int f(int a) { return +a; } }", "一元 `+`"),
+        # `#835`：标签语句原先报 "`outer` 后面期望 `=` 或 `(`"
+        ("public class T { public static int f() { outer: for (int i = 0; i < 3; i = i + 1) { } return 0; } }",
+         "标签语句"),
+        # `#836`：`List<Integer>` 原先报 "`List` 后面期望 `=` 或 `(`"
+        ("public class T { public static int f() { List<Integer> xs; return 0; } }", "泛型"),
     ]
     for src, needle in cases:
         try:

@@ -63,6 +63,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # merge queue（`main` 的保护规则里"Require merge queue"打开后，入队的 PR 会以
+  # `merge_group` 事件重跑必需检查）。**没有这一条，队列会永远等一个不会跑的检查。**
+  merge_group:
   workflow_dispatch:
     inputs:
       suite:
@@ -156,8 +159,9 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.event.after }}
+          # merge_group 的对照面是 `base_sha..head_sha`；push 用 before/after。
+          BEFORE: ${{ github.event.before || github.event.merge_group.base_sha }}
+          AFTER: ${{ github.event.after || github.event.merge_group.head_sha }}
         run: |
           set -uo pipefail
           err=$(mktemp)
@@ -441,7 +445,9 @@ jobs:
   static-shard:
     name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 180（2026-11-20）：分片 3 的 `loment_seed_test` 自带 3600 秒的自举护栏，
+    # 新红复跑还会再跑一遍 —— 60 分钟装不下一次满载的定点。其余片不受影响。
+    timeout-minutes: 180
     # `always()`：独占那片红了**也要**把其余九片跑完。`needs` 的默认行为是"依赖失败就
     # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"。独占那片与这里并行**不会**踩到
     # 共享位置：它是**先跑完**的那一个。
@@ -877,6 +883,8 @@ jobs:
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
           else
             base="${{ github.event.before }}"
           fi
@@ -927,6 +935,8 @@ jobs:
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
           else
             base="${{ github.event.before }}"
           fi

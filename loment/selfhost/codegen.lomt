@@ -1491,7 +1491,9 @@ fn fk_base(i: u32) -> u32 {
 fn find_method(s: ptr, src: ptr, toks: ptr, recv_tok: u32, name_tok: u32) -> u32 {
     let i: u32 = 0;
     while i < load32(s, 640) {
-        if load32(s, fk_base(i)) == 2 && tok_eq(src, toks, load32(s, fk_base(i) + 4), recv_tok) == 1 {
+        if (load32(s, fk_base(i)) == 2 || load32(s, fk_base(i)) == 4
+                || load32(s, fk_base(i)) == 5)
+                && tok_eq(src, toks, load32(s, fk_base(i) + 4), recv_tok) == 1 {
             let nt: u32 = load32(s, CG_FN + i * 12);
             if tok_eq(src, toks, nt, name_tok) == 1 {
                 return i;
@@ -1502,6 +1504,68 @@ fn find_method(s: ptr, src: ptr, toks: ptr, recv_tok: u32, name_tok: u32) -> u32
     return 4294967295;
 }
 
+fn class_has_method(s: ptr, src: ptr, toks: ptr, recv_tok: u32, name_tok: u32) -> u32 {
+    let i: u32 = 0;
+    while i < load32(s, 640) {
+        let fk: u32 = load32(s, fk_base(i));
+        if (fk == 4 || fk == 5)
+                && tok_eq(src, toks, load32(s, fk_base(i) + 4), recv_tok) == 1
+                && tok_eq(src, toks, load32(s, CG_FN + i * 12), name_tok) == 1 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// C4a 的继承方法副本：参考实现按子类名复制父类的实例方法（静态派发）。函数表条目
+/// `fkind = 5`，名字/返回/元数抄父类，接收者换成子类；发射时用父类 `fn` token 当体。
+/// 只处理**源码序里父类先出现**的（与类表前缀展开同一个前提）。
+fn build_class_copies(s: ptr, src: ptr, toks: ptr) -> u32 {
+    let sn: u32 = load32(s, 520);
+    let n0: u32 = load32(s, 640);
+    let si: u32 = 0;
+    while si < sn {
+        let ptok: u32 = load32(s, struct_base(si) + 72);
+        if load32(s, struct_base(si) + 76) == 2 && ptok != 0 {
+            let child: u32 = load32(s, struct_base(si));
+            let j: u32 = 0;
+            let ncur: u32 = load32(s, 640);
+            while j < ncur {
+                let fk: u32 = load32(s, fk_base(j));
+                if (fk == 4 || fk == 5)
+                        && tok_eq(src, toks, load32(s, fk_base(j) + 4), ptok) == 1 {
+                    let nm: u32 = load32(s, CG_FN + j * 12);
+                    if class_has_method(s, src, toks, child, nm) == 0 {
+                        let n: u32 = load32(s, 640);
+                        if n >= CG_MAXFN {
+                            return 0;
+                        }
+                        store32(s, CG_FN + n * 12, nm);
+                        store32(s, CG_FN + n * 12 + 4, load32(s, CG_FN + j * 12 + 4));
+                        store32(s, CG_FN + n * 12 + 8, load32(s, CG_FN + j * 12 + 8));
+                        store32(s, fk_base(n), 5);
+                        store32(s, fk_base(n) + 4, child);
+                        let npar: u32 = load32(s, CG_FN + j * 12 + 8);
+                        let q: u32 = 0;
+                        while q < npar {
+                            store32(s, CG_PARAM + n * 160 + q * 8,
+                                    load32(s, CG_PARAM + j * 160 + q * 8));
+                            store32(s, CG_PARAM + n * 160 + q * 8 + 4,
+                                    load32(s, CG_PARAM + j * 160 + q * 8 + 4));
+                            q = q + 1;
+                        }
+                        store32(s, 640, n + 1);
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        si = si + 1;
+    }
+    return load32(s, 640);
+}
+
 /// 发射 impl 方法的 LLVM 名 (不含 `@`): <接收者类型名>_<方法名>。
 fn emit_method_name(s: ptr, out: ptr, src: ptr, toks: ptr, fi: u32) -> u32 {
     emit_tok(s, out, src, toks, load32(s, fk_base(fi) + 4));
@@ -1509,9 +1573,16 @@ fn emit_method_name(s: ptr, out: ptr, src: ptr, toks: ptr, fi: u32) -> u32 {
     return emit_tok(s, out, src, toks, load32(s, CG_FN + fi * 12));
 }
 
-/// 发射变量名 (self -> __self; 其余原样)。所有"名字"位置的输出都要过这里。
+/// 发射变量名 (impl 的 self -> __self; 类方法保留源码里的 self; 其余原样)。
+/// 参考实现的 impl 解析阶段就改名成 `__self`，而 `docs/345` 的类方法**没有**这一步
+/// （`fn m(self: &C)` 的参数名就是 `self`）—— 两个实现必须按同一条走。
 fn emit_name_tok(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
     if tok_is(src, toks, i, "self") {
+        let fi: u32 = load32(s, 472);
+        if fi != 4294967295 && (load32(s, fk_base(fi)) == 4
+                || load32(s, fk_base(fi)) == 5) {
+            return emit_tok(s, out, src, toks, i);
+        }
         return emit_str(s, out, "__self");
     }
     return emit_tok(s, out, src, toks, i);
@@ -5726,8 +5797,17 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
     }
     if tok_kind(toks, j) == 0 && tok_is(src, toks, dot, ".") && tok_is(src, toks, dot + 2, "(") {
         // M8: 方法调用 x.m(args) -> 编译期解析为 <接收者类型>_m(x, args)
-        let mfi: u32 = find_method(s, src, toks, ty, dot + 1);
-        load_var(s, out, src, toks, j, lvl);   // 接收者按第一形参类型求值
+        let mfi: u32 = find_method(s, src, toks, sty, dot + 1);
+        // 类方法的接收者是 `self: &C`：接收者如果是值（`c.m()`），传它的地址
+        // （参考实现 `_addr_of` 同一条）；接收者本身已是 `&C`（方法体里的 `self.m()`）
+        // 就按指针值传。
+        let mself: u32 = load32(s, CG_PARAM + mfi * 160 + 4);
+        let maddr: u32 = 0;
+        if is_ref_tok(src, toks, mself) == 1 && is_ref_tok(src, toks, ty) == 0 {
+            maddr = 1;
+        } else {
+            load_var(s, out, src, toks, j, lvl);   // 接收者按第一形参类型求值
+        }
         let km: u32 = dot + 3;
         let am: u32 = 0;
         while !tok_is(src, toks, km, ")") && tok_kind(toks, km) != 4 && am < 9 {
@@ -5749,7 +5829,13 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, "(");
         emit_ty(s, out, src, toks, load32(s, CG_PARAM + mfi * 160 + 4));
         emit_str(s, out, " ");
-        emit_val(s, out, lvl);
+        if maddr == 1 {
+            emit_str(s, out, "%");
+            emit_name_tok(s, out, src, toks, j);
+            emit_str(s, out, ".addr");
+        } else {
+            emit_val(s, out, lvl);
+        }
         let bm: u32 = 0;
         while bm < am {
             emit_str(s, out, ", ");
@@ -6379,7 +6465,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     emit_str(s, out, "; ");
     if load32(s, 60) != 4294967295 {          // 泛型实例: 名字 = 基名_实参
         emit_inst_name(s, out, src, toks, load32(s, 60));
-    } else if fkind == 2 {                    // impl 方法: 注释也用 mangled 名
+    } else if fkind == 2 || fkind == 4 || fkind == 5 {   // impl/类方法: 注释也用 mangled 名
         emit_method_name(s, out, src, toks, load32(s, 472));
     } else {
         emit_tok(s, out, src, toks, base + 1);
@@ -6392,7 +6478,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     emit_str(s, out, " @");
     if load32(s, 60) != 4294967295 {          // 泛型实例
         emit_inst_name(s, out, src, toks, load32(s, 60));
-    } else if fkind == 2 {                    // impl 方法: 名字 = <接收者类型>_<方法>
+    } else if fkind == 2 || fkind == 4 || fkind == 5 {   // impl/类方法: 名字 = <接收者类型>_<方法>
         emit_method_name(s, out, src, toks, load32(s, 472));
     } else {
         emit_tok(s, out, src, toks, base + 1);
@@ -14481,6 +14567,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     let impl_recv: u32 = 0;
     let trait_depth: u32 = 0;
     let pend_impl: u32 = 0;
+    let class_depth: u32 = 0;
+    let class_recv: u32 = 0;
+    let pend_class: u32 = 0;
     store32(s, 456, 0);
     store32(s, 460, 0);
     store32(s, 464, 0);
@@ -14493,12 +14582,20 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
             }
             pend_impl = fp + 1;
         }
+        if tok_is(src, toks, i, "class") {
+            pend_class = i + 1;   // C4a: 单继承/非虚；类体的 fn 名字 = <类>_<方法>
+        }
         if tok_is(src, toks, i, "{") {
             depth = depth + 1;
             if pend_impl != 0 && impl_depth == 0 {
                 impl_depth = depth;
                 impl_recv = pend_impl;
                 pend_impl = 0;
+            }
+            if pend_class != 0 && class_depth == 0 {
+                class_depth = depth;
+                class_recv = pend_class;
+                pend_class = 0;
             }
         }
         if tok_is(src, toks, i, "}") {
@@ -14508,6 +14605,10 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
             }
             if trait_depth != 0 && depth == trait_depth {
                 trait_depth = 0;
+            }
+            if class_depth != 0 && depth == class_depth {
+                class_depth = 0;
+                class_recv = 0;
             }
             if depth > 0 {
                 depth = depth - 1;
@@ -14541,6 +14642,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
                 store32(s, fk_base(n), 3);
             } else if trait_depth != 0 && depth == trait_depth {
                 store32(s, fk_base(n), 1);
+            } else if class_depth != 0 && depth == class_depth {
+                store32(s, fk_base(n), 4);
+                store32(s, fk_base(n) + 4, class_recv);
             } else if impl_depth != 0 && depth == impl_depth {
                 store32(s, fk_base(n), 2);
                 store32(s, fk_base(n) + 4, impl_recv);
@@ -14589,34 +14693,49 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     let sn: u32 = 0;
     i = 0;
     while tok_kind(toks, i) != 4 {
-        if tok_is(src, toks, i, "struct") && sn < 64 {
+        if (tok_is(src, toks, i, "struct") || tok_is(src, toks, i, "class")) && sn < 64 {
+            let is_cls: u32 = 0;
+            if tok_is(src, toks, i, "class") {
+                is_cls = 1;
+            }
             store32(s, struct_base(sn), i + 1);
             let sbrace: u32 = i + 2;
             while tok_kind(toks, sbrace) != 4 && !tok_is(src, toks, sbrace, "{") {
-                sbrace = sbrace + 1;   // 跳过 `struct Pair<T>` 的 `<T>`
+                sbrace = sbrace + 1;   // 跳过 `struct Pair<T>` 的 `<T>` / `class C extends P`
             }
             let fld: u32 = sbrace + 1;
             let nf: u32 = 0;
             while !tok_is(src, toks, fld, "}") && tok_kind(toks, fld) != 4 && nf < 8 {
-                store32(s, struct_base(sn) + 8 + nf * 8, fld);
-                store32(s, struct_base(sn) + 8 + nf * 8 + 4, fld + 2);
-                nf = nf + 1;
-                // 步长按**类型自己有多长**算（`skip_type`）：`&T` / `[T; N]` / `Pair<u32>`
-                // 都不是一个 token。原来写死 `fld + 3`，字段写成 `data: &u32,` 时
-                // 会落在 `u32` 上，把它当成下一个字段名（`docs/299` 落地时撞到）。
-                // `#11`：**末字段可以没有尾逗号** —— 没有逗号时 `skip_type` 停在 `}`，
-                // 循环条件当场结束（不会越过 `}` 读成字段）。
-                let fend: u32 = skip_type(src, toks, fld + 2);
-                if tok_is(src, toks, fend, ",") {
-                    fld = fend + 1;
+                if tok_is(src, toks, fld, "fn") {
+                    // 类体的方法不是字段；整段跳过（C4a 非虚方法，C4b 再加 vtable）。
+                    fld = skip_block(src, toks, find_body(src, toks, find_paren(src, toks, fld + 2)) - 1);
                 } else {
-                    fld = fend;
+                    store32(s, struct_base(sn) + 8 + nf * 8, fld);
+                    store32(s, struct_base(sn) + 8 + nf * 8 + 4, fld + 2);
+                    nf = nf + 1;
+                    // 步长按**类型自己有多长**算（`skip_type`）：`&T` / `[T; N]` / `Pair<u32>`
+                    // 都不是一个 token。原来写死 `fld + 3`，字段写成 `data: &u32,` 时
+                    // 会落在 `u32` 上，把它当成下一个字段名（`docs/299` 落地时撞到）。
+                    // `#11`：**末字段可以没有尾逗号** —— 没有逗号时 `skip_type` 停在 `}`，
+                    // 循环条件当场结束（不会越过 `}` 读成字段）。
+                    let fend: u32 = skip_type(src, toks, fld + 2);
+                    if tok_is(src, toks, fend, ",") {
+                        fld = fend + 1;
+                    } else {
+                        fld = fend;
+                    }
                 }
             }
             store32(s, struct_base(sn) + 4, nf);
             store32(s, struct_base(sn) + 72, 0);   // 类型形参 (声明处) <T> / <T, U>
             store32(s, struct_base(sn) + 76, 0);
-            if tok_is(src, toks, i + 2, "<") {
+            if is_cls == 1 {
+                // 类: 72 = 父类名 token (0 = 没有), 76 = 1 = 还没把父类字段前缀展开。
+                if tok_is(src, toks, i + 2, "extends") {
+                    store32(s, struct_base(sn) + 72, i + 3);
+                }
+                store32(s, struct_base(sn) + 76, 1);
+            } else if tok_is(src, toks, i + 2, "<") {
                 store32(s, struct_base(sn) + 72, i + 3);
                 if tok_is(src, toks, i + 4, ",") {
                     store32(s, struct_base(sn) + 76, i + 5);
@@ -14627,6 +14746,65 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         i = i + 1;
     }
     store32(s, 520, sn);
+    // 类布局: 父类字段前缀 + 自己的字段。类表按源码序扫，父类可能在子类之后，
+    // 所以按"父类已展开"反复走，直到没有新的可展开项（最多 64 轮 = 表的条数）。
+    // 所以按"父类已展开"反复走，直到没有新的可展开项（最多 64 轮 = 表的条数）。
+    let cpass: u32 = 0;
+    while cpass < 64 {
+        let changed: u32 = 0;
+        let si: u32 = 0;
+        while si < sn {
+            if load32(s, struct_base(si) + 76) == 1 {
+                let ptok: u32 = load32(s, struct_base(si) + 72);
+                if ptok == 0 {
+                    store32(s, struct_base(si) + 76, 2);
+                    changed = 1;
+                } else {
+                    let pi: u32 = find_struct(s, src, toks, ptok);
+                    if pi != 4294967295 && load32(s, struct_base(pi) + 76) == 2 {
+                        let pn: u32 = load32(s, struct_base(pi) + 4);
+                        let cn: u32 = load32(s, struct_base(si) + 4);
+                        if pn + cn <= 8 {
+                            // 自己的字段整体右移 pn 格，再把父类前缀抄到最前。
+                            let k: u32 = cn;
+                            while k > 0 {
+                                k = k - 1;
+                                store32(s, struct_base(si) + 8 + (k + pn) * 8,
+                                        load32(s, struct_base(si) + 8 + k * 8));
+                                store32(s, struct_base(si) + 8 + (k + pn) * 8 + 4,
+                                        load32(s, struct_base(si) + 8 + k * 8 + 4));
+                            }
+                            let q: u32 = 0;
+                            while q < pn {
+                                store32(s, struct_base(si) + 8 + q * 8,
+                                        load32(s, struct_base(pi) + 8 + q * 8));
+                                store32(s, struct_base(si) + 8 + q * 8 + 4,
+                                        load32(s, struct_base(pi) + 8 + q * 8 + 4));
+                                q = q + 1;
+                            }
+                            store32(s, struct_base(si) + 4, pn + cn);
+                            store32(s, struct_base(si) + 76, 2);
+                            changed = 1;
+                        } else {
+                            store32(s, struct_base(si) + 76, 2);
+                            changed = 1;
+                        }
+                    }
+                }
+            }
+            si = si + 1;
+        }
+        if changed == 0 {
+            cpass = 64;
+        } else {
+            cpass = cpass + 1;
+        }
+    }
+    // 继承方法副本（C4a）。类表已经展开完父类前缀，这一步只加函数表条目。
+    let ccm: u32 = build_class_copies(s, src, toks);
+    if load32(s, 640) > 0 && ccm == 0 {
+        return 0;
+    }
     // 能力域表: name_tok | space_tok | lo | hi | revocable | packed
     // packed = kind(4 位) | flags(2 位) | param(24 位)，见 docs/306 §2/§5。
     let cn: u32 = 0;
@@ -14961,6 +15139,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
                     eq = eq + 1;
                 }
                 i = eq + 1;
+            } else if load32(s, fk_base(fnix)) == 4 {   // 类方法: 参考实现追加在全部普通函数之后
+                let cq: u32 = find_body(src, toks, find_paren(src, toks, i + 2));
+                i = skip_block(src, toks, cq - 1);
             } else {
                 store32(s, 4, 0);    // temp 计数随函数重置
                 store32(s, 480, 0);  // label 计数随函数重置
@@ -14973,6 +15154,43 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
         } else {
             i = i + 1;
         }
+    }
+    // 类方法: 参考实现先把类降成普通函数、`mod.funcs.extend(class_funcs)`，所以它们在
+    // 全部普通函数之后发射。函数表仍按源码序（方法查找用），这里只重排**发射序**。
+    i = 0;
+    let jfn: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "fn") {
+            if load32(s, fk_base(jfn)) == 4 {
+                store32(s, 4, 0);
+                store32(s, 480, 0);
+                store32(s, 476, 0);
+                store32(s, 472, jfn);
+                store32(s, CG_LAMID, 0);
+                i = emit_fn(s, out, src, toks, i);
+            } else {
+                i = i + 1;
+            }
+            jfn = jfn + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    // 继承方法副本（fkind 5）：体在父类的 `fn` token 上，名字/接收者在函数表里。
+    // 表项按"父类先建"追加，所以这里的顺序就是参考实现 `class_funcs` 的顺序。
+    let cfi: u32 = 0;
+    let cfn: u32 = load32(s, 640);
+    while cfi < cfn {
+        if load32(s, fk_base(cfi)) == 5 {
+            let body_tok: u32 = load32(s, CG_FN + cfi * 12) - 1;
+            store32(s, 4, 0);
+            store32(s, 480, 0);
+            store32(s, 476, 0);
+            store32(s, 472, cfi);
+            store32(s, CG_LAMID, 0);
+            i = emit_fn(s, out, src, toks, body_tok);
+        }
+        cfi = cfi + 1;
     }
     // 实例发射: 按发现序, 每个实例推入自己的类型实参替换, 再当作普通函数发射一遍
     let ie: u32 = 0;

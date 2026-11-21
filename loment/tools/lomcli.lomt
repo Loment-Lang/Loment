@@ -639,6 +639,8 @@ fn catalog(mem: ptr, fd: u64) {
     row(mem, fd, "cheat", "", "one-page cheat sheet");
     sec(mem, fd, "THIS INSTALL");
     row(mem, fd, "tools", "", "tools in this package: present or missing");
+    row(mem, fd, "hotupdate", "--payload FILE --sig FILE [--check|--rollback|--status]",
+        "install a signed toolchain generation (hot update)");
     row(mem, fd, "where", "[TOOL]", "absolute path of a tool");
     row(mem, fd, "env", "", "install prefix and environment");
     row(mem, fd, "doctor", "", "health check: is everything in place");
@@ -664,7 +666,7 @@ fn names_dump(fd: u64) {
     wstr(fd, "cat\nstat\ncount\nfns\ntokens\ngrep\ntodo\nhash\n");
     wstr(fd, "ls\ntree\nnew\nexamples\nexample\n");
     wstr(fd, "syntax\nbuiltins\ntypes\nkeywords\ncaps\ncodes\nexplain\ncheat\n");
-    wstr(fd, "tools\nwhere\nenv\ndoctor\nabout\ncolor\ncommands\nhelp\n");
+    wstr(fd, "tools\nhotupdate\nwhere\nenv\ndoctor\nabout\ncolor\ncommands\nhelp\n");
 }
 
 fn usage_line(mem: ptr, fd: u64, name: str, args: str, desc: str) {
@@ -2711,6 +2713,9 @@ fn dispatch(mem: ptr, ab: ptr, argc: u32) -> u32 {
     }
     if eq_cstr(cmd, n, "skill") {
         return delegate_note(mem, cmd, n, "share/loment/skill/SKILL.md");
+    }
+    if eq_cstr(cmd, n, "hotupdate") {
+        return delegate_note(mem, cmd, n, "loment-hotupdate");
     }
 
     red(mem, 2);

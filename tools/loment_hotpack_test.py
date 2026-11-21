@@ -284,6 +284,9 @@ def test_a_linker_from_the_payload_links_a_program() -> None:
                            text=True, encoding="utf-8", errors="replace", timeout=120)
         assert r.returncode == 0, (r.returncode, r.stderr[-300:])
         assert out.is_file()
+        # The selfhost linker writes 0644 (no fchmod); `loment build` is what chmods the
+        # result, so a test that runs the linked program must do the same (POSIX only).
+        out.chmod(0o755)
         run = subprocess.run([str(out)], capture_output=True, timeout=30)
         assert run.returncode == 0, (
             f"代际里的链接器编出来的程序 rc={run.returncode} —— GEP 行仍在重叠")

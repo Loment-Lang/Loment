@@ -889,7 +889,10 @@ def test_launcher_forwards_unknown_to_cli():
     sys.path.insert(0, str(ROOT / "tools"))
     import loment_dist  # noqa: E402
     assert 'exec "$cli" "$@"' in loment_dist.LAUNCHER_SH
-    assert '"%here%loment-cli.exe" %*' in loment_dist.LAUNCHER_CMD
+    # The tool path comes from %GH% (the active hot-update generation, or bin/ when
+    # there is none) -- docs/368. The property under test is that UNKNOWN commands are
+    # forwarded to the CLI, not which prefix resolves the binary.
+    assert '"%GH%loment-cli.exe" %*' in loment_dist.LAUNCHER_CMD
     # 两个启动器都必须是纯 ASCII (PowerShell 5.1 按 ANSI 读无 BOM 脚本, docs/157 §3.4)
     for name, txt in (("launcher.sh", loment_dist.LAUNCHER_SH),
                       ("launcher.cmd", loment_dist.LAUNCHER_CMD)):

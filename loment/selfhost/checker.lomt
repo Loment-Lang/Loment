@@ -47,6 +47,81 @@ const K_CONST: u32 = 4;
 const K_TPARAM: u32 = 5;   // 泛型形参 (`fn f<T>` 里的 T): 只当类型名用
 const K_METHOD: u32 = 6;   // impl 方法: 名字与接收者类型一起构成身份 (静态派发)
 
+//: 名字表的**哈希索引**（`docs/350` §12.6）：开放寻址、条目 = 槽位 + 1、0 = 空。
+//: 符号表 5200 格 × 20 字节，线性查找让 5000 行程序的名字解析退化成二次方；
+//: 桶表 8192 × 4 字节，接在类型表之后（`chk_arena_hash`）。
+const CHK_HASH_SLOTS: u32 = 8192;
+const CHK_HASH_OFF: u32 = 142688;
+
+fn chk_hash(src: ptr, t: ptr, name_tok: u32) -> u32 {
+    let st: u32 = load32(t, name_tok * 20 + 4);
+    let ln: u32 = load32(t, name_tok * 20 + 8);
+    let h: u32 = 2166136261;
+    let i: u32 = 0;
+    while i < ln {
+        h = (h ^ (load8(src, st + i) as u32)) * 16777619;
+        i = i + 1;
+    }
+    return h % CHK_HASH_SLOTS;
+}
+
+fn chk_hash_put(src: ptr, t: ptr, s: ptr, name_tok: u32, slot: u32) {
+    let hp: ptr = ptr_add(s, CHK_HASH_OFF);
+    let hb: u32 = chk_hash(src, t, name_tok);
+    let hk: u32 = 0;
+    while hk < CHK_HASH_SLOTS && load32(hp, ((hb + hk) % CHK_HASH_SLOTS) * 4) != 0 {
+        hk = hk + 1;
+    }
+    if hk < CHK_HASH_SLOTS {
+        store32(hp, ((hb + hk) % CHK_HASH_SLOTS) * 4, slot + 1);
+    }
+}
+
+/// 用户段没有任何"可能触发移动/生命周期诊断"的构造时返回 1（`docs/350` §12.6）。
+///
+/// 触发项**保守地多收**：`&`（借用）、`free`（E029）、`struct` / `enum` / `str` / `[`
+/// （非 Copy 类型）、`fp`（函数值）、**字符串字面量**（`let s = "x"` 的类型是推断出来的，
+/// 没有 `str` 关键字）、以及**大写开头的标识符**（类型名，含 `Option<…>` 这类预置泛型
+/// 的使用）。预置块（`pub enum Option` 起）不算用户段。
+fn chk_simple_unit(src: ptr, t: ptr) -> u32 {
+    // 预置块的头：`pub enum Option`。它是**追加**在用户源之后的固定尾巴。
+    let uend: u32 = 0;
+    let have: u32 = 0;
+    let j: u32 = 0;
+    while chk_tok_kind(t, j) != 4 {
+        if have == 0 && chk_tok_is(src, t, j, "pub")
+                && chk_tok_is(src, t, j + 1, "enum")
+                && chk_tok_is(src, t, j + 2, "Option") {
+            uend = j;
+            have = 1;
+        }
+        j = j + 1;
+    }
+    if have == 0 {
+        uend = j;
+    }
+    let k: u32 = 0;
+    while k < uend && chk_tok_kind(t, k) != 4 {
+        if chk_tok_is(src, t, k, "&") || chk_tok_is(src, t, k, "free")
+                || chk_tok_is(src, t, k, "struct") || chk_tok_is(src, t, k, "enum")
+                || chk_tok_is(src, t, k, "str") || chk_tok_is(src, t, k, "[")
+                || chk_tok_is(src, t, k, "fp") {
+            return 0;
+        }
+        if chk_tok_kind(t, k) == 2 {
+            return 0;                   // 字符串字面量：类型是推断的，移动检查照样要有
+        }
+        if chk_tok_kind(t, k) == 0 {
+            let c: u32 = load8(src, load32(t, k * 20 + 4)) as u32;
+            if c >= 65 && c <= 90 {
+                return 0;
+            }
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
 // 错误码 = 项目统一口径 `loment_diag.RULES` 的**数字部分**。
 // 自举 checker 与参考实现的对照判据 = 两边**码集相等**, 所以码值必须取自同一张表 ——
 // 以前这里自定义 1..4, 与 loment_diag 的分类对不上 (E_DUP=1 vs E013=13 之类)。
@@ -1063,14 +1138,23 @@ fn chk_decl_method(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32,
 
 /// 顶层名字查表: 返回槽位+1 (0 = 未找到)。调用方按 stride 20 读各字段。
 fn chk_lookup_slot(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u32 {
-    let i: u32 = 0;
-    while i < n {
-        // 方法不参与普通名字查找: 参考实现把 impl 方法改名成 `Type_method` 放进函数表,
-        // 所以裸 `measure(...)` 在那边也是"未定义的函数"。
-        if load32(s, i * 20 + 4) != K_METHOD && same(src, t, sym_get(t, s, n, i), name_tok) {
-            return i + 1;
+    // 哈希索引：桶里存 `槽位 + 1`。方法照旧**不参与**普通名字查找 —— 参考实现把 impl
+    // 方法改名成 `Type_method` 放进函数表，裸 `measure(...)` 在那边也是"未定义的函数"；
+    // 探到方法条目继续往后找，不提前结束。
+    let hp: ptr = ptr_add(s, CHK_HASH_OFF);
+    let b: u32 = chk_hash(src, t, name_tok);
+    let k: u32 = 0;
+    while k < CHK_HASH_SLOTS {
+        let pos: u32 = (b + k) % CHK_HASH_SLOTS;
+        let v: u32 = load32(hp, pos * 4);
+        if v == 0 {
+            return 0;
         }
-        i = i + 1;
+        if load32(s, (v - 1) * 20 + 4) != K_METHOD
+                && same(src, t, load32(s, (v - 1) * 20), name_tok) {
+            return v;
+        }
+        k = k + 1;
     }
     return 0;
 }
@@ -1137,6 +1221,9 @@ fn declare(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32, ka: u32,
     store32(s, n * 20 + 8, ka % 256);
     store32(s, n * 20 + 12, ret);
     store32(s, n * 20 + 16, aux);
+    // 哈希索引（槽位 + 1）。桶表 8192 > 符号上限 5200，一定找得到空格；调用方的
+    // `nsym` 容量判据在更早处拒绝更大的单元。
+    chk_hash_put(src, t, s, name_tok, n);
     return ((n + 1) as u64) * 4294967296 + (o as u64);
 }
 
@@ -1316,6 +1403,8 @@ fn decl_tparams(src: ptr, t: ptr, s: ptr, n: u32, name_tok: u32) -> u32 {
             store32(s, c * 20 + 8, 0);
             store32(s, c * 20 + 12, 0);
             store32(s, c * 20 + 16, 0);
+            // 泛型形参也要进哈希（`Option<T>` 的载荷 `T` 由 `check_type` 查名字表）。
+            chk_hash_put(src, t, s, k, c);
             c = c + 1;
         }
         k = k + 1;
@@ -4550,7 +4639,11 @@ fn chk_mv_add(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
 // 新表放中间最安全（离两头都远，将来任一张表扩容都不会撞上）。
 // ⚠ **它必须与类型表一起按函数清零**（见 `check_arena` 里 `chk_body` 之前那三行）——
 // 不清就是整单元单调 bump。
-const CHK_FR_ON: u32 = 2044;   // 0 = 还没算, 1 = `lms` 开着, 2 = 关着 (缓存)
+/// `lms` 档的**整单元**缓存：0 = 还没算，1 = 开着，2 = 关着。
+/// 放在类型表（0..1028）与 `moved`/已释放表（3520 起）之间的空段。
+/// ⚠ 它**不能**按函数清零 —— 那会让 `chk_lms_on` 每函数重扫一遍 token 流（O(n²)）。
+const CHK_LMS_ON: u32 = 1032;
+const CHK_FR_ON: u32 = 2044;   // 遗留：不再使用（保留编号，避免挪动其它偏移）
 const CHK_FR_N: u32 = 2048;    // 条数
 const CHK_FR_T: u32 = 2056;    // 表项起始
 
@@ -4597,10 +4690,10 @@ fn chk_fr_del(src: ptr, t: ptr, tyt: ptr, name_tok: u32) {
     }
 }
 
-/// `lms` 开着吗（`docs/253`）—— **带缓存**：`chk_use` 会对每一个标识符问一次，
-/// 每次都扫一遍 token 流是 O(n²)。算一次存在 `CHK_FR_ON`，按函数清零。
+/// `lms` 开着吗（`docs/253`）—— **整单元缓存**：`chk_use` 会对每一个标识符问一次，
+/// 每次都扫一遍 token 流是 O(n²)。算一次存在 `CHK_LMS_ON`，**按单元**只清零一次。
 fn chk_lms_c(src: ptr, t: ptr, tyt: ptr) -> u32 {
-    let v: u32 = load32(tyt, CHK_FR_ON);
+    let v: u32 = load32(tyt, CHK_LMS_ON);
     if v == 0 {
         v = 2;
         if chk_lms_on(src, t) == 1 {
@@ -7064,9 +7157,16 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     store32(oc, 8, prof);
     store32(nc, 0, 0);
     store32(tyt, 0, 0);                 // 复合类型表: 条数清零
+    store32(tyt, CHK_LMS_ON, 0);        // `lms` 档缓存: 整单元只算一次
     store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
+    // 哈希索引清零（新 brk 页本来就是零；同一个 arena 可能被复数单元复用）。
+    let _hz: u32 = 0;
+    while _hz < CHK_HASH_SLOTS {
+        store32(syms, CHK_HASH_OFF + _hz * 4, 0);
+        _hz = _hz + 1;
+    }
     // `lspe pass "reason" { 体 }` 在**检查入口**拆平（`docs/262` §5.16 / `#786`）：
     // 参考实现在解析里做，自举侧没有 AST，于是在 token 流上做同一个变换。放在这里
     // （不是每个调用方各做一次）是因为 checker 的消费方不止驱动器 —— 语言服务与
@@ -7765,6 +7865,12 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         ib = ib + 1;
     }
     store32(tyt, CHK_HASRET, hbr);
+    // **证明性跳过**（`docs/350` §12.6）：没有借用 / 释放 / 聚合 / 字符串 / 函数值时，
+    // 移动检查与生命周期检查证明不出任何一条诊断 —— 这两趟在 5000 行语料上占
+    // 12.4 s / 0.45 s（实测），整段跳过。判据 `chk_simple_unit` 是保守的：任何一种
+    // 可能触发诊断的构造在场，就照旧跑满。**默认档同样生效**（用户 2026-11-20 要求
+    // 自举默认进入 2000 ms 内）；它只跳过可证明无诊断的路径。
+    let simple_unit: u32 = chk_simple_unit(src, t);
     i = 0;
     while chk_tok_kind(t, i) != 4 {
         if chk_tok_is(src, t, i, "fn") {
@@ -7790,7 +7896,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // E029 的"已释放"表与 `lms` 档的缓存 —— **也必须按函数清零**：
                 // 不清就是整单元单调 bump，而这张表的容量只有 63（`CHK_FR_N`）。
                 store32(tyt, CHK_FR_N, 0);
-                store32(tyt, CHK_FR_ON, 0);
+                // `CHK_LMS_ON` **不在这里清**：它是整单元的缓存（每函数清 = 每函数重扫）。
                 store32(tyt, 3528, envc);    // 形参数 (E012 判"局部 vs 形参")
                 store32(tyt, 3520, envc);
                 chk_body(src, t, syms, n, env, envc,
@@ -7801,11 +7907,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                 // 走完必须**再读一次偏移格** —— 本地 o 是 chk_body 之前/之后拍的快照,
                 // 不回读的话 chk_moves 写的诊断在 `return o / 8` 时会被整条丢掉。
                 store32(tyt, 3576, 0);
-                chk_moves(src, t, syms, n, env, load32(tyt, 3520), fbra, fend, out, oc);
-                // 生命周期（`docs/299`）：区域/逃逸判据。放在 `chk_moves` 之后 ——
-                // 那时环境里已经有全部 `let` 的类型（与 E012 那条同一个理由）。
-                chk_life(src, t, syms, n, env, load32(tyt, 3520),
-                         chk_lh(fbra, fend), i, out, oc);
+                if simple_unit == 0 {
+                    chk_moves(src, t, syms, n, env, load32(tyt, 3520), fbra, fend, out, oc);
+                    // 生命周期（`docs/299`）：区域/逃逸判据。放在 `chk_moves` 之后 ——
+                    // 那时环境里已经有全部 `let` 的类型（与 E012 那条同一个理由）。
+                    chk_life(src, t, syms, n, env, load32(tyt, 3520),
+                             chk_lh(fbra, fend), i, out, oc);
+                }
                 // 借用生命周期域（`docs/318`）：区域形状的三条规则 + 期 2 三种形状。
                 chk_bdom(src, t, syms, n, env, load32(tyt, 3520),
                          fbra, fend, out, oc);
@@ -8023,7 +8131,11 @@ pub fn chk_arena_env() -> u32 { return 105808; }
 /// 区 (静默改坏别人), 所以条数是"每函数上限"而不是"整单元上限"。
 /// 448 条/函数对语料最重的函数 (152 let) 仍有 3 倍余量。
 pub fn chk_arena_tyt() -> u32 { return 138576; }
-pub fn chk_arena_bytes() -> u32 { return 142688; }
+/// 名字表哈希索引（`CHK_HASH_OFF`）接在类型表之后。
+pub fn chk_arena_hash() -> u32 { return CHK_HASH_OFF; }
+/// 142,688 + 8192 × 4。**写成字面量**：`loment_p8_test::test_m85_heap_budget` 按
+/// `return <数>` 解析这一行来算 PE 垫片的堆预算（表达式它读不懂）。
+pub fn chk_arena_bytes() -> u32 { return 175456; }
 /// 诊断缓冲该分配多少字节（与写它的两个模块同一个数，`#663`）。
 pub fn chk_err_bytes() -> u32 { return err_max(); }
 /// 诊断缓冲丢了多少条（读 `chk_pub` 数出来的那一格，`#656`）。

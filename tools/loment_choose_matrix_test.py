@@ -730,13 +730,13 @@ def test_effects_slot_changes_the_front_end_not_the_code():
 
 @test
 def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
-    """GC × VM × LSPE × LVM：三档 GC 在 **VM 上**跑出的行为与原生相同，而 `vm` / `lspe`
+    """GC × LVM × LSPE：三档 GC 在 **LVM 上**跑出的行为与原生相同，而 `lvm` / `lspe`
     两维**不改 IR**、只进 Potato（`docs/231` §1.3、`docs/243` §4.5、`docs/262` §10.1）。
 
     这一条把四个子系统放在同一张格里：
 
     * `gc`：三档各一份（同一份梯子源）；
-    * `vm`：`choose vm` 与不写——IR 必须逐字节相同（`vm` 今天只声明"要由 VM 执行"，
+    * `lvm`：`choose lvm` 与不写——IR 必须逐字节相同（这一维今天只声明"要由引擎执行"，
       产物不变；哪天它开始动 IR，这条会红，逼着重走 `docs/231` §2.2 的登记处）；
     * `lspe`：开/关审计——IR 同样必须相同，只有 Potato 的 `state` 变；
     * `lvm`：VM 跑出的退出码/输出必须与 `lomelf` 原生产物**逐字节相同**。
@@ -748,9 +748,9 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
         for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
             variants = {
                 "plain": {},
-                "vm": {"vm": "vm"},
+                "lvm": {"lvm": "lvm"},
                 "lspe_alt": {"lspe": lspe_alt},
-                "vm+lspe_alt": {"vm": "vm", "lspe": lspe_alt},
+                "lvm+lspe_alt": {"lvm": "lvm", "lspe": lspe_alt},
             }
             irs = {}
             for name, extra in variants.items():
@@ -758,17 +758,17 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
                 rc, diag, ir, pot = _emit(td, f"{gc}-{name}", cell, RUN_BODY)
                 assert rc == 0, f"{gc}+{name}: 编不过\n{diag[-400:]}"
                 assert pot.get("gc") == gc, f"{gc}+{name}: Potato 的 gc 记错了"
-                if "vm" in extra:
-                    assert pot.get("vm") == "vm", f"{gc}+{name}: Potato 没记 vm"
+                if "lvm" in extra:
+                    assert pot.get("lvm") == "lvm", f"{gc}+{name}: Potato 没记 lvm"
                 if "lspe" in extra:
                     assert (pot.get("lspe") or {}).get("state") == extra["lspe"], \
                         f"{gc}+{name}: Potato 没记 lspe"
                 irs[name] = ir
             base = irs["plain"]
-            assert irs["vm"] == base, \
-                f"{gc}: `choose vm` 改变了 IR —— vm 维开始驱动产物，登记处要重走（docs/231 §2.2）"
+            assert irs["lvm"] == base, \
+                f"{gc}: `choose lvm` 改变了 IR —— 这一维开始驱动产物，登记处要重走（docs/231 §2.2）"
             assert irs["lspe_alt"] == base, f"{gc}: 另一档审计改变了 IR"
-            assert irs["vm+lspe_alt"] == base, f"{gc}: vm + 另一档审计组合改变了 IR"
+            assert irs["lvm+lspe_alt"] == base, f"{gc}: lvm + 另一档审计组合改变了 IR"
 
             buf = io.BytesIO()
             rc_vm = lvm.run_ir(base, buf, None, ["probe"])
@@ -785,7 +785,7 @@ def test_gc_vm_lspe_and_lvm_agree_on_every_tier():
             assert (rc_native, out_native) == (rc_vm, out_vm), (
                 f"{gc}: 原生 rc={rc_native} {out_native!r} / VM rc={rc_vm} {out_vm!r}")
     native = "" if sys.platform != "win32" or LVMTest.ELF._wsl() else "（本机无 WSL，原生对照跳过）"
-    print(f"      3 档 GC × vm × lspe: IR 逐字节同；VM 均 rc={expected_rc}{native}")
+    print(f"      3 档 GC × lvm × lspe: IR 逐字节同；VM 均 rc={expected_rc}{native}")
 
 
 @test

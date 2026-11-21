@@ -1,6 +1,6 @@
 ---
 name: loment-runtime
-description: Loment runtime and artifact components - LVM execution tiers T0-T3 (compact form, cache, fusion, limits), the Potato form object v0-v19, hot update, LomentFaster and Lomenter (design only), and DGT (planned). Read when using choose vm, inspecting or validating Potato, packaging hot updates, or asking about optimization plans. Part of the LomentSkill suite; section numbers are global.
+description: Loment runtime and artifact components - LVM execution tiers T0-T3 (compact form, cache, fusion, limits), the Potato form object v0-v24, hot update, LomentFaster and Lomenter (design only), and DGT (planned). Read when using choose lvm, inspecting or validating Potato, packaging hot updates, or asking about optimization plans. Part of the LomentSkill suite; section numbers are global.
 ---
 
 ## 8.3 LVM: execution models
@@ -30,8 +30,9 @@ What matters when you use it:
 - **T4 (generational/concurrent collection) is explicitly out of LVM's scope** (`docs/232`
   §4.4): the VM is a reader of the same IR, not a new runtime with its own collector. The
   tiers stop at T3.
-- **`choose vm` only records the dimension today.** The artifact is **byte-identical to
-  `no_vm`** and carries no bytecode. The interpreter is a separate tool: `loment-lvm FILE`
+- **`choose lvm` only records the dimension today.** The artifact is **byte-identical to
+  `no_lvm`** and carries no bytecode. (The spelling was `vm` / `no_vm` before Potato v24;
+  the old spelling is no longer a switch.) The interpreter is a separate tool: `loment-lvm FILE`
   (the packaged binary) or `python tools/lvm.py FILE.lomt` in a checkout.
 - **The VM accepts two entry shapes.** `_start` and `command_main(argv, argc)` (the VM
   synthesises argv the way `/proc/self/cmdline` looks); an `interrupt fn` entry and a
@@ -59,11 +60,12 @@ What matters when you use it:
 Potato is **the form object written next to a compiled unit**: "what this unit is", answerable
 **without reading the source**. It is not a debug dump and not a profile.
 
-- **Versions are cumulative and only grow**: `v0` … `v19`. Each new required field bumps the
+- **Versions are cumulative and only grow**: `v0` … `v24`. Each new required field bumps the
   version; older objects stay valid, and a new version never rewrites an old one.
   Examples of the ladder: `v6` grammar, `v7` boundary, `v8` gc, `v9` runtime, `v10`
-  `gc_ladder`, `v11` port, `v12` surfaces, `v13` vm, `v14` net_ladder, `v15` lms, `v16` lspe,
-  `v17` lms_levels, `v18` lms_budgets, `v19` five-rung `gc_ladder`.
+  `gc_ladder`, `v11` port, `v12` surfaces, `v13` vm (renamed `lvm` in `v24`), `v14` net_ladder,
+  `v15` lms, `v16` lspe, `v17` lms_levels, `v18` lms_budgets, `v19` five-rung `gc_ladder`,
+  `v23` fp, `v24` `vm` → `lvm`.
 - **Two validators** (`tools/potato.py` and the Loment twin `loment/tools/lompotato.lomt`)
   check shape and **cross-field self-consistency** - for example `surfaces.total_sites ==
   boundary.syscalls`, `w0+w1+w2+w3 == total_net`, `total_net == surfaces.net`, and the ladder

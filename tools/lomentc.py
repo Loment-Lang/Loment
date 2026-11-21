@@ -3549,7 +3549,7 @@ MAXDEPTH = 8
 #:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
 #:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
 #:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）；
-#:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）；
+#:   * `lvm`     —— `lvm` / `no_lvm`：**要哪种执行模型**（`docs/231`；v24 起由 `vm` 改名）；
 #:   * `lms`     —— **档名**：七级安全梯子开哪几级（`docs/253` §11.3）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
@@ -3577,12 +3577,16 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **执行模型**（`docs/231`，用户 2026-10-11 定第五维）。与 `runtime` 同一条纪律：
     # 取值**只说"有没有"**，不说"是哪一档"—— 照 `docs/229` §1.5.5 那张梯子，档位会随年份长
     # （T0 解释 / T1 反馈向量 / T2 基线编译 / T3 优化+去优化），钉进值名里就等于把今天的内容
-    # 钉成这一维的身份。**默认 `no_vm`** —— 默认档不许改变任何现有程序的行为。
+    # 钉成这一维的身份。**默认 `no_lvm`** —— 默认档不许改变任何现有程序的行为。
     #
     # 2026-10-11 起它被**渠道闸**关在发行版外面（写得出、却什么也拿不到，比写不出来更坏）；
-    # **2026-10-17 放开**（用户裁决，`docs/231` 页首）：两个渠道都收 `choose vm`。
+    # **2026-10-17 放开**（用户裁决，`docs/231` 页首）：两个渠道都收它。
     # 它仍是**声明**，不是保证 —— 引擎凭什么说"可用"在 `docs/264` 那五条判据上。
-    "vm": ("vm", "no_vm"),
+    #
+    # **2026-11-21 改名**（用户裁决）：`vm` / `no_vm` → `lvm` / `no_lvm`。
+    # 旧拼写**不是别名** —— `choose vm` 从此是未定义的开关（E022），Potato v13–v23
+    # 的对象仍按旧拼写回放（v24 起才是这一格）。
+    "lvm": ("lvm", "no_lvm"),
     # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）。与 `gc` **正交** ——
     # `gc` 管"谁归还"（生命周期的**内向可达**），这一维管"谁能碰"（许可的**外向**）；
     # `docs/210` §6.2 那句"箭头反了"说的就是这两条是同一张图上的相反方向。
@@ -3604,7 +3608,7 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # （一条 `cmp` / 一个 `llvm.trap` / 一段内联桩），没有表、没有位图 ——
     # 所以它与 `no_runtime` **不冲突**，`CORE_FORBIDS` 里因此没有它。
     # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
-    # 与 `runtime` / `vm` 同一条纪律，装的东西不进值名。
+    # 与 `runtime` / `lvm` 同一条纪律，装的东西不进值名。
     "lms": ("lms_full", "lms_forensic_admin", "lms_daily_admin",
             "lms_manage_only_admin", "lms_close_admin"),
     # **安全审计**（`docs/262`，用户 2026-10-18 定第七维）。与其它六维**正交**：
@@ -3630,7 +3634,7 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **间接分派**（用户 2026-11-12 定）。`no_fp`（默认）下函数值 / 闭包 / 间接调用是
     # **编译错误并点名**；`fp` 才让这一整类进语言。理由与当年刻意排除它的那一条相同
     # （`docs/232` §3.3）：默认产物保持**静态调用图**，`closed` 与可达性门禁的前提不动。
-    # 取值只说"有没有"，与 `runtime` / `vm` 同一条纪律。
+    # 取值只说"有没有"，与 `runtime` / `lvm` 同一条纪律。
     "fp": ("fp", "no_fp"),
     # **类继承**（`docs/345` C0，`docs/344` 的地基）。`class_off` 是今天的语法；
     # `class_on` 才收 `class`/`extends`/`virtual`/`override`/`abstract`。C0 只落语法
@@ -3669,7 +3673,7 @@ CORE_SLOT_DEFAULTS = {"aicheck": "false", "effects": "false"}
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
 #: `lms` / `lspe` / `lifetime` 排在最后：它们**没有冲突对**，追加在尾部不会改动
 #: 任何既有配对的先后。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms", "lspe",
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "lvm", "lms", "lspe",
                                    "lifetime", "fp", "class", "flomtc")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 #: 槽取值也算核心写法（否则它会被当成**用户开关**吞掉，`choose lspe_aicheck_true`
@@ -3680,7 +3684,7 @@ CORE_WORDS = (frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed", "vm": "no_vm", "lms": "lms_full",
+                 "port": "sealed", "lvm": "no_lvm", "lms": "lms_full",
                  "lspe": "lspe_open_admin", "lifetime": "lifetime_auto", "fp": "no_fp",
                  "class": "class_off", "flomtc": "flomtc_false"}
 #: 生命周期维在**旧版次**里的默认值（`docs/305`：封版的版次一个字节都不变）。
@@ -3710,7 +3714,7 @@ CORE_DIM_ZH = {
     "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`）",
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
-    "vm": "执行模型（`vm` / `no_vm`）",
+    "lvm": "执行模型（`lvm` / `no_lvm`）",
     "lms": "内存安全档（`lms_full` / `lms_forensic_admin` / "
            "`lms_daily_admin` / `lms_manage_only_admin`）",
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
@@ -7948,7 +7952,7 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     有据可查** —— 判据那一侧也按棘轮规矩**反转**（`loment_channel_test` 从"发行版拒
     `use libl`"改成"发行版收 `use libl`"），而不是把那条判据删掉。
 
-    （`choose vm` 那条闸**原样留着**：LVM 还没到兑现的时候。）
+    （同一天那次**也包括** LVM 那一维：2026-10-17 它一起放开了，所以这里没有闸可留。）
     """
     exts = _ext_chain(ext)
     stores = store_roots(root, tool_dir)
@@ -9624,7 +9628,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # 不是一条新写的冲突 —— 少写一条冲突、多复用一条既有规则，与那条自己的口径一致。
     #
     # **次序**：排在运行期那条**之后** —— 自举侧的合并结果就是这个次序
-    # （`checker.lomt` 的强保证块在 `eff_vm` 那块之前），两边报文次序才对得上。
+    # （`checker.lomt` 的强保证块在 `eff_lvm` 那块之前），两边报文次序才对得上。
     # **`vm` 那条闸 2026-10-17 放开**（用户裁决，LVM 完成一大半）：发行版接受 `choose vm`。
     # 放开之后这个维**今天仍是声明**，不是保证 —— 解释器是仓侧的 `tools/lvm.py` 那一族
     # （Python），发行包里没有它，产物也不走字节码。这一句是这一维的**明写边界**，
@@ -11997,7 +12001,9 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # v22 = v21 + **生命周期档** `lifetime`（`docs/299`）：`lifetime_no` /
         # `lifetime_auto` / `lifetime_manual`。与 `gc` / `lms` 同级同形、**必填**，
         # 于是"这份产物有没有静态借用证明"是**不读源码可判的**。
-        "potato": "v23",
+        # v24 = v23 + **第五维改名**（用户 2026-11-21）：`vm` → `lvm`，取值
+        # `lvm` / `no_lvm`；键序不变（仍在 `port` 之后）。旧版对象按旧拼写回放。
+        "potato": "v24",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -12021,11 +12027,12 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # **必填**，所以"这份产物通不通着世界"是**不读源码可判的**，而不是"看源码里有没有
         # `choose hosted`"。这正是 `docs/219` §7 那句"测量强于声明"在这一维的落法。
         "port": mod.chooses.get("port", CORE_DEFAULTS["port"]),
-        # **执行模型**（`docs/231`）：`vm` / `no_vm`。与上面四维同一条纪律 —— **必填**，
-        # 所以"这份产物是给 VM 的还是原生的"是**不读源码可判的**（`docs/229` §4.1 那处
-        # 空白的第一格）。发行版里也如实抄（渠道闸 2026-10-17 放开）。**它今天不承诺性能**：
-        # `choose vm` 的产物与 `no_vm` **逐字节相同**（这一维是声明，引擎是另一个读者）。
-        "vm": mod.chooses.get("vm", CORE_DEFAULTS["vm"]),
+        # **执行模型**（`docs/231`，v24 起叫 `lvm`）：`lvm` / `no_lvm`。与上面四维同一条
+        # 纪律 —— **必填**，所以"这份产物是给 LVM 的还是原生的"是**不读源码可判的**
+        # （`docs/229` §4.1 那处空白的第一格）。发行版里也如实抄（渠道闸 2026-10-17 放开）。
+        # **它今天不承诺性能**：`choose lvm` 的产物与 `no_lvm` **逐字节相同**
+        # （这一维是声明，引擎是另一个读者）。
+        "lvm": _dims["lvm"],
         # **内存安全档**（`docs/253` §11.3，用户 2026-10-15 定第六维）。
         # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
         # **必填**，于是"这份产物在哪一档上"是**不读源码可判的**。
@@ -12055,7 +12062,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         # **系统索引**（v20，`docs/147` §5.4 / #1022）。六个系统各一条，次序写死；
         # `state` 与顶层字段（`lspe` 取台账自己的 `state`）、`detail` 与明细字段名、
         # `cost` 与明细的总数**逐条相同** —— 校验器不读源码也判得了它们打架。
-        # 没有明细字段的三个（`runtime` / `port` / `vm`）detail/cost 是 `null`。
+        # 没有明细字段的三个（`runtime` / `port` / `lvm`）detail/cost 是 `null`。
         "systems": {
             _sk: {
                 "state": (_lspe_ledger["state"] if _sk == "lspe"
@@ -12067,7 +12074,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                         else sum(1 for _v in _lms_levels.values() if _v)
                         if _sk == "lms" else _lspe_ledger["sites"])}),
             }
-            for _sk in _potato.SYSTEM_KEYS
+            for _sk in _potato.SYSTEM_KEYS_V24
         },
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,

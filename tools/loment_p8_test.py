@@ -1617,11 +1617,11 @@ def _dep_paths(target: Path) -> list[Path]:
 #: 核心模式的全部取值（与 `potato.CORE_WORDS` 同一条；只在这个夹具里用来认那一行）。
 #:
 #: ⚠ **这是第三份手抄**（另两份：`potato.CORE_WORDS` 与自举侧 `switches.lomt` 的
-#: `sw_is_core`）。加 `vm` 维（`docs/231`）时把这一份也补上了 —— 但**它已经漏了
+#: `sw_is_core`）。加第五维（`docs/231`，v24 起叫 `lvm`）时把这一份也补上了 —— 但**它已经漏了
 #: `port` 的 `sealed`/`hosted`**（`docs/222` 那次没跟上），这一处**不在本次范围**，
 #: 留着可见；真要收口就把三份变成一份推导的。
 _CORE_CHOOSE = ("std", "no_std", "gc_manual", "gc_auto", "gc_auto_alpha",
-                "runtime", "no_runtime", "vm", "no_vm",
+                "runtime", "no_runtime", "lvm", "no_lvm",
                 # 第八维（`docs/299`）：三个取值也要认出来，否则夹具会把
                 # `choose lifetime_auto` 当普通开关跳过。
                 "lifetime_no", "lifetime_auto", "lifetime_manual")

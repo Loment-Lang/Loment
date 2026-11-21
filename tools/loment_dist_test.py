@@ -391,7 +391,7 @@ def build() -> tuple[Path, Path]:
     # 这不是"放宽判据"：比的是**同一个东西**（归档里的 driver 与种子链产物逐字节相同），
     # 只是那份种子现在**按渠道**取；下面那条断言把"有没有走发行版"单独钉住。
     assert loment_dist.ACTIVE_SEED == loment_dist.RELEASE_SEED, (
-        "打包没有走发行版种子 —— 包里会是 dev 工具链，于是发行版照样收 `choose vm`"
+        "打包没有走发行版种子 —— 包里会是 dev 工具链，于是发行版照样收 `choose lvm`"
         "（`docs/231` §2.3）")
     driver = loment_dist._lomelf_link(
         loment_dist.ACTIVE_SEED.read_text(encoding="utf-8"), "elf")

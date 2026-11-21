@@ -2315,11 +2315,11 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     if nr == 0 {                                         // read(fd, buf, count)
         // 解释器**没有真的文件描述符** —— 只认识 257 开的那个合成文件（`docs/243` §3.4）。
         // 别的 fd **点名拒**：VM 里没有文件系统，装作有就是给错答案。
-        if x1 != VFD {
-            fail("系统调用 read：这个 fd 不是 VM 合成的那一个");
-        }
         if ctx_get(a, C_VFD_OPEN) == 0 {
             fail("系统调用 read：合成文件还没打开");
+        }
+        if x1 != ctx_get(a, C_VFD_OPEN) as u64 {
+            fail("系统调用 read：这个 fd 不是 VM 合成的那一个");
         }
         let rp: u32 = x2 as u32;
         let rw: u32 = x3 as u32;
@@ -2342,7 +2342,7 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         return rl as u64;
     }
     if nr == 3 {                                         // close(fd)
-        if x1 != VFD {
+        if ctx_get(a, C_VFD_OPEN) == 0 || x1 != ctx_get(a, C_VFD_OPEN) as u64 {
             fail("系统调用 close：这个 fd 不是 VM 合成的那一个");
         }
         ctx_set(a, C_VFD_OPEN, 0);
@@ -2414,7 +2414,7 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         // **只认识 `/proc/self/cmdline`**，而且给它的是**被解释程序自己的**命令行，
         // 不是解释器的（下面 `run` 里那段）。别的路径**点名拒**（`docs/243` §3.4）。
         if lit_is_cmdline(m, x2 as u32) {
-            ctx_set(a, C_VFD_OPEN, 1);
+            ctx_set(a, C_VFD_OPEN, VFD as u32);
             ctx_set(a, C_VFD_POS, 0);
             return VFD;
         }
@@ -3309,10 +3309,27 @@ fn snapshot_write(a: ptr, m: ptr) {
         }
         d = d + 1;
     }
+    // caps / shadow：镜像按地址重建能力，写空段（参考侧读侧照样跳过）。
     wu32(f, a, 0);
     wu32(f, a, 0);
-    wu32(f, a, 0);
-    wu32(f, a, 0);
+    // 合成文件（被解释程序自己的 `/proc/self/cmdline`）：**连同读游标与字节**。
+    // W5（`docs/360` §4）：停在 read 中间的 guest，恢复后要从同一位置接着读。
+    if ctx_get(a, C_VFD_OPEN) != 0 {
+        wu32(f, a, 1);
+        wu32(f, a, ctx_get(a, C_VFD_OPEN));         // fd（两个实现的 VFD 都是 1000）
+        wu32(f, a, ctx_get(a, C_VFD_POS));
+        // `C_ARG0` 是 **ARGV 区内的相对偏移**（`vm_syscall` 的 read 也是这么用的）。
+        wname(f, a, ARGV_OFF + ctx_get(a, C_ARG0), ctx_get(a, C_ARG0N));
+    } else {
+        wu32(f, a, 0);
+    }
+    // argv：guest 的命令行字段（去掉末尾 NUL），恢复侧据此重建之后新开的 cmdline。
+    if ctx_get(a, C_ARG0N) > 1 {
+        wu32(f, a, 1);
+        wname(f, a, ARGV_OFF + ctx_get(a, C_ARG0), ctx_get(a, C_ARG0N) - 1);
+    } else {
+        wu32(f, a, 0);
+    }
     let _f: i64 = syscall4(3, f, 0, 0);
 }
 
@@ -3450,6 +3467,88 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             cont_set(a, d, 5, bi);
             cont_set(a, d, 13, pv);
             d = d + 1;
+        }
+        // caps：跳过 —— 镜像的能力按地址重建（`docs/365` §2 的保真度边界）。
+        let nc: u32 = ru32(f, a);
+        let ci: u32 = 0;
+        while ci < nc {
+            let _cd: u32 = ru32(f, a);
+            let cn: u32 = ru32(f, a);
+            if cn > 240 {
+                fail("checkpoint：能力名太长");
+            }
+            if cn > 0 && read_exact(f, ptr_add(a, NAME_SCRATCH), cn) == 0 {
+                fail("checkpoint：能力名读不全");
+            }
+            let _co: u32 = ru32(f, a);
+            let _cg: u32 = ru32(f, a);
+            let _ct: u32 = ru32(f, a);
+            ci = ci + 1;
+        }
+        // shadow：跳过 —— 同一条理由。
+        let ns: u32 = ru32(f, a);
+        let si: u32 = 0;
+        while si < ns {
+            let _sa: u32 = ru32(f, a);
+            let _so: u32 = ru32(f, a);
+            let _sg: u32 = ru32(f, a);
+            let _st: u32 = ru32(f, a);
+            si = si + 1;
+        }
+        // 合成文件：采用快照里的 fd / 读游标 / 字节（W5，`docs/360` §4）。
+        let nv: u32 = ru32(f, a);
+        if nv > 0 {
+            let vfd: u32 = ru32(f, a);
+            let vpos: u32 = ru32(f, a);
+            let vlen: u32 = ru32(f, a);
+            if vlen > 8192 {
+                fail("checkpoint：命令行太长");
+            }
+            if vlen > 0 && read_exact(f, ptr_add(a, ARGV_OFF), vlen) == 0 {
+                fail("checkpoint：命令行读不全");
+            }
+            ctx_set(a, C_ARG0, 0);
+            ctx_set(a, C_ARG0N, vlen);
+            ctx_set(a, C_VFD_POS, vpos);
+            ctx_set(a, C_VFD_OPEN, vfd);
+            let vi: u32 = 1;
+            while vi < nv {
+                let _vf: u32 = ru32(f, a);
+                let _vp: u32 = ru32(f, a);
+                let vl: u32 = ru32(f, a);
+                if vl > 8192 {
+                    fail("checkpoint：命令行太长");
+                }
+                if vl > 0 && read_exact(f, ptr_add(a, ARGV_OFF), vl) == 0 {
+                    fail("checkpoint：命令行读不全");
+                }
+                vi = vi + 1;
+            }
+        }
+        // argv：把被解释程序自己的命令行重建到 ARGV 区 —— 恢复之后**新开**的 cmdline
+        // 拿到的是同一份字节，不是解释器进程的那一份。
+        let na: u32 = ru32(f, a);
+        if na > 0 {
+            let wt: u32 = 0;
+            let first: u32 = 0;
+            let ai2: u32 = 0;
+            while ai2 < na {
+                let al: u32 = ru32(f, a);
+                if wt + al + 1 > 8192 {
+                    fail("checkpoint：命令行太长");
+                }
+                if al > 0 && read_exact(f, ptr_add(a, ARGV_OFF + wt), al) == 0 {
+                    fail("checkpoint：命令行读不全");
+                }
+                store8(a, ARGV_OFF + wt + al, 0 as u8);
+                if ai2 == 0 {
+                    first = wt;
+                }
+                wt = wt + al + 1;
+                ai2 = ai2 + 1;
+            }
+            ctx_set(a, C_ARG0, first);
+            ctx_set(a, C_ARG0N, wt - first);
         }
     }
     let _c: i64 = syscall4(3, f, 0, 0);

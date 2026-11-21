@@ -3,7 +3,7 @@
 > 状态: **已实装**（2026-11-21），参考实现 ↔ 自举镜像
 > 上游: `docs/360`（旅行桥：P5）· `docs/363`（参考 P5）· `docs/364`（自举 P5）·
 > `docs/263`（上限：布局已对齐）· `docs/362`/`docs/364`（基质）
-> 判据: `tools/lvm_cp_test.py`（7 条）· `tools/lvm_twin_test.py`（10 条，含跨实现两条）
+> 判据: `tools/lvm_cp_test.py`（8 条）· `tools/lvm_twin_test.py`（11 条，含跨实现三条）
 > 一句话: **快照不再是谁的私事 —— 同一份字节，`tools/lvm.py` 与 `loment/tools/lvm.lomt`
 > 都能接着跑。**
 
@@ -77,11 +77,18 @@ ctx    256 B : 深度、步数、堆游标、对象计数、特权层数、站�
 | `pending` | 停在 `phi` 一半时的待写回值 | **非零就拒**（镜像没有并行 phi 暂存） |
 | `caps` | 每个 SSA 值的能力 `(oid, gen, tag)` | 忽略（镜像按地址） |
 | `shadow` | 指针存储的影子表 | 忽略 |
-| `vfd` | 合成文件的 fd / 游标 / 字节 | 忽略（镜像用自己合成的 cmdline） |
-| `argv` | 被解释程序的命令行 | 忽略（镜像用自己进程的 argv） |
+| `vfd` | 合成文件的 fd / 游标 / 字节 | **采用**（2026-11-21）：字节搬进 ARGV 区，fd / 游标写回 ctx |
+| `argv` | 被解释程序的命令行 | **采用**：重建到 ARGV 区，之后新开的 cmdline 也用它 |
 
-镜像写快照时写一个**最小扩展**（全零），参考侧能解析；参考侧读镜像的快照时，
-扩展里的空字段按"没有"处理，能力用 `cap_for_addr` 按地址重建。
+镜像写快照时也写 `vfd` / `argv`（`caps` / `shadow` 仍写空段）；参考侧读镜像的快照时，
+能力用 `cap_for_addr` 按地址重建。
+
+**为什么 `vfd` / `argv` 必须过快照**（W5，`docs/360` §4）：guest 能看到的外部输入今天只有
+它自己的命令行。停在 `read` 中间的 guest，恢复后要么从同一游标接着读，要么读到另一份字节 ——
+后者在跨实现恢复里是**宿主进程的**命令行，不是 guest 的。判据：
+`lvm_cp_test::test_checkpoint_carries_the_command_line_cursor`（参考自恢复）、
+`lvm_twin_test::test_checkpoint_cross_carries_the_command_line`（两个方向，且**故意**
+让宿主的 argv 与快照里的不同）。
 
 ---
 
@@ -108,8 +115,8 @@ ctx    256 B : 深度、步数、堆游标、对象计数、特权层数、站�
   镜像 → 参考会按地址重建能力。合法程序两种基质下答案相同；故障面的精确度不同。
 * **`sw_tag`**：镜像不支持，读到头里的 flags=2 直接拒。
 * **`phi` 中途**：参考的并行 phi 暂存只在参考侧有；跨实现恢复要求没有 pending。
-* **外部输入**：合成 cmdline 用各自进程的 argv；跨实现恢复要在同一命令行下。
-  真实文件 / 时间 / pid 不在快照里（`docs/360` W5 的同一条边界）。
+* **外部输入**：**合成 cmdline（含读游标）已进快照**（2026-11-21），跨实现恢复不再依赖
+  "两边命令行碰巧一样"。真实文件 / 时间 / pid 仍不在快照里（`docs/360` W5 的同一条边界）。
 
 ---
 
@@ -117,9 +124,10 @@ ctx    256 B : 深度、步数、堆游标、对象计数、特权层数、站�
 
 | 判据 | 内容 |
 |---|---|
-| **lvm_cp_test**（7） | 参考自恢复：两引擎同答 / 任意边界 / 调用栈 / 链式 / 确定与 IR 绑定 / `sw_tag` 状态 / 只走 T0 |
+| **lvm_cp_test**（8） | 参考自恢复：两引擎同答 / 任意边界 / 调用栈 / 链式 / 确定与 IR 绑定 / `sw_tag` 状态 / 只走 T0 / **合成命令行的读游标** |
 | **lvm_twin_test::test_checkpoint_cross_reference_first** | 参考存 → 镜像恢复：最后的 `rc + stdout` 与一口气跑完相同（停点 0 / 40） |
 | **lvm_twin_test::test_checkpoint_cross_mirror_first** | 镜像存 → 参考恢复：同上 |
+| **lvm_twin_test::test_checkpoint_cross_carries_the_command_line** | 两个方向都按快照里的命令行与读游标接着跑；宿主的 argv **故意**与快照里的不同 |
 | **lvm_twin_test::test_checkpoint_matches_reference** | 两边各自存/取（自恢复）同答，`sw_cap` 下也一样 |
 
 判据夹具带 `print("A")/print("B")`：**恢复后的那次打印走的是全局字符串**，

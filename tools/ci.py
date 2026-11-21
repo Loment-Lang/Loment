@@ -530,7 +530,7 @@ SHARD_COST = {
     "lvm_a0_test": 12.0,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
-    "lvm_twin_test": 66.5,     # 2026-11-21：本机 Windows 实测 66.3s（加跨实现两条）
+    "lvm_twin_test": 76.0,     # 2026-11-21：本机 Windows 实测 76.0s（跨实现三条，含命令行）
     "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,

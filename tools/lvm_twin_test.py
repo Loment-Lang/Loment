@@ -548,14 +548,18 @@ def _ref_cap(ll: Path, argv0: str) -> tuple[int, bytes, str]:
 
 
 def _run_mirror_args(mir: Path, ll: Path, extra: list[str],
-                     timeout: int = 180) -> tuple[int, bytes, bytes]:
-    """镜像 + 任意附加实参 -> `(rc, stdout, stderr)`。输入路径与 `_mirror_input_path` 同名。"""
+                     timeout: int = 180, tag_extra: str = "") -> tuple[int, bytes, bytes]:
+    """镜像 + 任意附加实参 -> `(rc, stdout, stderr)`。输入路径与 `_mirror_input_path` 同名。
+
+    `tag_extra` 给 WSL 里的那份输入换个名字 —— 用来量"宿主 argv 与快照里的不同"
+    （W5 的命令行那条判据）。同一内容、不同路径 ⇒ FNV 仍匹配。
+    """
     args = " ".join(extra)
     if sys.platform != "win32":
         r = subprocess.run([str(mir), str(ll), *extra], capture_output=True,
                            timeout=timeout, shell=False)
         return r.returncode, r.stdout, r.stderr
-    tag = f"/tmp/lvm_twin_{os.getpid()}"
+    tag = f"/tmp/lvm_twin_{os.getpid()}{tag_extra}"
     script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.err; "
               f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
               f"chmod +x {tag}.bin && cd /tmp && "
@@ -772,6 +776,74 @@ def test_checkpoint_cross_mirror_first() -> None:
                 f"镜像→参考（at={at}）：rc={rc2}（要 {base_rc}）"
                 f" stdout={got!r}（要 {base.getvalue()!r}）")
     print("      停点 0 与 40：镜像存 → 参考恢复，rc + stdout 与一口气跑完相同")
+
+
+_CMDLINE_PROG = """module w5_cmdline
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(64);
+    let at: i64 = (0 as i64) - (100 as i64);
+    let fd: i64 = syscall4(257, at as u64, str_ptr("/proc/self/cmdline") as u64, 0 as u64);
+    let n1: i64 = syscall4(0, fd as u64, p as u64, 8 as u64);
+    let i: u32 = 0;
+    while i < 20 {
+        i = i + 1;
+    }
+    let n2: i64 = syscall4(0, fd as u64, (p as u64) + (8 as u64), 40 as u64);
+    let n: u64 = (n1 + n2) as u64;
+    syscall4(1, 1 as u64, p as u64, n);
+    syscall4(3, fd as u64, 0 as u64, 0 as u64);
+    syscall4(60, 0 as u64, 0 as u64, 0 as u64);
+}
+"""
+
+
+def test_checkpoint_cross_carries_the_command_line() -> None:
+    """判 N（W5，`docs/360` §4）：合成命令行的**字节与读游标**跨实现交接。
+
+    两个方向各带一个"宿主 argv 与快照里不同"的陷阱：参考存的那份由镜像在**另一个
+    路径名**下恢复；镜像存的那份由参考在**另一组 argv** 下恢复。只认宿主 argv 的实现
+    会打印另一个名字 —— 快照里的那一份必须盖过它。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CMDLINE_PROG, "w5_cmdline", td)
+        ir = ll.read_text(encoding="utf-8")
+        argv0 = _mirror_input_path(ll)
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, [argv0], "t0")
+        assert base_rc == 0 and base.getvalue().endswith(b"\0"), base.getvalue()
+        ghost = td / "w5_ghost.ll"
+        ghost.write_bytes(ll.read_bytes())
+        for at in (0, 20, 40, 50):
+            pre = io.BytesIO()
+            _rc, blob = lvm.run_checkpointed(ir, pre, "none", at, None, [argv0])
+            assert blob is not None, f"参考在 {at} 处没有停"
+            snap = _snapshot_token(td, f"w5_ref_{at}.snap")
+            _snapshot_to_mirror(blob, snap)
+            mrc, mout, merr = _run_mirror_args(
+                mir, ghost, [f"resume={snap}"], tag_extra=f"_g{at}")
+            assert (mrc, pre.getvalue() + mout) == (base_rc, base.getvalue()), (
+                f"参考→镜像（at={at}）：rc={mrc} out={pre.getvalue() + mout!r}"
+                f"（要 {base.getvalue()!r}）err={merr[-160:]!r}")
+
+            msnap = _snapshot_token(td, f"w5_mir_{at}.snap")
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={msnap}"])
+            assert mrc1 == 0, f"镜像在 {at} 处没有停：{merr1[-160:]!r}"
+            blob2 = _snapshot_from_mirror(msnap)
+            post = io.BytesIO()
+            rc2, _b = lvm.run_checkpointed(ir, post, "none", None, blob2,
+                                           ["different-argv"])
+            assert (rc2, mout1 + post.getvalue()) == (base_rc, base.getvalue()), (
+                f"镜像→参考（at={at}）：rc={rc2} out={mout1 + post.getvalue()!r}"
+                f"（要 {base.getvalue()!r}）")
+    print("      停点 0/20/40/50：两边都按快照里的命令行与游标接着读")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -21,6 +21,8 @@
 * **E** 快照确定：同一 K 两次逐字节相同；换一份 IR 恢复被**点名拒**。
 * **F** 只走纯 T0：剖面 / 计数 / t2 / 紧凑形都在 CLI 上点名拒。
 * **G** `sw_tag` 的对象表与 4 位标签一起进快照（`docs/364`）。
+* **H** 合成文件（guest 自己的 `/proc/self/cmdline`）的**读游标**进快照：
+  停在 read 中间，恢复后从同一位置接着读（W5，`docs/360` §4）。
 
 用法: python tools/lvm_cp_test.py
 """
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -85,6 +88,29 @@ fn _start() {
         i = i + 1;
     }
     syscall4(60, s as u64, 0, 0);
+}
+"""
+
+
+#: 读 `/proc/self/cmdline`：先读 8 字节，循环一轮之后读剩下的 —— 停在中间时，
+#: 恢复后必须**从同一游标**接着读（W5）。
+_CMDLINE = """module cp_cmdline
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(64);
+    let at: i64 = (0 as i64) - (100 as i64);
+    let fd: i64 = syscall4(257, at as u64, str_ptr("/proc/self/cmdline") as u64, 0 as u64);
+    let n1: i64 = syscall4(0, fd as u64, p as u64, 8 as u64);
+    let i: u32 = 0;
+    while i < 20 {
+        i = i + 1;
+    }
+    let n2: i64 = syscall4(0, fd as u64, (p as u64) + (8 as u64), 40 as u64);
+    let n: u64 = (n1 + n2) as u64;
+    syscall4(1, 1 as u64, p as u64, n);
+    syscall4(3, fd as u64, 0 as u64, 0 as u64);
+    syscall4(60, 0 as u64, 0 as u64, 0 as u64);
 }
 """
 
@@ -240,6 +266,30 @@ def test_checkpoint_only_on_plain_t0() -> None:
                 rc = lvm.main(args)
             assert rc == 2, f"{args}: 没有拒（rc={rc}）"
     print("      t2 / 剖面 / 计数 / 缺 --checkpoint-out：四项都点名拒")
+
+
+def test_checkpoint_carries_the_command_line_cursor() -> None:
+    """判 H（W5）：停在 read 中间，恢复后从同一游标接着读（`docs/360` §4）。"""
+    ir = _compile(_CMDLINE, "cp_cmdline")
+    argv = ["checkpoint-cmdline-prog"]
+    want_rc, want_out, _ = _run(ir, argv=argv)
+    assert want_rc == 0 and want_out.endswith(b"\0"), (want_rc, want_out)
+    open_pts: list[int] = []
+    mid_pts: list[int] = []
+    for at in (0, 10, 20, 30, 40, 45, 50):
+        rc1, out1, blob = _run(ir, at, argv=argv)
+        assert blob is not None, f"{at} 处没有停"
+        if struct.unpack_from("<I", blob, 16 + lvm.CTX_VFD_OPEN)[0]:
+            open_pts.append(at)
+            if struct.unpack_from("<I", blob, 16 + lvm.CTX_VFD_POS)[0] == 8:
+                mid_pts.append(at)
+        rc2, out2, blob2 = _run(ir, None, blob, argv=argv)
+        assert blob2 is None
+        assert (rc2, out1 + out2) == (want_rc, want_out), (
+            f"at={at}: rc={rc2} out={out1 + out2!r} vs {want_out!r}")
+    assert open_pts, "没有采样点落在 open 之后 —— 这条判据没量到合成文件"
+    assert mid_pts, "没有采样点停在第一次 read 之后 —— 这条判据没量到游标"
+    print(f"      停点 {mid_pts} 停在读到 8 字节处：游标与字节都恢复")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

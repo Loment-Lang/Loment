@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""lms_sites.py — LMS 站点普查（`docs/363`）。
+"""lms_sites.py — LMS 站点普查（`docs/363` / `docs/361` V4）。
 
 把一份 IR 里的访存站点逐条点名。站点 ID 与 LVM 的 fault 报站点**同一套坐标**：
 
     (函数名, 块标签, 块内指令序号)   →   `fn:blk#idx`
 
-等级只有两个（V1）：
+等级三种：
 
+* `proven`：**常量下标 + 常量长度**，而且字节偏移 + 宽度 ≤ 对象大小（规则 **R1**）。
+  证明写在站点上（`rule: "R1"`），LNotary 复查引用是不是规则表里的；
 * `checked`：同函数里有 g1 形状的检查（`br i1 …, label %*lmsok, label %*lmsbad`），
   且这条访存在 `*lmsok` 块里 —— 原生侧真的会拦它；
 * `unsafe`：其余。LVM 的 `sw_cap` 会检查全部访存，但那是**基质**的账，
@@ -30,6 +32,7 @@ import lomelf  # noqa: E402
 SCHEMA = 1
 INTERNAL = "__loment_"
 _BR_OK_BAD = re.compile(r"br i1 .*label %([-\w.$]+), label %([-\w.$]+)")
+_RULES = ("R1", "R2", "R3", "R4")
 
 
 def canonical_bytes(obj: object) -> bytes:
@@ -53,11 +56,7 @@ def _checked_blocks(fn) -> set[str]:
 
 
 def _checked_sites(fn) -> set[tuple[str, int]]:
-    """每个 `*lmsok` 块里**第一条**访存才是被检查的那一条。
-
-    检查保护的是紧跟 `getelementptr` 的那条 `load`/`store`；块里后面的访存
-    （比如把结果写进局部变量的 `store i32 %t6, ptr %x.addr`）不在检查范围内。
-    """
+    """每个 `*lmsok` 块里**第一条**访存才是被检查的那一条。"""
     ok = _checked_blocks(fn)
     out: set[tuple[str, int]] = set()
     for blk in fn.blocks:
@@ -70,6 +69,72 @@ def _checked_sites(fn) -> set[tuple[str, int]]:
     return out
 
 
+def _const_int(s: str) -> int | None:
+    s = s.strip()
+    if s.startswith("-"):
+        return -int(s[1:]) if s[1:].isdigit() else None
+    return int(s) if s.isdigit() else None
+
+
+def _ptr_name(op: str) -> str | None:
+    s = op.strip()
+    if s.startswith("ptr "):
+        s = s[4:].strip()
+    return s if s.startswith("%") else None
+
+
+def _gep_info(text: str, offsets: dict[str, tuple[str, int]]) -> tuple[str, int] | None:
+    """常量 GEP 的 `(基对象, 字节偏移)`；有一个下标不是常量就返回 `None`。"""
+    body = text[len("getelementptr"):].strip()
+    if body.startswith("inbounds"):
+        body = body[len("inbounds"):].strip()
+    ty, i = lomelf.parse_type(body)
+    ops = lomelf.split_top(body[i:].lstrip(", ").strip())
+    if not ops:
+        return None
+    base = _ptr_name(ops[0])
+    if base is None or base not in offsets:
+        return None
+    root, boff = offsets[base]
+    idxs: list[int] = []
+    for op in ops[1:]:
+        _t, j = lomelf.parse_type(op)
+        v = _const_int(op[j:].strip())
+        if v is None:
+            return None
+        idxs.append(v)
+    if not idxs:
+        return None
+    if ty.startswith("["):
+        n, elem = lomelf.array_parts(ty)
+        esz = lomelf.size_of(elem)
+        if len(idxs) >= 2:
+            return root, boff + idxs[0] * n * esz + idxs[1] * esz
+        return root, boff + idxs[0] * esz
+    if ty.startswith("%"):
+        if len(idxs) >= 2:
+            off, _fty = lomelf.field_offset(ty, idxs[1])
+            return root, boff + off
+        return None
+    return root, boff + idxs[0] * lomelf.size_of(ty)
+
+
+def _access_ptr(text: str, op: str, ty: str | None) -> str | None:
+    """从 load/store 文本里取指针操作数。"""
+    if op == "load":
+        rest = text[len("load "):].lstrip()
+        _t, j = lomelf.parse_type(rest)
+        return rest[j:].lstrip(", ").strip()
+    if op == "store":
+        rest = text[len("store "):].lstrip()
+        _t, j = lomelf.parse_type(rest)
+        for part in reversed(lomelf.split_top(rest[j:].lstrip(", ").strip())):
+            if part.strip().startswith("ptr "):
+                return part.strip()
+        return None
+    return None
+
+
 def census(ir_text: str) -> dict:
     _globals, funcs, _externs = lomelf.parse_ll(ir_text)
     sites: list[dict] = []
@@ -77,9 +142,21 @@ def census(ir_text: str) -> dict:
         if fn.name.startswith(INTERNAL):
             continue
         checked_set = _checked_sites(fn)
+        sizes: dict[str, int] = {}
+        offsets: dict[str, tuple[str, int]] = {}
         for blk in fn.blocks:
             for idx, ins in enumerate(blk.instrs):
                 text = ins.text
+                if text.startswith("alloca ") and ins.dest:
+                    ty, _ = lomelf.parse_type(text[len("alloca "):])
+                    sizes[ins.dest] = lomelf.size_of(ty)
+                    offsets[ins.dest] = (ins.dest, 0)
+                    continue
+                if text.startswith("getelementptr") and ins.dest:
+                    info = _gep_info(text, offsets)
+                    if info is not None:
+                        offsets[ins.dest] = info
+                    continue
                 op = ty = None
                 if text.startswith("load "):
                     op = "load"
@@ -89,16 +166,27 @@ def census(ir_text: str) -> dict:
                     ty, _ = lomelf.parse_type(text[len("store "):])
                 elif text.startswith("atomicrmw "):
                     op = "atomicrmw"
-                    ty = None
                 if op is None:
                     continue
+                proven = False
+                ptr_text = _access_ptr(text, op, ty)
+                if ptr_text is not None and ty is not None:
+                    pname = _ptr_name(ptr_text)
+                    if pname is not None and pname in offsets:
+                        root, off = offsets[pname]
+                        width = lomelf.size_of(ty)
+                        if root in sizes and off + width <= sizes[root]:
+                            proven = True
                 checked = (blk.label, idx) in checked_set
                 site = {
                     "fn": fn.name, "blk": blk.label, "idx": idx,
                     "op": op, "ty": ty,
-                    "grade": "checked" if checked else "unsafe",
+                    "grade": ("proven" if proven
+                              else "checked" if checked else "unsafe"),
                 }
-                if checked:
+                if proven:
+                    site["rule"] = "R1"
+                elif checked:
                     site["fault"] = "F01"
                 sites.append(site)
     raw = ir_text.encode("utf-8")
@@ -108,6 +196,7 @@ def census(ir_text: str) -> dict:
         "sites": sites,
         "counts": {
             "sites": len(sites),
+            "proven": sum(1 for s in sites if s["grade"] == "proven"),
             "checked": sum(1 for s in sites if s["grade"] == "checked"),
             "unsafe": sum(1 for s in sites if s["grade"] == "unsafe"),
         },
@@ -132,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(a.out).write_text(out, encoding="utf-8")
         c = table["counts"]
         print(f"[LMS] sites -> {a.out} ({c['sites']} site(s), "
-              f"{c['checked']} checked, {c['unsafe']} unsafe)")
+              f"{c['proven']} proven, {c['checked']} checked, {c['unsafe']} unsafe)")
     else:
         print(out, end="")
     return 0

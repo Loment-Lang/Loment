@@ -429,6 +429,61 @@ class LNotaryTest(unittest.TestCase):
                 "--seal", str(law), "--universes", str(forest))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    # ---- V4 · proven 站点与规则引用（docs/361 §6） -------------------------
+
+    def _r1_table(self) -> dict:
+        src = self.tmp / "r1.lomt"
+        src.write_text(
+            "module r1\nchoose vm\n\n"
+            "fn _start() {\n"
+            "    let a: [u32; 4] = [1, 2, 3, 4];\n"
+            "    let x: u32 = a[0];\n"
+            "    let y: u32 = a[3];\n"
+            "    syscall4(60, 0, 0, 0);\n"
+            "}\n", encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "lomentc.py"),
+             str(src), "--print", "llvm"],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ir = self.tmp / "r1.ll"
+        ir.write_text(r.stdout, encoding="utf-8")
+        out = self.tmp / "r1.sites.json"
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "lms_sites.py"),
+             str(ir), "--out", str(out)],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    # AC · R1：常量下标 + 常量长度 ⇒ proven
+    def test_r1_proven_sites(self) -> None:
+        from lnotary import sites
+
+        table = self._r1_table()
+        proven = [s for s in table["sites"] if s["grade"] == "proven"]
+        self.assertTrue(proven)
+        self.assertTrue(all(s.get("rule") == "R1" for s in proven))
+        self.assertEqual(sites.verify_sites(table), [])
+
+    # AD · proven 必须引用规则表里的规则
+    def test_proven_rule_must_be_known(self) -> None:
+        from lnotary import sites
+
+        table = self._r1_table()
+        table["sites"][0]["rule"] = "R9"
+        errs = sites.verify_sites(table)
+        self.assertTrue(any(e.code == "LNT-SITES" for e in errs), errs)
+
+    # AE · proven 少了 rule 也红
+    def test_proven_without_rule_is_rejected(self) -> None:
+        from lnotary import sites
+
+        table = self._r1_table()
+        table["sites"][0].pop("rule", None)
+        errs = sites.verify_sites(table)
+        self.assertTrue(any(e.code == "LNT-SITES" for e in errs), errs)
+
 
 #: `loment_tools_test::test_every_criterion_is_registered` 要看见它们；
 #: `unittest` 的 loader 不经过 `TESTS`，所以两条路各留一份名字。

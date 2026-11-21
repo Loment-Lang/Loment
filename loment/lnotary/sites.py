@@ -13,7 +13,8 @@ from .verify import Error
 
 SCHEMA = 1
 OPS = frozenset({"load", "store", "atomicrmw"})
-GRADES = frozenset({"checked", "unsafe"})
+GRADES = frozenset({"proven", "checked", "unsafe"})
+RULES = frozenset({"R1", "R2", "R3", "R4"})
 FAULTS = frozenset({"F01", "F02", "F03"})
 
 
@@ -55,7 +56,7 @@ def verify_sites(table: object, ir_bytes: bytes | None = None) -> list[Error]:
         _err(out, "LNT-SITES", "站点表的 sites 必须是数组")
         return out
     seen: set[tuple[str, str, int]] = set()
-    checked = unsafe = 0
+    proven = checked = unsafe = 0
     for s in sites:
         if (not isinstance(s, dict)
                 or not isinstance(s.get("fn"), str)
@@ -72,6 +73,11 @@ def verify_sites(table: object, ir_bytes: bytes | None = None) -> list[Error]:
             _err(out, "LNT-SITES", f"{key} 的 op 是 {s.get('op')!r}（只有 {sorted(OPS)}）")
         if s.get("grade") not in GRADES:
             _err(out, "LNT-SITES", f"{key} 的 grade 是 {s.get('grade')!r}（只有 {sorted(GRADES)}）")
+        elif s["grade"] == "proven":
+            proven += 1
+            if s.get("rule") not in RULES:
+                _err(out, "LNT-SITES",
+                     f"{key} 是 proven，但 rule 不在 {sorted(RULES)}（得到 {s.get('rule')!r}）")
         elif s["grade"] == "checked":
             checked += 1
             if s.get("fault") not in FAULTS:
@@ -82,7 +88,8 @@ def verify_sites(table: object, ir_bytes: bytes | None = None) -> list[Error]:
     if not isinstance(counts, dict):
         _err(out, "LNT-SITES", "站点表缺少 counts")
     else:
-        want = {"sites": len(sites), "checked": checked, "unsafe": unsafe}
+        want = {"sites": len(sites), "proven": proven,
+                "checked": checked, "unsafe": unsafe}
         for k, v in want.items():
             if counts.get(k) != v:
                 _err(out, "LNT-SITES", f"counts.{k} 是 {counts.get(k)!r}，应为 {v}")

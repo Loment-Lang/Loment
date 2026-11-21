@@ -12,12 +12,12 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .verify import Error, LEVELS
+from .verify import Error, LEVELS, lvm_enabled
 
 SCHEMA = 1
 
 #: 九个核心维。`lspe` 的取值住在 `lspe.state`，其余是顶层字段。
-DIMS = ("mode", "gc", "runtime", "port", "vm", "lms", "lifetime", "fp")
+DIMS = ("mode", "gc", "runtime", "port", "vm", "lms", "lifetime", "fp", "lvm")
 
 #: 法域里收录的三条规律（V1）。每条只在产物**真的声称**它时出现。
 LAW_NO_RUNTIME = "no_runtime"
@@ -82,9 +82,9 @@ def derive_lawspace(doc: dict, artifact_bytes: bytes,
     绑进旁挂（`docs/363`）。`genesis` 是创世预算（`docs/361` V5），缺省用
     `GENESIS_DEFAULTS`。不修改 `doc`；输出不含时间戳、路径等不稳定字段。
     """
-    if doc.get("vm") != "vm":
-        raise ValueError("LNT-VM: LNotary 只在 choose vm 的产物上启用"
-                         f"（这份是 {doc.get('vm')!r}）")
+    if not lvm_enabled(doc):
+        raise ValueError("LNT-VM: LNotary 只在 choose lvm（旧拼写 choose vm）的产物上启用"
+                         f"（这份是 vm={doc.get('vm')!r} lvm={doc.get('lvm')!r}）")
     dims = dims_of(doc)
     g = dict(GENESIS_DEFAULTS)
     if genesis:
@@ -129,9 +129,10 @@ def verify_lawspace(doc: dict, side: object,
     if side.get("potato") != doc.get("potato"):
         _err(out, "LNT-LS",
              f"旁挂的 potato 是 {side.get('potato')!r}，产物是 {doc.get('potato')!r}")
-    if doc.get("vm") != "vm":
+    if not lvm_enabled(doc):
         _err(out, "LNT-VM",
-             f"LNotary 只在 choose vm 的产物上启用；这份是 {doc.get('vm')!r}")
+             f"LNotary 只在 choose lvm（旧拼写 choose vm）的产物上启用；"
+             f"这份是 vm={doc.get('vm')!r} lvm={doc.get('lvm')!r}")
 
     g = side.get("genesis")
     if not isinstance(g, dict):

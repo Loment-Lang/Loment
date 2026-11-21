@@ -79,25 +79,30 @@ choose lnotary_true
 
 ---
 
-## 2.5 启用条件：`choose vm`
+## 2.5 启用条件：LVM 被 choose 启用
 
-**LNotary 只在 `choose vm` 的产物上启用**（用户 2026-11-21 定）。
+**LNotary 只在产物声明 LVM 执行时启用**（用户 2026-11-21 定）。
 
 理由不是审美：公证人的强声明本来就用 LVM 的词说 —— 站点坐标 `(fn, blk, idx)`、
-fault 码 `F01–F03`、`sw_cap` 基质。没有 `choose vm`，这些词在产物里没有对应的执行面，
+fault 码 `F01–F03`、`sw_cap` 基质。没有 LVM，这些词在产物里没有对应的执行面，
 公证会变成"用 LVM 的术语给另一件更弱的事盖章"。时间桥梁也需要两个基质可比；
-产物不声明 `vm`，桥的一端是空的。
+产物不声明 LVM，桥的一端是空的。
 
-落点两处，所有入口共享同一条规则：
+**拼写**：今天的维度值是 `choose vm`；LVM 线正在把它改成 `choose lvm`（2026-11-21
+进行中，尚未落地）。门控两条都认（`verify.lvm_enabled`），改名落地那一刻不需要再改一次。
 
-* `verify_potato` —— `vm != "vm"` ⇒ **`LNT-VM`**；
-* `derive_lawspace` —— 同一个条件直接抛 `ValueError`（防直接调用绕过）。
+落点三处，所有入口共享同一条规则：
+
+* `verify_potato` —— 不启用 ⇒ **`LNT-VM`**；
+* `derive_lawspace` —— 同一个条件直接抛 `ValueError`（防直接调用绕过）；
+* `verify_lawspace` —— 同一条规则再查一次。
 
 两个边界要写明：
 
-1. `docs/231` 的**发行版驱动器拒 `choose vm`**，所以这等于把 LNotary 定位成 **dev 工具链**的能力；
-2. `choose vm` 是**声明**，不是"真的在 LVM 里跑过"的证明。运行证明要等 LVM 侧交出
-   运行记录，那是下一档（不属于 V0–V5）。
+1. **发行版已经接受**这道声明（`docs/231`，2026-10-17 用户裁决"VM 应该得开了"）。
+   它不再是 dev-only 的能力。
+2. `choose vm` / `choose lvm` 是**声明**，不是"真的在 LVM 里跑过"的证明。运行证明要等
+   LVM 侧交出运行记录，那是下一档（不属于 V0–V5）。
 
 ---
 
@@ -166,7 +171,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 
 ---
 
-## 5. 判据（二十九条，`tools/lnotary_test.py`）
+## 5. 判据（三十二条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -199,9 +204,12 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | Z | 子的 sum 与环 ⇒ `LNT-SUM` / `LNT-CYCLE` | 同上 |
 | AA | 旁挂 `genesis` 缺省与 mode 校验 | 同上 |
 | AB | CLI `seal` → `derive` 根 → `derive` 子 → `verify --universes` 往返 | 同上 |
+| AC | R1：常量下标 + 常量长度 ⇒ `proven`，`rule: "R1"` | 站点表不存在 ⇒ 红 |
+| AD | `proven` 的 `rule` 改成 `R9` ⇒ `LNT-SITES` | 同上 |
+| AE | `proven` 少了 `rule` ⇒ `LNT-SITES` | 同上 |
 
-二十九条在本机全绿（`python tools/lnotary_test.py`，29/29，约 8.7s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 29`。
+三十二条在本机全绿（`python tools/lnotary_test.py`，32/32，约 11.1s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 32`。
 
 ---
 
@@ -212,7 +220,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | **V1** | `lawspace` 旁挂与**封印哈希**（`docs/358` §4.1） | `docs/357` W1 | **已落地** |
 | **V2** | 站点表与旁挂绑定（`docs/363`） | `docs/356` 站点坐标 | **已落地** |
 | **V3** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | 下一档 |
-| **V4** | `proven` 站点的规则引用必须可复查 | 规则表进产物 | 未开始 |
+| **V4** | `proven` 站点的规则引用必须可复查 | 规则表进产物 | **已落地** |
 | **V5** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 | **已落地** |
 
 V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不冒充源码级完备。**
@@ -239,6 +247,23 @@ V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不�
 
 ---
 
+## 6.6 站点证明（V4）
+
+站点表的第三个等级 `proven` 不认自由标签：每条 `proven` 必须引用规则表里的一条
+（`R1`–`R4`，`docs/356` §6.2）。V4 先落 **R1**：
+
+> 常量下标 + 常量长度，且字节偏移 + 宽度 ≤ 对象大小。
+
+普查器（`tools/lms_sites.py`）在函数内跟踪 `alloca` 的对象大小与常量 `getelementptr`
+的字节偏移；`load`/`store` 的指针落在已知对象里且界内，就标 `proven` + `rule: "R1"`。
+LNotary 的 `sites.verify_sites` 只核**引用是否可复查**：规则名不在表里、或者 `proven`
+没有规则，都是 `LNT-SITES`。它不重算偏移（零工具链 import）。
+
+R2（规范循环）/ R3（支配分支）/ R4（生命周期）是下一档；V4 只做 R1，因为它是
+**纯局部**的，不需要解释器。
+
+---
+
 ## 7. 我不主张
 
 1. **不主张 V0–V2 能证明产物安全。** 它只证明产物内部没有假账；
@@ -251,8 +276,9 @@ V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不�
 5. **不主张现在扩到源码级完备。** 那要站点表与 IR 解码（`docs/358` §1A）。
 6. **不主张派生链证明可达性。** V5 证明"子能碰的东西不多于父"（静态）；哪些 `unsafe`
    站点在子权能下真的到得了，是另一条分析，不在定理里（`docs/363` §7）。
-7. **不主张 LNotary 今天能用于发行版产物。** 发行版驱动器拒 `choose vm`（`docs/231`），
-   所以它是 **dev 工具链**的能力；另外 `choose vm` 是声明，不是运行证明（§2.5）。
+7. **不主张 `choose lvm` 是运行证明。** 它是声明；真正的运行证明要等 LVM 侧交出运行记录（§2.5）。
+8. **不主张 V4 的证明覆盖 R2–R4。** 只落了 R1（常量下标 + 常量长度）；其余三条规则要循环/分支/
+   生命周期的形状，是下一档（§6.6）。
 
 ---
 

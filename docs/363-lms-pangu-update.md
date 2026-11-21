@@ -99,22 +99,26 @@ g1 会先 `abort`（132），`sw_cap` 轮不到。两份探针因此各关一侧
   "schema": 1,
   "source": { "sha256": "…", "bytes": 12345 },
   "sites": [
+    { "fn": "_start", "blk": "entry", "idx": 4,
+      "op": "store", "ty": "i32", "grade": "proven", "rule": "R1" },
     { "fn": "_start", "blk": "L1_lmsok", "idx": 1,
       "op": "load", "ty": "i8", "grade": "checked", "fault": "F01" }
   ],
-  "counts": { "sites": 4, "checked": 1, "unsafe": 3 },
+  "counts": { "sites": 5, "proven": 1, "checked": 1, "unsafe": 3 },
   "seal": "…"
 }
 ```
 
-等级只有两个：
+等级三种：
 
+* **`proven`**：常量下标 + 常量长度，且字节偏移 + 宽度 ≤ 对象大小（规则 **R1**）。
+  `rule` 必填，LNotary 只核**引用是否可复查**（V4，`docs/361` §6.6）；
 * **`checked`**：同一个 `*lmsok` 块里**第一条**访存 —— g1 检查保护的就是它；
 * **`unsafe`**：其余。块里第二条访存（比如把结果写进局部变量的 `store i32 %t6`）
   不在检查范围内，**不许跟着升级**。
 
 `seal` 是除自己外全部字段的规范哈希；`source.sha256` 把表绑到 IR 字节。
-LNotary 的 `sites.verify_sites` 只核自洽与绑定，不重扫 IR（零工具链 import 是硬约束）。
+LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重扫 IR（零工具链 import 是硬约束）。
 
 旁挂因此多一格：
 

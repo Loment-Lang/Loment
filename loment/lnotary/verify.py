@@ -14,6 +14,14 @@ MAX_VERSION = 23
 #: 声明"这份产物要求公证"的用户开关。编译器把它记进 `switches`。
 CLAIM_SWITCH = "lnotary_true"
 
+#: **LVM 的激活声明**。今天的维度值是 `vm`；LVM 线正在把拼写改成 `lvm`
+#: （2026-11-21 进行中）。两条都认 —— 改名落地那一刻，门控不需要再改一次。
+LVM_ON_VALUES = ("vm", "lvm")
+
+
+def lvm_enabled(doc: dict) -> bool:
+    return doc.get("vm") in LVM_ON_VALUES or doc.get("lvm") == "lvm"
+
 SYSTEMS = ("gc", "runtime", "port", "vm", "lms", "lspe")
 SYSTEM_DETAIL = {"gc": "gc_ladder", "lms": "lms_levels", "lspe": "lspe"}
 LEVELS = ("lms_check", "lms_manage", "lms_guard", "lms_reject",
@@ -230,11 +238,12 @@ def verify_potato(doc: object) -> Verdict:
     n = _parse_version(v, doc)
     if n is None:
         return v
-    #: **启用条件**（用户 2026-11-21）：LNotary 只在 `choose vm` 的产物上启用。
+    #: **启用条件**（用户 2026-11-21）：LNotary 只在 LVM 被 choose 启用的产物上生效。
     #: 没有 LVM 就没有 `sw_cap` 基质，公证人的站点/fault 声明会变成另一件更弱的事。
-    if doc.get("vm") != "vm":
+    if not lvm_enabled(doc):
         _err(v, "LNT-VM",
-             f"LNotary 只在 choose vm 的产物上启用；这份是 {doc.get('vm')!r}")
+             f"LNotary 只在 choose lvm（旧拼写 choose vm）的产物上启用；"
+             f"这份是 vm={doc.get('vm')!r} lvm={doc.get('lvm')!r}")
     if n >= 20:
         _check_systems(v, doc)
     if n >= 10:

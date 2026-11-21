@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shlex
 import shutil
@@ -462,6 +464,163 @@ def test_twin_error_parity() -> None:
                 f"err={ref[2][:60]!r} / 镜像 rc={got[0]} out={got[1][:40]!r} "
                 f"err={got[2][:60]!r}")
     print(f"      四份 IR 的退出码 / stdout / stderr 逐字节相同（{', '.join(_PARITY_CASES)}）")
+
+
+# ---------------------------------------------------------------- sw_cap（docs/363）
+#
+# `docs/360` B7：两套解释器对**同一故障**给同一 code + site。自举侧没有 SSA 能力表
+# （`VAL_REC` 只有 16 字节），所以它落的是**按地址**的那一半；三条探针钉住两边的
+# 退出码与站点，合法语料钉住「加了检查，没加行为」。
+
+_CAP_PROBES = {
+    "cap_oob": """module cap_oob
+choose runtime
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let i: u32 = 10;
+    a[i] = 99;
+    syscall4(60, a[0] as u64, 0, 0);
+}
+""",
+    "cap_uaf": """module cap_uaf
+choose runtime
+use bytes
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    free(p);
+    let q: ptr = r64(slot, 0) as ptr;
+    let v: u32 = load32(q, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+""",
+    "cap_heap_oob": """module cap_heap_oob
+choose runtime
+use bytes
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 16, 99);
+    syscall4(60, 0, 0, 0);
+}
+""",
+}
+
+
+def _ref_ir_text(text: str, name: str, td: Path) -> Path:
+    src = td / f"{name}.lomt"
+    src.write_text(text, encoding="utf-8", newline="\n")
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{name}: {errs[:2]}"
+    ll = td / f"{name}.ll"
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    return ll
+
+
+def _ref_cap(ll: Path, argv0: str) -> tuple[int, bytes, str]:
+    import io as _io  # noqa: PLC0415
+    buf, err = _io.BytesIO(), _io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = lvm.run_ir(ll.read_text(encoding="utf-8"), buf, None, [argv0],
+                        "t0", substrate="sw_cap")
+    return rc, buf.getvalue(), err.getvalue()
+
+
+def _run_mirror_cap(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes, bytes]:
+    """镜像 + `sw_cap` 实参 -> `(rc, stdout, stderr)`。输入路径与 `_mirror_input_path` 同名。"""
+    if sys.platform != "win32":
+        r = subprocess.run([str(mir), str(ll), "sw_cap"], capture_output=True,
+                           timeout=timeout, shell=False)
+        return r.returncode, r.stdout, r.stderr
+    tag = f"/tmp/lvm_twin_{os.getpid()}"
+    script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.err; "
+              f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
+              f"chmod +x {tag}.bin && cd /tmp && "
+              f"timeout {timeout} {tag}.bin {tag}.ll sw_cap > {tag}.out 2> {tag}.err; echo -n $?")
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                       capture_output=True, timeout=timeout + 180, shell=False)
+    import base64  # noqa: PLC0415
+    out = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {tag}.out 2>/dev/null || true"]).stdout
+    err = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {tag}.err 2>/dev/null || true"]).stdout
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    return (rc,
+            base64.b64decode(out) if out.strip() else b"",
+            base64.b64decode(err) if err.strip() else b"")
+
+
+def _fault_line(err: str) -> str:
+    line = next((x for x in err.splitlines() if x.startswith("lvm: F0")), "")
+    return line.split(" (")[0]          # 码 + 站点；witness 文案两边可以不同
+
+
+def test_cap_faults_match_reference() -> None:
+    """判 I（B7）：越界 / 悬垂 / 堆越界 —— 两边的退出码与 `F0k + 站点` 相同。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang（这条判据要它把种子编成 stage1）")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for name, text in _CAP_PROBES.items():
+            ll = _ref_ir_text(text, name, td)
+            rrc, _rout, rerr = _ref_cap(ll, "prog")
+            mrc, _mout, merr = _run_mirror_cap(mir, ll)
+            assert rrc == mrc, f"[{name}] 退出码不同：参考 {rrc} / 镜像 {mrc}"
+            rl = _fault_line(rerr)
+            ml = _fault_line(merr.decode("utf-8", "replace"))
+            assert rl and ml, f"[{name}] 有一边没有故障行：参考 {rerr!r} / 镜像 {merr!r}"
+            assert rl == ml, f"[{name}] 站点不同：参考 {rl!r} / 镜像 {ml!r}"
+    print("      三条故障：两边的退出码与 `F0k + 站点` 逐字节同")
+
+
+def test_cap_legal_programs_match() -> None:
+    """判 J：合法语料在 `sw_cap` 下两边同答 —— 加了检查，没加行为。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    ran = 0
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for rel in CORPUS:
+            ll = _ref_ir(ROOT / rel, td)
+            try:
+                rrc, rout, _rerr = _ref_cap(ll, _mirror_input_path(ll))
+            except Exception:  # noqa: BLE001
+                continue                 # 参考自己跑不了（`lvm_test` 的棘轮管它）
+            mrc, mout, merr = _run_mirror_cap(mir, ll)
+            assert (rrc, rout) == (mrc, mout), (
+                f"{rel}: 参考 rc={rrc} out={rout[:40]!r} / 镜像 rc={mrc} "
+                f"out={mout[:40]!r} err={merr[-120:]!r}")
+            ran += 1
+    assert ran >= len(CORPUS) - 2, f"只跑成了 {ran} 份"
+    print(f"      {ran} 份合法语料：sw_cap 下两边 stdout + rc 逐字节同")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -509,6 +509,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--checksums", metavar="PATH", help="写 SHA256SUMS 风格清单 (M88)")
     a = ap.parse_args(argv)
+    # `#1784`：写与核对是两件事 —— 一起给就**拒掉**。原先两个写分支先返回，
+    # `--check` 被接受却从没跑过，调用方以为核过了（与自举侧 `lomrel.lomt` 同一句）。
+    if a.check and (a.emit is not None or a.checksums):
+        print("[ERR] --check is exclusive with --emit / --checksums "
+              "(a write is not a verification)", file=sys.stderr)
+        return 2
     want = build()
     if a.checksums:
         # 显式 LF: 校验清单会被 sha256sum -c 之类逐行解析, CRLF 会让文件名带上 \r

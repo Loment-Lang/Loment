@@ -130,6 +130,33 @@ def _reject(candidate: Path, tree: Path, **kw) -> str:
 
 
 @test
+def test_malformed_hot_meta_is_rejected_not_a_crash() -> None:
+    """`#1705`：坏 `.lomhot` 要报一句，**不许**冒 `IndexError`/`KeyError`/`ValueError`。
+
+    这份文件由 `lomelf --hot-meta` 写，但可以被手改、也可能来自别的构建 —— 用户输入
+    不是"内部数据"。夹具是几条各缺一样东西的记录行，外加一条正常的对照。
+    """
+    bad = [
+        "func f frame=1 layout=x\ncall g nope\n",        # 调用点那格不是 `名字=值`
+        "func f layout=x\n",                             # 缺 frame
+        "func f frame=one layout=x\n",                   # frame 不是整数
+        "call c at=4\n",                                 # call 在任何 func 之前
+        "wat 1 2\n",                                     # 不认识的记录行
+    ]
+    for text in bad:
+        try:
+            lu.parse_hot_meta(text)
+        except lu.Reject as e:
+            assert e.code == "hot-meta" and e.detail, (text, e)
+        else:
+            raise AssertionError(f"坏 .lomhot 被收下了: {text!r}")
+    good = "lomhot 1\nfunc f entry=0 frame=8 layout=abc\ncall c1 at=4\n"
+    fns = lu.parse_hot_meta(good)
+    assert fns["f"]["frame"] == 8 and fns["f"]["calls"] == [("c1", 4)], fns
+    print(f"      {len(bad)} 种坏 .lomhot 都报成 hot-meta；正常那份照旧解析")
+
+
+@test
 def test_manifest_is_computed_from_the_tree() -> None:
     man = lu.manifest(ROOT, f"v{BASE}-hot.1")
     lom = sorted(ROOT.glob("lom/*.lom"))

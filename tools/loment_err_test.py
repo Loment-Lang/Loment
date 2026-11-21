@@ -715,6 +715,11 @@ def test_a_grammar_declaration_beats_content_sniffing():
                    + "y = 2" + "\n")
         assert "像 C#" in o2, f"别名 {alias!r} 没认成 C#：{o2[-400:]!r}"
 
+    # `#862`：声明**前面**的行内块注释不改读法 —— 与工具链 `_GRAMMAR_LEAD` 同一条线
+    o4 = probe("cmt", "/* license */ choose write grammar cpp\n"
+               + "\n" + "x = 1" + "\n")
+    assert "像 C++" in o4 and "据文件头" in o4, f"行内注释挡掉了声明：{o4[-400:]!r}"
+
     # 没有声明时，依据仍要说清是"据后缀"（不能混着说）
     o3 = probe("noext", "y = 2" + "\n")
     assert "像 Python" in o3 and "据后缀" in o3, f"没说清依据是后缀：{o3[-400:]!r}"

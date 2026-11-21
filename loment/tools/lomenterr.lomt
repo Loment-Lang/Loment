@@ -135,6 +135,8 @@ const LBRACE: u32 = 123;
 const RBRACE: u32 = 125;
 const RBRACK: u32 = 93;
 const SEMI: u32 = 59;
+const SLASH: u32 = 47;
+const STAR: u32 = 42;
 
 // ---------------------------------------------------------------- 界面字串
 //
@@ -1832,6 +1834,10 @@ fn eat_word(sr: ptr, p: u32, e: u32, w: str) -> u32 {
 /// —— 而这一节反复要治的就是那个。共享常量**防**漂；判据只能**事后抓**。
 fn decl_at(sr: ptr, s: u32, e: u32) -> u64 {
     let p: u32 = skip_blank(sr, s, e);
+    // `#862`：同一行内的块注释在声明前面时不该改变读法 —— 与工具链
+    // `potato_from._GRAMMAR_LEAD` 同一条线（跨行的不算，那边也只收行内）
+    p = skip_block_comment(sr, p, e);
+    p = skip_blank(sr, p, e);
     let i: u32 = 0;
     let bad: u64 = 18446744073709551615 as u64;
     while i < decl_word_count() {
@@ -1855,6 +1861,28 @@ fn decl_at(sr: ptr, s: u32, e: u32) -> u64 {
         return bad;
     }
     return (a as u64) * 4294967296 + (p - a) as u64;
+}
+
+/// 跳过**同一行内**的一个 `/* ... */`（`#862`）。没有闭合的 `*/`、或者根本不在注释上，
+/// 原样返回 `p` —— 不吞掉后面的词（半截注释不是"声明前有注释"）。
+///
+/// 与工具链同一条线：`potato_from._GRAMMAR_LEAD` 只收同一行内的块注释。
+fn skip_block_comment(sr: ptr, p: u32, e: u32) -> u32 {
+    if p + 1 >= e {
+        return p;
+    }
+    if load8(sr, p) != SLASH || load8(sr, p + 1) != STAR {
+        return p;
+    }
+    let i: u32 = p + 2;
+    let go: u32 = 1;
+    while i + 1 < e && go == 1 {
+        if load8(sr, i) == STAR && load8(sr, i + 1) == SLASH {
+            return i + 2;
+        }
+        i = i + 1;
+    }
+    return p;
 }
 
 /// 文件头有没有 `choose write grammar <别名>`？返回语言下标，`0xFFFFFFFF` = 没有/认不出。

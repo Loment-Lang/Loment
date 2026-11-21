@@ -1038,6 +1038,13 @@ fn run(mem: ptr) -> u32 {
         ax = argv_n(ab, 8192, k);
     }
 
+    // `#1784`：写与核对是两件事 —— 一起给就**拒掉**。原先两个写分支先返回，
+    // `--check` 被接受却从没跑过，调用方以为核过了（与参考实现同一句、同一退码）。
+    if check_f == 1 && (emit_f == 1 || cks_f == 1) {
+        wstr(2, "[ERR] --check is exclusive with --emit / --checksums (a write is not a verification)\n");
+        return 2;
+    }
+
     if cks_f == 1 {
         let olen: u32 = checksums(mem, n, outb);
         if olen == 0 {

@@ -9,15 +9,17 @@
 #   2. 在基线 tag 的克隆上重放**声明为 fix** 的提交（`loment_projection`），
 #      产生投影树与投影清单；
 #   3. 从投影树编装载件（`loment_hotart`），**不是**从 R 编 —— 功能不许跟着进来；
-#   4. 用发行密钥给 `SHA256SUMS` 做分离签名，把候选挂成 GitHub Pre-Release。
+#   4. 从投影树编**工具链代际载荷**（`loment_hotpack`：链接器/编译器/CLI 等全部工具），
+#      用裸 Ed25519 签；同时出原生更新器、启动器与自举材料（`docs/368`）；
+#   5. 用发行密钥给 `SHA256SUMS` 做分离签名，把候选挂成 GitHub Pre-Release。
 #
 # **信任锚在跑着的那棵树里**（`#1695`）：候选自带的公钥不参与验证。这里仍然把发行公钥
 # 作为 asset 一起发（`loment-signing.asc` / `FINGERPRINT`），那是给人核对的第二渠道，
 # 不是准入的输入。
 #
 # 边界：
-# * 载荷是 `loment/tools/lsp.lomt` 编出来的 ELF（`docs/281`）—— 热更新换的是跑着的
-#   工具链映像；链接器/编译器这类**构建期**修复不在载荷里，它们随下一次完整发行走。
+# * 两条载荷：`candidate.hot` 换**跑着的** LSP 映像（`docs/281`）；`payload-*.hot` 落盘成
+#   工具链代际，管下一次启动与构建期工具。后者由装好的原生更新器验签、写代际、切指针。
 # * 一个没有声明 fix 的 tag **不出件**，这里直接红：热更新 tag 必须带东西。
 # * 同一个 tag 已发布 → 拒绝覆盖（`#438`）。
 
@@ -152,6 +154,69 @@ jobs:
             exit 1
           }
 
+      # 工具链代际载荷：从投影树编全部工具（链接器/编译器/CLI/...），裸 Ed25519 签名。
+      # 自举用的更新器从**tag 这棵树**编（不是投影树）—— 它是信任根，不随载荷换。
+      - name: 工具链代际载荷（原生更新器）
+        env:
+          HOTFIX_KEY: ${{ secrets.LOMENT_HOTFIX_ED25519_KEY }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -eu
+          if [ -z "${HOTFIX_KEY:-}" ]; then
+            echo "::error::没有 LOMENT_HOTFIX_ED25519_KEY —— 无法签工具链载荷"
+            exit 1
+          fi
+          printf '%s\n' "$HOTFIX_KEY" > "$RUNNER_TEMP/hotfix.pem"
+          python tools/loment_hotpack.py \
+            --old "$RUNNER_TEMP/hot-base" \
+            --new loment/build/hot-tree \
+            --release "$TAG" \
+            --out loment/build/hot \
+            --projection loment/build/hot-projection.json \
+            --platform both \
+            --key "$RUNNER_TEMP/hotfix.pem"
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tools")
+          import loment_dist
+          # The updater is a package tool too: build it on the release-channel seed, so
+          # it behaves exactly like the rest of an installed toolchain (docs/231 §2.3).
+          work = Path(os.environ["RUNNER_TEMP"]) / "hotupdate-build"
+          loment_dist.OUT = work / "out"
+          loment_dist.STAGE = work / "stage"
+          loment_dist._use_release_seed()
+          b = loment_dist.build_tools({"loment-hotupdate"})["loment-hotupdate"]
+          out = Path("loment/build/hot")
+          (out / "loment-hotupdate-linux-x64").write_bytes(b[0])
+          (out / "loment-hotupdate-linux-x64").chmod(0o755)
+          (out / "loment-hotupdate-windows-x64.exe").write_bytes(b[1])
+          # A stock 0.1.5.1 launcher resolves only bin/. The bootstrap replaces it with
+          # this one, which reads share/loment/hot/current and prefers the active
+          # generation -- without it the payload would land on disk and nothing would
+          # use it.
+          (out / "loment-launcher.sh").write_text(
+              loment_dist._subst(loment_dist.LAUNCHER_SH, "release"), encoding="ascii")
+          (out / "loment-launcher.cmd").write_bytes(
+              loment_dist._crlf(loment_dist._subst(loment_dist.LAUNCHER_CMD,
+                                                   "release")).encode("ascii"))
+          PY
+          cp .github/hotfix/bootstrap-hotfix.sh loment/build/hot/
+          cp .github/hotfix/bootstrap-hotfix.cmd loment/build/hot/
+          rm -f "$RUNNER_TEMP/hotfix.pem"
+          test -f loment/build/hot/payload-linux-x64.hot.sig &&
+          test -f loment/build/hot/payload-windows-x64.hot.sig
+          # Extend the existing SHA256SUMS (hotart writes the candidate line) so the gpg
+          # signature that follows covers the whole release, not just candidate.hot.
+          (cd loment/build/hot && sha256sum \
+             payload-linux-x64.hot payload-linux-x64.hot.sig \
+             payload-windows-x64.hot payload-windows-x64.hot.sig \
+             loment-hotupdate-linux-x64 loment-hotupdate-windows-x64.exe \
+             loment-launcher.sh loment-launcher.cmd \
+             release-key.ed25519 baseline.txt \
+             bootstrap-hotfix.sh bootstrap-hotfix.cmd) >> loment/build/hot/SHA256SUMS
+
       - name: 分离签名（发行密钥）
         if: ${{ github.event.inputs.dry_run != 'true' }}
         env:
@@ -207,7 +272,47 @@ jobs:
             loment/build/hot/SHA256SUMS \
             loment/build/hot/SHA256SUMS.asc \
             loment/build/hot/loment-signing.asc \
-            loment/build/hot/FINGERPRINT
+            loment/build/hot/FINGERPRINT \
+            loment/build/hot/payload-linux-x64.hot \
+            loment/build/hot/payload-linux-x64.hot.sig \
+            loment/build/hot/payload-windows-x64.hot \
+            loment/build/hot/payload-windows-x64.hot.sig \
+            loment/build/hot/loment-hotupdate-linux-x64 \
+            loment/build/hot/loment-hotupdate-windows-x64.exe \
+            loment/build/hot/loment-launcher.sh \
+            loment/build/hot/loment-launcher.cmd \
+            loment/build/hot/release-key.ed25519 \
+            loment/build/hot/baseline.txt \
+            loment/build/hot/bootstrap-hotfix.sh \
+            loment/build/hot/bootstrap-hotfix.cmd
+
+      # 自举脚本的核对点必须在归档之外（同 `#419`）：正文里列出这批 asset 的摘要。
+      - name: 把热更新件的摘要写进 release 正文
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json body -q .body > "$PWD/body.md"
+          {
+            echo
+            echo "## Hotfix generation anchors"
+            echo
+            echo "The native updater verifies \`payload-*.hot\` with the pinned Ed25519 key."
+            echo "These digests are published here for the **bootstrap** step, which runs on an"
+            echo "installation that predates the updater (compare them out of band)."
+            echo
+            echo '```'
+            (cd loment/build/hot && sha256sum \
+              payload-linux-x64.hot payload-linux-x64.hot.sig \
+              payload-windows-x64.hot payload-windows-x64.hot.sig \
+              loment-hotupdate-linux-x64 loment-hotupdate-windows-x64.exe \
+              loment-launcher.sh loment-launcher.cmd \
+              release-key.ed25519 baseline.txt bootstrap-hotfix.sh bootstrap-hotfix.cmd)
+            echo '```'
+          } >> "$PWD/body.md"
+          gh release edit "$TAG" --notes-file "$PWD/body.md"
 
       - name: 核对挂上去的 asset
         if: ${{ github.event.inputs.dry_run != 'true' }}
@@ -221,9 +326,21 @@ jobs:
             "FINGERPRINT" \
             "SHA256SUMS" \
             "SHA256SUMS.asc" \
+            "baseline.txt" \
+            "bootstrap-hotfix.cmd" \
+            "bootstrap-hotfix.sh" \
             "candidate.hot" \
             "hotfix.json" \
-            "loment-signing.asc" | sort)
+            "loment-hotupdate-linux-x64" \
+            "loment-hotupdate-windows-x64.exe" \
+            "loment-launcher.cmd" \
+            "loment-launcher.sh" \
+            "loment-signing.asc" \
+            "payload-linux-x64.hot" \
+            "payload-linux-x64.hot.sig" \
+            "payload-windows-x64.hot" \
+            "payload-windows-x64.hot.sig" \
+            "release-key.ed25519" | sort)
           if [ "$have" != "$want" ]; then
             echo "::error::热更新 $TAG 的 asset 与预期不符"
             echo "--- 实有 ---"; echo "$have"
@@ -231,4 +348,4 @@ jobs:
             exit 1
           fi
           echo "$have"
-          echo "六个 asset 齐了（装载件 + 清单 + 分离签名 + 公钥与指纹）"
+          echo "十八个 asset 齐了（LSP 装载件 + 工具链代际载荷 + 更新器 + 启动器 + 自举材料）"

@@ -14,26 +14,29 @@ phi 的两趟模型。
 
 from __future__ import annotations
 
-import base64
 import bisect
-import hashlib
-import json
 import os
 import re
+import struct
 import sys
 import time
-import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomelf  # noqa: E402
 
-#: 解释器自己的地址空间。全局从 `GLOBAL_BASE` 起、堆紧跟着、栈从顶上往下。
-MEM_SIZE = 16 * 1024 * 1024
+#: 解释器自己的地址空间。**与自举镜像同一套布局**（`docs/365` 的跨实现快照）：
+#: 4 MiB / 帧 32 KiB / 栈从顶上下压 / 全局从 64 KiB 起。
+MEM_SIZE = 4 * 1024 * 1024
 GLOBAL_BASE = 0x10000
 STACK_TOP = MEM_SIZE
 #: 每一层调用一段自己的栈区（按深度算基址 —— 见 `run` 里那段注释）。
-FRAME_SIZE = 4096
+FRAME_SIZE = 32768
+#: 帧内**值表之后的槽区起点**（自举镜像的 `FR_SLOTS = 8 + 1024*16 + 128`）。
+#: 两边必须一样：跨实现快照里的 alloca 地址是绝对地址。
+FRAME_SLOTS = 16520
+#: 堆的上限 = 栈底（`MEM_SIZE - MAX_DEPTH * FRAME_SIZE`），与镜像的 `STACK_LIMIT` 同。
+STACK_LIMIT = MEM_SIZE - 32 * FRAME_SIZE
 
 #: 每个标量占 8 字节（与 `lomelf` 的栈槽模型同口径，`SCALAR_SIZE`）。
 SLOT = 8
@@ -43,11 +46,9 @@ SLOT = 8
 #: 执行的指令条数**（与镜像同口径），撞上就点名报函数 / 块 / 第几条，而不是等下去。
 STEP_CAP = 50_000_000
 
-#: **调用深度上限**（`docs/262`，issue #353）。不设的话，地址空间算出来能放 ~4080 层，
-#: 而**宿主 Python 的栈**在 ~200 层就先炸 —— 于是程序死在一个 `RecursionError` 上，
-#: 那不是 VM 的话，也不是使用者看得懂的话。取 128：**比镜像的 `MAX_DEPTH = 32` 宽松**
-#: （孪生那边不会因此更严），又远低于宿主栈。语料实测最大深度 **10**。
-MAX_DEPTH = 128
+#: **调用深度上限**。与镜像的 `MAX_DEPTH = 32` 取同一个数：跨实现快照的帧基址是
+#: `MEM_SIZE - 深度 * FRAME_SIZE`，两边必须一致。语料实测最大深度 **10**。
+MAX_DEPTH = 32
 
 #: **合成文件**的 fd 从这儿起（`docs/243` §3.4）。解释器没有真的文件描述符，
 #: 所以真 fd 与合成 fd 不会撞；这个数两边实现**必须一样**（自举镜像里也写 1000）。
@@ -628,7 +629,7 @@ class Mem:
         self.heap = (self.heap + align - 1) // align * align
         a = self.heap
         self.heap += n
-        if self.heap >= self.sp:
+        if self.heap >= STACK_LIMIT:
             raise LvmError("堆撞上栈 —— 地址空间用完了")
         return a
 
@@ -642,14 +643,15 @@ class Frame:
         self.slots: dict[str, int] = {}
         self.vals: dict[str, object] = {}
         #: `sw_cap` 基质用的两张旁表（关着时恒为空，没有代价）：
-        #: SSA 名 -> 能力 `(obj_id, gen)`；本帧登记过、返回时要归还的对象。
-        self.caps: dict[str, tuple[int, int]] = {}
+        #: SSA 名 -> 能力 `(obj_id, gen, tag)`；本帧登记过、返回时要归还的对象。
+        self.caps: dict[str, tuple[int, int, int]] = {}
         self.objs: list[int] = []
-        self.next = base
+        #: 槽从**值表之后**起（`FRAME_SLOTS`），与自举镜像的 `FR_SLOTS` 同址。
+        self.next = base + FRAME_SLOTS
 
     def slot(self) -> int:
-        a = self.next
-        self.next += SLOT
+        a = (self.next + SLOT - 1) // SLOT * SLOT
+        self.next = a + SLOT
         return a
 
 
@@ -1388,7 +1390,105 @@ class Executor(Vm):
 # 默认仍是递归引擎（零风险）；只有 `--checkpoint-at` / `--resume` 走这一档。
 # 判据 `tools/lvm_cp_test.py` 拿整份语料钉「两个引擎同答」。
 
-CP_MAGIC = b"LVMC\x01"
+#: 共同快照格式（`docs/365`）：与自举镜像**同一套布局**。
+#: 头 16 B + ctx 256 B + 全局表 + 对象表 + 续延栈 2112 B + 4 MiB 内存 + 参考侧扩展。
+CP_MAGIC = b"LVMC"
+CP_VERSION = 1
+CP_HEADER = 16
+CTX_SIZE = 256
+CONT_REC = 16          # u32 / 帧
+MAX_CONT = 33          # MAX_DEPTH + 1
+FRAME_VALS = 8         # 帧内值表起点（自举的 FR_VALS）
+VAL_REC = 16           # 值表一条：name_off/name_len/vlo/vhi
+EXT_MAGIC = b"LVEX"
+EXT_VERSION = 1
+
+#: 自举镜像 ctx 的格号（跨实现快照要写它的布局）。
+CTX_NSRC, CTX_NG, CTX_NF, CTX_NP, CTX_NB, CTX_NI = 0, 4, 8, 12, 16, 20
+CTX_HEAP, CTX_DEPTH, CTX_STEPS = 24, 28, 96
+CTX_PROF_FD, CTX_NEDGE = 104, 108
+CTX_ARG0, CTX_ARG0N, CTX_VFD_POS, CTX_VFD_OPEN = 112, 116, 120, 124
+CTX_SUB, CTX_PRIV = 172, 188
+CTX_NOBJ, CTX_NFOBJ, CTX_NRET = 192, 196, 200
+CTX_MODE, CTX_CKPT_AT, CTX_IFHASH = 220, 248, 252
+
+#: 对象 kind 的跨实现编码（与自举的 `OBJ_*` 同数；argv 是参考侧多出来的一档）。
+KIND_CODE = {"global": 1, "brk": 2, "alloca": 3, "heap": 4, "argv": 5}
+CODE_KIND = {v: k for k, v in KIND_CODE.items()}
+
+
+def fnv32(data: bytes) -> int:
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+
+
+def _u16(v: int) -> bytes:
+    return struct.pack("<H", v & 0xFFFF)
+
+
+def _u32(v: int) -> bytes:
+    return struct.pack("<I", v & 0xFFFFFFFF)
+
+
+def _u64(v: int) -> bytes:
+    return struct.pack("<Q", v & 0xFFFFFFFFFFFFFFFF)
+
+
+def cp_frame_count(blob: bytes) -> int:
+    """快照里的调用深度（测试用；格式是共同格式的 ctx）。"""
+    return struct.unpack_from("<I", blob, CP_HEADER + CTX_DEPTH)[0]
+
+
+def cp_substrate(blob: bytes) -> int:
+    return struct.unpack_from("<I", blob, 12)[0]
+
+
+def ir_layout(text: str, funcs: list) -> tuple[dict, dict]:
+    """IR 文本 -> `(SSA 名 -> 跨度, SSA 名 -> 类型)`。
+
+    跨度必须与自举镜像解析出来的**逐字节一致**：它拿 `name_off/name_len` 当值表的键。
+    """
+    data = text.encode("utf-8")
+    spans: dict[tuple[str, str], tuple[int, int]] = {}
+    types: dict[tuple[str, str], str] = {}
+    define_re = re.compile(rb"^define\b[^\n]*?@([-A-Za-z0-9_.]+)\s*\(([^)]*)\)", re.M)
+    name_re = re.compile(rb"%[-A-Za-z0-9_.]+")
+    dest_re = re.compile(rb"^[ \t]*(%[-A-Za-z0-9_.]+)[ \t]*=")
+    for m in define_re.finditer(data):
+        fn = m.group(1).decode()
+        params = m.group(2)
+        pbase = m.start(2)
+        for nm in name_re.finditer(params):
+            spans[(fn, nm.group(0).decode())] = (pbase + nm.start(), len(nm.group(0)))
+        # 函数体：从 `{` 之后逐行扫 dest
+        body_start = data.find(b"{", m.end())
+        if body_start < 0:
+            continue
+        pos = body_start + 1
+        while pos < len(data):
+            nl = data.find(b"\n", pos)
+            if nl < 0:
+                nl = len(data)
+            line = data[pos:nl]
+            if line.strip() == b"}":
+                break
+            dm = dest_re.match(line)
+            if dm:
+                spans[(fn, dm.group(1).decode())] = (pos + dm.start(1), len(dm.group(1)))
+            pos = nl + 1
+    for fn in funcs:
+        for ty, name in fn.params:
+            types[(fn.name, name)] = ty
+        for blk in fn.blocks:
+            for ins in blk.instrs:
+                if not ins.dest:
+                    continue
+                ty = lomelf.result_type(ins.text)
+                if ty is not None:
+                    types[(fn.name, ins.dest)] = ty
+    return spans, types
 
 
 class _Suspend(Exception):
@@ -1396,6 +1496,39 @@ class _Suspend(Exception):
 
     def __init__(self, blob: bytes) -> None:
         self.blob = blob
+
+
+#: 自举镜像的 `NONE`（块/函数下标的空值）。
+NONE = 0xFFFFFFFF
+
+
+class _Reader:
+    """共同快照的游标（截断一律点名拒）。"""
+
+    __slots__ = ("b", "o")
+
+    def __init__(self, b: bytes) -> None:
+        self.b = b
+        self.o = 0
+
+    def take(self, n: int) -> bytes:
+        if self.o + n > len(self.b):
+            raise LvmError("checkpoint：文件截断了")
+        d = self.b[self.o:self.o + n]
+        self.o += n
+        return d
+
+    def u16(self) -> int:
+        return struct.unpack("<H", self.take(2))[0]
+
+    def u32(self) -> int:
+        return struct.unpack("<I", self.take(4))[0]
+
+    def u64(self) -> int:
+        return struct.unpack("<Q", self.take(8))[0]
+
+    def done(self) -> bool:
+        return self.o >= len(self.b)
 
 
 class _IterFrame(Frame):
@@ -1415,24 +1548,6 @@ class _IterFrame(Frame):
         self.internal = fn.name.startswith("__loment_")
 
 
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
-
-
-def _unb64(text: str) -> bytes:
-    return base64.b64decode(text.encode("ascii"))
-
-
-def _enc_val(v):
-    if isinstance(v, bytes):
-        return ["b", _b64(v)]
-    return ["i", int(v)]
-
-
-def _dec_val(v):
-    return _unb64(v[1]) if v[0] == "b" else int(v[1])
-
-
 class ExplicitExecutor(Executor):
     """T0 的显式栈引擎：把 Python 的调用栈换成 guest 自己的栈。"""
 
@@ -1441,7 +1556,16 @@ class ExplicitExecutor(Executor):
         self.stack: list[_IterFrame] = []
         self.executed = 0
         self.cp_at: int | None = None
-        self.ir_sha = ""
+        #: 共同快照要的 IR 侧信息（由 `run_checkpointed` 装）。
+        self.ir_text = ""
+        self.ir_bytes = b""
+        self.ir_fnv = 0
+        self.func_list: list = []
+        self.fn_index: dict[str, int] = {}
+        self.block_index: dict[str, dict[str, int]] = {}
+        self.global_blocks: list = []
+        self.name_spans: dict = {}
+        self.value_types: dict = {}
         self._block_cache: dict[str, dict] = {}
 
     # ------------------------------------------------------------ 入口
@@ -1654,124 +1778,347 @@ class ExplicitExecutor(Executor):
         caller.wait_hook = None
         return False
 
-    # ------------------------------------------------------------ 快照
-    def _snap_sub(self):
-        if self.sub is None:
-            return None
-        s = self.sub
-        return {
-            "mode": s.mode,
-            "tag_seq": s.tag_seq,
-            "objs": [[o.oid, o.base, o.limit, o.gen, 1 if o.alive else 0, o.kind, o.tag]
-                     for _, o in sorted(s.objs.items())],
-            "next_oid": s.next_oid,
-            "retired": [o.oid for o in s.retired],
-            "shadow": [[a, c[0], c[1], c[2]] for a, c in sorted(s.shadow.items())],
-            "globals": [[k, c[0], c[1], c[2]] for k, c in sorted(self.global_caps.items())],
-        }
+    # ------------------------------------------------------------ 共同快照（docs/365）
+    def _align8(self, v: int) -> int:
+        return (v + 7) // 8 * 8
 
-    def _snap_frame(self, fr: _IterFrame) -> dict:
-        return {
-            "fn": fr.fn.name,
-            "label": fr.label,
-            "idx": fr.idx,
-            "prev": fr.prev,
-            "steps": fr.steps,
-            "next": fr.next,
-            "vals": [[k, _enc_val(v)] for k, v in sorted(fr.vals.items())],
-            "caps": [[k, c[0], c[1], c[2]] for k, c in sorted(fr.caps.items())],
-            "objs": list(fr.objs),
-            "pending": [[d, _enc_val(v), None if c is None else [c[0], c[1], c[2]]]
-                        for d, v, c in fr.pending],
-            "wait_dest": fr.wait_dest,
-            "wait_retty": fr.wait_retty,
-            "wait_hook": list(fr.wait_hook) if fr.wait_hook is not None else None,
-        }
+    def _place_value(self, fr: _IterFrame, val) -> tuple[int, int]:
+        """宿主值 -> `(lo, hi)`。聚合先落到本帧槽区，记成 `(addr, size)`。"""
+        if isinstance(val, bytes):
+            fr.next = self._align8(fr.next)
+            addr = fr.next
+            self.mem.put(addr, bytes(val))
+            fr.next = addr + len(val)
+            return addr, len(val)
+        v = int(val) & 0xFFFFFFFFFFFFFFFF
+        return v & 0xFFFFFFFF, v >> 32
+
+    def _span_name(self, off: int, ln: int) -> str | None:
+        if not ln:
+            return None
+        return self.ir_bytes[off:off + ln].decode("utf-8", "replace")
+
+    def _wait_span(self, fr: _IterFrame) -> tuple[int, int]:
+        if not fr.wait_dest:
+            return 0, 0
+        sp = self.name_spans.get((fr.fn.name, fr.wait_dest))
+        if sp is None:
+            raise LvmError(f"checkpoint：找不到 {fr.wait_dest} 的 IR 跨度")
+        return sp
+
+    def _prepare_tables(self) -> list:
+        """把每帧的值表与聚合暂存写进 guest 内存；返回待写回的 phi 条目。"""
+        pending = []
+        for d, fr in enumerate(self.stack, 1):
+            base = fr.base
+            n = 0
+            for name, val in sorted(fr.vals.items()):
+                sp = self.name_spans.get((fr.fn.name, name))
+                if sp is None:
+                    raise LvmError(f"checkpoint：找不到 SSA 名 {name} 的 IR 跨度（{fr.fn.name}）")
+                if n >= 1024:
+                    raise LvmError("checkpoint：一帧里的值超过自举镜像的 1024 格")
+                lo, hi = self._place_value(fr, val)
+                struct.pack_into("<IIII", self.mem.buf, base + FRAME_VALS + n * VAL_REC,
+                                 sp[0], sp[1], lo, hi)
+                n += 1
+            for name, val, cap in fr.pending:
+                lo, hi = self._place_value(fr, val)
+                pending.append((d, name, lo, hi, cap))
+            struct.pack_into("<II", self.mem.buf, base, n, fr.next - base)
+        return pending
+
+    def _sub_code(self) -> int:
+        if self.sub is None:
+            return 0
+        return 2 if self.sub.mode == "tag" else 1
+
+    def _extension(self, pending: list) -> bytes:
+        out = bytearray(EXT_MAGIC + _u32(EXT_VERSION))
+        out += _u32(len(pending))
+        for d, name, lo, hi, cap in pending:
+            nb = name.encode("utf-8")
+            out += _u32(d) + _u32(len(nb)) + nb + _u64(lo) + _u64(hi)
+            if cap is None:
+                out += _u32(0)
+            else:
+                out += _u32(1) + _u32(cap[0]) + _u32(cap[1]) + _u32(cap[2])
+        out += _u32(len(self.stack))
+        for fr in self.stack:
+            for txt in (fr.fn.name, fr.label, fr.prev or ""):
+                nb = txt.encode("utf-8")
+                out += _u32(len(nb)) + nb
+        caps = []
+        for d, fr in enumerate(self.stack, 1):
+            for name, c in sorted(fr.caps.items()):
+                caps.append((d, name, c))
+        out += _u32(len(caps))
+        for d, name, c in caps:
+            nb = name.encode("utf-8")
+            out += _u32(d) + _u32(len(nb)) + nb + _u32(c[0]) + _u32(c[1]) + _u32(c[2])
+        sh = sorted(self.sub.shadow.items()) if self.sub is not None else []
+        out += _u32(len(sh))
+        for a, c in sh:
+            out += _u32(a) + _u32(c[0]) + _u32(c[1]) + _u32(c[2])
+        out += _u32(len(self.vfds))
+        for fd, (fdta, pos) in sorted(self.vfds.items()):
+            out += _u32(fd) + _u32(pos) + _u32(len(fdta)) + bytes(fdta)
+        out += _u32(len(self.argv))
+        for s in self.argv:
+            nb = s.encode("utf-8")
+            out += _u32(len(nb)) + nb
+        return bytes(out)
 
     def snapshot(self) -> bytes:
-        """序列化 guest 状态。**唯一**的宿主状态是序列化格式本身。"""
-        data = {
-            "v": 2,
-            "ir": self.ir_sha,
-            "executed": self.executed,
-            "stack": [self._snap_frame(f) for f in self.stack],
-            "mem": _b64(zlib.compress(bytes(self.mem.buf), 6)),
-            "heap": self.mem.heap,
-            "sp": self.mem.sp,
-            "sub": self._snap_sub(),
-            "vfds": [[fd, _b64(v[0]), v[1]] for fd, v in sorted(self.vfds.items())],
-            "next_vfd": self.next_vfd,
-            "argv": list(self.argv),
-        }
-        raw = json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return CP_MAGIC + zlib.compress(raw, 9)
+        """共同快照：与自举镜像同一套布局（`docs/365`）。"""
+        if not self.ir_text:
+            raise LvmError("checkpoint：这台引擎没有绑定 IR 文本")
+        pending = self._prepare_tables()
+        ctx = bytearray(CTX_SIZE)
+        cset = lambda off, v: struct.pack_into("<I", ctx, off, int(v) & 0xFFFFFFFF)  # noqa: E731
+        cset(CTX_NSRC, len(self.ir_bytes))
+        cset(CTX_NG, len(self.globals))
+        cset(CTX_NF, len(self.func_list))
+        cset(CTX_NP, sum(len(f.params) for f in self.func_list))
+        cset(CTX_NB, sum(len(f.blocks) for f in self.func_list))
+        cset(CTX_NI, sum(len(b.instrs) for f in self.func_list for b in f.blocks))
+        cset(CTX_HEAP, self.mem.heap)
+        cset(CTX_DEPTH, len(self.stack))
+        cset(CTX_STEPS, self.executed)
+        cset(CTX_PROF_FD, 0)
+        cset(CTX_NEDGE, 0)
+        cset(CTX_ARG0, 0)
+        cset(CTX_ARG0N, 0)
+        if self.vfds:
+            _fd, (fdta, pos) = next(iter(sorted(self.vfds.items())))
+            cset(CTX_VFD_POS, pos)
+            cset(CTX_VFD_OPEN, 1)
+        cset(CTX_SUB, 1 if self.sub is not None else 0)
+        cset(CTX_PRIV, self.priv)
+        live = [o for o in (self.sub.objs.values() if self.sub else []) if o.alive]
+        cset(CTX_NOBJ, len(live))
+        cset(CTX_NFOBJ, sum(1 for o in live if o.kind == "alloca"))
+        cset(CTX_NRET, len(self.sub.retired) if self.sub else 0)
+        cset(CTX_MODE, 1)
+        cset(CTX_CKPT_AT, 0)
+        cset(CTX_IFHASH, self.ir_fnv)
+
+        out = bytearray(CP_MAGIC + _u32(CP_VERSION) + _u32(self.ir_fnv)
+                        + _u32(self._sub_code()) + ctx)
+        out += _u32(len(self.globals))
+        for name, g in self.globals.items():
+            nb = name.encode("utf-8")
+            out += _u32(len(nb)) + nb + _u32(g.addr)
+        objs = []
+        if self.sub is not None:
+            objs = [o for o in self.sub.objs.values() if o.alive]
+            seen = set()
+            for o in self.sub.retired:
+                if o.oid not in seen:
+                    seen.add(o.oid)
+                    objs.append(o)
+        out += _u32(len(objs))
+        for o in objs:
+            out += (_u32(o.oid) + _u32(o.base) + _u32(o.limit) + _u32(o.gen)
+                    + _u32(1 if o.alive else 0) + _u32(KIND_CODE.get(o.kind, 4))
+                    + _u32(o.tag))
+        out += _u32(self.sub.next_oid if self.sub else 1)
+        out += _u32(self.sub.tag_seq if self.sub else 0)
+        cont = bytearray(MAX_CONT * CONT_REC * 4)
+        for d, fr in enumerate(self.stack, 1):
+            base = STACK_TOP - d * FRAME_SIZE
+            fi = self.fn_index[fr.fn.name]
+            bi = self.block_index[fr.fn.name][fr.label]
+            prev = (NONE if fr.prev is None
+                    else self.block_index[fr.fn.name][fr.prev])
+            cfr = (STACK_TOP - (d - 1) * FRAME_SIZE) if d > 1 else NONE
+            ro, rl = self._wait_span(self.stack[d - 2]) if d > 1 else (0, 0)
+            do_, dl = self._wait_span(fr)
+            hook = 0
+            a0 = 0
+            if fr.wait_hook is not None:
+                hook = 1 if fr.wait_hook[0] == "alloc" else 2
+                a0 = int(fr.wait_hook[1]) & 0xFFFFFFFFFFFFFFFF
+            rec = [fi, base, cfr, ro, rl, bi, fr.idx, do_, dl,
+                   1 if fr.internal else 0, hook,
+                   a0 & 0xFFFFFFFF, a0 >> 32, prev, fr.steps, 0]
+            for k, v in enumerate(rec):
+                struct.pack_into("<I", cont, (d * CONT_REC + k) * 4, v)
+        out += cont
+        out += bytes(self.mem.buf)
+        out += self._extension(pending)
+        return bytes(out)
 
     def restore(self, blob: bytes) -> None:
-        if not blob.startswith(CP_MAGIC):
+        r = _Reader(blob)
+        if r.take(4) != CP_MAGIC:
             raise LvmError("checkpoint：魔数不对")
-        try:
-            data = json.loads(zlib.decompress(blob[len(CP_MAGIC):]).decode("utf-8"))
-        except (zlib.error, json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise LvmError(f"checkpoint：解不开（{e}）") from e
-        if data.get("v") != 2:
-            raise LvmError(f"checkpoint：不认识的版本 {data.get('v')!r}")
-        if data.get("ir") != self.ir_sha:
+        ver = r.u32()
+        if ver != CP_VERSION:
+            raise LvmError(f"checkpoint：不认识的版本 {ver}")
+        if r.u32() != self.ir_fnv:
             raise LvmError("checkpoint：IR 与快照不匹配（字节码换了）")
-        buf = zlib.decompress(_unb64(data["mem"]))
-        if len(buf) != MEM_SIZE:
+        flags = r.u32()
+        ctx = r.take(CTX_SIZE)
+        self.mem.heap = struct.unpack_from("<I", ctx, CTX_HEAP)[0]
+        depth = struct.unpack_from("<I", ctx, CTX_DEPTH)[0]
+        self.executed = struct.unpack_from("<I", ctx, CTX_STEPS)[0]
+        if depth > MAX_DEPTH:
+            raise LvmError("checkpoint：深度超过上限")
+        nglob = r.u32()
+        gaddr = {}
+        for _ in range(nglob):
+            name = r.take(r.u32()).decode("utf-8", "replace")
+            gaddr[name] = r.u32()
+        for name, g in self.globals.items():
+            if name in gaddr:
+                g.addr = gaddr[name]
+        nobj = r.u32()
+        objs = []
+        for _ in range(nobj):
+            oid = r.u32()
+            base = r.u32()
+            limit = r.u32()
+            gen = r.u32()
+            alive = r.u32()
+            kind = CODE_KIND.get(r.u32(), "heap")
+            tag = r.u32()
+            objs.append((oid, base, limit, gen, alive, kind, tag))
+        next_oid = r.u32()
+        tag_seq = r.u32()
+        cont = r.take(MAX_CONT * CONT_REC * 4)
+        mem = r.take(MEM_SIZE)
+        if len(mem) != MEM_SIZE:
             raise LvmError("checkpoint：内存长度不对")
-        self.mem.buf = bytearray(buf)
-        self.mem.heap = int(data["heap"])
-        self.mem.sp = int(data["sp"])
-        self.sub = self._restore_sub(data["sub"]) if data["sub"] is not None else None
-        self.vfds = {int(fd): [_unb64(b), int(p)] for fd, b, p in data["vfds"]}
-        self.next_vfd = int(data["next_vfd"])
-        self.argv = [str(x) for x in data["argv"]]
-        self.executed = int(data["executed"])
-        self.stack = [self._restore_frame(f) for f in data["stack"]]
+        self.mem.buf = bytearray(mem)
+        if flags == 0:
+            self.sub = None
+        else:
+            s = SwCap("tag" if flags == 2 else "cap")
+            s.next_oid = next_oid
+            s.tag_seq = tag_seq
+            for oid, base, limit, gen, alive, kind, tag in objs:
+                o = _Obj(oid, base, limit - base, kind)
+                o.gen = gen
+                o.alive = bool(alive)
+                o.tag = tag
+                s.objs[oid] = o
+                if o.alive:
+                    s.live[o.base] = oid
+            s.bases = sorted(s.live)
+            s.retired = [s.objs[oid] for oid, *_ in objs if not alive]
+            self.sub = s
+            self.global_caps = {}
+            for name, g in self.globals.items():
+                cap = s.cap_for_addr(g.addr)
+                if cap is not None:
+                    self.global_caps[name] = cap
+        pending, caps, shadow, vfds, argv = [], {}, [], {}, []
+        frame_names: list = []
+        if not r.done():
+            if r.take(4) != EXT_MAGIC:
+                raise LvmError("checkpoint：扩展魔数不对")
+            if r.u32() != EXT_VERSION:
+                raise LvmError("checkpoint：扩展版本不对")
+            for _ in range(r.u32()):
+                d = r.u32()
+                name = r.take(r.u32()).decode("utf-8", "replace")
+                lo = r.u64()
+                hi = r.u64()
+                cap = None
+                if r.u32():
+                    cap = (r.u32(), r.u32(), r.u32())
+                pending.append((d, name, lo, hi, cap))
+            frame_names = []
+            for _ in range(r.u32()):
+                fn_name = r.take(r.u32()).decode("utf-8", "replace")
+                blk_name = r.take(r.u32()).decode("utf-8", "replace")
+                prev_name = r.take(r.u32()).decode("utf-8", "replace")
+                frame_names.append((fn_name, blk_name, prev_name))
+            for _ in range(r.u32()):
+                d = r.u32()
+                name = r.take(r.u32()).decode("utf-8", "replace")
+                caps.setdefault(d, {})[name] = (r.u32(), r.u32(), r.u32())
+            for _ in range(r.u32()):
+                shadow.append((r.u32(), (r.u32(), r.u32(), r.u32())))
+            for _ in range(r.u32()):
+                fd = r.u32()
+                pos = r.u32()
+                vfds[fd] = [r.take(r.u32()), pos]
+            for _ in range(r.u32()):
+                argv.append(r.take(r.u32()).decode("utf-8", "replace"))
+        if self.sub is not None:
+            self.sub.shadow = dict(shadow)
+        self.vfds = vfds
+        self.next_vfd = (max(vfds) + 1) if vfds else VFD_BASE
+        if argv:
+            self.argv = argv
+        self.stack = []
+        for d in range(1, depth + 1):
+            rec = struct.unpack_from("<16I", cont, d * CONT_REC * 4)
+            (fi, _frb, _cfr, _ro, _rl, bi, j, do_, dl, _priv, hook,
+             a0lo, a0hi, prev, steps, _sp) = rec
+            if d <= len(frame_names):
+                fn_name, blk_name, prev_name = frame_names[d - 1]
+                fn = self.funcs.get(fn_name)
+                if fn is None:
+                    raise LvmError(f"checkpoint：没有函数 {fn_name!r}")
+                blk = next((b for b in fn.blocks if b.label == blk_name), None)
+                if blk is None:
+                    raise LvmError(f"checkpoint：{fn_name} 里没有块 {blk_name!r}")
+                prev_label = prev_name or None
+            else:
+                if bi >= len(self.global_blocks):
+                    raise LvmError("checkpoint：块下标越界")
+                fn, blk = self.global_blocks[bi]
+                prev_label = (None if prev == NONE
+                              else self.global_blocks[prev][1].label)
+            fr = _IterFrame(self.mem, STACK_TOP - d * FRAME_SIZE, fn)
+            fr.label = blk.label
+            fr.idx = j
+            fr.prev = prev_label
+            fr.steps = steps
+            fr.next = fr.base + struct.unpack_from("<I", self.mem.buf, fr.base + 4)[0]
+            n = struct.unpack_from("<I", self.mem.buf, fr.base)[0]
+            if n > 1024:
+                raise LvmError("checkpoint：一帧里的值超过 1024 格")
+            fr.vals = {}
+            for k in range(n):
+                no, nl, lo, hi = struct.unpack_from(
+                    "<IIII", self.mem.buf, fr.base + FRAME_VALS + k * VAL_REC)
+                name = self._span_name(no, nl)
+                ty = self.value_types.get((fn.name, name))
+                if ty is not None and lomelf.is_agg(ty):
+                    fr.vals[name] = bytes(self.mem.buf[lo:lo + hi])
+                else:
+                    fr.vals[name] = lo | (hi << 32)
+            fr.caps = dict(caps.get(d, {}))
+            fr.objs = [o.oid for o in (self.sub.objs.values() if self.sub else [])
+                       if o.kind == "alloca" and fr.base <= o.base < fr.base + FRAME_SIZE]
+            fr.wait_dest = self._span_name(do_, dl) if dl else None
+            fr.wait_retty = "void"
+            if j > 0 and j <= len(blk.instrs):
+                ins = blk.instrs[j - 1]
+                if ins.text.startswith("call "):
+                    ty = lomelf.result_type(ins.text)
+                    fr.wait_retty = "void" if ty is None else ty
+            a0 = (a0hi << 32) | a0lo
+            fr.wait_hook = (("alloc", a0) if hook == 1
+                            else ("free", a0) if hook == 2 else None)
+            fr.internal = fn.name.startswith("__loment_")
+            fr.pending = []
+            for pd, name, lo, hi, cap in pending:
+                if pd != d:
+                    continue
+                ty = self.value_types.get((fn.name, name))
+                if ty is not None and lomelf.is_agg(ty):
+                    val = bytes(self.mem.buf[lo:lo + hi])
+                else:
+                    val = lo | (hi << 32)
+                fr.pending.append((name, val, cap))
+            self.stack.append(fr)
         self.priv = sum(1 for f in self.stack if f.internal)
-
-    def _restore_sub(self, d) -> SwCap:
-        s = SwCap(str(d.get("mode", "cap")))
-        s.tag_seq = int(d.get("tag_seq", 0))
-        for oid, base, limit, gen, alive, kind, tag in d["objs"]:
-            o = _Obj(int(oid), int(base), int(limit) - int(base), str(kind))
-            o.gen = int(gen)
-            o.alive = bool(alive)
-            o.tag = int(tag)
-            s.objs[o.oid] = o
-            if o.alive:
-                s.live[o.base] = o.oid
-        s.next_oid = int(d["next_oid"])
-        s.bases = sorted(s.live)
-        s.retired = [s.objs[int(oid)] for oid in d["retired"] if int(oid) in s.objs]
-        s.shadow = {int(a): (int(o), int(g), int(t)) for a, o, g, t in d["shadow"]}
-        self.global_caps = {k: (int(o), int(g), int(t))
-                            for k, o, g, t in d["globals"]}
-        return s
-
-    def _restore_frame(self, d) -> _IterFrame:
-        fn = self.funcs.get(str(d["fn"]))
-        if fn is None:
-            raise LvmError(f"checkpoint：没有函数 {d['fn']!r}")
-        fr = _IterFrame(self.mem, 0, fn)
-        fr.label = str(d["label"])
-        fr.idx = int(d["idx"])
-        fr.prev = d["prev"]
-        fr.steps = int(d["steps"])
-        fr.next = int(d["next"])
-        fr.vals = {k: _dec_val(v) for k, v in d["vals"]}
-        fr.caps = {k: (int(o), int(g), int(t)) for k, o, g, t in d["caps"]}
-        fr.objs = [int(x) for x in d["objs"]]
-        fr.pending = [
-            (x[0], _dec_val(x[1]),
-             None if x[2] is None else (int(x[2][0]), int(x[2][1]), int(x[2][2])))
-            for x in d["pending"]
-        ]
-        fr.wait_dest = d["wait_dest"]
-        fr.wait_retty = str(d["wait_retty"])
-        fr.wait_hook = tuple(d["wait_hook"]) if d["wait_hook"] else None
-        return fr
+        self.cp_at = None
 
 
 def run_checkpointed(text: str, out, substrate: str = "none",
@@ -1795,14 +2142,29 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     sub = (SwCap("cap") if substrate == "sw_cap"
            else SwCap("tag") if substrate == "sw_tag" else None)
     vm = ExplicitExecutor(globals_, funcs, externs, out, None, argv, None, sub)
-    vm.ir_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    vm.cp_at = at
+    vm.ir_text = text
+    vm.ir_bytes = text.encode("utf-8")
+    vm.ir_fnv = fnv32(vm.ir_bytes)
+    vm.func_list = funcs
+    vm.fn_index = {f.name: i for i, f in enumerate(funcs)}
+    vm.block_index = {}
+    vm.global_blocks = []
+    gidx = 0
+    for f in funcs:
+        vm.block_index[f.name] = {}
+        for b in f.blocks:
+            vm.block_index[f.name][b.label] = gidx
+            vm.global_blocks.append((f, b))
+            gidx += 1
+    vm.name_spans, vm.value_types = ir_layout(text, funcs)
     if resume is not None:
         vm.restore(resume)
         want = {"none": None, "sw_cap": "cap", "sw_tag": "tag"}[substrate]
         got = vm.sub.mode if vm.sub is not None else None
         if got != want:
             raise LvmError("checkpoint：基质与快照不匹配（resume 要带同一档）")
+    # `at` 是**本次**命令行的：恢复之后才设，避免被快照里的旧停点覆盖。
+    vm.cp_at = at
     try:
         if resume is not None:
             value = vm.run_resumed()

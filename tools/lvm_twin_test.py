@@ -580,6 +580,38 @@ def _run_mirror_cap(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes
     return _run_mirror_args(mir, ll, ["sw_cap"], timeout)
 
 
+def _snapshot_token(td: Path, name: str) -> str:
+    """镜像**看得见**的快照路径（Windows 上在 WSL 的 `/tmp`，Linux 上就是临时目录）。"""
+    if sys.platform != "win32":
+        return str(td / name)
+    snap = f"/tmp/lvm_cross_{os.getpid()}_{name}"
+    subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                   capture_output=True, timeout=60, shell=False)
+    return snap
+
+
+def _snapshot_to_mirror(blob: bytes, snap: str) -> None:
+    """参考侧的快照字节送到镜像能读的位置（Windows 上经宿主临时文件 + WSL 的 `cp`）。"""
+    if sys.platform != "win32":
+        Path(snap).write_bytes(blob)
+        return
+    host = Path(tempfile.gettempdir()) / f"lvm_cross_{os.getpid()}.snap"
+    host.write_bytes(blob)
+    subprocess.run([*_WSLCMD, "bash", "-lc",
+                    f"cp {ELF._wsl_path(host)} {snap}"],
+                   capture_output=True, timeout=120, shell=False)
+
+
+def _snapshot_from_mirror(snap: str) -> bytes:
+    if sys.platform != "win32":
+        p = Path(snap)
+        return p.read_bytes() if p.exists() else b""
+    out = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {snap} 2>/dev/null || true"]).stdout
+    import base64  # noqa: PLC0415
+    return base64.b64decode(out) if out.strip() else b""
+
+
 def _fault_line(err: str) -> str:
     line = next((x for x in err.splitlines() if x.startswith("lvm: F0")), "")
     return line.split(" (")[0]          # 码 + 站点；witness 文案两边可以不同
@@ -685,6 +717,61 @@ def test_checkpoint_matches_reference() -> None:
             assert mout1 + mout2 == ref[1], (
                 f"镜像 stdout 不同（at={at}）：{mout1 + mout2!r} vs {ref[1]!r}")
     print("      停点 0 与 40：两边各自存/取，最后的 rc + stdout 相同")
+
+
+def test_checkpoint_cross_reference_first() -> None:
+    """判 L（`docs/365`）：参考存下的快照，**镜像**接着跑 —— 与一口气跑完同 rc + stdout。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CKPT_PROG, "cross_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        for at in (0, 40):
+            pre = io.BytesIO()
+            _prc, blob = lvm.run_checkpointed(ir, pre, "none", at, None, ["prog"])
+            assert blob is not None, f"参考在 {at} 条指令处没有停"
+            snap = _snapshot_token(td, f"ref_{at}.snap")
+            _snapshot_to_mirror(blob, snap)
+            mrc, mout, merr = _run_mirror_args(mir, ll, [f"resume={snap}"])
+            got = pre.getvalue() + mout
+            assert (mrc, got) == (base_rc, base.getvalue()), (
+                f"参考→镜像（at={at}）：rc={mrc}（要 {base_rc}）"
+                f" stdout={got!r}（要 {base.getvalue()!r}）err={merr[-160:]!r}")
+    print("      停点 0 与 40：参考存 → 镜像恢复，rc + stdout 与一口气跑完相同")
+
+
+def test_checkpoint_cross_mirror_first() -> None:
+    """判 M（`docs/365`）：镜像存下的快照，**参考**接着跑 —— 同上一条的反方向。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CKPT_PROG, "cross_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        for at in (0, 40):
+            snap = _snapshot_token(td, f"mir_{at}.snap")
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={snap}"])
+            assert mrc1 == 0, (
+                f"镜像在 {at} 处没有正常停（rc={mrc1}）：{merr1[-160:]!r}")
+            blob = _snapshot_from_mirror(snap)
+            assert blob, f"镜像没有写下快照：{snap}"
+            post = io.BytesIO()
+            rc2, _blob2 = lvm.run_checkpointed(ir, post, "none", None, blob, ["prog"])
+            got = mout1 + post.getvalue()
+            assert (rc2, got) == (base_rc, base.getvalue()), (
+                f"镜像→参考（at={at}）：rc={rc2}（要 {base_rc}）"
+                f" stdout={got!r}（要 {base.getvalue()!r}）")
+    print("      停点 0 与 40：镜像存 → 参考恢复，rc + stdout 与一口气跑完相同")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -29,10 +29,8 @@ from __future__ import annotations
 
 import contextlib
 import io
-import json
 import sys
 import tempfile
-import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -110,8 +108,7 @@ def _run(ir: str, at=None, resume=None, substrate="none", argv=None):
 
 
 def _stack_depth(blob: bytes) -> int:
-    data = json.loads(zlib.decompress(blob[len(lvm.CP_MAGIC):]).decode("utf-8"))
-    return len(data["stack"])
+    return lvm.cp_frame_count(blob)
 
 
 def test_engines_agree_on_corpus() -> None:

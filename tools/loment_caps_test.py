@@ -124,8 +124,13 @@ def test(fn):
 #: 捕获表的步长 `CG_DFR_STRIDE`（84 B/条，**不是**上界，来路写在 `EXPLAINED`）与三个
 #: 真上界 `CG_MAXDFR` / `CG_MAXDFRAMES` / `CG_MAXDFARGS`（都判了 `>=` 并 `cg_fail`）。
 #: 条数 251 → **255**、沉默 168 → **169**（多出来的那一处就是步长本身）。
-CAPACITY_SITES = 270
-SILENT_SITES = 178
+#:
+#: 2026-11-21（`docs/362`–`docs/365`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
+#: 续延栈进了口径 —— `MAX_OBJS` / `MAX_RET` / `MAX_FOBJ` / `CONT_REC` / `MAX_CONT` 五处。
+#: 条数 270 → **275**、沉默 178 → **179**（新增的那处沉默是归还窗口的**滚动**：
+#: 满了丢最旧的一条，不是写穿，来路写在 `EXPLAINED`）。
+CAPACITY_SITES = 275
+SILENT_SITES = 179
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
@@ -215,6 +220,7 @@ SILENT_NAMES = frozenset((
     "MAXW",
     "MAX_DIALECT",
     "MAX_LANG",
+    "MAX_RET",
     "MEM_CAP",
     "MIN_RECLEN",
     "MMAX",

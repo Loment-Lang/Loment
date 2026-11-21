@@ -250,6 +250,8 @@ const CONT_END: u32 = 14258628;      // CONT_OFF + 33 * 64
 //: 快照头 16 字节 + 数字暂存。头：magic(4) / version / irhash / 保留。
 const SNAP_HDR: u32 = 14258628;
 const WNUM_SCRATCH: u32 = 14258660;  // SNAP_HDR + 32（只在报错时写 1 字节）
+//: 恢复扩展里的名字暂存（最多 240 字节；扩展在**内存读完之后**，不能借 `m`）。
+const NAME_SCRATCH: u32 = 14258692;  // SNAP_HDR + 64
 
 const OBJ_GLOBAL: u32 = 1;
 const OBJ_BRK: u32 = 2;
@@ -3078,7 +3080,145 @@ fn read_exact(fd: u64, p: ptr, n: u32) -> u32 {
     return 1;
 }
 
-/// 快照：头 16 B + ctx 256 B + 对象表 118916 B + 续延栈 2112 B + guest 内存 4 MiB。
+/// 快照（共同格式，docs/365）：头 16 B + ctx 256 B + 全局表 + 对象表 +
+/// 续延栈 2112 B + guest 内存 4 MiB + 扩展（帧名字段 + 四个空段）。
+fn wu32(f: u64, a: ptr, v: u32) {
+    store32(a, SNAP_HDR + 16, v);
+    let _n: u64 = write_all(f, ptr_add(a, SNAP_HDR + 16), 4);
+}
+
+fn wname(f: u64, a: ptr, off: u32, len: u32) {
+    wu32(f, a, len);
+    if len > 0 {
+        let _n: u64 = write_all(f, ptr_add(a, off), len as u64);
+    }
+}
+
+fn ru32(f: u64, a: ptr) -> u32 {
+    if read_exact(f, ptr_add(a, SNAP_HDR + 16), 4) == 0 {
+        fail("checkpoint：文件截断了");
+    }
+    return load32(a, SNAP_HDR + 16);
+}
+
+/// 恢复一个**活**对象（按 base 插进有序表；gen 用文件里的）。
+fn obj_restore(a: ptr, base: u32, limit: u32, gen: u32, kind: u32) {
+    let n: u32 = ctx_get(a, C_NOBJ);
+    if n >= MAX_OBJS {
+        fail("checkpoint：对象表满了");
+    }
+    let pos: u32 = obj_find_pos(a, base);
+    let i: u32 = n;
+    while i > pos {
+        obj_copy(a, i, i - 1);
+        i = i - 1;
+    }
+    obj_put(a, pos, base, limit, kind);
+    wr(a, OBJ_OFF, pos * 5 + 2, gen);
+    ctx_set(a, C_NOBJ, n + 1);
+}
+
+/// 恢复一条**已归还**对象（只进最近 1024 条的窗口）。
+fn ret_restore(a: ptr, base: u32, limit: u32, gen: u32, kind: u32) {
+    let nr: u32 = ctx_get(a, C_NRET);
+    if nr >= MAX_RET {
+        let i: u32 = 1;
+        while i < MAX_RET {
+            ret_copy(a, i - 1, i);
+            i = i + 1;
+        }
+        nr = MAX_RET - 1;
+    }
+    wr(a, RET_OFF, nr * 5, base);
+    wr(a, RET_OFF, nr * 5 + 1, limit);
+    wr(a, RET_OFF, nr * 5 + 2, gen);
+    wr(a, RET_OFF, nr * 5 + 3, 0);
+    wr(a, RET_OFF, nr * 5 + 4, kind);
+    ctx_set(a, C_NRET, nr + 1);
+}
+
+/// 共同格式的 PC 用**名字**：两边解析出来的块号可能不同（自举比参考少一个块）。
+fn fn_find_name(a: ptr, m: ptr, no: u32, nl: u32) -> u32 {
+    if nl == 0 {
+        return NONE;
+    }
+    let nf: u32 = ctx_get(a, C_NF);
+    let i: u32 = 0;
+    while i < nf {
+        let o: u32 = rd(a, F_OFF, i * 8);
+        let l: u32 = rd(a, F_OFF, i * 8 + 1);
+        // F 表的名字带 `@`；共同格式里不带。
+        if l == nl + 1 && same(a, o + 1, m, no, nl) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return NONE;
+}
+
+fn blk_find_name(a: ptr, fi: u32, m: ptr, no: u32, nl: u32) -> u32 {
+    if fi == NONE || nl == 0 {
+        return NONE;
+    }
+    let fb: u32 = rd(a, F_OFF, fi * 8 + 6);
+    let nb: u32 = rd(a, F_OFF, fi * 8 + 7);
+    let i: u32 = 0;
+    while i < nb {
+        let o: u32 = rd(a, B_OFF, (fb + i) * 5);
+        let l: u32 = rd(a, B_OFF, (fb + i) * 5 + 1);
+        if l == nl && same(a, o, m, no, nl) {
+            return fb + i;
+        }
+        i = i + 1;
+    }
+    return NONE;
+}
+
+/// 按名字把全局表的 `+4` 补成地址（`place_globals` 在恢复时被跳过）。
+fn gpatch(a: ptr, m: ptr, no: u32, nl: u32, addr: u32) {
+    let ng: u32 = ctx_get(a, C_NG);
+    let i: u32 = 0;
+    let hit: u32 = 0;
+    while i < ng && hit == 0 {
+        let o: u32 = rd(a, G_OFF, i * 6);
+        let l: u32 = rd(a, G_OFF, i * 6 + 1);
+        if l == nl && same(a, o, m, no, nl) {
+            wr(a, G_OFF, i * 6 + 4, addr);
+            hit = 1;
+        }
+        i = i + 1;
+    }
+    if hit == 0 {
+        fail("checkpoint：全局表对不上");
+    }
+}
+
+/// 从恢复出来的对象表重建每帧的 alloca 列表（按帧地址区间分组）。
+fn frame_obj_rebuild(a: ptr) {
+    ctx_set(a, C_NFOBJ, 0);
+    let d: u32 = 1;
+    let depth: u32 = ctx_get(a, C_DEPTH);
+    while d <= depth {
+        // 与 `frame_retire` / `bind_call` 同一个下标单位：**第 d*4 个字**，
+        // 不是 `FBASE_OFF + d*4` 字节（2026-11-21：恢复后一返回就把整张表当成这帧的）。
+        wr(a, FBASE_OFF, d * 4, ctx_get(a, C_NFOBJ));
+        let fbase: u32 = MEM_SIZE - d * FRAME_SIZE;
+        let i: u32 = 0;
+        let nobj: u32 = ctx_get(a, C_NOBJ);
+        while i < nobj {
+            if obj_kind(a, i) == OBJ_ALLOCA {
+                let b: u32 = obj_base(a, i);
+                if b >= fbase && b < fbase + FRAME_SIZE {
+                    wr(a, FOBJ_OFF, ctx_get(a, C_NFOBJ), b);
+                    ctx_set(a, C_NFOBJ, ctx_get(a, C_NFOBJ) + 1);
+                }
+            }
+            i = i + 1;
+        }
+        d = d + 1;
+    }
+}
+
 fn snapshot_write(a: ptr, m: ptr) {
     let po: u32 = load32(a, SNAP_HDR + 40);
     let pl: u32 = load32(a, SNAP_HDR + 44);
@@ -3096,17 +3236,83 @@ fn snapshot_write(a: ptr, m: ptr) {
     store8(a, SNAP_HDR + 3, 67);      // C
     store32(a, SNAP_HDR + 4, 1);      // version
     store32(a, SNAP_HDR + 8, ctx_get(a, C_IFHASH));
-    store32(a, SNAP_HDR + 12, 0);
+    store32(a, SNAP_HDR + 12, ctx_get(a, C_SUB));   // 0 = none / 1 = sw_cap
     let _a: u64 = write_all(f, ptr_add(a, SNAP_HDR), 16);
     let _b: u64 = write_all(f, ptr_add(a, CTX_OFF), 256);
-    // 全局表的 `+4` 是**地址**（`place_globals` 写的）。恢复时会跳过 place_globals，
-    // 所以这张表必须跟着走；否则全局操作数会把"初始化 span"当地址用。
-    let _g: u64 = write_all(f, ptr_add(a, G_OFF), 6144);
-    let _c: u64 = write_all(f, ptr_add(a, OBJ_OFF),
-                            (FBASE_OFF + 132 - OBJ_OFF) as u64);
-    let _d: u64 = write_all(f, ptr_add(a, CONT_OFF),
+    // 全局表：名字 + 地址（`+4` 是 place_globals 写的地址）。
+    let ng: u32 = ctx_get(a, C_NG);
+    wu32(f, a, ng);
+    let i: u32 = 0;
+    while i < ng {
+        wname(f, a, rd(a, G_OFF, i * 6), rd(a, G_OFF, i * 6 + 1));
+        wu32(f, a, rd(a, G_OFF, i * 6 + 4));
+        i = i + 1;
+    }
+    // 对象：活的在前，归还的在后（共同格式的 kind 码与自举的 OBJ_* 同数）。
+    let nlive: u32 = ctx_get(a, C_NOBJ);
+    let nret: u32 = ctx_get(a, C_NRET);
+    wu32(f, a, nlive + nret);
+    i = 0;
+    while i < nlive {
+        wu32(f, a, i + 1);
+        wu32(f, a, obj_base(a, i));
+        wu32(f, a, obj_limit(a, i));
+        wu32(f, a, rd(a, OBJ_OFF, i * 5 + 2));
+        wu32(f, a, 1);
+        wu32(f, a, obj_kind(a, i));
+        wu32(f, a, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < nret {
+        wu32(f, a, 2147483648 + i);
+        wu32(f, a, rd(a, RET_OFF, i * 5));
+        wu32(f, a, rd(a, RET_OFF, i * 5 + 1));
+        wu32(f, a, rd(a, RET_OFF, i * 5 + 2));
+        wu32(f, a, 0);
+        wu32(f, a, rd(a, RET_OFF, i * 5 + 4));
+        wu32(f, a, 0);
+        i = i + 1;
+    }
+    wu32(f, a, nlive + nret + 1);
+    wu32(f, a, 0);
+    let _c: u64 = write_all(f, ptr_add(a, CONT_OFF),
                             (MAX_CONT * CONT_REC * 4) as u64);
     let _e: u64 = write_all(f, m, MEM_SIZE as u64);
+    // 最小扩展：LVEX / version 1 / npending 0 / ncaps 0 / nshadow 0 / nvfd 0 / nargv 0
+    store8(a, SNAP_HDR + 16, 76);
+    store8(a, SNAP_HDR + 17, 86);
+    store8(a, SNAP_HDR + 18, 69);
+    store8(a, SNAP_HDR + 19, 88);
+    store32(a, SNAP_HDR + 20, 1);
+    store32(a, SNAP_HDR + 24, 0);
+    let _x: u64 = write_all(f, ptr_add(a, SNAP_HDR + 16), 12);
+    // 帧的**名字**（函数 / 块 / 前驱）：两边解析出来的下标可能差一格。
+    wu32(f, a, ctx_get(a, C_DEPTH));
+    let d: u32 = 1;
+    while d <= ctx_get(a, C_DEPTH) {
+        let fi: u32 = cont_get(a, d, 0);
+        let fo: u32 = rd(a, F_OFF, fi * 8);
+        let fl: u32 = rd(a, F_OFF, fi * 8 + 1);
+        if fl > 1 {
+            wname(f, a, fo + 1, fl - 1);     // 去掉 `@`
+        } else {
+            wu32(f, a, 0);
+        }
+        let bi: u32 = cont_get(a, d, 5);
+        wname(f, a, rd(a, B_OFF, bi * 5), rd(a, B_OFF, bi * 5 + 1));
+        let pv: u32 = cont_get(a, d, 13);
+        if pv == NONE {
+            wu32(f, a, 0);
+        } else {
+            wname(f, a, rd(a, B_OFF, pv * 5), rd(a, B_OFF, pv * 5 + 1));
+        }
+        d = d + 1;
+    }
+    wu32(f, a, 0);
+    wu32(f, a, 0);
+    wu32(f, a, 0);
+    wu32(f, a, 0);
     let _f: i64 = syscall4(3, f, 0, 0);
 }
 
@@ -3129,22 +3335,119 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
     if load32(a, SNAP_HDR + 8) != ctx_get(a, C_IFHASH) {
         fail("checkpoint：IR 与快照不匹配（字节码换了）");
     }
+    let flags: u32 = load32(a, SNAP_HDR + 12);
+    if flags == 2 {
+        fail("checkpoint：跨实现恢复不支持 sw_tag（docs/365）");
+    }
+    // 自己进程的 cmdline 位置不能被快照里的值覆盖（那是参考侧的数）。
+    let my_arg0: u32 = ctx_get(a, C_ARG0);
+    let my_arg0n: u32 = ctx_get(a, C_ARG0N);
     if read_exact(f, ptr_add(a, CTX_OFF), 256) == 0 {
         fail("checkpoint：ctx 读不全");
     }
-    if read_exact(f, ptr_add(a, G_OFF), 6144) == 0 {
-        fail("checkpoint：全局表读不全");
+    ctx_set(a, C_ARG0, my_arg0);
+    ctx_set(a, C_ARG0N, my_arg0n);
+    ctx_set(a, C_SUB, flags);
+    ctx_set(a, C_NOBJ, 0);
+    ctx_set(a, C_NRET, 0);
+    // 全局表：按名字补地址
+    let ng: u32 = ru32(f, a);
+    let i: u32 = 0;
+    while i < ng {
+        let nl: u32 = ru32(f, a);
+        if nl > 240 {
+            fail("checkpoint：全局名太长");
+        }
+        if read_exact(f, m, nl) == 0 {
+            fail("checkpoint：全局名读不全");
+        }
+        gpatch(a, m, 0, nl, ru32(f, a));
+        i = i + 1;
     }
-    if read_exact(f, ptr_add(a, OBJ_OFF), FBASE_OFF + 132 - OBJ_OFF) == 0 {
-        fail("checkpoint：对象表读不全");
+    // 对象表
+    let n: u32 = ru32(f, a);
+    i = 0;
+    while i < n {
+        if read_exact(f, m, 28) == 0 {
+            fail("checkpoint：对象表读不全");
+        }
+        let base: u32 = load32(m, 4);
+        let limit: u32 = load32(m, 8);
+        let gen: u32 = load32(m, 12);
+        let alive: u32 = load32(m, 16);
+        let kind: u32 = load32(m, 20);
+        let k: u32 = kind;
+        if k > 4 {
+            k = OBJ_GLOBAL;
+        }
+        if alive != 0 {
+            obj_restore(a, base, limit, gen, k);
+        } else {
+            ret_restore(a, base, limit, gen, k);
+        }
+        i = i + 1;
     }
+    let _no: u32 = ru32(f, a);
+    let _ts: u32 = ru32(f, a);
     if read_exact(f, ptr_add(a, CONT_OFF), MAX_CONT * CONT_REC * 4) == 0 {
         fail("checkpoint：续延栈读不全");
     }
     if read_exact(f, m, MEM_SIZE) == 0 {
         fail("checkpoint：内存读不全");
     }
+    // 可选扩展：头 12 字节 + 帧名字段（函数 / 块 / 前驱）。
+    if read_exact(f, ptr_add(a, SNAP_HDR + 16), 12) == 1 {
+        if load8(a, SNAP_HDR + 16) != 76 || load8(a, SNAP_HDR + 17) != 86
+                || load8(a, SNAP_HDR + 18) != 69 || load8(a, SNAP_HDR + 19) != 88 {
+            fail("checkpoint：扩展魔数不对");
+        }
+        if load32(a, SNAP_HDR + 24) != 0 {
+            fail("checkpoint：跨实现恢复不支持停在 phi 中途（docs/365）");
+        }
+        let nf: u32 = ru32(f, a);
+        let d: u32 = 1;
+        while d <= nf {
+            let fl: u32 = ru32(f, a);
+            if fl > 240 {
+                fail("checkpoint：函数名太长");
+            }
+            if fl > 0 && read_exact(f, ptr_add(a, NAME_SCRATCH), fl) == 0 {
+                fail("checkpoint：函数名读不全");
+            }
+            let fi: u32 = fn_find_name(a, ptr_add(a, NAME_SCRATCH), 0, fl);
+            let bl: u32 = ru32(f, a);
+            if bl > 240 {
+                fail("checkpoint：块名太长");
+            }
+            if bl > 0 && read_exact(f, ptr_add(a, NAME_SCRATCH), bl) == 0 {
+                fail("checkpoint：块名读不全");
+            }
+            let bi: u32 = blk_find_name(a, fi, ptr_add(a, NAME_SCRATCH), 0, bl);
+            let pn: u32 = ru32(f, a);
+            let pv: u32 = NONE;
+            if pn > 0 {
+                if pn > 240 {
+                    fail("checkpoint：前驱名太长");
+                }
+                if read_exact(f, ptr_add(a, NAME_SCRATCH), pn) == 0 {
+                    fail("checkpoint：前驱名读不全");
+                }
+                pv = blk_find_name(a, fi, ptr_add(a, NAME_SCRATCH), 0, pn);
+                if pv == NONE {
+                    fail("checkpoint：前驱块名字对不上");
+                }
+            }
+            if fi == NONE || bi == NONE {
+                fail("checkpoint：函数/块名字对不上");
+            }
+            cont_set(a, d, 0, fi);
+            cont_set(a, d, 5, bi);
+            cont_set(a, d, 13, pv);
+            d = d + 1;
+        }
+    }
     let _c: i64 = syscall4(3, f, 0, 0);
+    frame_obj_rebuild(a);
 }
 
 /// `argv_n` 的那一格若以 `prefix` 开头，返回值的 span；否则 `0`。
@@ -3362,7 +3665,7 @@ const COP_OFF: u32 = 11507968;                 // CC_OFF + 32768*48；操作数�
 const CX_OFF: u32 = 13605120;                  // COP_OFF + 131072*16；附加池
 const CSL_OFF: u32 = 13867264;                 // CX_OFF + 65536*4；槽名表 2 u32
 const FS2_OFF: u32 = 14129408;                 // CSL_OFF + 32768*8；每函数 4 u32
-const ARENA_T2: u64 = 14258692;                // SNAP_HDR + 64（含 sw_cap 对象表与续延栈，docs/364）
+const ARENA_T2: u64 = 14258948;                // NAME_SCRATCH + 256（docs/365 的共同快照）
 
 //: 编译记录 12 格
 const CR_KIND: u32 = 0;

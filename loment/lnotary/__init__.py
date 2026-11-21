@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from . import lawspace  # noqa: F401
+from . import sites  # noqa: F401
 from . import verify  # noqa: F401
 
-__all__ = ["lawspace", "verify"]
+__all__ = ["lawspace", "sites", "verify"]

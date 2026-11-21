@@ -548,6 +548,7 @@ def cmd_lnotary_verify(a) -> int:
     """
     import json
     import lnotary.lawspace as _lawspace
+    import lnotary.sites as _sites
     import lnotary.verify as _lnotary
     try:
         raw = Path(a.artifact).read_bytes()
@@ -561,6 +562,19 @@ def cmd_lnotary_verify(a) -> int:
     v = _lnotary.verify_potato(doc)
     errs = list(v.errors)
     side = None
+    side_table = None
+    if getattr(a, "sites", None):
+        try:
+            side_table = json.loads(Path(a.sites).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了站点表：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 站点表不是 JSON：{e}", file=sys.stderr)
+            return 2
+        errs += _sites.verify_sites(side_table)
+        if not getattr(a, "seal", None):
+            errs.append(_lawspace.Error("LNT-LS", "--sites 必须与 --seal 一起给"))
     if getattr(a, "seal", None):
         try:
             side = json.loads(Path(a.seal).read_text(encoding="utf-8"))
@@ -570,7 +584,7 @@ def cmd_lnotary_verify(a) -> int:
         except json.JSONDecodeError as e:
             print(f"[ERR] 旁挂不是 JSON：{e}", file=sys.stderr)
             return 2
-        errs += _lawspace.verify_lawspace(doc, side, raw)
+        errs += _lawspace.verify_lawspace(doc, side, raw, side_table)
     elif _lnotary.CLAIM_SWITCH in v.claimed_switches:
         errs.append(_lawspace.Error(
             "LNT-CLAIM", f"产物声明了 {_lnotary.CLAIM_SWITCH}，但没有给 --seal"))
@@ -598,6 +612,7 @@ def cmd_lnotary_seal(a) -> int:
     """
     import json
     import lnotary.lawspace as _lawspace
+    import lnotary.sites as _sites
     import lnotary.verify as _lnotary
     try:
         raw = Path(a.artifact).read_bytes()
@@ -613,7 +628,22 @@ def cmd_lnotary_seal(a) -> int:
         for e in v.errors:
             print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
         return 1
-    side = _lawspace.derive_lawspace(doc, raw)
+    side_table = None
+    if getattr(a, "sites", None):
+        try:
+            side_table = json.loads(Path(a.sites).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了站点表：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 站点表不是 JSON：{e}", file=sys.stderr)
+            return 2
+        errs = _sites.verify_sites(side_table)
+        if errs:
+            for e in errs:
+                print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
+            return 1
+    side = _lawspace.derive_lawspace(doc, raw, side_table)
     text = json.dumps(side, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if getattr(a, "out", None):
         Path(a.out).write_text(text, encoding="utf-8")
@@ -965,11 +995,15 @@ def main(argv: list[str] | None = None) -> int:
     lnv.add_argument("artifact")
     lnv.add_argument("--seal", default=None, metavar="PATH",
                      help="法域旁挂（不给则只跑 V0；产物声明 lnotary_true 时必须给）")
+    lnv.add_argument("--sites", default=None, metavar="PATH",
+                     help="站点表（tools/lms_sites.py 的产物；与 --seal 一起给）")
     lnv.add_argument("--json", action="store_true")
     lnv.set_defaults(fn=cmd_lnotary_verify)
     lns = lnsub.add_parser("seal")
     lns.add_argument("artifact")
     lns.add_argument("--out", default=None, metavar="PATH")
+    lns.add_argument("--sites", default=None, metavar="PATH",
+                     help="站点表（tools/lms_sites.py 的产物）")
     lns.set_defaults(fn=cmd_lnotary_seal)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)

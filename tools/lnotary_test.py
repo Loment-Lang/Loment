@@ -216,5 +216,77 @@ class LNotaryTest(unittest.TestCase):
         self.assertIn("lawspace", r2.stdout)
 
 
+    # ---- V2 · 站点表（docs/363） ------------------------------------------
+
+    def _site_table(self) -> dict:
+        src = self.tmp / "sites.lomt"
+        src.write_text(
+            "module s\nchoose runtime\nchoose close lms_reject\n\n"
+            "fn _start() {\n"
+            "    let p: ptr = alloc(4);\n"
+            "    let x: u32 = load8(p, 4);\n"
+            "    syscall4(60, 0, 0, 0);\n"
+            "}\n", encoding="utf-8")
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
+                            str(src), "--print", "llvm"],
+                           cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ir = self.tmp / "sites.ll"
+        ir.write_text(r.stdout, encoding="utf-8")
+        out = self.tmp / "sites.json"
+        r = subprocess.run([sys.executable, str(ROOT / "tools" / "lms_sites.py"),
+                            str(ir), "--out", str(out)],
+                           cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    # Q · 真站点表被接受
+    def test_site_table_is_accepted(self) -> None:
+        from lnotary import sites
+
+        table = self._site_table()
+        self.assertEqual(sites.verify_sites(table), [])
+        self.assertGreaterEqual(table["counts"]["sites"], 1)
+
+    # R · 改等级
+    def test_tampered_site_grade_is_rejected(self) -> None:
+        from lnotary import sites
+
+        table = self._site_table()
+        table["sites"][0]["grade"] = "bogus"
+        errs = sites.verify_sites(table)
+        self.assertTrue(any(e.code == "LNT-SITES" for e in errs), errs)
+
+    # S · 旁挂绑站点表
+    def test_lawspace_binds_site_table(self) -> None:
+        from lnotary import lawspace
+
+        table = self._site_table()
+        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"), table)
+        self.assertIn("sites", side)
+        self.assertEqual(lawspace.verify_lawspace(
+            self.plain, side, self._bytes("plain"), table), [])
+
+    # T · 换一张站点表
+    def test_lawspace_rejects_a_different_site_table(self) -> None:
+        from lnotary import lawspace
+
+        table = self._site_table()
+        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"), table)
+        other = json.loads(json.dumps(table))
+        other["seal"] = "0" * 64
+        errs = lawspace.verify_lawspace(self.plain, side, self._bytes("plain"), other)
+        self.assertTrue(any(e.code == "LNT-LS" for e in errs), errs)
+
+    # U · 站点表自己的封印
+    def test_site_table_seal_tamper_is_rejected(self) -> None:
+        from lnotary import sites
+
+        table = self._site_table()
+        table["seal"] = "0" * 64
+        errs = sites.verify_sites(table)
+        self.assertTrue(any(e.code == "LNT-SEAL" for e in errs), errs)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -134,6 +134,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "lmgr_test",
                  # 独立公证人（`docs/361`）：只读 Potato，零工具链 import。
                  "lnotary_test",
+                 # LMS × LVM 时间桥梁（`docs/363`）：原生 fault ABI 101、`sw_cap` 101、
+                 # 默认无 fault 符号、缓存键看见用户开关。
+                 "lms_bridge_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
                  # 崩溃批次（`#805` / `#868`–`#874`）：深度/容量越界**只许出诊断**。
                  # 每条都跑种子链出来的自举驱动（真入口），不是拿 Python 实现代替。
@@ -376,6 +379,7 @@ SHARD_COST = {
     "loment_caps_test": 99.9,
     "lmgr_test": 6.0,
     "lnotary_test": 1.4,
+    "lms_bridge_test": 4.1,
     "loment_channel_test": 92.8,
     "loment_choose_matrix_test": 16.7,
     "loment_cli_test": 340.0,   # #1770: 并行分片下的实测墙钟

@@ -68,10 +68,12 @@ def _laws_of(doc: dict) -> list[dict]:
     return laws
 
 
-def derive_lawspace(doc: dict, artifact_bytes: bytes) -> dict:
+def derive_lawspace(doc: dict, artifact_bytes: bytes,
+                    sites: dict | None = None) -> dict:
     """从一份**已通过 V0** 的 Potato 派生旁挂。调用方负责先跑 V0。
 
-    不修改 `doc`；输出不含时间戳、路径等不稳定字段。
+    `sites` 是 `tools/lms_sites.py` 派生的站点表；给了就把它的封印与站点数
+    绑进旁挂（`docs/363`）。不修改 `doc`；输出不含时间戳、路径等不稳定字段。
     """
     dims = dims_of(doc)
     body = {
@@ -83,6 +85,11 @@ def derive_lawspace(doc: dict, artifact_bytes: bytes) -> dict:
         "dims_hash": sha256_hex(canonical_bytes(dims)),
         "laws": _laws_of(doc),
     }
+    if sites is not None:
+        body["sites"] = {
+            "sha256": sites.get("seal"),
+            "count": (sites.get("counts") or {}).get("sites"),
+        }
     body["seal"] = sha256_hex(canonical_bytes(body))
     return body
 
@@ -92,8 +99,13 @@ def _err(out: list[Error], code: str, message: str) -> None:
 
 
 def verify_lawspace(doc: dict, side: object,
-                    artifact_bytes: bytes | None = None) -> list[Error]:
-    """核对旁挂与产物。只读；返回错误列表（空 = 接受）。"""
+                    artifact_bytes: bytes | None = None,
+                    sites: dict | None = None) -> list[Error]:
+    """核对旁挂与产物。只读；返回错误列表（空 = 接受）。
+
+    如果旁挂绑了站点表（`sites` 字段），调用方必须同时给出那张表；
+    反过来给了表却没绑，也红 —— 两边的说法必须一致。
+    """
     out: list[Error] = []
     if not isinstance(side, dict):
         _err(out, "LNT-LS", f"旁挂必须是对象，得到 {type(side).__name__}")
@@ -149,6 +161,24 @@ def verify_lawspace(doc: dict, side: object,
                      f"{lid} 的 declared 是 {law.get('declared')!r}，应为 {want!r}")
             if law.get("checked") is not True:
                 _err(out, "LNT-LAW", f"{lid} 没有被公证人核过（checked != true）")
+
+    want_sites = side.get("sites")
+    if want_sites is not None:
+        if not isinstance(want_sites, dict):
+            _err(out, "LNT-LS", "旁挂的 sites 必须是 {sha256, count}")
+        elif sites is None:
+            _err(out, "LNT-LS", "旁挂绑了站点表，但没有给 --sites")
+        else:
+            if want_sites.get("sha256") != sites.get("seal"):
+                _err(out, "LNT-LS",
+                     f"旁挂绑的站点表封印是 {want_sites.get('sha256')!r}，"
+                     f"实际是 {sites.get('seal')!r}")
+            want_n = (sites.get("counts") or {}).get("sites")
+            if want_sites.get("count") != want_n:
+                _err(out, "LNT-LS",
+                     f"旁挂绑的站点数是 {want_sites.get('count')!r}，实际是 {want_n!r}")
+    elif sites is not None:
+        _err(out, "LNT-LS", "给了 --sites，但旁挂没绑站点表")
 
     body = {k: v for k, v in side.items() if k != "seal"}
     want_seal = sha256_hex(canonical_bytes(body))

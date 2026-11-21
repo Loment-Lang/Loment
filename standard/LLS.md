@@ -1099,7 +1099,7 @@ A block is `{ statement* }`.
   enclosing block; references in its initialiser resolve in the enclosing scopes;
 * a nested block MAY shadow an enclosing name; the inner declaration is a distinct
   variable with its own storage;
-* a second `let` of the same name **in the same block** is E013 (duplicate name);
+* a second `let` of the same name **in the same block** is E0241 (the fine code of the duplicate-name family E013);
   parameters belong to the function's outermost scope, so the body may shadow a
   parameter with a `let`;
 * a `for` variable is visible only in its loop body, a `match` binding only in its arm,
@@ -1145,7 +1145,7 @@ The type annotation is required. `let x = 1;` is a **parse error** (E019, "expec
 got `=`"), not a type error. A name MUST be declared before use; use before `let` is E002.
 
 Under `tur2027.1Alpha` and later alpha editions, declaring the same name twice in the
-same block is E013; a nested block may shadow an enclosing name (§11.1). Under the
+same block is E0241 (family E013); a nested block may shadow an enclosing name (§11.1). Under the
 earlier editions, re-declaring the same name in the same function is allowed and the
 earlier behaviour of §39 applies.
 

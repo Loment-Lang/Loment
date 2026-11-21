@@ -10141,7 +10141,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         _prev = declared.get(s.name)
                         if _prev is not None:
                             errs.append(
-                                f"{s.line}: 变量 {s.name} 在同一块内重复定义"
+                                f"{s.line}: 变量 {s.name} 在这个块里已经声明过"
                                 f"（第一次在第 {_prev} 行）")
                         else:
                             declared[s.name] = s.line

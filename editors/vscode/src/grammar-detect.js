@@ -29,6 +29,14 @@ const GRAMMAR_ALIASES = {
   'tur2026.1': 'tur2026.1',
   'tur2026.2': 'tur2026.2',
   'tur2026.3': 'tur2026.3',
+  // Block-scope alpha (docs/353): explicit alpha, canonical name keeps the case.
+  // The table must match `potato_from.GRAMMAR_ALIASES` key-for-key (the criterion
+  // compares the two tables), so the capitalised canonical spellings are listed
+  // too even though lookups lowercase the source word.
+  'tur2027.1Alpha': 'tur2027.1Alpha',
+  '2027.1Alpha': 'tur2027.1Alpha',
+  'tur2027.1alpha': 'tur2027.1Alpha',
+  '2027.1alpha': 'tur2027.1Alpha',
   c: 'c',
   py: 'python', python: 'python',
   java: 'java',
@@ -44,7 +52,8 @@ const GRAMMAR_ALIASES = {
 //: （2026-11-03 命名 Tur，2026-11-04 改成两级版次名，`docs/295` / `docs/296`）——
 //: 上色用的是同一套。**`rust` 不在这里**：它退回成一门表层语法（与 C/Java/Go 同级），
 //: 所以它有 `loment-rust` 那一套语法文件。
-const NATIVE_GRAMMARS = ['loment', 'tur2026.1', 'tur2026.2', 'tur2026.3'];
+const NATIVE_GRAMMARS = ['loment', 'tur2026.1', 'tur2026.2', 'tur2026.3',
+                         'tur2027.1Alpha'];
 
 //: 声明里那三个词 —— **与参考实现同一份词序契约**（`GRAMMAR_DECL_WORDS`）。
 const GRAMMAR_DECL_WORDS = ['choose', 'write', 'grammar'];

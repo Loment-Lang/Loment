@@ -6363,7 +6363,9 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     if same(src, t, load32(env, q * 8), nm) { dup = 1; }
                     q = q + 1;
                 }
-                if dup == 1 { chk_pub(src, t, oc, p, 13, nm); }
+                // 细分码（`docs/353`）：这一支只在 alpha 的块作用域里跑，所以同块重名
+                // 是 E0241，不再退回族码 E013 —— 参考实现那边是同一个码。
+                if dup == 1 { chk_pub(src, t, oc, p, 241, nm); }
             }
             c = chk_env_add(t, env, c, nm, dty);
             store32(tyt, 3520, c);   // 最新环境条数 (chk_moves 在 chk_body 之后跑, 读这个)

@@ -114193,7 +114193,7 @@ L424_then:
   %t1397 = load ptr, ptr %oc.addr
   %t1398 = load ptr, ptr %p.addr
   %t1399 = load i32, ptr %nm.addr
-  call void @chk_pub(ptr %t1395, ptr %t1396, ptr %t1397, ptr %t1398, i32 13, i32 %t1399)
+  call void @chk_pub(ptr %t1395, ptr %t1396, ptr %t1397, ptr %t1398, i32 241, i32 %t1399)
   br label %L426_end
 L425_else:
   br label %L426_end

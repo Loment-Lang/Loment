@@ -8093,7 +8093,7 @@ def test_alpha_block_scope_duplicate_and_standalone_block():
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         for name, src, want in (
-                ("dup", dup, "重复定义"),
+                ("dup", dup, "已经声明过"),
                 ("blk", blk, None),
                 ("after", after, "使用未声明的变量 x")):
             p = td / f"{name}.lomt"

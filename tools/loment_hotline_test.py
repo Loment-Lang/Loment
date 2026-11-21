@@ -224,15 +224,15 @@ def test_a_manifest_from_another_baseline_is_refused() -> None:
         repo = _repo(t)
         _commit(repo, "fix: real fix\n\nHotfix: yes", _fix)
         proj = _project(repo, t)
-        proj["baseline"] = "0.1.6"
+        proj["baseline"] = "0.1.7"
         cand = _candidate(t / "cand", repo, f"v{BASE}-hot.1", proj)
         try:
             lu.check(cand, repo)
         except lu.Reject as e:
             assert e.code == "projection-baseline", e.code
         else:
-            raise AssertionError("另一条基线（0.1.6）的清单被接受了")
-    print("      清单说自己是 0.1.6 的 —— 准入按 projection-baseline 拒绝")
+            raise AssertionError("另一条基线（0.1.7）的清单被接受了")
+    print("      清单说自己是 0.1.7 的 —— 准入按 projection-baseline 拒绝")
 
 
 def main() -> int:

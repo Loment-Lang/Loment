@@ -6790,7 +6790,9 @@ def _fault_messages() -> list[tuple[str, str]]:
         ("__lom_ms2", " / "),
         ("__lom_ms3", " / 第 "),
         ("__lom_ms4", " 条（距该指令 "),
-        ("__lom_ms5", "\n   | 站点：（PC 不在任何访存站点上）\n"),
+        ("__lom_ms5", "   | 站点：（PC 不在任何访存站点上；也不在任何用户函数里）\n"),
+        ("__lom_ms5a", "   | 站点：（PC 不在任何访存站点上；所在函数："),
+        ("__lom_ms5b", "）\n"),
         ("__lom_ms6", "）\n"),
     ]
     for sig, name, tag, title in _FAULT_TITLES:
@@ -6911,7 +6913,64 @@ def _emit_msg_write(name: str, parts: list[str]) -> None:
               f"i64 {len(text.encode('utf-8'))})"]
 
 
-def _ir_site_lookup(nsites: int, parts: list[str], from_block: str = "entry") -> None:
+def _ir_fn_lookup(nfns: int, parts: list[str]) -> None:
+    """`sitenone` 里的退路：PC 不在访存点上时，指出它落在哪个**用户函数**里。"""
+    parts += [
+        "  br label %floop",
+        "floop:",
+        "  %fi = phi i64 [0, %sitenone], [%fi2, %fcont]",
+        "  %fv = phi i64 [-1, %sitenone], [%fv2, %fcont]",
+        f"  %fdone = icmp sge i64 %fi, {nfns}",
+        "  br i1 %fdone, label %fafter, label %fbody",
+        "fbody:",
+        "  %fe = mul i64 %fi, 24",
+        "  %fp = add i64 %fb, %fe",
+        "  %fpp = inttoptr i64 %fp to ptr",
+        "  %fs = load i64, ptr %fpp",
+        "  %fpe = add i64 %fp, 8",
+        "  %fpep = inttoptr i64 %fpe to ptr",
+        "  %fen = load i64, ptr %fpep",
+        "  %fge = icmp uge i64 %rip, %fs",
+        "  %flt = icmp ult i64 %rip, %fen",
+        "  %fin = and i1 %fge, %flt",
+        "  br i1 %fin, label %ftake, label %fskip",
+        "ftake:",
+        "  br label %fcont",
+        "fskip:",
+        "  br label %fcont",
+        "fcont:",
+        "  %fv2 = phi i64 [%fi, %ftake], [%fv, %fskip]",
+        "  %fi2 = add i64 %fi, 1",
+        "  br label %floop",
+        "fafter:",
+        "  %fhas = icmp sge i64 %fv, 0",
+        "  br i1 %fhas, label %fshow, label %fnone",
+        "fnone:",
+    ]
+    _emit_msg_write("__lom_ms5", parts)
+    parts += ["  br label %sitedone", "fshow:"]
+    # 名字：fns[fv] 的 off@+16 / len@+20
+    parts += [
+        "  %fne = mul i64 %fv, 24",
+        "  %fnp = add i64 %fb, %fne",
+        "  %fn16 = add i64 %fnp, 16",
+        "  %fn16p = inttoptr i64 %fn16 to ptr",
+        "  %fno = load i32, ptr %fn16p",
+        "  %fnov = zext i32 %fno to i64",
+        "  %fn20 = add i64 %fnp, 20",
+        "  %fn20p = inttoptr i64 %fn20 to ptr",
+        "  %fnl = load i32, ptr %fn20p",
+        "  %fnlv = zext i32 %fnl to i64",
+        "  %fnm2 = add i64 %xb, %fnov",
+    ]
+    _emit_msg_write("__lom_ms5a", parts)
+    parts += [f"  %w_fnm = {_SYS3}(i64 1, i64 2, i64 %fnm2, i64 %fnlv)"]
+    _emit_msg_write("__lom_ms5b", parts)
+    parts += ["  br label %sitedone"]
+
+
+def _ir_site_lookup(nsites: int, parts: list[str], nfns: int,
+                    from_block: str = "entry") -> None:
     """站点查找 + 打印。表按地址升序；取 `addr <= rip` 的最大那一条。"""
     parts += [
         "  %sb0 = ptrtoint ptr @__lom_sites to i64",
@@ -6952,8 +7011,8 @@ def _ir_site_lookup(nsites: int, parts: list[str], from_block: str = "entry") ->
         "  br i1 %shas, label %showsite, label %sitenone",
         "sitenone:",
     ]
-    _emit_msg_write("__lom_ms5", parts)
-    parts += ["  br label %sitedone", "showsite:"]
+    _ir_fn_lookup(nfns, parts)
+    parts += ["showsite:"]
     # site[bi]：fn@+8(u32) blk@+12(u32) packed@+16(u64: ins 低 32 / kind / width)
     parts += [
         "  %se = mul i64 %sbi, 24",
@@ -7076,7 +7135,12 @@ def _fault_runtime_ir(entry: str, entry_is_main: bool, plan: dict) -> str:
     parts += ["  call void @__wrnum(i64 %sig)"]
     _emit_msg_write("__lom_m_nl", parts)
     _emit_msg_write("__lom_m_addr", parts)
+    # 读写方向只对**页错误**有意义：SIGILL/FPE/ABRT 的 `REG_ERR` 不是页错误码，
+    # 拿它判方向会凭空说一个"读"。`err == 0` 就不说方向。
     parts += ["  call void @__wrhex(i64 %addr)",
+              "  %haserr = icmp ne i64 %err, 0",
+              "  br i1 %haserr, label %dirchk, label %dirnone",
+              "dirchk:",
               "  %isw = and i64 %err, 2",
               "  %iswr = icmp ne i64 %isw, 0",
               "  br i1 %iswr, label %dwr, label %drd",
@@ -7084,13 +7148,16 @@ def _fault_runtime_ir(entry: str, entry_is_main: bool, plan: dict) -> str:
     _emit_msg_write("__lom_m_wr", parts)
     parts += ["  br label %ddone", "drd:"]
     _emit_msg_write("__lom_m_rd", parts)
+    parts += ["  br label %ddone",
+              "dirnone:"]                     # 没有页错误码：只说地址，不编方向
+    _emit_msg_write("__lom_m_nl", parts)
     parts += ["  br label %ddone", "ddone:"]
     _emit_msg_write("__lom_m_pc", parts)
     parts += ["  call void @__wrhex(i64 %rip)"]
     _emit_msg_write("__lom_m_rsp", parts)
     parts += ["  call void @__wrhex(i64 %rsp)"]
     _emit_msg_write("__lom_m_nl", parts)
-    _ir_site_lookup(plan["nsites"], parts, from_block="ddone")
+    _ir_site_lookup(plan["nsites"], parts, plan["nfns"], from_block="ddone")
     # 栈溢出时故障地址可能**高于** RSP（写进下一页的守卫页），所以两个方向都算；
     # 无符号减法在反方向会回绕成一个巨大的数，不会被判成"近"。
     parts += ["  %d1 = sub i64 %rsp, %addr",

@@ -944,6 +944,34 @@ def test_a_foreign_grammar_file_gets_one_info_and_no_fake_errors():
 
 
 @test
+def test_formatting_a_foreign_grammar_file_is_null_not_an_internal_error():
+    """`#865`：格式化一份别的语法的源，回 `null`，**不回 `-32603 内部错误`**。
+
+    LSP 的 `textDocument/formatting` 结果本来就允许 `null`（= 这一次没有编辑）。
+    回内部错误的话，编辑器弹的是"语言服务出错了"，用户以为插件挂了 —— 而事实是
+    这份源不是 Loment 写的，格式化器没有它的规则。同一个判断 `_diagnostics` 已经在做
+    （`#262`），这里只是把格式化那一支也接上。
+    """
+    uri = "file:///foreign-fmt.lomt"
+    resp = PY_LSP.handle({"jsonrpc": "2.0", "id": 7,
+                          "method": "textDocument/formatting",
+                          "params": {"textDocument": {"uri": uri}}},
+                         {uri: FOREIGN_SRC})[0]
+    assert "error" not in resp, f"格式化回了内部错误: {resp.get('error')}"
+    assert resp.get("result") is None, resp
+    print("      python 侧：格式化一份 python 语法的源 -> null")
+
+    # 原生源仍然照常格式化 —— 这道口子不能把正常路径一起关掉。
+    ok = "module demo\n\nfn f() -> i32 {\n    return 1;\n}\n"
+    resp = PY_LSP.handle({"jsonrpc": "2.0", "id": 8,
+                          "method": "textDocument/formatting",
+                          "params": {"textDocument": {"uri": "file:///ok.lomt"}}},
+                         {"file:///ok.lomt": ok})[0]
+    assert "error" not in resp and resp.get("result") is not None, resp
+    print("      python 侧：一份原生源照常有格式化结果")
+
+
+@test
 def test_a_dot_nl_file_gets_one_info_and_no_fake_errors():
     """`#351`：`.nl` **没有** `choose write grammar` 那一行 —— 两个语言服务按**后缀**认
     natural，一条 Info、一条 Error 都没有。

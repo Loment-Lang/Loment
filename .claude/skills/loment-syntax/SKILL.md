@@ -353,9 +353,10 @@ fn _start() {
   compiles). Older packages limited a unit to one name-form `use`; on those, the **path** form
   (`use "<prefix>/share/lompi/store/std/0.1.0/text.lomt"`) was the workaround. **Take modules one
   at a time anyway; a facade is huge and collision-prone.**
-- `use std` exists and drags all **133** modules into one unit. The 0.1.4.6 fix removed the old
-  "18 minutes then SIGILL" failure (measured in 0.1.5: about 16 seconds to IR), but the facade is
-  still large; prefer per-module imports.
+- `use std` exists and drags **every module in the `std` package** into one unit (`ls
+  lompi/store/std/0.1.0` for the current count - it keeps growing). The 0.1.4.6 fix removed the
+  old "18 minutes then SIGILL" failure (measured in 0.1.5: about 16 seconds to IR), but the facade
+  is still large; prefer per-module imports.
 - Only the name form works this way; `store` is a **directory tree** - do not reach into it by
   path unless you mean the path form above.
 - `mem`, `num` and `sha256` exist in **both** places; `use mem` resolves the **toolchain core

@@ -37,6 +37,12 @@ import lomentc  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 EX = ROOT / "loment" / "examples"
 
+#: stage1 编一条大单元的**上限**。300 秒在 `lomcli.lomt` 上不够：2026-11-19/20 的
+#: 门禁里这条命令在并行分片（`-j 4`、十片同时跑）下要 330–420 秒，于是
+#: `loment_potato_emit_test` / `loment_cli_test` 双双超时（`#1770`）。本机同一份单元
+#: 约 115 秒，所以这是**负载下的墙钟**，不是编译器真退化了。抬到 900 秒留出三倍余量。
+STAGE1_TIMEOUT = 900
+
 #: 这一格**覆盖**的语料: 单文件（不带 `use`）、非泛型、无 trait/impl 的那一片。
 #: 逐份与参考实现比字节 —— 不挑"有代表性"的几份。
 COVERED = (
@@ -185,7 +191,7 @@ def _stage1() -> Path | None:
 def _run(stage1: Path, rel: str) -> subprocess.CompletedProcess:
     return subprocess.run([str(stage1), rel, "--emit-potato"], cwd=str(ROOT),
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", shell=False, timeout=300)
+                          errors="replace", shell=False, timeout=STAGE1_TIMEOUT)
 
 
 def _want(rel: str) -> str:
@@ -583,7 +589,7 @@ def test_lspe_effect_sites_match_on_both_implementations():
             r = subprocess.run([str(s1), str(p), "--emit-potato",
                                 "--lspe-level", str(lvl)], cwd=str(ROOT),
                                capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", timeout=300, shell=False)
+                               errors="replace", timeout=STAGE1_TIMEOUT, shell=False)
             assert r.returncode == 0, r.stderr[-400:]
             mod, deps = lomentc.load_unit(p, ROOT, lspe_level=lvl)
             want = lomentc.emit_potato(mod, ROOT, deps)
@@ -602,7 +608,7 @@ def test_lspe_effect_sites_match_on_both_implementations():
 def _emit_potato_on(stage1: Path, p: Path) -> subprocess.CompletedProcess:
     return subprocess.run([str(stage1), str(p), "--emit-potato"], cwd=str(ROOT),
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", shell=False, timeout=300)
+                          errors="replace", shell=False, timeout=STAGE1_TIMEOUT)
 
 
 @test

@@ -1,0 +1,732 @@
+// loment/tools/update.lomt — 热更新载荷的原生安装器（工具链代际）。
+//
+// 为什么是原生：装好的包没有 Python、也没有 openssl/gpg。标准库里有 sha512 与 ed25519，
+// 所以验签与逐文件摘要都能在本进程里做完。
+//
+// 输入（`--from` 之外的路径都相对 `--prefix`）：
+//   <prefix>/share/loment/hot/release-key.ed25519   32 字节，钉住的发布公钥
+//   <prefix>/share/loment/hot/baseline.txt          准入对照面（language/baseline/contract/capability/fixed_core）
+//   <prefix>/share/loment/hot/current               当前代际：'a' 或 'b'
+//   <release>/payload-<platform>.hot                载荷（`HOTG` v1）
+//   <release>/payload-<platform>.hot.sig            整份载荷的裸 Ed25519 签名（64 字节）
+//
+// 载荷里有一份 `manifest.txt`（签名覆盖它），准入按它逐条比：
+//   schema 1 / platform <p> / release <tag> / base_digest <sha512(baseline.txt)>
+//   fixed_core <sha256(release-key.ed25519)> / file <name> <sha256> <mode> / fix <sha>
+//
+// 安装写进**非活动**代际 `gen/<a|b>/bin/*`；全部写完才写 `current`。旧代际原样保留，
+// 所以 `--rollback` 只是把指针切回去。
+//
+// 固定核：更新器自己**不在载荷里**（信任根）。`fixed_core` 只钉发布公钥；换了钥匙就
+// 对不上基线。载荷不能改 `bin/loment-hotupdate`、也不能改 `baseline.txt`/`current`。
+
+module update
+choose runtime
+
+use sha512
+use ed25519
+
+const CMD_CAP: u64 = 65536;
+const SCR_CAP: u32 = 4096;
+const PATH_CAP: u32 = 4096;
+const MAN_CAP: u64 = 65536;
+const PAYLOAD_CAP: u64 = 33554432;      // 32 MiB —— 十来个工具的上限（PE shim 堆 64 MiB）
+const HDR: u32 = 16;
+const ENT: u32 = 128;
+const NAME_CAP: u32 = 48;
+const KEY_LEN: u32 = 32;
+const SIG_LEN: u32 = 64;
+
+// ---------------------------------------------------------------- 基础
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn fail(msg: str) -> u32 {
+    let _a: u64 = write_all(2, str_ptr("loment-hotupdate: "), 18);
+    let _b: u64 = write_all(2, str_ptr(msg), str_len(msg) as u64);
+    let _c: u64 = write_all(2, str_ptr("\n"), 1);
+    return die(1);
+}
+
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    let _a: u64 = write_all(2, str_ptr("loment-hotupdate: "), 18);
+    let _b: u64 = write_all(2, str_ptr(msg), str_len(msg) as u64);
+    let _c: u64 = write_all(2, tail, n as u64);
+    let _d: u64 = write_all(2, str_ptr("\n"), 1);
+    return die(1);
+}
+
+fn say(p: ptr, n: u32) -> u32 {
+    let _a: u64 = write_all(1, p, n as u64);
+    let _b: u64 = write_all(1, str_ptr("\n"), 1);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+/// 把 (p,n) 复制进 scr 并以 NUL 收尾；返回 0 成功、1 太长。
+fn cstr(scr: ptr, p: ptr, n: u32) -> u32 {
+    if n >= SCR_CAP {
+        return 1;
+    }
+    let i: u32 = 0;
+    while i < n {
+        store8(scr, i, load8(p, i) as u8);
+        i = i + 1;
+    }
+    store8(scr, i, 0 as u8);
+    return 0;
+}
+
+fn open_ro(p: ptr, n: u32, scr: ptr) -> i64 {
+    let e: u32 = cstr(scr, p, n);
+    if e != 0 {
+        return -1;
+    }
+    return syscall4(257, (0 as u64) - 100, scr as u64, 0);
+}
+
+fn read_file(p: ptr, n: u32, buf: ptr, cap: u64, scr: ptr) -> i64 {
+    let fd: i64 = open_ro(p, n, scr);
+    if fd < 0 {
+        return -1;
+    }
+    let got: u64 = read_all(fd as u64, buf, cap);
+    syscall4(3, fd as u64, 0, 0);
+    return got as i64;
+}
+
+fn write_file(p: ptr, n: u32, data: ptr, len: u32, mode: u32, scr: ptr) -> i32 {
+    let e: u32 = cstr(scr, p, n);
+    if e != 0 {
+        return 1;
+    }
+    // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577
+    let fd: i64 = syscall6(257, (0 as u64) - 100, scr as u64, 577,
+                           mode as u64, 0);
+    if fd < 0 {
+        return 2;
+    }
+    let w: u64 = write_all(fd as u64, data, len as u64);
+    syscall4(3, fd as u64, 0, 0);
+    if w != len as u64 {
+        return 3;
+    }
+    return 0;
+}
+
+fn copy(dst: ptr, o: u32, src: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i < n {
+        store8(dst, o + i, load8(src, i) as u8);
+        i = i + 1;
+    }
+    return o + n;
+}
+
+fn app(dst: ptr, o: u32, s: str) -> u32 {
+    return copy(dst, o, str_ptr(s), str_len(s));
+}
+
+fn appb(dst: ptr, o: u32, p: ptr, n: u32) -> u32 {
+    return copy(dst, o, p, n);
+}
+
+fn same(a: ptr, ao: u32, b: ptr, bo: u32, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(a, ao + i) != load8(b, bo + i) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn has(dst: ptr, o: u32, s: str) -> bool {
+    return same(dst, o, str_ptr(s), 0, str_len(s));
+}
+
+// ---------------------------------------------------------------- argv
+
+fn argv_n(buf: ptr, cap: u64, scr: ptr, n: u32) -> u64 {
+    let fd: i64 = open_ro(str_ptr("/proc/self/cmdline"), 18, scr);
+    if fd < 0 {
+        return 0;
+    }
+    let rn: i64 = syscall4(0, fd as u64, buf as u64, cap);
+    syscall4(3, fd as u64, 0, 0);
+    if rn <= 0 {
+        return 0;
+    }
+    let m: u32 = rn as u32;
+    let i: u32 = 0;
+    let f: u32 = 0;
+    let s: u32 = 0;
+    let hit: u64 = 0;
+    while i < m {
+        if load8(buf, i) == 0 {
+            if f == n {
+                hit = (s as u64) * 4294967296 + ((i - s) as u64);
+            }
+            f = f + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return hit;
+}
+
+fn arg_is(buf: ptr, av: u64, lit: str) -> bool {
+    let s: u32 = (av >> 32) as u32;
+    let n: u32 = (av % 4294967296) as u32;
+    if n != str_len(lit) {
+        return false;
+    }
+    return same(buf, s, str_ptr(lit), 0, n);
+}
+
+fn arg_copy(buf: ptr, av: u64, dst: ptr) -> u32 {
+    let s: u32 = (av >> 32) as u32;
+    let n: u32 = (av % 4294967296) as u32;
+    let _o: u32 = copy(dst, 0, ptr_add(buf, s), n);
+    store8(dst, n, 0 as u8);
+    return n;
+}
+
+// ---------------------------------------------------------------- 十六进制
+
+fn hex_digest(out: ptr, dig: ptr) -> u32 {
+    let hexs: str = "0123456789abcdef";
+    let i: u32 = 0;
+    while i < 64 {
+        let b: u32 = load8(dig, i);
+        store8(out, i * 2, str_byte(hexs, b / 16) as u8);
+        store8(out, i * 2 + 1, str_byte(hexs, b % 16) as u8);
+        i = i + 1;
+    }
+    return 128;
+}
+
+/// 小端 32 位读 —— 不引 lib 的 `mem`（会和 std 的 `mem` 单元重名）。
+fn ld32(p: ptr, o: u32) -> u32 {
+    return load8(p, o) | (load8(p, o + 1) << 8)
+         | (load8(p, o + 2) << 16) | (load8(p, o + 3) << 24);
+}
+
+// ---------------------------------------------------------------- 载荷索引
+
+fn idx_name(pl: ptr, i: u32) -> u32 {
+    let o: u32 = HDR + i * ENT;
+    let n: u32 = 0;
+    while n < NAME_CAP && load8(pl, o + n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn idx_off(pl: ptr, i: u32) -> u32 {
+    return ld32(pl, HDR + i * ENT + 112);
+}
+
+fn idx_len(pl: ptr, i: u32) -> u32 {
+    return ld32(pl, HDR + i * ENT + 116);
+}
+
+fn idx_mode(pl: ptr, i: u32) -> u32 {
+    return ld32(pl, HDR + i * ENT + 120);
+}
+
+fn data_start(count: u32) -> u32 {
+    let x: u32 = HDR + count * ENT;
+    return (x + 7) / 8 * 8;
+}
+
+/// 名字必须是 `bin/<tool>`：只允许 ASCII 工具名字符，不含 `..`。冒号在 Windows 上是
+/// 备用数据流的分隔符（`bin\C:evil`），反斜杠是另一个分隔符 —— 两者都不收。
+fn name_ok(p: ptr, n: u32) -> bool {
+    if n < 5 || n >= NAME_CAP {
+        return false;
+    }
+    if !has(p, 0, "bin/") {
+        return false;
+    }
+    let i: u32 = 0;
+    while i < n {
+        let c: u32 = load8(p, i);
+        let ok: bool = (c >= 97 && c <= 122)
+                    || (c >= 65 && c <= 90)
+                    || (c >= 48 && c <= 57)
+                    || c == 46 || c == 95 || c == 45 || c == 47;
+        if !ok {
+            return false;
+        }
+        if i + 1 < n && c == 46 && load8(p, i + 1) == 46 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- 清单/基线
+
+fn word_end(p: ptr, i: u32, n: u32) -> u32 {
+    while i < n && load8(p, i) != 32 && load8(p, i) != 9
+        && load8(p, i) != 13 && load8(p, i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn skip_sp(p: ptr, i: u32, n: u32) -> u32 {
+    while i < n && (load8(p, i) == 32 || load8(p, i) == 9 || load8(p, i) == 13) {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn line_end(p: ptr, i: u32, n: u32) -> u32 {
+    while i < n && load8(p, i) != 10 {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// 在清单里找 `file <name> <hash> <mode>`；名字与 hash 逐字节比。
+fn manifest_file_ok(mp: ptr, mn: u32, name: ptr, nl: u32, hex: ptr, hl: u32) -> bool {
+    let i: u32 = 0;
+    while i < mn {
+        let e: u32 = line_end(mp, i, mn);
+        let a: u32 = skip_sp(mp, i, e);
+        let b: u32 = word_end(mp, a, e);
+        if b - a == 4 && has(mp, a, "file") {
+            let c: u32 = skip_sp(mp, b, e);
+            let d: u32 = word_end(mp, c, e);
+            if d - c == nl && same(mp, c, name, 0, nl) {
+                let f: u32 = skip_sp(mp, d, e);
+                let g: u32 = word_end(mp, f, e);
+                if g - f == hl && same(mp, f, hex, 0, hl) {
+                    return true;
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return false;
+}
+
+/// 清单里必须出现的那些行。返回 0 成功；否则把原因交给调用方打印。
+fn manifest_scan(mp: ptr, mn: u32, base_hex: ptr, fixed_hex: ptr,
+                 plat_p: ptr, plat_n: u32, rel_out: ptr) -> u32 {
+    let schema: u32 = 0;
+    let fixed: u32 = 0;
+    let base: u32 = 0;
+    let plat_ok: u32 = 0;
+    let fixes: u32 = 0;
+    let i: u32 = 0;
+    while i < mn {
+        let e: u32 = line_end(mp, i, mn);
+        let a: u32 = skip_sp(mp, i, e);
+        let b: u32 = word_end(mp, a, e);
+        if b - a == 6 && has(mp, a, "schema") {
+            let c: u32 = skip_sp(mp, b, e);
+            if c < e && load8(mp, c) == 49 { schema = 1; }
+        }
+        if b - a == 8 && has(mp, a, "platform") {
+            let c: u32 = skip_sp(mp, b, e);
+            let d: u32 = word_end(mp, c, e);
+            if d - c == plat_n && same(mp, c, plat_p, 0, plat_n) {
+                plat_ok = 1;
+            }
+        }
+        if b - a == 7 && has(mp, a, "release") {
+            let c: u32 = skip_sp(mp, b, e);
+            let d: u32 = word_end(mp, c, e);
+            let _x: u32 = copy(rel_out, 0, ptr_add(mp, c), d - c);
+            store8(rel_out, d - c, 0 as u8);
+        }
+        if b - a == 11 && has(mp, a, "base_digest") {
+            let c: u32 = skip_sp(mp, b, e);
+            let d2: u32 = word_end(mp, c, e);
+            if d2 - c == 128 && same(mp, c, base_hex, 0, 128) { base = 1; }
+        }
+        if b - a == 10 && has(mp, a, "fixed_core") {
+            let c: u32 = skip_sp(mp, b, e);
+            let d3: u32 = word_end(mp, c, e);
+            if d3 - c == 128 && same(mp, c, fixed_hex, 0, 128) { fixed = 1; }
+        }
+        if b - a == 3 && has(mp, a, "fix") {
+            fixes = fixes + 1;
+        }
+        i = e + 1;
+    }
+    if schema == 0 { return 1; }
+    if plat_ok == 0 { return 2; }
+    if base == 0 { return 3; }
+    if fixed == 0 { return 4; }
+    if fixes == 0 { return 5; }
+    return 0;
+}
+
+/// 基线里的 `fixed_core` 必须是**本地公钥**的摘要。
+fn baseline_fixed_ok(bp: ptr, bn: u32, fixed_hex: ptr) -> bool {
+    let i: u32 = 0;
+    while i < bn {
+        let e: u32 = line_end(bp, i, bn);
+        let a: u32 = skip_sp(bp, i, e);
+        let b: u32 = word_end(bp, a, e);
+        if b - a == 10 && has(bp, a, "fixed_core") {
+            let c: u32 = skip_sp(bp, b, e);
+            let d: u32 = word_end(bp, c, e);
+            return d - c == 128 && same(bp, c, fixed_hex, 0, 128);
+        }
+        i = e + 1;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------- 路径
+
+fn hot_path(out: ptr, pre: ptr, pn: u32, tail: str) -> u32 {
+    let o: u32 = copy(out, 0, pre, pn);
+    o = app(out, o, "/share/loment/hot");
+    o = app(out, o, tail);
+    store8(out, o, 0 as u8);
+    return o;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let cmdv: u64 = sys_alloc(CMD_CAP);
+    let basev: u64 = sys_alloc(MAN_CAP);
+    let payv: u64 = sys_alloc(PAYLOAD_CAP);
+    let miscv: u64 = sys_alloc(1048576);
+    if cmdv == 0 || basev == 0 || payv == 0 || miscv == 0 {
+        return fail("out of memory");
+    }
+    let cmd: ptr = cmdv as ptr;
+    let base: ptr = basev as ptr;
+    let pay: ptr = payv as ptr;
+    let misc: ptr = miscv as ptr;
+    let scr: ptr = misc;
+    let path: ptr = ptr_add(misc, 4096);
+    let to: ptr = ptr_add(misc, 8192);
+    let keyb: ptr = ptr_add(misc, 32768);
+    let pre: ptr = ptr_add(misc, 12288);
+    let sigp: ptr = ptr_add(misc, 16384);
+    let hexb: ptr = ptr_add(misc, 16640);
+    let fixedb: ptr = ptr_add(misc, 16896);
+    let relb: ptr = ptr_add(misc, 17152);
+    let pn: u32 = 0;      // prefix len
+    let plp: ptr = ptr_add(misc, 17408);   // payload path
+    let pln: u32 = 0;
+    let sp: ptr = ptr_add(misc, 21504);    // sig path
+    let sn: u32 = 0;
+    let check: u32 = 0;
+    let roll: u32 = 0;
+    let status: u32 = 0;
+    let i: u32 = 1;
+    let more: u32 = 1;
+    while more == 1 {
+        let av: u64 = argv_n(cmd, CMD_CAP, scr, i);
+        if av == 0 {
+            more = 0;
+        } else {
+            if arg_is(cmd, av, "--prefix") {
+                i = i + 1;
+                let v: u64 = argv_n(cmd, CMD_CAP, scr, i);
+                pn = arg_copy(cmd, v, pre);
+            }
+            if arg_is(cmd, av, "--payload") {
+                i = i + 1;
+                let v2: u64 = argv_n(cmd, CMD_CAP, scr, i);
+                pln = arg_copy(cmd, v2, plp);
+            }
+            if arg_is(cmd, av, "--sig") {
+                i = i + 1;
+                let v3: u64 = argv_n(cmd, CMD_CAP, scr, i);
+                sn = arg_copy(cmd, v3, sp);
+            }
+            if arg_is(cmd, av, "--check") { check = 1; }
+            if arg_is(cmd, av, "--rollback") { roll = 1; }
+            if arg_is(cmd, av, "--status") { status = 1; }
+            i = i + 1;
+        }
+    }
+    if pn == 0 {
+        return fail("usage: loment-hotupdate --prefix DIR [--payload FILE] [--sig FILE] [--check|--rollback|--status]");
+    }
+    // `--status` / `--rollback` 只看前缀与代际，不需要载荷。
+    let cp: u32 = hot_path(path, pre, pn, "/current");
+    let cur: u32 = 0;      // 0 = 没有/未知 -> 装 a
+    let cn: i64 = read_file(path, cp, to, 8, scr);
+    if cn > 0 && load8(to, 0) == 97 { cur = 1; }
+    if cn > 0 && load8(to, 0) == 98 { cur = 2; }
+
+    if status == 1 {
+        if cur == 0 { return say(str_ptr("current (base)"), 14); }
+        if cur == 1 { return say(str_ptr("current a"), 9); }
+        return say(str_ptr("current b"), 9);
+    }
+    if roll == 1 {
+        if cur == 0 { return fail("nothing to roll back to"); }
+        let other: u32 = 1;
+        if cur == 1 { other = 2; }
+        let gp: u32 = gen_manifest(path, pre, pn, other);
+        let got: i64 = read_file(path, gp, to, 8, scr);
+        // 另一格有装过 -> 切过去；没有 -> 回到基线（'0'，启动器认 bin/）。
+        let letter: u8 = 48;
+        if got > 0 {
+            letter = 97;
+            if other == 2 { letter = 98; }
+        }
+        store8(to, 0, letter);
+        let cp2: u32 = hot_path(path, pre, pn, "/current");
+        let wr: i32 = write_file(path, cp2, to, 1, 420, scr);
+        if wr != 0 { return fail("cannot write current"); }
+        if got <= 0 { return say(str_ptr("rolled back to base"), 19); }
+        return say(str_ptr("rolled back"), 11);
+    }
+    if pln == 0 {
+        return fail("usage: loment-hotupdate --prefix DIR --payload FILE [--sig FILE] [--check]");
+    }
+    if sn == 0 {
+        // 默认 <payload>.sig
+        let o: u32 = appb(sp, 0, plp, pln);
+        let o2: u32 = app(sp, o, ".sig");
+        store8(sp, o2, 0 as u8);
+        sn = o2;
+    }
+
+    // 固定公钥
+    let kp: u32 = hot_path(path, pre, pn, "/release-key.ed25519");
+    let kn: i64 = read_file(path, kp, keyb, 64, scr);
+    if kn != 32 {
+        return fail("release-key.ed25519 missing or not 32 bytes");
+    }
+    let key: ptr = keyb;
+    let kctx: ptr = alloc(852);
+    let kdig: ptr = alloc(64);
+    sha512(key, 0, 32, kdig, kctx);
+    let kh: u32 = hex_digest(fixedb, kdig);
+    store8(fixedb, kh, 0 as u8);
+
+    // 基线 + 它的摘要
+    let bp: u32 = hot_path(path, pre, pn, "/baseline.txt");
+    let bn64: i64 = read_file(path, bp, base, MAN_CAP, scr);
+    if bn64 <= 0 {
+        return fail("baseline.txt missing");
+    }
+    let bn: u32 = bn64 as u32;
+    let bctx: ptr = alloc(852);
+    let bdig: ptr = alloc(64);
+    sha512(base, 0, bn, bdig, bctx);
+    let bh: u32 = hex_digest(hexb, bdig);
+    store8(hexb, bh, 0 as u8);
+    if !baseline_fixed_ok(base, bn, fixedb) {
+        return fail("baseline fixed_core does not match the pinned release key");
+    }
+
+    // 载荷 + 签名
+    let pn64: i64 = read_file(plp, pln, pay, PAYLOAD_CAP, scr);
+    if pn64 <= 0 {
+        return fail("payload missing or empty");
+    }
+    let total: u32 = pn64 as u32;
+    let sv: i64 = read_file(sp, sn, to, 128, scr);
+    if sv != SIG_LEN {
+        return fail("signature missing or not 64 bytes");
+    }
+    let sig: ptr = to;
+    let sc: ptr = alloc(ed_scratch());
+    if ed_verify(key, pay, total, sig, sc) != 0 {
+        return fail("payload signature is not valid for the pinned release key");
+    }
+
+    // 索引头
+    if !has(pay, 0, "HOTG") { return fail("payload magic is not HOTG"); }
+    if ld32(pay, 4) != 1 { return fail("payload version is not 1"); }
+    let count: u32 = ld32(pay, 8);
+    if count == 0 || count > 4096 { return fail("payload count out of range"); }
+    let ds: u32 = data_start(count);
+    if ds > total { return fail("payload index runs past the file"); }
+
+    // 找 manifest.txt
+    let mi: u32 = 4096;
+    let j: u32 = 0;
+    while j < count {
+        let o: u32 = HDR + j * ENT;
+        let nl: u32 = idx_name(pay, j);
+        if nl == 12 && has(pay, o, "manifest.txt") {
+            mi = j;
+        }
+        j = j + 1;
+    }
+    if mi == 4096 { return fail("payload has no manifest.txt"); }
+    let mo: u32 = HDR + mi * ENT;
+    let moff: u32 = ds + idx_off(pay, mi);
+    let mlen: u32 = idx_len(pay, mi);
+    if moff + mlen > total { return fail("manifest runs past the payload"); }
+    let mp: ptr = ptr_add(pay, moff);
+    let _mdig: u32 = 0;
+
+    // platform 从载荷文件名里取
+    let mr: u32 = 0;
+    if contains(plp, pln, "windows-x64") == 1 {
+        mr = manifest_scan(mp, mlen, hexb, fixedb, str_ptr("windows-x64"), 11, relb);
+    } else {
+        mr = manifest_scan(mp, mlen, hexb, fixedb, str_ptr("linux-x64"), 9, relb);
+    }
+    if mr == 1 { return fail("manifest schema is not 1"); }
+    if mr == 2 { return fail("manifest platform does not match the payload file"); }
+    if mr == 3 { return fail("manifest base_digest does not match this install's baseline"); }
+    if mr == 4 { return fail("manifest fixed_core does not match the pinned release key"); }
+    if mr == 5 { return fail("manifest has no fix entries"); }
+
+    // 目标代际 = 另一格
+    let g2: u32 = 1;
+    if cur == 1 { g2 = 2; }
+
+    // 逐文件：先验摘要，再写
+    let k: u32 = 0;
+    let installed: u32 = 0;
+    while k < count {
+        let o2: u32 = HDR + k * ENT;
+        let nl2: u32 = idx_name(pay, k);
+        if name_ok(ptr_add(pay, o2), nl2) {
+            let off: u32 = ds + idx_off(pay, k);
+            let len: u32 = idx_len(pay, k);
+            if (off as u64) + (len as u64) > (total as u64) {
+                return fail("payload entry runs past the file");
+            }
+            let dg: ptr = alloc(64);
+            let c2: ptr = alloc(852);
+            sha512(ptr_add(pay, off), 0, len, dg, c2);
+            // 索引里是二进制摘要；清单里是 64 个十六进制字符
+            if !same(pay, o2 + NAME_CAP, dg, 0, 64) {
+                return fail("payload entry digest does not match its bytes");
+            }
+            let hx: u32 = hex_digest(hexb, dg);
+            store8(hexb, hx, 0 as u8);
+            if !manifest_file_ok(mp, mlen, ptr_add(pay, o2), nl2, hexb, 128) {
+                return fail("payload entry is not listed in the manifest");
+            }
+            // `--check` 只验，不落盘。
+            if check == 0 {
+                let o3: u32 = hot_path(path, pre, pn, "/gen/");
+                if g2 == 1 { store8(path, o3, 97 as u8); } else { store8(path, o3, 98 as u8); }
+                let o4: u32 = o3 + 1;
+                store8(path, o4, 47 as u8);       // '/'
+                let o5: u32 = appb(path, o4 + 1, ptr_add(pay, o2), nl2);
+                store8(path, o5, 0 as u8);
+                // 工具一律 0755；载荷里的 mode 只用于报告，不直接落到文件系统。
+                let wr2: i32 = write_file(path, o5, ptr_add(pay, off), len, 493, scr);
+                if wr2 == 1 { return fail("generation path too long"); }
+                if wr2 == 2 { return fail("cannot open the generation file"); }
+                if wr2 == 3 { return fail("short write to the generation file"); }
+            }
+            installed = installed + 1;
+        }
+        k = k + 1;
+    }
+    if installed == 0 {
+        return fail("payload carries no bin/* entries");
+    }
+
+    if check == 1 {
+        let _x: u64 = write_all(1, str_ptr("ok "), 3);
+        let _y: u64 = write_all(1, relb, str_len_ptr(relb) as u64);
+        let _z: u64 = write_all(1, str_ptr("\n"), 1);
+        return die(0);
+    }
+
+    // 清单副本进代际（status / 审计用）
+    let o6: u32 = hot_path(path, pre, pn, "/gen/");
+    if g2 == 1 { store8(path, o6, 97 as u8); } else { store8(path, o6, 98 as u8); }
+    let o7: u32 = app(path, o6 + 1, "/manifest.txt");
+    store8(path, o7, 0 as u8);
+    let _mw: i32 = write_file(path, o7, mp, mlen, 420, scr);
+
+    // 指针：全部写完才切
+    let letter2: u8 = 97;
+    if g2 == 2 { letter2 = 98; }
+    store8(to, 0, letter2);
+    let cp3: u32 = hot_path(path, pre, pn, "/current");
+    let wr3: i32 = write_file(path, cp3, to, 1, 420, scr);
+    if wr3 != 0 { return fail("cannot write current"); }
+
+    let _x2: u64 = write_all(1, str_ptr("installed "), 10);
+    let _y2: u64 = write_all(1, relb, str_len_ptr(relb) as u64);
+    let _z2: u64 = write_all(1, str_ptr("\n"), 1);
+    return die(0);
+}
+
+// ---------------------------------------------------------------- 小工具
+
+fn contains(p: ptr, n: u32, s: str) -> u32 {
+    let sl: u32 = str_len(s);
+    if sl == 0 || sl > n { return 0; }
+    let i: u32 = 0;
+    while i + sl <= n {
+        if same(p, i, str_ptr(s), 0, sl) == true {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn gen_manifest(out: ptr, pre: ptr, pn: u32, g: u32) -> u32 {
+    let o: u32 = hot_path(out, pre, pn, "/gen/");
+    if g == 1 { store8(out, o, 97 as u8); } else { store8(out, o, 98 as u8); }
+    let o2: u32 = app(out, o + 1, "/manifest.txt");
+    store8(out, o2, 0 as u8);
+    return o2;
+}
+
+fn str_len_ptr(p: ptr) -> u32 {
+    let n: u32 = 0;
+    while load8(p, n) != 0 {
+        n = n + 1;
+    }
+    return n;
+}

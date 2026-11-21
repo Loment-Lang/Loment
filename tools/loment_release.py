@@ -435,6 +435,9 @@ GLOBS = [
     "tools/loment_hotline_test.py",
     # 投影树 → 热更新件（`#1155`）：编两份 hotswap 档，拼装载件。**同位置**。
     "tools/loment_hotart.py", "tools/loment_hotart_test.py",
+    # 工具链代际载荷（原生更新器）：从投影树编全部工具，裸 Ed25519 签名。**同位置**。
+    "tools/loment_hotpack.py", "tools/loment_hotpack_test.py",
+    "loment/hotswap/release-key.ed25519",
     # 稳定性模拟（`#1152` 追加）：一个进程连着换六次、两槽轮流。**同位置**。
     "tools/loment_hotstress_test.py",
     # 命令行与模拟器（`#1155`）：`loment hotupdate` 与假 Pre-Release 的搭建。**同位置**。

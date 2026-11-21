@@ -5,19 +5,18 @@
 顶层只有一个检查器 —— `MainChecker`（主检查器）。它自己承担 Producer 角色，
 下辖域检查器（`DomainChecker` / E9）、借用检查器（`BorrowChecker` / E10）、
 效应检查器（`EffectChecker` / E11）、GC 检查器（`GCChecker` / E12）等子检查器。
-`CheckerRegistry` 是编译期登记表，`Scheduler` 按适用性给出 `Plan`；主检查器按
-计划调用子检查器。Advisory 子类只能产问题，Evidence 插件还要过义务的 `accept`
-集合；求解器仍是唯一裁决者。
+`CheckerRegistry` 是编译期登记表。**调度器属于 SDK**（`sdk.Scheduler`），
+不在主检查器里：主检查器只接收 SDK 给的 `Plan`，按它调用子检查器。
+Advisory 子类只能产问题，Evidence 插件还要过义务的 `accept` 集合；求解器仍是
+唯一裁决者。
 
-编译器只有一条入口：`main_checker().audit(...)`。它把“算计划 → 跑普查阶段 →
-追加效应/借用结果”收在一次调用里；`census()` / `plan_for_tokens()` 保留给包内
-与旧判据，内部也走同一个主检查器。默认路径的站点集合、顺序与内容寻址 id 不变。
+编译器只有一条入口：`lspe.audit(...)`（`LspeSdk` 会话）。SDK 持有调度器，算完
+计划再把 `Plan` 交给主检查器；主检查器自己不会调度。`census()` 保留给包内与
+旧判据。默认路径的站点集合、顺序与内容寻址 id 不变。
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -27,7 +26,6 @@ from .census import (census_bounds, census_constant, census_domain, census_drop,
                      census_e3, census_e4, census_frame, census_reclaim,
                      census_wf, site_id_factory)
 from .registry import LSPE_OBLIGATIONS
-from .solver import LSPE_DEFAULT_BUDGET
 
 PHASES = ("P0", "P1", "P2", "P3", "P4", "P5", "P6")
 ROLES = ("Producer", "Evidence", "Gate", "Advisory", "Resolver", "Ledger")
@@ -505,61 +503,6 @@ class CheckerRegistry:
         return len(self._by_id)
 
 
-class Scheduler:
-    """适用性 / 顺序 / 预算 / 跳过原因。它不改变求解器（`docs/344` §4）。"""
-
-    def plan(self, facts: UnitFacts, registry: CheckerRegistry) -> Plan:
-        run: list[str] = []
-        skip: list[SkipRecord] = []
-        for checker in registry.checkers():
-            reason = self._skip_reason(checker, facts)
-            if reason is None:
-                run.append(checker.desc.id)
-            else:
-                skip.append(SkipRecord(checker.desc.id, reason))
-        budgets: list[tuple[str, int]] = []
-        remaining = LSPE_DEFAULT_BUDGET
-        for cid in run:
-            desc = registry.get(cid).desc
-            take = max(0, min(int(desc.budget), remaining))
-            budgets.append((cid, take))
-            remaining -= take
-        payload = {
-            "run": run,
-            "skip": [[s.engine, s.reason] for s in skip],
-            "budgets": budgets,
-            "facts": facts.digest(),
-        }
-        raw = json.dumps(payload, ensure_ascii=True, sort_keys=True,
-                         separators=(",", ":")).encode("utf-8")
-        digest = hashlib.sha256(raw).hexdigest()
-        return Plan(tuple(run), tuple(skip), tuple(budgets),
-                    int(digest[:16], 16), int(hashlib.sha256(
-                        json.dumps(facts.digest(), sort_keys=True,
-                                   separators=(",", ":")).encode("utf-8")
-                    ).hexdigest()[:16], 16),
-                    level=facts.level, dims=facts.dims)
-
-    def _skip_reason(self, checker: MacroChecker, facts: UnitFacts) -> str | None:
-        desc = checker.desc
-        if desc.mandatory:
-            # 强制集永不 skipped；事实缺失让引擎自己报 Q001/Q002。
-            # **只有显式 mandatory 的检查器**（E2b/E6）走这条；按义务表把整个引擎
-            # 拉进强制集会违背"触发器不成立就没有站点"的过近似。
-            return None
-        if desc.id == "E7Differential":
-            return None if facts.twin_available else "twin_missing"
-        if desc.id == "E8Falsification":
-            return None if facts.probes else "no_probe"
-        if desc.id == "E10Loans" and facts.dim("lifetime") == "lifetime_no":
-            return "profile"
-        if desc.id == "A1Advisory" and not facts.has("advisory"):
-            return "profile"
-        if desc.triggers and not checker.applies(facts):
-            return "not_applicable"
-        return None
-
-
 def evidence_allowed(obligation: str) -> bool:
     """第三方证据是否被这条义务接受（默认只有 Advisory）。"""
     spec = LSPE_OBLIGATIONS.get(obligation)
@@ -572,10 +515,11 @@ def evidence_allowed(obligation: str) -> bool:
 class MainChecker(MacroChecker):
     """LSPE SDK 的唯一主检查器（`docs/361`）。
 
-    它自己承担 Producer 角色（P0），下辖所有子检查器；编译器的唯一入口是
-    `audit()`。子检查器分两用：`check()` 走 `MacroChecker` 统一接口产
-    `Claim`/问题，`scan()` 走普查阶段产站点。两者都由主检查器调度，登记表
-    与计划仍是唯一的“谁跑谁不跑”的依据。
+    它自己承担 Producer 角色（P0），下辖所有子检查器。**它不持有调度器**：
+    `Scheduler` 属于 SDK，`audit()` / `run()` 要求调用方传入 `Plan`；没有计划
+    就点名失败。子检查器分两用：`check()` 走 `MacroChecker` 统一接口产
+    `Claim`/问题，`scan()` 走普查阶段产站点。计划（由 SDK 生成）仍是唯一的
+    “谁跑谁不跑”的依据。
     """
 
     desc = EngineDesc("MainChecker", 0, "Producer", budget=0)
@@ -602,7 +546,6 @@ class MainChecker(MacroChecker):
             self.checker.register(c)
         for p in plugins:
             self.checker.register(p)
-        self.scheduler = Scheduler()
 
     # ---- 子检查器 -------------------------------------------------------
     def sub(self, engine: str) -> MacroChecker:
@@ -621,12 +564,11 @@ class MainChecker(MacroChecker):
     def borrow_checker(self) -> MacroChecker:
         return self.sub("E10Loans")
 
-    # ---- 调度 -----------------------------------------------------------
-    def plan(self, facts: UnitFacts) -> Plan:
-        return self.scheduler.plan(facts, self.checker)
-
+    # ---- 执行（计划由 SDK 传入；主检查器不持有调度器） -------------------
     def run(self, ctx: Ctx, plan: Plan | None = None) -> HostResult:
-        plan = plan or ctx.plan or self.plan(ctx.facts)
+        plan = plan or ctx.plan
+        if plan is None:
+            raise ValueError("MainChecker 不持有调度器：请由 SDK 传入 Plan")
         result = HostResult(plan)
         budgets = dict(plan.budgets)
         for cid in plan.run:
@@ -680,7 +622,7 @@ class MainChecker(MacroChecker):
             return
         result.claims.append(claim)
 
-    # ---- 普查 / 审计（编译器的唯一入口） --------------------------------
+    # ---- 普查 / 审计（计划由 SDK 传入） --------------------------------
     def _scan(self, toks: list, unit: str, *, plan: Plan | None,
               lms, instances, shadowed, scoped: bool, effects: bool,
               borrows: bool) -> CensusStage:
@@ -716,56 +658,19 @@ class MainChecker(MacroChecker):
                         borrows=False)
         return st.sites, st.unsourced, st.passes
 
-    def audit(self, toks: list, unit: str, *, dims: dict | None = None,
-              level: int = 3, lms=frozenset(), instances=(),
-              slots: dict | None = None, twin_available: bool = True,
-              probes=(), scoped: bool = False,
+    def audit(self, toks: list, unit: str, *, plan: Plan,
+              lms=frozenset(), instances=(), scoped: bool = False,
               shadowed: dict[str, frozenset[str]] | None = None,
-              effects: bool | None = None,
+              effects: bool = False,
               borrows: bool = False) -> AuditResult:
-        """编译器唯一入口：算计划、跑子检查器、返回台账要的站点。
+        """按 SDK 给的 `plan` 跑子检查器；主检查器不自己调度。
 
-        `effects=None` 时按 `slots["effects"] == "true"` 推导；`borrows=True`
-        才跑 E10 的报告面（它今天不写台账，默认不付这份成本）。
+        `effects=True` 才追加 E11 站点；`borrows=True` 才跑 E10 的报告面
+        （它今天不写台账，默认不付这份成本）。
         """
-        slots_in = dict(slots or {})
-        if effects is True and slots_in.get("effects") != "true":
-            slots_in["effects"] = "true"
-        facts = UnitFacts.from_tokens(
-            toks, dims=dims, level=level, lms=frozenset(lms or ()),
-            instances=instances, slots=slots_in,
-            twin_available=twin_available, probes=probes)
-        plan = self.plan(facts)
-        use_effects = (bool(effects) if effects is not None
-                       else slots_in.get("effects") == "true")
         st = self._scan(toks, unit, plan=plan, lms=lms, instances=instances,
                         shadowed=shadowed, scoped=scoped,
-                        effects=use_effects, borrows=borrows)
+                        effects=bool(effects), borrows=bool(borrows))
         return AuditResult(plan=plan, sites=st.sites, unsourced=st.unsourced,
                            passes=st.passes, effects=st.effects_out,
                            loans=st.loans_out)
-
-
-def main_checker(plugins: tuple[MacroChecker, ...] = ()) -> MainChecker:
-    """SDK 的唯一入口：一个主检查器，子检查器都在它下面。"""
-    return MainChecker(plugins)
-
-
-def plan_for_tokens(toks: list, unit: str, *, dims: dict | None = None,
-                    level: int = 3, lms=frozenset(), instances=(),
-                    slots: dict | None = None, twin_available: bool = True,
-                    probes=()) -> Plan:
-    facts = UnitFacts.from_tokens(toks, dims=dims, level=level, lms=lms,
-                                  instances=instances, slots=slots,
-                                  twin_available=twin_available, probes=probes)
-    return main_checker().plan(facts)
-
-
-def plan_lines(plan: Plan) -> list[str]:
-    """`loment lspe state` 的调度面：计划、跳过原因与预算。"""
-    run = ",".join(plan.run) if plan.run else "-"
-    out = [f"[LSPE] plan {plan.plan_hash:016x} level={plan.level} run={run}"]
-    for s in plan.skip:
-        out.append(f"[LSPE] skip {s.engine}: {s.reason}")
-    out.append("[LSPE] budgets " + ", ".join(f"{e}={n}" for e, n in plan.budgets))
-    return out

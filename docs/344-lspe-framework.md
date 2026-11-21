@@ -9,7 +9,7 @@
 > `docs/253`（LMS）· `docs/210`（LGC）· `docs/146`（能力域）· `docs/158`（冻结面）·
 > `docs/182`（诊断与 `choose`）
 > 一句话: **LSPE 已经是独立包；这次把它做成真正的框架：`MacroChecker` 抽象基类、
-> `MainChecker` 是唯一顶层检查器并持 `checker` + `scheduler`、调度器按适用性决定
+> `MainChecker` 是唯一顶层检查器（持有 `checker`），`Scheduler` 属于 SDK、按适用性决定
 > 谁跑谁不跑，并把“为什么没跑”写进台账。类继承与间接引用由
 > `choose class_on` / `indirect_on` 打开；默认关闭，`_off` 产物逐字节不变。**
 
@@ -21,8 +21,9 @@
    E10/E11/E12、证据子集格上的工作列表求解器、站点普查、派生树、台账、LSPC、
    问题码。编译器只是客户端；引擎顺序今天**手写固定**。
 2. **这次做的是“框架化”**：`MacroChecker` 是抽象基类；`MainChecker` 是**唯一的
-   顶层检查器**，持有 `checker`（子类登记/派发）与 `scheduler`（适用性/顺序/
-   预算/跳过）；域检查器、借用检查器、效应检查器等都登记在它下面。派发用
+   顶层检查器**，持有 `checker`（子类登记/派发）；**调度器属于 SDK**
+   （`LspeSdk.scheduler`，适用性/顺序/预算/跳过），主检查器只接收 `Plan`。
+   域检查器、借用检查器、效应检查器等都登记在主检查器下面。派发用
    `class_on` 的 vtable + `indirect_on` 的封闭世界间接调用（语言面未落地时，
    Python 侧先做同一形状）。
 3. **不做的**：不做运行期插件加载（产物是静态 ELF）、不做开放世界的间接引用
@@ -52,7 +53,7 @@
 | `loment/lspe/aicheck.py` / `aiask.py` | AI 检查器：只产 Q014，**永不进证据** |
 | `loment/lspe/lspe.lomt` | 自举侧同一套普查与引擎（token 级、固定容量） |
 
-编译器在 `tools/lomentc.py` 的 `load()` 里调一次 `main_checker().audit(...)`、
+编译器在 `tools/lomentc.py` 的 `load()` 里调一次 `lspe.audit(...)`、
 在 `emit_potato()` 里调一次台账，再加一个名字根；它**不定义**义务、证据、求解器。
 这条边界由 `lspe_test` 钉住（`docs/262` §5.14）。
 
@@ -90,9 +91,10 @@
 ### 2.1 一张图
 
 ```
-MainChecker（唯一顶层检查器；Producer / P0）
-├── checker   : CheckerRegistry        // 子检查器登记与派发
-└── scheduler : Scheduler              // 适用性 / 顺序 / 预算 / 跳过
+LspeSdk（SDK 会话）
+├── scheduler : Scheduler              // 适用性 / 顺序 / 预算 / 跳过（SDK 的）
+└── checker   : MainChecker（唯一顶层检查器；Producer / P0）
+    └── checker : CheckerRegistry      // 子检查器登记与派发
 
 MacroChecker（抽象基类）
 ├── ConstantChecker      (E1/E2/E5)   // 共用一遍词法
@@ -111,9 +113,11 @@ MacroChecker（抽象基类）
 
 - **`MacroChecker` 是抽象基类**：定义 `desc()` / `role()` / `applies()` /
   `check()` / `scan()`。
-- **`MainChecker` 是唯一的顶层检查器**：它持有 `checker`（登记/派发）与
-  `scheduler`（调度）；它自己承担 Producer 角色，不登记进自己的表。子检查器
-  要么走 `check()` 产 `Claim`/问题，要么走 `scan()` 产站点。
+- **`MainChecker` 是唯一的顶层检查器**：它持有 `checker`（登记/派发）；它自己
+  承担 Producer 角色，不登记进自己的表。子检查器要么走 `check()` 产
+  `Claim`/问题，要么走 `scan()` 产站点。
+- **调度器属于 SDK，不在检查器里**：`Scheduler` 是 `LspeSdk` 的成员；主检查器
+  不持有 `scheduler`，也没有 `plan()`，`audit()` / `run()` 要求传入 `Plan`。
 - **所有引擎都是它的子检查器**：域检查器（E9）、借用检查器（E10）、效应
   检查器（E11）、GC 检查器（E12）等。`applies()` 默认用描述符的触发器。
 - **角色不是继承层级**：所有子类都 `extends MacroChecker`，但 `role()` 决定
@@ -157,7 +161,7 @@ P5 Ledger    Potato v16 + .lspe 旁挂 + 证明根
 P6 LSPC      编译前风险单
 ```
 
-**只有 P1/P2/P4 的检查器是可调度的**；P0/P3/P5/P6 是主检查器固定阶段。
+**只有 P1/P2/P4 的检查器是可调度的**；P0/P3/P5/P6 是 SDK/主检查器固定阶段。
 这条分界是“调度器不能改变语义”的硬保证：调度器只能决定**子检查器跑不跑**，
 不能决定**求解器怎么算**、**台账怎么写**。
 
@@ -209,9 +213,10 @@ struct EngineDesc {
 
 - **登记**：`MainChecker.checker` 持有一张 `[&MacroChecker]`（或类构造器表）；
   每个子类在编译期登记；顺序按 `(phase, id)` 固定。主检查器自己不登记。
-- **派发**：`MainChecker.plan(facts)` 对每个子类调 `applies()`；跑的子类按固定
-  顺序调 `check()`（框架面）或 `scan()`（普查面）。`class_on` 的 vtable 负责
-  `check()` 的多态；`indirect_on` 负责登记表里的函数指针。
+- **派发**：`LspeSdk.plan(facts)` 调 `Scheduler.plan(facts, checker.checker)`；
+  它按 `applies()` 产出 `Plan`，主检查器再按 `Plan` 调子类的 `check()`
+  （框架面）或 `scan()`（普查面）。`class_on` 的 vtable 负责 `check()` 的多态；
+  `indirect_on` 负责登记表里的函数指针。
 - **封闭世界**：所有子类在编译期已知；没有运行期 `register()`，没有 `dlopen`。
   这与 `docs/345` §4 的目标集规则同一条。
 - **孪生**：参考侧与自举侧的 `EngineDesc`、计划、跳过原因、计划哈希逐字节相同；
@@ -475,8 +480,9 @@ V0 依赖 `docs/345` 的 **C0**（`choose` 两维 + 语法骨架）；V1 依赖 
 ### 9.1 V0–V4 落地状态（2026-11-21）
 
 - `loment/lspe/framework.py`：`MacroChecker` / `EngineDesc` / `CheckerRegistry` /
-  `Scheduler` / `MainChecker` / `Ctx` / `Claim` / `AdvisoryQuestion` /
-  `AuditResult`；**唯一顶层检查器** + 14 个下辖子检查器（E1–E12、A1）。
+  `MainChecker` / `Ctx` / `Claim` / `AdvisoryQuestion` / `AuditResult`；
+  **唯一顶层检查器** + 14 个下辖子检查器（E1–E12、A1）。`loment/lspe/sdk.py`
+  持有 `LspeSdk` 与 `Scheduler`：调度器属于 SDK，主检查器只接收 `Plan`。
   登记表按 `(phase, id)` 固定排序，上限 64；调度器给每条 skip 一个原因，
   计划哈希对 `(run, skip, budgets, facts)` 内容寻址。`Plan.run` 里没有
   `P0Producer` —— 主检查器自己就是生产器。
@@ -484,15 +490,21 @@ V0 依赖 `docs/345` 的 **C0**（`choose` 两维 + 语法骨架）；V1 依赖 
   `plugin_id` / `plugin_version`，且义务的 `accept` 集合要含 `External`/`Plugin`
   （今天没有义务 opt-in，所以插件证据一律被拒）。`LSPE_SDK_VERSION =
   "lspe-sdk/1.0"`，公开面冻结在 `loment/lspe/sdk.py`（`docs/361` §4）。
-- **编译器接入**：`load()` 只有一次 `lspe.main_checker().audit(...)`；计划、站点、
-  pass 块与效应追加都由主检查器返回。计划放在台账的 `_plan` 内部字段，
+- **编译器接入**：`load()` 只有一次 `lspe.audit(...)`（SDK 会话）；SDK 算计划，
+  主检查器返回站点、pass 块与效应追加。计划放在台账的 `_plan` 内部字段，
   `public()` 剥掉，Potato 产物不变。`loment lspe state` 在 stderr 打
   `[LSPE] plan / skip / budgets`。
-- **判据**：`lspe_test` 从 78 条增到 86 条；新增 8 条钉住“单一主检查器、
-  域/借用在其下、审计顺序不变、编译器只有一条入口、公开面冻结”。
+- **自举侧对齐**：`loment/lspe/lspe.lomt` 现在也有 `lspe_sched`（SDK 调度器）
+  与 `lspe_main`（唯一主检查器）；`lspe_engine` / `lspe_domain` 私有。
+  `potato.lomt` 先算计划再交主检查器。E10 仍是参考侧报告面；E11/E12 的台账
+  计数在 `potato.lomt` 的装配器里。种子 7,417,951 B；`lomelf` 全局表
+  6144 → 8192（后面每张表同幅后移），genesis 按新种子/镜像重出。
+- **判据**：`lspe_test` 从 78 条增到 87 条；新增 9 条钉住“单一主检查器、
+  域/借用在其下、审计顺序不变、编译器只有一条入口、公开面冻结、自举侧同形状”。
   `lomentc_test` 271/271、`loment_potato_emit_test` 旧绿不变。
-- **边界**：`docs/345` 的 C2–C4（vtable / 自举侧类）仍是语言面梯子，不属于
-  这一层派发；本层用 Python 子类做同一条“基类 + 登记表 + 固定顺序”的派发。
+- **边界**：`docs/345` 的 C2–C4（vtable / 自举侧类）仍是语言面梯子；这一层的
+  参考侧用 Python 子类，自举侧用 `lspe_sched` / `lspe_main` + 私有函数做同一条
+  “调度器在外面、主检查器派发、子检查器私有”的派发。
 
 ---
 

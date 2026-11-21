@@ -18439,12 +18439,12 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     # LMS 的 g1 内联界检查也是站点（`#1021`）：档位从**开关表**读（预扫已按档铺过
     # 初值），与发射器同一个读法。
     _lms_on = frozenset(n for n in LMS_TOGGLES if _lms_level(mod, n))
-    # `docs/361` SDK 1.0：编译器只有一条 LSPE 入口 —— 主检查器。它内部算计划、
-    # 跑域/借用/效应/GC 等子检查器，并把 E11 的站点追加在普查之后（顺序与旧路径
-    # 逐字节相同）。计划仍以 `_plan` 进台账内部字段（`public()` 会剥掉），所以
-    # Potato 产物逐字节不变。
+    # `docs/361` SDK 1.0：编译器只有一条 LSPE 入口 —— SDK 的 `audit()`。调度器
+    # 属于 SDK，不在检查器里：SDK 先算计划，再交给主检查器跑域/借用/效应/GC 等
+    # 子检查器，并把 E11 的站点追加在普查之后（顺序与旧路径逐字节相同）。计划仍以
+    # `_plan` 进台账内部字段（`public()` 会剥掉），所以 Potato 产物逐字节不变。
     _scoped = block_scope_on(_eff)
-    _lspe_audit = lspe.main_checker().audit(
+    _lspe_audit = lspe.audit(
         tt, mod.name, dims=effective_dims(mod), level=lspe_level,
         lms=_lms_on, slots=getattr(mod, "slots", {}),
         scoped=_scoped,

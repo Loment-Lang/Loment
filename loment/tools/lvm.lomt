@@ -3405,6 +3405,12 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             fail("checkpoint：跨实现恢复不支持停在 phi 中途（docs/365）");
         }
         let nf: u32 = ru32(f, a);
+        if nf >= MAX_CONT {
+            fail("checkpoint：续延栈太深");
+        }
+        if nf != ctx_get(a, C_DEPTH) {
+            fail("checkpoint：帧数与深度不一致");
+        }
         let d: u32 = 1;
         while d <= nf {
             let fl: u32 = ru32(f, a);

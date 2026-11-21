@@ -7913,7 +7913,9 @@ pub fn chk_arena_env() -> u32 { return 105808; }
 pub fn chk_arena_tyt() -> u32 { return 138576; }
 /// 名字表哈希索引（`CHK_HASH_OFF`）接在类型表之后。
 pub fn chk_arena_hash() -> u32 { return CHK_HASH_OFF; }
-pub fn chk_arena_bytes() -> u32 { return CHK_HASH_OFF + CHK_HASH_SLOTS * 4; }
+/// 142,688 + 8192 × 4。**写成字面量**：`loment_p8_test::test_m85_heap_budget` 按
+/// `return <数>` 解析这一行来算 PE 垫片的堆预算（表达式它读不懂）。
+pub fn chk_arena_bytes() -> u32 { return 175456; }
 /// 诊断缓冲该分配多少字节（与写它的两个模块同一个数，`#663`）。
 pub fn chk_err_bytes() -> u32 { return err_max(); }
 /// 诊断缓冲丢了多少条（读 `chk_pub` 数出来的那一格，`#656`）。

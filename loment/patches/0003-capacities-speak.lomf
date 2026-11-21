@@ -34,6 +34,10 @@ about
 about **2026-11-18**（域树收尾）：`dom_stmt` / `dom_for` 的失败路径改成「前进到块尾」
 about （诊断不再退化成崩溃），并多了一个 6 号（域语句降不下去）—— `new` 再跟树走一次。
 about
+about **2026-11-21**（盘古档，`docs/363`）：`emit_module` 多收第 7 个参数 `pangu`
+about （`lms_pangu_true` 是用户开关，`apply_switches` 会把它从 token 流里抹掉）；
+about 这一块的 `new` 因此再跟树走一次。
+about
 about 棘轮：`loment_caps_test::test_the_front_end_has_no_silent_capacity` 把「前端缺口 0」钉住，
 about `EXPLAINED` 逐条写清每一处排除的来路（见 `tools/loment_caps.py`）。
 
@@ -157,7 +161,8 @@ old <<<
 new <<<
     // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
     let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
-                             sw_state_named(unit, sw, "domain_clock_explicit"));
+                             sw_state_named(unit, sw, "domain_clock_explicit"),
+                             sw_state_named(unit, sw, "lms_pangu_true"));
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。

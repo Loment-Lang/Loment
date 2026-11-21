@@ -133,6 +133,13 @@ def key_for(mod, deps, *, flags: dict | None = None) -> str | None:
     h.update(f"profile={getattr(mod, 'profile', '')}".encode("utf-8") + b"\0")
     for k, v in sorted((flags or {}).items()):
         h.update(f"{k}={v}".encode("utf-8") + b"\0")
+    #: **用户开关与七级覆盖**。`_apply_switches` 会把 `choose` 行从源里抹掉，
+    #: 所以源字节摘要看不出它们；漏掉这一格时，改一行 `choose close lms_reject`
+    #: 或加 `lms_pangu_true` 会读到旧 IR（2026-11-20 实测撞到）。
+    sw = getattr(mod, "switches", None)
+    if sw is not None:
+        for name in sorted(getattr(sw, "vals", {})):
+            h.update(f"sw={name}:{int(bool(sw.state(name)))}".encode("utf-8") + b"\0")
     for path, data in srcs:
         h.update(path.encode("utf-8") + b"\0")
         h.update(str(len(data)).encode("ascii") + b"\0")

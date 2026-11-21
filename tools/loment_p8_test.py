@@ -353,11 +353,18 @@ def _st(s) -> str:
     if n == "While":
         body = "".join(" " + _st(x) for x in s.body)
         return f"(while {_ex(s.cond)} ({body}))"
+    if n == "Block":
+        body = "".join(" " + _st(x) for x in s.body)
+        return f"(block ({body}))"
     if n == "For":
         body = "".join(" " + _st(x) for x in s.body)
         return f"(for {s.var} {_ex(s.lo)} {_ex(s.hi)} ({body}))"
     if n == "Guard":
         return f"(guard {s.cap} {_ex(s.expr)})"
+    if n == "Break":
+        return "(break)"
+    if n == "Continue":
+        return "(continue)"
     if n == "Match":
         # `if let` 也走这里 (参考实现把它反糖成两臂 Match: 命中臂 + 通配臂)
         return (f"(match {_ex(s.subject)}"
@@ -820,7 +827,8 @@ def _prof_of_text(text: str) -> int:
     2 = tur2026.3）。**与 driver.strip_grammar_decl 同一张别名表**：夹具绕过了装载器，
     所以它得自己把版次交给 `emit_module` / `check_arena` 的最后一个实参。"""
     prof = {"tur3": 2, "tur2026.3": 2, "tur2": 1, "tur2026.2": 1,
-            "tur": 0, "tur1": 0, "tur2026.1": 0, "loment": 2}
+            "tur": 0, "tur1": 0, "tur2026.1": 0, "loment": 2,
+            "tur2027.1alpha": 3, "2027.1alpha": 3}
     for line in text.split("\n"):
         h = line.strip().rstrip(";").split()
         if len(h) == 4 and h[0] == "choose" and h[1] == "write" and h[2] == "grammar":
@@ -1075,7 +1083,13 @@ def test_m82_loment_codegen_byte_identical():
                        # `#538`：`choose no_gc` 的那行 IR 标记两份实现必须逐字节同。
                        ROOT / "loment" / "selfhost" / "ir_no_gc.lomt",
                        # `docs/299`：借用类型（`&T` / `&mut T` / `*r` / 写穿字段 / 借用字段）。
-                       ROOT / "loment" / "selfhost" / "ir_borrow.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_borrow.lomt",
+                       # `docs/353`：块作用域（独立块 / 遮蔽 / for / match / if let）。
+                       ROOT / "loment" / "selfhost" / "ir_scope.lomt",
+                       # `docs/353` §4：GC alpha + 遮蔽（按名字保守退出，E12 站点）。
+                       ROOT / "loment" / "selfhost" / "ir_scope_gc.lomt",
+                       # `docs/353` §4 + `docs/309`：alpha 里的 `lgc` 三种窗口各一层作用域。
+                       ROOT / "loment" / "selfhost" / "lgc_alpha.lomt"):
             want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:
@@ -1679,7 +1693,8 @@ def _unit_text(target: Path) -> str:
     #   * 声明行要抹 —— `Parser.parse` 要求第一个 token 是 `module`；
     #   * 版次要传 —— 抹掉之后 `Parser` 只看得到缺省的 Tur 1。
     raw_full = target.read_text(encoding="utf-8")
-    _pname = {2: "tur2026.3", 1: "tur2026.2"}.get(_prof_of_text(raw_full), "tur2026.1")
+    _pname = {3: "tur2027.1Alpha", 2: "tur2026.3", 1: "tur2026.2"}.get(
+        _prof_of_text(raw_full), "tur2026.1")
     raw = _blank_grammar_decl(raw_full)
     have = {e.name for e in lomentc.Parser(
         lomentc._apply_switches(lomc.lex(raw), lomentc.SwitchTable()), raw,

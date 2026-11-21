@@ -477,6 +477,9 @@ _CASES: list[tuple[str, str]] = [
      "fn f() { lgc end; }\n"),
     ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
      "fn f() { lgc start(2 + 3) { } }\n"),
+    # ---- 块作用域（docs/353，tur2027.1Alpha）-------------------------------
+    ("scope-dup-in-block", "choose write grammar tur2027.1Alpha\nmodule m\nchoose runtime\n"
+     "fn f() -> u32 {\n    let x: u32 = 1;\n    let x: u32 = 2;\n    return x;\n}\n"),
     # ---- 借用生命周期（docs/299，第八维 `lifetime`）--------------------------
     # 这五条是"借用从**声明**走到**判据**"的证据：只有参考实现收不算落地，
     # 自举侧必须给出**同一组码**。每一条都对应 `docs/299` §8 的一条 v1 语义。

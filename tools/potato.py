@@ -264,7 +264,7 @@ LSPE_COUNTS = ("sites", "obligations", "proved", "undecided",
 #: **旧产物可以缺 `depth`**（回放承诺）：缺项按 0 算，identity 仍然成立。
 LSPE_FLOOR_KEYS = ("assumed", "stale_wf", "budget", "depth", "drop_honest", "pass")
 #: `lspe` 是一个**封闭**对象：未知键必须报，不能静默扩展（与 `gc_ladder` 同一条纪律）。
-#: `interrogations` / `lspc` / `proof_root` 是 v2（0.1.5.2）的可选字段：
+#: `interrogations` / `lspc` / `proof_root` 是 v2（0.1.6）的可选字段：
 #: 新发射器都写，旧产物缺了也照样合法（回放）。
 LSPE_KEYS = frozenset({
     "state", "set_by", "mode", "level", "sites", "obligations", "proved",
@@ -340,7 +340,8 @@ ABIS = ("c", "rust", "python", "go", "java")
 #: **只让拼法与形状，不让语义**（`docs/188` §0）。
 #: Tur 的版次是**两级名**（`docs/296` §1.1）：`tur<年份>.<年内序号>`。这里只放规范名；
 #: 当年短名（`tur1` / `tur2`）与历史拼法（`tur`）是源侧别名，不进对象。
-GRAMMARS = ("loment", "tur2026.1", "tur2026.2", "tur2026.3", "c", "python", "java", "go", "rust",
+GRAMMARS = ("loment", "tur2026.1", "tur2026.2", "tur2026.3", "tur2027.1Alpha",
+            "c", "python", "java", "go", "rust",
             "csharp", "cpp", "natural")
 
 
@@ -927,7 +928,7 @@ def validate(doc: object) -> list[str]:
                         v = e.get(k)
                         if not isinstance(v, int) or isinstance(v, bool) or v < 0:
                             errs.append(f"{ver}: lspe.passes[{i}].{k} 必须是非负整数，得到 {v!r}")
-            # ---- v2（0.1.5.2）的可选字段 ----
+            # ---- v2（0.1.6）的可选字段 ----
             it = lp.get("interrogations")
             if it is not None:
                 if not isinstance(it, dict):

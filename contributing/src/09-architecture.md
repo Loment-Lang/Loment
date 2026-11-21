@@ -43,7 +43,7 @@ grammar means. Divergence between grammars is a named class of defect (`docs/188
 
 A domain is a four-tuple `(space, lo, hi, revocable)`. A unit declares what it may reach; `guard`
 traps outside the domain and counts the pass. `excluded` declares what it must not reach.
-Capability work is the theme of `0.1.5.2` (`docs/146`).
+Capability work is the theme of `0.1.6` (`docs/146`).
 
 ## The Potato form object
 

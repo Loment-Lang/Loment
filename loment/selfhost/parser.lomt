@@ -593,13 +593,82 @@ fn parse_stmts(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     return pack(i, o);
 }
 
+/// 这份源声明的版次是不是 `tur2027.1Alpha`（块作用域）。
+/// 词法器把它拆成 `tur2027` `.` `1` `Alpha`（或 `2027` `.` `1` `Alpha`）。
+fn parse_alpha(src: ptr, t: ptr) -> u32 {
+    let z: u32 = 0;
+    while tok_kind(t, z) != 4 {
+        if (tok_is(src, t, z, "tur2027") || tok_is(src, t, z, "2027"))
+                && tok_is(src, t, z + 1, ".")
+                && tok_kind(t, z + 2) == 1
+                && tok_is(src, t, z + 3, "Alpha") {
+            return 1;
+        }
+        if tok_is(src, t, z, "module") {
+            return 0;
+        }
+        z = z + 1;
+    }
+    return 0;
+}
+
+/// `break` / `continue` 在这份源里是语法吗（Tur 2+ / 默认 2026.3，或 alpha）。
+fn parse_tur2(src: ptr, t: ptr) -> u32 {
+    let z: u32 = 0;
+    while tok_kind(t, z) != 4 {
+        if tok_is(src, t, z, "choose") && tok_is(src, t, z + 1, "write")
+                && tok_is(src, t, z + 2, "grammar") {
+            if tok_is(src, t, z + 3, "tur") || tok_is(src, t, z + 3, "tur1")
+                    || (tok_is(src, t, z + 3, "tur2026")
+                        && tok_is(src, t, z + 4, ".") && tok_is(src, t, z + 5, "1")) {
+                return 0;                  // 显式钉 Tur 1
+            }
+            return 1;
+        }
+        if tok_is(src, t, z, "module") {
+            return 1;                      // 没声明 = 默认 2026.3
+        }
+        z = z + 1;
+    }
+    return 1;
+}
+
+/// 块体的 dump：`tur2027.1Alpha` 下多包一层 `(block ( … ))`（与参考实现的 `Block` 同口径）。
+fn parse_body(src: ptr, t: ptr, start: u32, out: ptr, o: u32) -> u64 {
+    if parse_alpha(src, t) == 1 {
+        o = puts(out, o, "(block (");
+        let r: u64 = parse_stmts(src, t, start, out, o);
+        o = unpk_o(r);
+        let c: u32 = unpk_i(r);
+        o = puts(out, o, "))");
+        return pack(c, o);
+    }
+    return parse_stmts(src, t, start, out, o);
+}
+
 fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
+    // **独立块**（`tur2027.1Alpha`）：`(block ( … ))`，与参考实现的 `Block` 同口径。
+    if tok_is(src, t, i, "{") && parse_alpha(src, t) == 1 {
+        let rb: u64 = parse_body(src, t, i + 1, out, o);
+        return pack(unpk_i(rb) + 1, unpk_o(rb));
+    }
+    if (tok_is(src, t, i, "break") || tok_is(src, t, i, "continue"))
+            && parse_tur2(src, t) == 1 {
+        if tok_is(src, t, i, "break") {
+            o = puts(out, o, "(break)");
+        } else {
+            o = puts(out, o, "(continue)");
+        }
+        return pack(i + 2, o);             // 跳过 `;`
+    }
     // `lspe pass "reason" { … }`：**纯审计标注**。块里的语句照常检查、照常发射，
-    // 所以解析时直接把内层语句接进外层（语言没有块作用域）。理由的 E038 在
+    // 所以解析时直接把内层语句接进外层（旧版次没有块作用域）。理由的 E038 在
     // checker 的 token 扫描里判 —— 这里负责把块拆平。
+    // `tur2027.1Alpha` 不同：参考实现把它解析成 `Block("lspe_pass")`，体是一层词法
+    // 作用域（`docs/353` §4），dump 也要带 `(block …)`。
     if tok_is(src, t, i, "lspe") && tok_is(src, t, i + 1, "pass")
             && tok_kind(t, i + 2) == 2 && tok_is(src, t, i + 3, "{") {
-        let rp: u64 = parse_stmts(src, t, i + 4, out, o);
+        let rp: u64 = parse_body(src, t, i + 4, out, o);
         return pack(unpk_i(rp) + 1, unpk_o(rp));
     }
     // `lgc`（`docs/309`）：与参考实现同形 —— 窗口在 AST 里**摊平**成
@@ -610,9 +679,11 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         let act: u32 = i + 1;
         if tok_is(src, t, act, "end") {
             if tok_is(src, t, act + 1, "{") {
-                // `lgc end { … }`：短暂暂停窗口（`docs/309`），与 start 一样摊平。
+                // `lgc end { … }`：短暂暂停窗口（`docs/309`）。旧版次与 start 一样摊平；
+                // alpha 下体是一层块（`docs/353` §4）。
                 o = puts(out, o, "(lgc off)");
-                let rb: u64 = parse_stmts(src, t, act + 2, out, o);
+                if parse_alpha(src, t) == 1 { o = puts(out, o, " "); }
+                let rb: u64 = parse_body(src, t, act + 2, out, o);
                 return pack(unpk_i(rb) + 1,
                             puts(out, unpk_o(rb), " (lgc close)"));
             }
@@ -636,7 +707,8 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         }
         o = puts(out, o, ")");
         if tok_is(src, t, k, "{") {
-            let rb: u64 = parse_stmts(src, t, k + 1, out, o);
+            if parse_alpha(src, t) == 1 { o = puts(out, o, " "); }
+            let rb: u64 = parse_body(src, t, k + 1, out, o);
             return pack(unpk_i(rb) + 1, puts(out, unpk_o(rb), " (lgc close)"));
         }
         return pack(k + 1, o);                // `lgc start;`

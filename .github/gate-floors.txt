@@ -33,10 +33,10 @@ loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 12
 loment_lms_test 21
-loment_grammar_test 41
+loment_grammar_test 42
 loment_tools_test 66
-loment_p7_test 8
-loment_p8_test 61
+loment_p7_test 9
+loment_p8_test 62
 loment_p9_test 2
 loment_crash_test 9
 loment_gc_surface_test 3
@@ -61,7 +61,7 @@ loment_net_test 3
 loment_ffi_test 30
 loment_ports_test 27
 loment_hosted_test 14
-loment_rel_test 8
+loment_rel_test 9
 loment_editors_test 3
 vscode_ext_test 19
 loment_filetype_test 4
@@ -91,7 +91,7 @@ loment_lumtui_test 7
 loment_lompi_test 49
 lompicheck_test 7
 loment_register_test 9
-loment_multisyntax_test 73
+loment_multisyntax_test 74
 loment_multisyntax_projects_test 3
 loment_megaproject_test 8
 loment_state_test 8
@@ -110,7 +110,7 @@ loment_invariant_test 2
 loment_caps_test 11
 loment_book_test 4
 loment_book_site_test 4
-loment_update_test 13
+loment_update_test 14
 loment_hotfix_test 7
 loment_staging_test 6
 loment_projection_test 6

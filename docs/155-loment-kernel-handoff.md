@@ -17,7 +17,7 @@
 | 自举 | 用 Loment 重写编译器四段（lexer/parser/checker/codegen） | `loment/selfhost/` + `docs/150` |
 
 **关键事实：Loment 程序已经能在 FujoOS 用户态跑起来**（M67，串口 `M67 RESULT: PASS loment-user`），
-链路是 `.lomt → LLVM IR → ELF → fujorun 容器 → QEMU -append fujo.run=<name> → 串口`，
+链路是 `.lomt → LLVM IR → ELF → fujopack 容器 (FUJR) → QEMU -append fujo.run=<name> → 串口`，
 一条命令复现：`python tools/loment_boot.py loment/examples/user_hello.lomt`。
 
 **当前进度**（`docs/154`，从 `docs/145` 自动生成）：完成 **96** / 部分 **2** / 未达 **1** / 未开始 **1**（2026-09-15 复核，本单下方 §2 的 10 项里已有 9 项由内核线落地，见那里的更新块）。
@@ -86,7 +86,7 @@
 | `lom/build/fuc.py`（由 `lom/fuc.lom` 生成） | `NODE_STRUCT` 等 FUI 布局 | 内核 FUI 解码；M69 已证明与 L1 程序**逐字节一致** |
 | IR 全局 `@__loment_caps` | 域描述表：每行 `{ i64 fnv1a(space), i64 lo, i64 hi, i64 revocable }` | **运行时可读的域表**——内核可以直接读它做域检查 |
 | IR 全局 `@__loment_audit` | `[16 x i64]` 审计计数数组，`guard` 通过时 `+1` | 运行时可读的审计计数（M38） |
-| `tools/loment_boot.py` | `.lomt → ELF → fujorun → QEMU → 串口断言` 一键 | 回归用；内核侧改装载逻辑后请重跑 |
+| `tools/loment_boot.py` | `.lomt → ELF → fujopack → QEMU → 串口断言` 一键 | 回归用；内核侧改装载逻辑后请重跑 |
 | `tools/loment.py dbg FILE --fn X / --addr 0x…` | Loment 版调试器（符号化） | 排查用户程序问题 |
 
 **只有 `@__loment_caps` / `@__loment_audit` 这两个全局是"运行时接口"**，其余是编译期/工具链产物。

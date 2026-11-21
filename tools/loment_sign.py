@@ -373,9 +373,31 @@ def sign_gpg(sums: Path, uid: str = GPG_UID) -> int:
     return 0
 
 
-def verify_gpg(sums: Path, want_fpr: str | None = None) -> int:
-    """验 GPG 分离签名。**不仅要 gpg 说 Good signature, 还要核对指纹** ——
-    任何密钥签出来的都叫 Good signature, 不核对指纹等于没验身份。"""
+def gpg_identity_matches(want: str, fpr: str, uid: str) -> bool:
+    """`want` 是**指纹**（可只写末 16 位）还是**UID**？两种都比一次（`#1782`）。
+
+    指纹是 16–40 个十六进制字符；别的都当 UID 与 `GOODSIG` 那行带的身份比。
+    空 `want` = 没要求，一律算匹配。
+    """
+    import re  # noqa: PLC0415
+    want = want.strip()
+    if not want:
+        return True
+    if re.fullmatch(r"[0-9A-Fa-f]{16,40}", want):
+        return fpr.upper().endswith(want.upper())
+    return want == uid
+
+
+def verify_gpg(sums: Path, want: str | None = None) -> int:
+    """验 GPG 分离签名。**不仅要 gpg 说 Good signature, 还要核对身份** ——
+    任何密钥签出来的都叫 Good signature, 不核对等于没验身份。
+
+    `want` 可以是**指纹**（40 位，或长密钥 ID 16 位）也可以是**UID**
+    （`--gpg-user` 的说明本来就是 "GPG 身份"）（`#1782`）。原先它一律拿去和
+    `VALIDSIG` 的指纹比 —— 拿 UID 来验**永远**不相等，于是签名明明 Good、
+    密钥也对，却报 "(与记录不符)" 退 1。`GOODSIG` 那行带着 UID，两边都收。
+    """
+    import re  # noqa: PLC0415
     asc = sums.with_name(SUMS_ASC)
     if not asc.exists():
         print(f"[ERR] 缺 {asc.name} (先跑 --sign-gpg)", file=sys.stderr)
@@ -383,15 +405,22 @@ def verify_gpg(sums: Path, want_fpr: str | None = None) -> int:
     r = _sh("gpg", "--batch", "--status-fd", "1", "--verify", str(asc), str(sums))
     out = (r.stdout or "") + (r.stderr or "")
     good = "GOODSIG" in out and r.returncode == 0
-    used = ""
+    used_fpr, used_uid = "", ""
     for line in out.splitlines():
         if line.startswith("[GNUPG:] VALIDSIG"):
-            used = line.split()[2]
-    want = want_fpr or (GPG_FPR.read_text(encoding="utf-8").strip() if GPG_FPR.exists() else "")
-    match = (not want) or (used == want)
+            used_fpr = line.split()[2]
+        elif line.startswith("[GNUPG:] GOODSIG"):
+            parts = line.split(None, 3)
+            if len(parts) >= 4:
+                used_uid = parts[3].strip()
+    want = want or (GPG_FPR.read_text(encoding="utf-8").strip() if GPG_FPR.exists() else "")
+    match = gpg_identity_matches(want, used_fpr, used_uid)
     ok = good and match
+    who = used_fpr or "-"
+    if used_uid:
+        who += f" ({used_uid})"
     print(f"{'[OK]' if ok else '[ERR]'} {asc.name}: 签名={'Good' if good else 'BAD'} "
-          f"指纹={used or '-'}{'' if match else ' (与记录不符: ' + want + ')'}")
+          f"身份={who}{'' if match else ' (与记录不符: ' + want + ')'}")
     return 0 if ok else 1
 
 

@@ -288,5 +288,131 @@ class LNotaryTest(unittest.TestCase):
         self.assertTrue(any(e.code == "LNT-SEAL" for e in errs), errs)
 
 
+    # ---- V5 · 同产物派生链（docs/361 §6） ----------------------------------
+
+    _SEAL = "a" * 64
+    _GEN = {"mode": "same_artifact", "max_depth": 4,
+            "max_children": 8, "max_total": 32}
+
+    # V · 根的和绑（封印，初始授权）
+    def test_root_universe_binds_seal_and_grant(self) -> None:
+        from lnotary import derive
+
+        u = derive.root_universe(self._SEAL, ["file_read"], {"heap": 100})
+        self.assertEqual(u["depth"], 0)
+        self.assertEqual(u["sum"], derive.root_sum(
+            self._SEAL, ["file_read"], {"heap": 100}))
+        bad = json.loads(json.dumps(u))
+        bad["caps"] = ["file_read", "net"]
+        errs = derive.verify_forest(self._SEAL, self._GEN, [bad])
+        self.assertTrue(any(e.code == "LNT-SUM" for e in errs), errs)
+
+    # W · 子 caps ⊆ 父
+    def test_cap_escalation_is_rejected(self) -> None:
+        from lnotary import derive
+
+        root = derive.root_universe(self._SEAL, ["read"], {"heap": 10})
+        with self.assertRaises(ValueError):
+            derive.derive_universe(root, ["read", "write"], {"heap": 10}, self._GEN)
+        child = derive.derive_universe(root, ["read"], {"heap": 5}, self._GEN)
+        self.assertEqual(derive.verify_forest(
+            self._SEAL, self._GEN, [root, child]), [])
+        bad = json.loads(json.dumps(child))
+        bad["caps"] = ["read", "write"]
+        errs = derive.verify_forest(self._SEAL, self._GEN, [root, bad])
+        self.assertTrue(any(e.code == "LNT-CAP" for e in errs), errs)
+
+    # X · 子预算 ≤ 父（且不许新增资源）
+    def test_budget_escalation_is_rejected(self) -> None:
+        from lnotary import derive
+
+        root = derive.root_universe(self._SEAL, ["read"], {"heap": 10})
+        with self.assertRaises(ValueError):
+            derive.derive_universe(root, ["read"], {"heap": 11}, self._GEN)
+        with self.assertRaises(ValueError):
+            derive.derive_universe(root, ["read"], {"steps": 1}, self._GEN)
+        child = derive.derive_universe(root, ["read"], {"heap": 5}, self._GEN)
+        bad = json.loads(json.dumps(child))
+        bad["budget"] = {"heap": 11}
+        errs = derive.verify_forest(self._SEAL, self._GEN, [root, bad])
+        self.assertTrue(any(e.code == "LNT-BUD" for e in errs), errs)
+
+    # Y · 深度 / 子数 / 总数
+    def test_depth_and_tree_limits(self) -> None:
+        from lnotary import derive
+
+        g = {"mode": "same_artifact", "max_depth": 1,
+             "max_children": 1, "max_total": 2}
+        root = derive.root_universe(self._SEAL, ["read"], {"heap": 10})
+        c1 = derive.derive_universe(root, ["read"], {"heap": 9}, g)
+        with self.assertRaises(ValueError):
+            derive.derive_universe(c1, ["read"], {"heap": 8}, g)
+        c2 = derive.derive_universe(root, ["read"], {"heap": 8}, g)
+        errs = derive.verify_forest(self._SEAL, g, [root, c1, c2])
+        self.assertTrue(any(e.code == "LNT-TREE" for e in errs), errs)
+
+    # Z · 子的 sum 与环
+    def test_child_sum_and_cycle_are_rejected(self) -> None:
+        from lnotary import derive
+
+        root = derive.root_universe(self._SEAL, ["read"], {"heap": 10})
+        child = derive.derive_universe(root, ["read"], {"heap": 5}, self._GEN)
+        bad = json.loads(json.dumps(child))
+        bad["sum"] = "0" * 64
+        errs = derive.verify_forest(self._SEAL, self._GEN, [root, bad])
+        self.assertTrue(any(e.code == "LNT-SUM" for e in errs), errs)
+        a = {"schema": 1, "id": "a", "parent": "b", "seal": self._SEAL,
+             "caps": ["read"], "budget": {"heap": 1}, "depth": 1,
+             "sum": "1" * 64}
+        b = {"schema": 1, "id": "b", "parent": "a", "seal": self._SEAL,
+             "caps": ["read"], "budget": {"heap": 1}, "depth": 1,
+             "sum": "2" * 64}
+        errs = derive.verify_forest(self._SEAL, self._GEN, [root, a, b])
+        self.assertTrue(any(e.code == "LNT-CYCLE" for e in errs), errs)
+
+    # AA · 旁挂的 genesis
+    def test_lawspace_genesis_defaults_and_mode(self) -> None:
+        from lnotary import lawspace
+
+        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"))
+        self.assertEqual(side["genesis"]["mode"], "same_artifact")
+        self.assertEqual(lawspace.verify_lawspace(
+            self.plain, side, self._bytes("plain")), [])
+        bad = json.loads(json.dumps(side))
+        bad["genesis"]["mode"] = "open_world"
+        errs = lawspace.verify_lawspace(self.plain, bad, self._bytes("plain"))
+        self.assertTrue(any(e.code == "LNT-GEN" for e in errs), errs)
+
+    # AB · CLI：seal -> derive 根 -> derive 子 -> verify --universes
+    def test_cli_derive_round_trip(self) -> None:
+        import json as _json
+
+        law = self.tmp / "plain.lawspace.json"
+        root = self.tmp / "root.universe.json"
+        child = self.tmp / "child.universe.json"
+        forest = self.tmp / "forest.json"
+        lum = str(ROOT / "tools" / "loment.py")
+
+        def run(*args):
+            return subprocess.run([sys.executable, lum, *args], cwd=str(ROOT),
+                                  capture_output=True, text=True, encoding="utf-8")
+
+        r = run("lnotary", "seal", str(self.tmp / "plain.potato.json"), "--out", str(law))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = run("lnotary", "derive", str(law), "--caps", "read", "--heap", "100",
+                "--out", str(root))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r = run("lnotary", "derive", str(law), "--parent", str(root),
+                "--caps", "read", "--heap", "50", "--out", str(child))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        forest.write_text(_json.dumps([
+            _json.loads(root.read_text(encoding="utf-8")),
+            _json.loads(child.read_text(encoding="utf-8")),
+        ]), encoding="utf-8")
+        r = run("lnotary", "verify", str(self.tmp / "plain.potato.json"),
+                "--seal", str(law), "--universes", str(forest))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

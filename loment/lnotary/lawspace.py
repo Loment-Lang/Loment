@@ -25,6 +25,11 @@ LAW_LMS_FULL = "lms_full"
 LAW_LIFETIME_AUTO = "lifetime_auto"
 LAWS = (LAW_NO_RUNTIME, LAW_LMS_FULL, LAW_LIFETIME_AUTO)
 
+#: **创世预算**（`docs/358` §3.2 / `docs/361` V5）：递归有界，三个数进封印。
+#: 一份产物派生出的子宇宙总数、深度、每层子数都不许超过它。
+GENESIS_DEFAULTS = {"mode": "same_artifact", "max_depth": 4,
+                    "max_children": 8, "max_total": 32}
+
 
 def canonical_bytes(obj: object) -> bytes:
     """规范序列化：排序键、无空白、UTF-8。哈希只认这一种写法。"""
@@ -69,13 +74,18 @@ def _laws_of(doc: dict) -> list[dict]:
 
 
 def derive_lawspace(doc: dict, artifact_bytes: bytes,
-                    sites: dict | None = None) -> dict:
+                    sites: dict | None = None,
+                    genesis: dict | None = None) -> dict:
     """从一份**已通过 V0** 的 Potato 派生旁挂。调用方负责先跑 V0。
 
     `sites` 是 `tools/lms_sites.py` 派生的站点表；给了就把它的封印与站点数
-    绑进旁挂（`docs/363`）。不修改 `doc`；输出不含时间戳、路径等不稳定字段。
+    绑进旁挂（`docs/363`）。`genesis` 是创世预算（`docs/361` V5），缺省用
+    `GENESIS_DEFAULTS`。不修改 `doc`；输出不含时间戳、路径等不稳定字段。
     """
     dims = dims_of(doc)
+    g = dict(GENESIS_DEFAULTS)
+    if genesis:
+        g.update(genesis)
     body = {
         "schema": SCHEMA,
         "potato": doc.get("potato"),
@@ -84,6 +94,7 @@ def derive_lawspace(doc: dict, artifact_bytes: bytes,
         "dims": dims,
         "dims_hash": sha256_hex(canonical_bytes(dims)),
         "laws": _laws_of(doc),
+        "genesis": g,
     }
     if sites is not None:
         body["sites"] = {
@@ -115,6 +126,20 @@ def verify_lawspace(doc: dict, side: object,
     if side.get("potato") != doc.get("potato"):
         _err(out, "LNT-LS",
              f"旁挂的 potato 是 {side.get('potato')!r}，产物是 {doc.get('potato')!r}")
+
+    g = side.get("genesis")
+    if not isinstance(g, dict):
+        _err(out, "LNT-GEN", "旁挂缺少 genesis（创世预算）")
+    else:
+        if g.get("mode") != "same_artifact":
+            _err(out, "LNT-GEN",
+                 f"genesis.mode 必须是 same_artifact，得到 {g.get('mode')!r}")
+        for k in ("max_depth", "max_children", "max_total"):
+            v = g.get(k)
+            if not (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
+                _err(out, "LNT-GEN", f"genesis.{k} 必须是非负整数")
+        if isinstance(g.get("max_depth"), int) and g.get("max_depth") < 1:
+            _err(out, "LNT-GEN", "genesis.max_depth 至少为 1")
 
     art = side.get("artifact")
     if not isinstance(art, dict):

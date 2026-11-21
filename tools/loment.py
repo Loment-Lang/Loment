@@ -588,6 +588,25 @@ def cmd_lnotary_verify(a) -> int:
     elif _lnotary.CLAIM_SWITCH in v.claimed_switches:
         errs.append(_lawspace.Error(
             "LNT-CLAIM", f"产物声明了 {_lnotary.CLAIM_SWITCH}，但没有给 --seal"))
+    if getattr(a, "universes", None):
+        import lnotary.derive as _derive
+        try:
+            ut = json.loads(Path(a.universes).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了派生树：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 派生树不是 JSON：{e}", file=sys.stderr)
+            return 2
+        if isinstance(ut, dict):
+            ut = ut.get("universes")
+        if side is None:
+            errs.append(_lawspace.Error("LNT-GEN", "--universes 必须与 --seal 一起给"))
+        elif not isinstance(ut, list):
+            errs.append(_lawspace.Error(
+                "LNT-GEN", "派生树必须是数组或 {universes: [...]}"))
+        else:
+            errs += _derive.verify_forest(side.get("seal"), side.get("genesis"), ut)
     if getattr(a, "json", False):
         print(json.dumps({
             "ok": not errs,
@@ -603,6 +622,58 @@ def cmd_lnotary_verify(a) -> int:
         for e in errs:
             print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
     return 0 if not errs else 1
+
+
+def cmd_lnotary_derive(a) -> int:
+    """`loment lnotary derive <lawspace.json> [--parent U] --caps …`（`docs/361` V5）。
+
+    没有 `--parent` 就造根（根的和绑封印与初始授权）；有父就派生一个**收缩**的子。
+    """
+    import json
+    import lnotary.derive as _derive
+    try:
+        side = json.loads(Path(a.lawspace).read_text(encoding="utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了旁挂：{e}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as e:
+        print(f"[ERR] 旁挂不是 JSON：{e}", file=sys.stderr)
+        return 2
+    seal, genesis = side.get("seal"), side.get("genesis")
+    if not isinstance(seal, str) or not isinstance(genesis, dict):
+        print("[LNOTARY] LNT-GEN: 旁挂缺少 seal 或 genesis", file=sys.stderr)
+        return 1
+    caps = [c for c in (getattr(a, "caps", "") or "").split(",") if c]
+    budget = {}
+    if getattr(a, "heap", None) is not None:
+        budget["heap"] = a.heap
+    if getattr(a, "steps", None) is not None:
+        budget["steps"] = a.steps
+    if getattr(a, "parent", None):
+        try:
+            parent = json.loads(Path(a.parent).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了父宇宙：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 父宇宙不是 JSON：{e}", file=sys.stderr)
+            return 2
+        try:
+            u = _derive.derive_universe(parent, caps, budget, genesis,
+                                        uid=getattr(a, "uid", None))
+        except ValueError as e:
+            print(f"[LNOTARY] LNT-GEN: {e}", file=sys.stderr)
+            return 1
+    else:
+        u = _derive.root_universe(seal, caps, budget,
+                                  uid=getattr(a, "uid", None) or "root")
+    text = json.dumps(u, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if getattr(a, "out", None):
+        Path(a.out).write_text(text, encoding="utf-8")
+        print(f"[LNOTARY] universe -> {a.out} (sum {u['sum'][:16]}…)")
+    else:
+        print(text, end="")
+    return 0
 
 
 def cmd_lnotary_seal(a) -> int:
@@ -997,6 +1068,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="法域旁挂（不给则只跑 V0；产物声明 lnotary_true 时必须给）")
     lnv.add_argument("--sites", default=None, metavar="PATH",
                      help="站点表（tools/lms_sites.py 的产物；与 --seal 一起给）")
+    lnv.add_argument("--universes", default=None, metavar="PATH",
+                     help="派生树（数组或 {universes: [...]}；与 --seal 一起给）")
     lnv.add_argument("--json", action="store_true")
     lnv.set_defaults(fn=cmd_lnotary_verify)
     lns = lnsub.add_parser("seal")
@@ -1005,6 +1078,15 @@ def main(argv: list[str] | None = None) -> int:
     lns.add_argument("--sites", default=None, metavar="PATH",
                      help="站点表（tools/lms_sites.py 的产物）")
     lns.set_defaults(fn=cmd_lnotary_seal)
+    lnd = lnsub.add_parser("derive")
+    lnd.add_argument("lawspace")
+    lnd.add_argument("--parent", default=None, metavar="PATH")
+    lnd.add_argument("--caps", default="", metavar="A,B")
+    lnd.add_argument("--heap", type=int, default=None)
+    lnd.add_argument("--steps", type=int, default=None)
+    lnd.add_argument("--uid", default=None)
+    lnd.add_argument("--out", default=None, metavar="PATH")
+    lnd.set_defaults(fn=cmd_lnotary_derive)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

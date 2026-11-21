@@ -1,6 +1,6 @@
 # 361 · LNotary：产物公证人
 
-> 状态: **V0–V2 已落地**（2026-11-20，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
+> 状态: **V0–V2 + V5 已落地**（2026-11-21，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
 > `docs/357` §4.2 · `docs/262`（LSPE）· `docs/147`（Potato 台阶）· `docs/353`（Dissigsegv）
 > 基准: `origin/main` `a460b90e` + 本分支
 > 一句话: **第三方视角的产物审计器：只读 Potato，零工具链 import，
@@ -99,8 +99,11 @@ lomentc · potato · potato_from · lspe
 ## 4. CLI
 
 ```
-loment lnotary verify <potato.json> [--seal <lawspace.json>] [--sites <sites.json>] [--json]
+loment lnotary verify <potato.json> [--seal <lawspace.json>] [--sites <sites.json>]
+                                [--universes <forest.json>] [--json]
 loment lnotary seal   <potato.json> [--sites <sites.json>] [--out <lawspace.json>]
+loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
+                                [--heap N] [--steps N] [--uid ID] [--out PATH]
 ```
 
 - 接受 ⇒ 退出码 0，打印 `[LNOTARY] ok: … (potato v23[ + lawspace])`；
@@ -128,6 +131,8 @@ loment lnotary seal   <potato.json> [--sites <sites.json>] [--out <lawspace.json
       "checked": true, "evidence": ["runtime", "lms_budgets"] }
   ],
   "sites": { "sha256": "<站点表的 seal>", "count": 4 },
+  "genesis": { "mode": "same_artifact", "max_depth": 4,
+               "max_children": 8, "max_total": 32 },
   "seal": "…"
 }
 ```
@@ -138,7 +143,7 @@ loment lnotary seal   <potato.json> [--sites <sites.json>] [--out <lawspace.json
 
 ---
 
-## 5. 判据（二十一条，`tools/lnotary_test.py`）
+## 5. 判据（二十八条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -163,9 +168,16 @@ loment lnotary seal   <potato.json> [--sites <sites.json>] [--out <lawspace.json
 | S | 旁挂绑站点表（`sites {sha256, count}`） | 同上 |
 | T | 换一张站点表 ⇒ `LNT-LS` | 同上 |
 | U | 站点表自己的封印被改 ⇒ `LNT-SEAL` | 同上 |
+| V | 根的和绑（封印，初始授权） | 派生链不存在 ⇒ 红 |
+| W | 子 caps ⊆ 父；提权 ⇒ `LNT-CAP` | 同上 |
+| X | 子预算 ≤ 父；新增资源 ⇒ `LNT-BUD` | 同上 |
+| Y | 深度 / 子数 / 总数 ⇒ `LNT-DEPTH` / `LNT-TREE` | 同上 |
+| Z | 子的 sum 与环 ⇒ `LNT-SUM` / `LNT-CYCLE` | 同上 |
+| AA | 旁挂 `genesis` 缺省与 mode 校验 | 同上 |
+| AB | CLI `seal` → `derive` 根 → `derive` 子 → `verify --universes` 往返 | 同上 |
 
-二十一条在本机全绿（`python tools/lnotary_test.py`，21/21，约 6.7s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 21`。
+二十八条在本机全绿（`python tools/lnotary_test.py`，28/28，约 8.1s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 28`。
 
 ---
 
@@ -177,12 +189,29 @@ loment lnotary seal   <potato.json> [--sites <sites.json>] [--out <lawspace.json
 | **V2** | 站点表与旁挂绑定（`docs/363`） | `docs/356` 站点坐标 | **已落地** |
 | **V3** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | 下一档 |
 | **V4** | `proven` 站点的规则引用必须可复查 | 规则表进产物 | 未开始 |
-| **V5** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 | 未开始 |
+| **V5** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 | **已落地** |
 
 V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不冒充源码级完备。**
 封印只绑产物、旁挂与站点表的字节，不假装证明了规律本身。
 `docs/253` §8.1 的"拒，而不是退化"在公证人这里的读法是：
 **核不了的东西不进这一档，不拿"设计上考虑了"冒充已经核过。**
+
+---
+
+## 6.5 同产物派生链（V5）
+
+`loment/lnotary/derive.py` 把 PANGU 的"子宇宙不继承父宇宙的全部权限"落成四元组：
+
+- **宇宙** = `(id, parent, seal, caps, budget, depth, sum)`；
+- **根** `sum = H("lnotary-root/1" ‖ seal ‖ {caps, budget})` —— 初始授权也绑进来，
+  `docs/358` 的"根 = seal"是它的简化读法；
+- **子** `sum = H(父 sum ‖ {caps, budget})`；派生只允许**收缩**：
+  `caps ⊆ 父`、`budget ≤ 父`、`depth = 父 + 1`；
+- **树**：恰好一个根；每层子数 ≤ `max_children`、总数 ≤ `max_total`；环直接拒；
+- 三个预算数住在**封印**里（`genesis`），子宇宙改不了它 —— 改封印就 `LNT-SEAL`。
+
+这是**静态**定理：子能碰的东西不多于父。哪些 `unsafe` 站点在子权能下真的到得了，
+是可达性分析，不在这一档（§7 第 6 条）。
 
 ---
 
@@ -196,6 +225,8 @@ V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不�
 4. **不主张它替代 `loment lspe verify`。** 两条命令看的是不同层面：一条查证明根，
    一条查索引与台账的自洽。
 5. **不主张现在扩到源码级完备。** 那要站点表与 IR 解码（`docs/358` §1A）。
+6. **不主张派生链证明可达性。** V5 证明"子能碰的东西不多于父"（静态）；哪些 `unsafe`
+   站点在子权能下真的到得了，是另一条分析，不在定理里（`docs/363` §7）。
 
 ---
 

@@ -131,9 +131,11 @@ def test(fn):
 #: 2026-11-21（`docs/362`–`docs/365`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
 #: 续延栈进了口径 —— `MAX_OBJS` / `MAX_RET` / `MAX_FOBJ` / `CONT_REC` / `MAX_CONT` 五处。
 #: 与 main 的 `CHK_HASH_SLOTS` 合并后：条数 271 → **276**、沉默 178 → **179**
+#: 原生段错误 stage 2 又加了五条（`FAULT_*_MAX` 四条 + `FAULT_TEXT_RESERVE`），
+#: 五条都**有话**（越界点名退出），所以沉默数不变：276 → **281**。
 #: （新增的那处沉默是归还窗口的**滚动**：满了丢最旧的一条，不是写穿，来路写在
 #: `EXPLAINED`）。
-CAPACITY_SITES = 276
+CAPACITY_SITES = 281
 SILENT_SITES = 179
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。

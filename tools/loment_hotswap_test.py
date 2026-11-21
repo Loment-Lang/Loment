@@ -117,6 +117,9 @@ _KNOWN_DEFAULT_DELTAS = {
     ("3768ed3e6970f447593a4037a7577568cac364a45055b44a89a122b5c736311a",
      "9fbf022eae62fd70b2357f3b00b704215d66959a7fad425497b96908ed84d339"):
         "#1830：GEP 首下标按 pointee 整块步进",
+    ("9fbf022eae62fd70b2357f3b00b704215d66959a7fad425497b96908ed84d339",
+     "ada9fa605809daa07417a525c9e2b197ea3619e9eef25b355113555c54bb59ac"):
+        "文本窗口 4 MiB -> 8 MiB：数据段钉到 0xC00000（docs/200 §9）",
 }
 
 

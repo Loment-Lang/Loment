@@ -339,7 +339,7 @@ class E11Effects(MacroChecker):
 
 
 class E12GC(MacroChecker):
-    """GC 检查器（`docs/351` §5）：把每个 `alloc` 站点的回收判决指到**唯一**一个声明。
+    """GC 检查器（`docs/353` §5）：把每个 `alloc` 站点的回收判决指到**唯一**一个声明。
 
     它不拥有 L0/L1/L2 的判决（那仍是编译器的 Producer 面），只负责**作用域解析**
     与证据：没有遮蔽 ⇒ `Syntactic`；有遮蔽 ⇒ `Assumed`，编译器在那一格保守退出。

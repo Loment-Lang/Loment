@@ -207,7 +207,7 @@ def _mark(site: dict, cover, i: int) -> dict:
 def census_reclaim(toks: list, sid, sites: list[dict],
                    cover=lambda _i: None,
                    shadowed: dict[str, frozenset[str]] | None = None) -> None:
-    """E12 GC 检查器（`docs/351` §5）：每个 `alloc` 一个 `ReclaimScoped` 站点。
+    """E12 GC 检查器（`docs/353` §5）：每个 `alloc` 一个 `ReclaimScoped` 站点。
 
     `shadowed` 是**函数名 -> 该函数里出现两次以上的声明名**（编译器在 AST 上算，
     自举侧按 token 数同名声明）。分配名不在那张表里 ⇒ 证据是 `Syntactic`（回收判决

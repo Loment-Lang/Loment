@@ -39,12 +39,12 @@ LSPE_OBLIGATIONS: dict[str, dict[str, object]] = {
                       "accept": ("LocalFlow", "Interproc", "Assumed")},
     "LadderLiability": {"owner": "docs/210",
                         "accept": ("Typed", "Interproc", "GlobalInvariant", "Assumed")},
-    # **GC 检查器**（`docs/351` §5）：每个 `alloc` 站点的回收判决必须能**唯一**
+    # **GC 检查器**（`docs/353` §5）：每个 `alloc` 站点的回收判决必须能**唯一**
     # 指到一个声明。没有遮蔽时这是**语法事实**（`Syntactic`）；有遮蔽时 GC
     # 检查器给 `Assumed`，L0/L1/L2 在那一格保守退出。
     # `Assumed` **不在**接受集里：有遮蔽的站点就是要停在"未证明"，
     # 让 `--lspe-mode=strict` 有机会把它升级成 E034。少回收是安全的。
-    "ReclaimScoped": {"owner": "docs/210 §7 / docs/351 §5",
+    "ReclaimScoped": {"owner": "docs/210 §7 / docs/353 §5",
                       "accept": ("Syntactic", "LocalFlow")},
     "CapabilityLive": {"owner": "docs/146",
                        "accept": ("Typed", "GlobalInvariant", "Assumed")},
@@ -117,7 +117,7 @@ LSPE_SITE_KINDS = frozenset({
     # 调用行 / C 边界 / 续延捕获。
     "effect_decl", "row", "perform", "handle", "resume", "row_call",
     "effect_foreign", "handler_capture",
-    # E12 GC 检查器（`docs/351` §5）：每个 `alloc` 一个站点，证据是"这个回收
+    # E12 GC 检查器（`docs/353` §5）：每个 `alloc` 一个站点，证据是"这个回收
     # 判决指到唯一一个声明"。
     "reclaim",
 })

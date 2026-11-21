@@ -2983,7 +2983,7 @@ fn pt_block_end(unit: ptr, t: ptr, i: u32) -> u32 {
     return j;
 }
 
-/// E12（`docs/351` §5）的自举孪生：返回 `(rt << 32) | rp`。
+/// E12（`docs/353` §5）的自举孪生：返回 `(rt << 32) | rp`。
 ///
 /// `rt` = `alloc(` 站点数；`rp` = 分配名在该函数里**只声明一次**的站点数。
 /// 只统计 `fn` 的体；`extern fn` 与 trait 签名没有体，跳过。
@@ -3115,7 +3115,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     let bcov: u32 = 0;
     let psites: u32 = 0;
     let passed: u32 = 0;
-    // E12（`docs/351` §5）：`alloc` 站点的回收归属。
+    // E12（`docs/353` §5）：`alloc` 站点的回收归属。
     let rt: u32 = 0;
     let rp: u32 = 0;
     // 上下文级别（`#1091`）：证据按级别截断 —— Typed/LocalFlow 从 L1 起，

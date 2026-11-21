@@ -1083,11 +1083,11 @@ def test_m82_loment_codegen_byte_identical():
                        ROOT / "loment" / "selfhost" / "ir_no_gc.lomt",
                        # `docs/299`：借用类型（`&T` / `&mut T` / `*r` / 写穿字段 / 借用字段）。
                        ROOT / "loment" / "selfhost" / "ir_borrow.lomt",
-                       # `docs/351`：块作用域（独立块 / 遮蔽 / for / match / if let）。
+                       # `docs/353`：块作用域（独立块 / 遮蔽 / for / match / if let）。
                        ROOT / "loment" / "selfhost" / "ir_scope.lomt",
-                       # `docs/351` §4：GC alpha + 遮蔽（按名字保守退出，E12 站点）。
+                       # `docs/353` §4：GC alpha + 遮蔽（按名字保守退出，E12 站点）。
                        ROOT / "loment" / "selfhost" / "ir_scope_gc.lomt",
-                       # `docs/351` §4 + `docs/309`：alpha 里的 `lgc` 三种窗口各一层作用域。
+                       # `docs/353` §4 + `docs/309`：alpha 里的 `lgc` 三种窗口各一层作用域。
                        ROOT / "loment" / "selfhost" / "lgc_alpha.lomt"):
             want = _unit_ll(target)
             got = _run_codegen(exe, target, td)

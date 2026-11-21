@@ -665,7 +665,7 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
     // 所以解析时直接把内层语句接进外层（旧版次没有块作用域）。理由的 E038 在
     // checker 的 token 扫描里判 —— 这里负责把块拆平。
     // `tur2027.1Alpha` 不同：参考实现把它解析成 `Block("lspe_pass")`，体是一层词法
-    // 作用域（`docs/351` §4），dump 也要带 `(block …)`。
+    // 作用域（`docs/353` §4），dump 也要带 `(block …)`。
     if tok_is(src, t, i, "lspe") && tok_is(src, t, i + 1, "pass")
             && tok_kind(t, i + 2) == 2 && tok_is(src, t, i + 3, "{") {
         let rp: u64 = parse_body(src, t, i + 4, out, o);
@@ -680,7 +680,7 @@ fn parse_stmt(src: ptr, t: ptr, i: u32, out: ptr, o: u32) -> u64 {
         if tok_is(src, t, act, "end") {
             if tok_is(src, t, act + 1, "{") {
                 // `lgc end { … }`：短暂暂停窗口（`docs/309`）。旧版次与 start 一样摊平；
-                // alpha 下体是一层块（`docs/351` §4）。
+                // alpha 下体是一层块（`docs/353` §4）。
                 o = puts(out, o, "(lgc off)");
                 if parse_alpha(src, t) == 1 { o = puts(out, o, " "); }
                 let rb: u64 = parse_body(src, t, act + 2, out, o);

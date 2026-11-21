@@ -91,11 +91,14 @@ def build_lomenterr(force: bool = False) -> Path:
 
     新鲜度按**内容哈希**（源码 + 种子 + 链接器）判 —— 不用 mtime：Windows 上时间戳粒度粗，
     "改完立刻跑"会拿到旧产物，而那正是最需要对的一刻（与 lompi「身份是内容哈希」同一条）。
+    **`errdata.lomt` 也要算进去**：分类器的规则表住在那一侧，只改规则时源码哈希不变 ——
+    不把它算进来的话，改完规则的第一次 `--classify` 跑的还是旧二进制（2026-11-19 实测）。
     """
     import hashlib
     import loment_dist
     h = hashlib.sha256()
     h.update(ERR_SRC.read_bytes())
+    h.update((ROOT / "loment" / "tools" / "errdata.lomt").read_bytes())
     h.update(loment_dist.SEED.read_bytes())
     h.update((ROOT / "tools" / "lomelf.py").read_bytes())
     key = h.hexdigest()

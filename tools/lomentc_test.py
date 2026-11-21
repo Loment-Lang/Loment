@@ -8053,7 +8053,7 @@ fn call(f: (u32) -> u32, x: u32) -> u32 { return f(x); }
 
 @test
 def test_alpha_block_scope_shadowing():
-    """`tur2027.1Alpha`（`docs/351`）：内层 `let` 遮蔽外层，出块后外层值不变。"""
+    """`tur2027.1Alpha`（`docs/353`）：内层 `let` 遮蔽外层，出块后外层值不变。"""
     src = ("choose write grammar tur2027.1Alpha\n"
            "module scope_shadow\nchoose runtime\n\n"
            "fn probe() -> u32 {\n"
@@ -8127,7 +8127,7 @@ def test_alpha_block_scope_old_editions_are_unchanged():
 
 @test
 def test_alpha_reclaim_sites_are_per_name():
-    """E12（`docs/351` §4）：唯一声明的 `alloc` 是 `Syntactic`，遮蔽名的是 `Assumed`。"""
+    """E12（`docs/353` §4）：唯一声明的 `alloc` 是 `Syntactic`，遮蔽名的是 `Assumed`。"""
     src = ("choose write grammar tur2027.1Alpha\n"
            "module scope_gc\nchoose gc_auto_alpha\nchoose runtime\n\n"
            "fn f(n: u32) -> u32 {\n"
@@ -8142,6 +8142,90 @@ def test_alpha_reclaim_sites_are_per_name():
         p.write_text(src, encoding="utf-8", newline="\n")
         d = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
     assert d["lspe"]["per_kind"].get("ReclaimScoped") == "0/2", d["lspe"]["per_kind"]
+
+
+@test
+def test_stored_borrow_from_a_call_is_registered():
+    """调用返回的借用存下来，也进独占表（#1542）。
+
+    `bind` 从前只认字面 `&place` 右式；`let r = get(&mut a);` 的来源由函数摘要给出
+    （出参借自第几个形参），实参的位置键就是被借的地方 —— 漏掉它，之后 `g(&a)`
+    就静默放行两把冲突的借用。
+    """
+    head = ("module m\nfn get(p: &mut u32) -> &mut u32 { return p; }\n"
+            "fn id(p: &u32) -> &u32 { return p; }\n"
+            "fn g(q: &u32) -> u32 { return *q; }\n"
+            "fn gm(q: &mut u32) -> u32 { return *q; }\n")
+    mut_then_shared = head + (
+        "fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = get(&mut a);"
+        " return g(&a); }\n")
+    assert any("既被可变借用又被借用" in x for x in errs(mut_then_shared)), \
+        errs(mut_then_shared)
+    shared_then_mut = head + (
+        "fn f() -> u32 { let a: u32 = 1; let r: &u32 = id(&a); return gm(&mut a); }\n")
+    assert any("既被可变借用又被借用" in x for x in errs(shared_then_mut)), \
+        errs(shared_then_mut)
+    # 存下来但之后不再碰那块地方 -> 通过
+    quiet = head + (
+        "fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = get(&mut a); return *r; }\n")
+    assert errs(quiet) == [], errs(quiet)
+
+
+@test
+def test_a_stored_mut_local_is_used_once():
+    """`&mut` 局部不是 Copy：传走 / 赋给别人只能一次（#1543）。
+
+    解引用（`*r`）、字段访问、显式重借（`&mut *r`）用的是借用指向的东西，不算用掉；
+    形参每用一次就是一次自动重借（与 Rust 同）。
+    """
+    head = "module m\nfn g(q: &mut u32) -> u32 { return *q; }\n"
+    twice = head + ("fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;"
+                    " let x: u32 = g(r); return g(r) + x; }\n")
+    assert any("用掉一次" in x for x in errs(twice)), errs(twice)
+    copied = head + ("fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;"
+                     " let s: &mut u32 = r; let x: u32 = g(r); return g(s) + x; }\n")
+    assert any("用掉一次" in x for x in errs(copied)), errs(copied)
+    # 解引用不算用掉，`return *r` 也不是"返回借用"（解出来的是值）
+    deref_only = head + ("fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;"
+                         " *r = 2; return *r; }\n")
+    assert errs(deref_only) == [], errs(deref_only)
+    # 显式重借之后还能用一次
+    reborrow = head + ("fn f() -> u32 { let a: u32 = 1; let r: &mut u32 = &mut a;"
+                       " let x: u32 = g(&mut *r); return g(r) + x; }\n")
+    assert errs(reborrow) == [], errs(reborrow)
+    # 形参不受这条约束；行内借用互不牵连
+    params = head + ("fn f(p: &mut u32) -> u32 { let x: u32 = g(p); return g(p) + x; }\n")
+    assert errs(params) == [], errs(params)
+    inline = head + ("fn f() -> u32 { let a: u32 = 1; let b: u32 = 2;"
+                     " return g(&mut a) + g(&mut b); }\n")
+    assert errs(inline) == [], errs(inline)
+
+
+@test
+def test_moves_out_of_a_struct_field_are_tracked():
+    """把非 Copy 的字段移出来之后：同一字段不能移两次、整体不能再用、兄弟字段照常（#1552）。
+
+    整变量的移动（M13）由名字表管；字段级移动要用**路径键**，否则 `let a = o.i;`
+    之后 `o.i`、`o` 都以为还能用。
+    """
+    h = "module m\nstruct I { v: u32 }\nstruct O { i: I, j: I, n: u32 }\n"
+    twice = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                 " let a: I = o.i; let b: I = o.i; return b.v; }\n")
+    assert any("字段 o.i 已被移动" in x for x in errs(twice)), errs(twice)
+    whole = h + ("fn g(x: O) -> u32 { return x.n; }\n"
+                 "fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                 " let a: I = o.i; return g(o); }\n")
+    assert any("部分字段已被移动" in x for x in errs(whole)), errs(whole)
+    borrow = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                  " let a: I = o.i; let r: &I = &o.i; return r.v; }\n")
+    assert any("不能再借它" in x for x in errs(borrow)), errs(borrow)
+    # 兄弟字段与 Copy 字段都不受影响
+    sibling = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                   " let a: I = o.i; let b: I = o.j; return b.v + o.n; }\n")
+    assert errs(sibling) == [], errs(sibling)
+    copy_field = h + ("fn f() -> u32 { let o: O = O { i: I { v: 1 }, j: I { v: 2 }, n: 3 };"
+                      " let a: u32 = o.n; let b: u32 = o.n; return a + b; }\n")
+    assert errs(copy_field) == [], errs(copy_field)
 
 
 def main() -> int:

@@ -100,7 +100,7 @@ TUR2_PLUS = ("tur2026.2", "tur2026.3", "tur2027.1Alpha")
 #: 别写成 `profile >= "..."`：规范名是字符串，词法序不是版次序。
 TUR3_PLUS = ("tur2026.3", "tur2027.1Alpha")
 
-#: **块作用域版次**（`docs/351`）。只有这一个 alpha 版次开启：
+#: **块作用域版次**（`docs/353`）。只有这一个 alpha 版次开启：
 #: 所有带花括号的体都是词法作用域、允许嵌套遮蔽、同块重复声明报错、
 #: 独立 `{ … }` 块是合法语句。旧版次（含默认的 `tur2026.3`）保持原来的
 #: 函数级泄漏语义 —— 冻结版次的兼容承诺（LLS §26.1）对它们有效。
@@ -2410,7 +2410,7 @@ class Assign:
 
 @dataclass
 class Block:
-    """**独立块语句**：`{ stmt* }`（`tur2027.1Alpha`，`docs/351` §2）。
+    """**独立块语句**：`{ stmt* }`（`tur2027.1Alpha`，`docs/353` §2）。
 
     旧版次里写在语句位的 `{` 是解析错（#44）；alpha 起它是一个真正的块：
     里面的 `let` 只活到 `}`，出块即不可见。它没有值 —— 不是表达式。
@@ -4487,7 +4487,7 @@ class Parser:
             # 切片借用**规范化**到已有的切片类型（它们本来就是 ptr+len 的借用视图）：
             # `&[T]` → `[T]`，`&mut [T]` → `mut [T]`。区域标记在类型串里放不下
             # （`_is_slice` 要求以 `]` 结尾），于是记在 `last_region`，由 `parse_fn`
-            # 取到形参/返回类型上 —— 它只影响函数摘要，不影响布局（`docs/351`）。
+            # 取到形参/返回类型上 —— 它只影响函数摘要，不影响布局（`docs/353`）。
             if _is_slice(inner):
                 self.last_region = region
                 elem = _slice_elem(inner)
@@ -5322,7 +5322,7 @@ class Parser:
     def parse_stmt(self):
         t = self.peek()
         if t.val == "{" and self.profile in BLOCK_SCOPE_EDITIONS:
-            # `tur2027.1Alpha`（`docs/351` §2）：独立块语句。旧版次里这里是解析错
+            # `tur2027.1Alpha`（`docs/353` §2）：独立块语句。旧版次里这里是解析错
             # （#44：`期望表达式，得到 '{'`），所以只有 alpha 收它。
             return self.parse_block_node()
         if t.val == "lspe" and self.peek(1).kind == "ident" and self.peek(1).val == "pass":
@@ -6975,6 +6975,10 @@ def _is_place(e) -> bool:
         return _is_place(e.obj)
     if isinstance(e, Index):
         return _is_place(e.obj)
+    if isinstance(e, Un) and e.op == "*":
+        # `*r` 是借用指向的**地方**：它已经有地址，所以显式重借 `&*r` / `&mut *r`
+        # 合法（`docs/299` §3.4；`&mut` 局部的第二次使用就靠它）。
+        return _is_place(e.expr)
     return False
 
 
@@ -8886,8 +8890,14 @@ def _lifetime_expr_prov(e, scope: dict[str, str], prov: dict[str, frozenset],
             return frozenset({("p", root.name)}) if root.name in _param_names(scope) \
                 else frozenset({("l", root.name)})
         if e.op == "*":
-            return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
-                                       structs_with_borrow, sums)
+            # `*r` 解出来的是**值**：只有当它本身还是借用（`*r` 的类型是 `&T`）时，
+            # 来源才跟着 r 走。`return *r;`（u32）不是"返回 a 的借用"—— 从前这一格
+            # 一律往下传，于是把"拷出一个值"误报成悬垂。
+            rt = expr_type(e, scope, funcs, structs)
+            if _is_borrowish(rt, structs):
+                return _lifetime_expr_prov(e.expr, scope, prov, funcs, structs,
+                                           structs_with_borrow, sums)
+            return frozenset()
         return frozenset()
     if isinstance(e, Call):
         t = expr_type(e, scope, funcs, structs)
@@ -8970,8 +8980,27 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
     borrowed: set[str] = set()       # 被借过的根变量名（`free` 那条用）
     stored_mut: dict[str, int] = {}
     stored_shared: set[str] = set()
+    #: 已经**用掉**的 `&mut` 局部（`#1543`）：`&mut` 不是 Copy，一次只能用出去一次。
+    mut_used: dict[str, int] = {}
     swb = {n for n, s in structs.items()
            if any(_is_borrowish(ft, structs) for _, ft in s.fields)}
+
+    def use_mut_local(e, line: int, how: str) -> None:
+        """`&mut` 局部被当**值**用掉（传参 / 赋给别人 / 返回）。
+
+        解引用 `*r`、字段访问 `r.f`、显式重借 `&mut *r` 都不算 —— 它们用的是借用
+        指向的东西。形参不算：每用一次就是一次自动重借（Rust 同一条）。
+        """
+        if not isinstance(e, Ident):
+            return
+        t = scope.get(e.name, "")
+        if not (_is_ref(t) and _ref_mut(t)) or e.name in params:
+            return
+        if e.name in mut_used:
+            errs.append(f"{line}: 变量 {e.name} 的 `&mut` 已经用掉一次 —— {how}"
+                        f" 是第二把独占借用；要再用一次请显式重借 `&mut *{e.name}`")
+            return
+        mut_used[e.name] = line
 
     def err_local(origins: frozenset, line: int) -> None:
         loc = sorted(name for kind, name in origins if kind == "l")
@@ -9012,6 +9041,7 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
                         f"{e.line}: 在 {e.args[0].name} 仍被借用时释放它 —— "
                         f"借用的区域必须包在释放点之内（`docs/299` §3.5）")
             for a in e.args:
+                use_mut_local(a, e.line, "把它当实参传走")
                 note_borrows(a)
             return
         for attr in ("expr", "obj", "left", "right", "value", "default", "idx"):
@@ -9035,21 +9065,40 @@ def _lifetime_fn_errs(f: Func, funcs: dict, structs: dict, enums: dict,
                 stored_mut[key] = line
             else:
                 stored_shared.add(key)
+        # **调用返回的借用**（`#1542`）：`let r = get(&mut a);` 存下来的是一把借自 a
+        # 的借用 —— 来源由函数摘要给出（出参借自哪些形参），实参的位置键就是被借的地方。
+        if isinstance(expr, Call) and _is_borrowish(ty, structs):
+            mut = _is_ref(ty) and _ref_mut(ty)
+            for i in sorted(sums.get(expr.name, frozenset())):
+                if i >= len(expr.args):
+                    continue
+                a = expr.args[i]
+                key = _borrow_key(a) if not (isinstance(a, Un) and a.op in ("&", "&mut")) \
+                    else _borrow_key(a.expr)
+                if key is None:
+                    continue
+                if mut:
+                    stored_mut[key] = line
+                else:
+                    stored_shared.add(key)
 
     def walk(stmts) -> None:
         for s in stmts:
             if isinstance(s, Let):
                 scope[s.name] = s.type
                 note_borrows(s.expr)
+                use_mut_local(s.expr, s.line, "赋给另一个绑定")   # `#1543`
                 bind(s.name, s.type, s.expr, s.line)
             elif isinstance(s, Assign):
                 note_borrows(s.expr)
+                use_mut_local(s.expr, s.line, "赋给另一个变量")
                 if isinstance(s.target, Ident):
                     bind(s.target.name, scope.get(s.target.name, ""), s.expr, s.line)
                 else:
                     note_borrows(s.target)
             elif isinstance(s, Return):
                 note_borrows(s.expr)
+                use_mut_local(s.expr, s.line, "作为返回值交出去")
                 # `return &x;` 那一格由 M17 报（`_move_check`，E012）；这里只补
                 # 别名/字段/经调用传回来那些它看不见的形状，免得同一处报两遍。
                 _prov = prov_of(s.expr)
@@ -10490,7 +10539,7 @@ def _falls_through(body: list) -> bool:
             return True
         return any(_falls_through(b) for _p, b in s.arms)
     if isinstance(s, (DomainBlock, Block)):
-        # `docs/313` / `docs/351`：块的末尾就是函数的末尾 —— 块里不掉，函数就不掉。
+        # `docs/313` / `docs/353`：块的末尾就是函数的末尾 —— 块里不掉，函数就不掉。
         return _falls_through(s.body)
     return True
 
@@ -10651,11 +10700,45 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
     #: **`free` 自己那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"——
     #: 那正是 use-after-free 的经典形状。
     freed: set[str] = set()
+    #: **字段级移动**（`#1552`）：路径键（`v.a`）-> 行。整变量的 `moved` 管不到
+    #: "把一个非 Copy 字段移出来"：同一个字段能移两次，整体也照样能用。
+    moved_places: dict[str, int] = {}
+
+    def gone_at(key: str) -> str | None:
+        """`key` 这个位置（或它的祖先）是不是已经被移走；返回那个被移走的键。"""
+        for k in moved_places:
+            if key == k or key.startswith(k + ".") or key.startswith(k + "["):
+                return k
+        return None
+
+    def partial_of(name: str) -> str | None:
+        """整变量 `name` 有字段被移走过没有（那几个字段之外还能用）。"""
+        for k in moved_places:
+            if k.startswith(name + ".") or k.startswith(name + "["):
+                return k
+        return None
+
+    def use_place_base(e) -> None:
+        """字段/下标访问的**基址**不是一次"取用整个值"。
+
+        `v.a` 被移走之后 `v.b` 仍然合法，所以"部分字段已移动"这一条在基址上跳过；
+        **整变量**被移走（或释放）时，`v[0]` / `v.a` 照样不合法。"""
+        if isinstance(e, Ident):
+            if e.name in moved:
+                errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
+            elif lms and e.name in freed:
+                errs.append(f"{e.line}: 变量 {e.name} 指向的块已经被 `free`，不能再用")
+            return
+        use(e)
 
     def use(e) -> None:
         if isinstance(e, Ident):
             if e.name in moved:
                 errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
+            elif partial_of(e.name) is not None:
+                errs.append(
+                    f"{e.line}: 变量 {e.name} 的部分字段已被移动（{partial_of(e.name)}），"
+                    f"不能把它当整体用")
             elif lms and e.name in freed:
                 # 同上（`#486`）：码在头一行，正文不再重复。
                 errs.append(f"{e.line}: 变量 {e.name} 指向的块已经被 `free`，不能再用")
@@ -10665,6 +10748,11 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
         elif isinstance(e, Un):
             if e.op not in ("&", "&mut"):
                 use(e.expr)
+            else:
+                # 借一个已经被移走的位置同样是 E006（`#1552`）
+                k = _place_key(e.expr)
+                if k is not None and gone_at(k) is not None:
+                    errs.append(f"{e.line}: 字段 {gone_at(k)} 已被移动，不能再借它")
         elif isinstance(e, Cast):
             use(e.expr)
         elif isinstance(e, MethodCall):
@@ -10683,16 +10771,31 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                     moved.add(a.name)  # 非 Copy 传参 = 移动
                 else:
                     use(a)
+                    # 非 Copy 的**字段**当实参传走 = 把它移出来（`#1552`）
+                    if isinstance(a, (FieldAccess, Index)):
+                        ak = _place_key(a)
+                        at = expr_type(a, scope, funcs, structs)
+                        if ak is not None and at is not None \
+                                and not _is_copy_type(at, structs, enums):
+                            moved_places[ak] = a.line
             # **E029**：`free(p)` 之后 `p` 指向的块没了 —— 记下来，之后再用到 `p` 就报。
             # ⚠ **登记放在循环之后**：`use(a)` 在上面已经把 `free` 自己那个实参走过一遍了，
             # 而**那一次是合法的**（清掉再报就成了"`free` 自己都不能调"）。
             if lms and e.name == "free" and e.args and isinstance(e.args[0], Ident):
                 freed.add(e.args[0].name)
         elif isinstance(e, Index):
-            use(e.obj)
+            k = _place_key(e)
+            if k is not None and gone_at(k) is not None:
+                errs.append(f"{e.line}: 字段 {gone_at(k)} 已被移动, 不能再用")
+                return
+            use_place_base(e.obj)
             use(e.idx)
         elif isinstance(e, FieldAccess):
-            use(e.obj)
+            k = _place_key(e)
+            if k is not None and gone_at(k) is not None:
+                errs.append(f"{e.line}: 字段 {gone_at(k)} 已被移动, 不能再用")
+                return
+            use_place_base(e.obj)
         elif isinstance(e, ArrayLit):
             for it in e.items:
                 use(it)
@@ -10713,6 +10816,13 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
                 if isinstance(s.expr, Ident) and s.expr.name in sc \
                         and not _is_copy_type(sc[s.expr.name], structs, enums):
                     moved.add(s.expr.name)
+                elif isinstance(s.expr, (FieldAccess, Index)):
+                    # 把非 Copy 的**字段**移进一个新绑定（`#1552`）
+                    fk = _place_key(s.expr)
+                    ft = expr_type(s.expr, sc, funcs, structs)
+                    if fk is not None and ft is not None \
+                            and not _is_copy_type(ft, structs, enums):
+                        moved_places[fk] = s.line
                 sc[s.name] = s.type
                 freed.discard(s.name)      # 重新绑定 = 这个名字不再指那块死掉的块
             elif isinstance(s, Assign):
@@ -14525,7 +14635,7 @@ class _Ir:
         self.tmp = 0
         self.lbl = 0
         self.vars: dict[str, tuple[str, str]] = {}  # 槽名 -> (loment 类型, alloca)
-        #: **块作用域版次**（`docs/351`）：`True` 时 `vars` 的键是**声明槽名**
+        #: **块作用域版次**（`docs/353`）：`True` 时 `vars` 的键是**声明槽名**
         #: （`x` / `x.1` / `x.2`…），发射器用 `env` 把源码名解析到当前可见的那一格。
         #: 旧版次保持今天的名字即槽名，`env` 为 `None`。
         self.block_scope = block_scope_on(tur_edition)
@@ -16296,7 +16406,7 @@ class _Ir:
         return p
 
     def slot_of(self, name: str) -> str:
-        """源码名 -> 当前可见的**声明槽名**（`docs/351`）。
+        """源码名 -> 当前可见的**声明槽名**（`docs/353`）。
 
         旧版次没有槽名这回事：名字就是槽名。块作用域版次里 `env` 是一叠按块复制的
         `名字 -> 槽名` 表，最内层命中者胜 —— 与 checker 的作用域规则同一条。
@@ -16325,7 +16435,7 @@ class _Ir:
         # `defer`（`docs/296` §2.3）：每层语句表就是一个作用域，帧在块尾按 LIFO 执行。
         # 块以 `return`/`break`/`continue` 收尾时那几条已经跑过（见 `stmt`），这里只补
         # 正常走到块尾的那一支。
-        # **块作用域版次**：每层语句表同时是一层词法作用域（`docs/351`）。
+        # **块作用域版次**：每层语句表同时是一层词法作用域（`docs/353`）。
         if self.env is not None:
             self.env.append(dict(self.env[-1]))
         self.defers.append([])

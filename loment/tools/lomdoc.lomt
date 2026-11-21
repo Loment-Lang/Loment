@@ -1243,7 +1243,7 @@ fn foreign_grammar(src: ptr, t: ptr, n: u32) -> u32 {
                     || tk_is(src, t, i + 3, "rust") == true {
                 return 0;                   // 原生写法，照旧放行
             }
-            // `tur2027.1Alpha`（`docs/351`）：词法器拆成 `tur2027` `.` `1` `Alpha`。
+            // `tur2027.1Alpha`（`docs/353`）：词法器拆成 `tur2027` `.` `1` `Alpha`。
             if (tk_is(src, t, i + 3, "tur2027") == true
                     || tk_is(src, t, i + 3, "2027") == true)
                     && tk_is(src, t, i + 4, ".") == true

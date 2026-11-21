@@ -1908,7 +1908,7 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "tur2026.1": "tur2026.1",
     "tur2026.2": "tur2026.2",
     "tur2026.3": "tur2026.3",
-    # `tur2027.1Alpha`（块作用域，`docs/351`）是**显式选用**的 alpha 版次：
+    # `tur2027.1Alpha`（块作用域，`docs/353`）是**显式选用**的 alpha 版次：
     # 它不跟默认走（见 `DEFAULT_EDITION` 的注），但规范名本身是完整的。
     # 别名 `2027.1Alpha` 只是省掉族前缀的源侧拼法，对象侧仍然只写规范名。
     "2027.1Alpha": "tur2027.1Alpha",

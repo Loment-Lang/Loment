@@ -474,7 +474,7 @@ _CASES: list[tuple[str, str]] = [
      "fn f() { lgc end; }\n"),
     ("lgc-budget-expr", "choose write grammar tur2026.3\nmodule m\nchoose runtime\n"
      "fn f() { lgc start(2 + 3) { } }\n"),
-    # ---- 块作用域（docs/351，tur2027.1Alpha）-------------------------------
+    # ---- 块作用域（docs/353，tur2027.1Alpha）-------------------------------
     ("scope-dup-in-block", "choose write grammar tur2027.1Alpha\nmodule m\nchoose runtime\n"
      "fn f() -> u32 {\n    let x: u32 = 1;\n    let x: u32 = 2;\n    return x;\n}\n"),
     # ---- 借用生命周期（docs/299，第八维 `lifetime`）--------------------------

@@ -626,7 +626,7 @@ pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32,
         }
         if hit == 1 {
             let e: u32 = block_end(unit, toks, j + 3, b);
-            // **块作用域版次**（`tur2027.1Alpha`，`docs/351` §4）：`lspe pass` 的体
+            // **块作用域版次**（`tur2027.1Alpha`，`docs/353` §4）：`lspe pass` 的体
             // 在参考实现里是一个 `Block` —— 头可以删，`{` / `}` 不能删，否则体里的
             // `let` 会漏进外层（同块重名、遮蔽都判错）。
             if prof >= 3 {

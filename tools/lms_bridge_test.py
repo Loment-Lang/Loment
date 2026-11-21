@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "loment"))
 
+import loment_suite  # noqa: E402
+
 LOMENTC = ROOT / "tools" / "lomentc.py"
 LOMELF = ROOT / "tools" / "lomelf.py"
 #: `LOMENT_LVM` 指向另一条线的工作树时，判据 B 可以直接对它的 `--substrate` 跑 ——
@@ -187,5 +189,9 @@ TESTS = [(n, getattr(LmsBridgeTest, n)) for n in dir(LmsBridgeTest)
          if n.startswith("test_")]
 
 
+def main() -> int:
+    return loment_suite.run_unittest(LmsBridgeTest, "lms_bridge_test")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    sys.exit(main())

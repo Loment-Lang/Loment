@@ -22,7 +22,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 LOMENTC = ROOT / "tools" / "lomentc.py"
+sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "loment"))
+
+import loment_suite  # noqa: E402
 
 
 def _compile(src_text: str, name: str, tmp: Path) -> dict:
@@ -541,5 +544,9 @@ TESTS = [(n, getattr(LNotaryTest, n)) for n in dir(LNotaryTest)
          if n.startswith("test_")]
 
 
+def main() -> int:
+    return loment_suite.run_unittest(LNotaryTest, "lnotary_test")
+
+
 if __name__ == "__main__":
-    unittest.main()
+    sys.exit(main())

@@ -12,6 +12,8 @@
 # 这份表是**从 runner 上量出来的**（本机有 clang/WSL，看到的只是子集）：
 # `tools/ci.py` 判预算失败时，每一条都打出一行可以直接粘进来的文本；原因那一列由
 # 那份量取脚本从套件源码里抽（`gate.out` 每条只留最后一行，带不出原因）。
+lms_bridge_test test_lvm_sw_cap_exits_101_with_site  # 仓库: `--substrate` 还没合进来（`docs/362`）
+lms_bridge_test test_native_fault_abi_exits_101  # 环境: 无 WSL（CI 镜像里没有）
 loment_cstrans_test test_a_byte_only_unit_runs_and_proves_it_is_unsigned  # 环境: 需要 dotnet + WSL
 loment_cstrans_test test_translation_runs_same_as_dotnet  # 环境: 需要 dotnet + WSL
 loment_dap_test test_breakpoint_stops_on_the_right_line  # 环境: 需要 WSL + Windows 侧 clang

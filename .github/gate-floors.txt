@@ -38,7 +38,7 @@ loment_tools_test 66
 loment_p7_test 9
 loment_p8_test 62
 loment_p9_test 2
-loment_segv_test 8
+loment_segv_test 10
 loment_crash_test 9
 loment_gc_surface_test 4
 loment_gc_why_test 8
@@ -51,7 +51,7 @@ loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 27
-loment_elf_test 92
+loment_elf_test 94
 loment_pe_test 17
 loment_genesis_test 9
 loment_status_test 4

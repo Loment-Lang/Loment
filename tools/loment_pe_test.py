@@ -2135,7 +2135,6 @@ fn main() {
 """
 
 
-@test
 def _seed_openat(d: Path) -> None:
     (d / "probe.txt").write_bytes(b"x")
     (d / "append.txt").write_bytes(b"0123456789")

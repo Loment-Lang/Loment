@@ -1546,8 +1546,9 @@ fn build_class_copies(s: ptr, src: ptr, toks: ptr) -> u32 {
                         store32(s, CG_FN + n * 12 + 8, load32(s, CG_FN + j * 12 + 8));
                         store32(s, fk_base(n), 5);
                         store32(s, fk_base(n) + 4, child);
+                        let npar: u32 = load32(s, CG_FN + j * 12 + 8);
                         let q: u32 = 0;
-                        while q < 20 {
+                        while q < npar {
                             store32(s, CG_PARAM + n * 160 + q * 8,
                                     load32(s, CG_PARAM + j * 160 + q * 8));
                             store32(s, CG_PARAM + n * 160 + q * 8 + 4,

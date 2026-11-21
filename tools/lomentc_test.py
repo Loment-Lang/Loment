@@ -7614,11 +7614,9 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
         "fn run() -> u32 {\n"
         "    let n: u32;\n"
         "    let a: u32;\n"
-        "    let __eff_r1: u32 = 41;\n"
-        "    a = __eff_r1;\n"
+        "    a = 41;\n"
         "    n = a + 1;\n"
         "    return n;\n}\n")
-    lomentc._EFF_TMP[0] = 0            # 临时名是确定的：这一条按名字比 IR
     a, b = parse(src), parse(plain)
     assert lomentc.check(a) == [], lomentc.check(a)
     assert lomentc.check(b) == [], lomentc.check(b)
@@ -7630,9 +7628,9 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
 
 
 @test
-def test_a3a_rejects_captures_and_non_tail_arms():
-    """A3a 的三条边界：闭臂、尾续、臂里平铺（`docs/341` §10.7）。"""
-    cap = _EFF_BASE + (
+def test_arm_capture_is_direct_and_shadowing_is_rejected():
+    """A3b：臂直接引用外层局部（不造合成名）；写捕获与同名遮蔽都点名拒（§7.8）。"""
+    ok = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"
         "    let base: u32 = 7;\n"
@@ -7641,7 +7639,76 @@ def test_a3a_rejects_captures_and_non_tail_arms():
         "        a\n"
         "    } with { get() => { resume(base); } };\n"
         "    return n;\n}\n")
-    assert any("A3a 的臂是闭的" in x for x in errs(cap)), errs(cap)
+    m = parse(ok)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    names = [getattr(s, "name", "") for s in m.funcs[0].body
+             if isinstance(s, lomentc.Let)]
+    assert not any(nm.startswith("__eff_") for nm in names), names
+    # handle 体里同名局部的遮蔽：直接引用会改绑，所以点名拒。
+    shadow = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let base: u32 = 9;\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { resume(base); } };\n"
+        "    return n;\n}\n")
+    assert any("被 handle 体里的同名局部遮住" in x for x in errs(shadow)), errs(shadow)
+    # 写捕获是错的（只读）。
+    bad = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { base = base + 1; resume(base); } };\n"
+        "    return n;\n}\n")
+    assert any("捕获只读" in x for x in errs(bad)), errs(bad)
+
+
+@test
+def test_abort_arm_skips_the_rest_of_the_handle_body():
+    """A3b：不 `resume` 的臂 = abort；降级成 `while true { … n = v; break; }`。"""
+    src = _EFF_BASE + (
+        "effect Log { fn get() -> u32; fn stop() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let k: u32 = 9;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        let b: u32 = perform Log.stop();\n"
+        "        a + b\n"
+        "    } with {\n"
+        "        get() => { resume(40); }\n"
+        "        stop() => { return k; }\n"
+        "    };\n"
+        "    return n;\n}\n")
+    m = parse(src)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    body = m.funcs[0].body
+    loops = [s for s in body if isinstance(s, lomentc.While)]
+    assert len(loops) == 1, body
+    assert isinstance(loops[0].body[-1], lomentc.Break), loops[0].body[-1]
+    assert any(isinstance(s, lomentc.Assign)
+               and isinstance(s.target, lomentc.Ident) and s.target.name == "n"
+               for s in loops[0].body), loops[0].body
+    # 裸 `return;` 不能当 abort（没有值）。
+    bad = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let n: u32 = handle Log {\n"
+        "        perform Log.get();\n"
+        "        0\n"
+        "    } with { get() => { return; } };\n"
+        "    return n;\n}\n")
+    assert errs(bad), errs(bad)
+
+
+@test
+def test_a3a_rejects_non_tail_and_incomplete_arms():
+    """A3a 的两条边界：尾续、臂里平铺（`docs/341` §10.7）。"""
     two = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"

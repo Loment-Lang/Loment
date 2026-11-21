@@ -47,6 +47,9 @@ RUNGS = ("L0", "L0.5", "L1", "L2", "L3")
 #: `L3` 的**具名原因**。每一条都要能指到"用户该改哪儿"。
 #: 键是稳定标识（进 `--json`），值是人话。
 REASONS = {
+    # `#1485`：这一档**根本没有分层**。只有 `choose gc_auto_alpha` 会填 L0/L1/L2；
+    # 非 alpha 单元给一个 alpha 档的理由（"尺寸不是字面量"…）会把用户引到没用的改动上。
+    "tier": "这一档没有分层（只有 `choose gc_auto_alpha` 才有 L0 / L1 / L2）",
     "shape": "形状不合 —— 只有语句级的 `let NAME: ptr = alloc(<字面量>);` 才分层",
     "param": "`NAME` 是形参（形参的缓冲不是这个函数分配的）",
     "size-not-literal": "尺寸不是字面量（L0 要求字面量，命名常量也不行）",
@@ -114,6 +117,13 @@ def _all_alloc_lines(mod) -> list[int]:
     return lines
 
 
+def _n_lets(toks: list, f, name: str) -> int:
+    """这个函数里 `let name` 出现了几次（`#1460`：遮蔽时两个站点都该说 multi-decl）。"""
+    return sum(1 for i in range(f.tok_at, min(f.tok_end, len(toks)))
+               if toks[i].kind == "ident" and toks[i].val == name
+               and i > 0 and toks[i - 1].val == "let")
+
+
 def _l0_refusal(f, toks: list, s: dict, params: set) -> "str | None":
     """`L0` **为什么没收它**（`None` = 收了）。按 `_l0_promotable` 那几道闸的**原顺序**问。
 
@@ -124,17 +134,19 @@ def _l0_refusal(f, toks: list, s: dict, params: set) -> "str | None":
     name = s["name"]
     if name in params:
         return "param"
-    lit = _size_literal_is_int(toks, f, name)
+    # `#1460`：声明次数要**自己数**。`_ptr_only_uses` 撞到第二个 `let` 就 `ok=False` 并
+    # `break`，它的 `ndecl` 于是永远是 0/1 —— 把 `multi-decl` 那条理由变成了死码。
+    if _n_lets(toks, f, name) != 1:
+        return "multi-decl"
+    lit = _size_literal_is_int(toks, f, name, s.get("line"))
     if lit is False:
         return "size-not-literal"
     if lit == 0:
         return "size-zero"
-    ok, ndecl, _last = lomentc._ptr_only_uses(toks, f.tok_at, f.tok_end, name,
-                                              _decl_tok(toks, f, name))
+    ok, _ndecl, _last = lomentc._ptr_only_uses(toks, f.tok_at, f.tok_end, name,
+                                               _decl_tok(toks, f, name, s.get("line")))
     if not ok:
         return "escape"
-    if ndecl != 1:
-        return "multi-decl"
     return None
 
 
@@ -153,22 +165,33 @@ def _shape_reason(f, toks: list, s: dict, params: set, l0n: set, l1n: set) -> st
     return _l0_refusal(f, toks, s, params) or "no-epoch-no-l1"
 
 
-def _decl_tok(toks: list, f, name: str) -> int:
-    """`name` 那条声明的 token 下标（`_ptr_only_uses` 要它来分辨"声明处"与"别处"）。"""
+def _decl_tok(toks: list, f, name: str, line: int | None = None) -> int:
+    """`name` 那条声明的 token 下标（`_ptr_only_uses` 要它来分辨"声明处"与"别处"）。
+
+    `line` 给了就取**那一行的那条声明**（`#1460`）：同名遮蔽时每个站点各问各的，
+    原先一律回**第一条** —— 第二个站点的"尺寸是不是字面量"会拿第一个 `let` 的尺寸去回答。
+    """
+    best, exact = -1, -1
     for i in range(f.tok_at, min(f.tok_end, len(toks))):
         if toks[i].kind == "ident" and toks[i].val == name \
                 and i > 0 and toks[i - 1].val == "let":
-            return i
-    return -1
+            if line is None:
+                return i
+            if toks[i].line == line:
+                exact = i
+            if toks[i].line <= line:
+                best = i
+    return exact if exact >= 0 else best
 
 
-def _size_literal_is_int(toks: list, f, name: str):
+def _size_literal_is_int(toks: list, f, name: str, line: int | None = None):
     """`let name: ptr = alloc(<num>);` 里那一格是不是整数字面量。
 
     回 `True`（是且 > 0）/ `False`（不是字面量）/ `0`（字面量但是 0）/ `None`（找不到那条声明）。
     与 `_l0_promotable` 的形状判定**同一条**：`let NAME : ptr = alloc ( <number> ) ;`。
+    `line` 让同名遮蔽时问的是**这个站点自己的**那条声明（`#1460`）。
     """
-    i = _decl_tok(toks, f, name)
+    i = _decl_tok(toks, f, name, line)
     if i < 0:
         return None
     j = i + 1
@@ -181,13 +204,26 @@ def _size_literal_is_int(toks: list, f, name: str):
     return lomentc._int_lit(toks[j + 5].val) & 0xFFFFFFFF or 0
 
 
+def tier_of(mod) -> str:
+    """这份单元自己声明的 GC 档（`choose gc_*` 的规范名，缺省 = `CORE_DEFAULTS`）。"""
+    return getattr(mod, "chooses", {}).get("gc", lomentc.CORE_DEFAULTS["gc"])
+
+
+ALPHA = "gc_auto_alpha"
+
+
 def sites(mod) -> list[dict]:
     """逐站点：`{line, rung, reason, name}` —— **按源码行序**。
 
     `reason` 在 `L0`/`L1`/`L2` 上恒为 `None`（那些是**成功**的分层），在 `L3` 上是
     `REASONS` 里的一条键。
+
+    **不跑分析**（`#1451`）：这一层只读 `mod` 上的分层表。原先在这里无条件调
+    `_gc_alpha_pass(mod, [])` —— 既不尊重单元自己写的档，又会把调用方跑过的
+    **带依赖**的分析表改写成**不带依赖**的一份（之后 `emit_*` 产出的就是另一个程序）。
+    需要分层的调用方（`report` 与测试）自己先跑 `_gc_alpha_pass(mod, deps)`。
     """
-    lomentc._gc_alpha_pass(mod, [])
+    alpha = tier_of(mod) == ALPHA
     toks = mod.toks
     shape = _shape_sites(mod)
     out: list[dict] = []
@@ -195,6 +231,12 @@ def sites(mod) -> list[dict]:
         f = s["fn"]                     # **归属来自走语句时的那一层**，不按名字反查：
                                         # 不同函数可以有同名局部（实测：一对只差一行的
                                         # 程序里 `eat` 与 `f` 都有 `p`，反查会认错函数）。
+        # `#1485`：非 alpha 档没有分层 —— 说"尺寸不是字面量"之类的话只会把人引去改
+        # 一个不会改变结果的写法。这一档的答案只有一句：这一层不存在。
+        if not alpha:
+            out.append({"line": s["line"], "name": s["name"], "rung": "L3",
+                        "reason": "tier", "l0_refused": None})
+            continue
         params = {p.name for p in f.params}
         l0n = set(f.l0)
         l1n = _l1_names(f)
@@ -248,10 +290,18 @@ def histogram(rows: list[dict]) -> dict:
     return h
 
 
-def report(path: Path) -> tuple[list[dict], dict]:
-    mod = lomentc.load(path)
+def report(path: Path) -> tuple[list[dict], dict, str]:
+    """`(逐站点, 直方图, 档名)`。分析在这里跑 —— **带依赖**，且只在本单元真是 alpha 时跑。
+
+    依赖要一起给（`#1451`）：`_gc_alpha_pass(mod, [])` 的 deref-only 安全表会少掉依赖里的
+    函数，于是本可以上 L0 的站点被算成 L3 —— 那正是这把尺子要避免的那类错。
+    """
+    mod, deps = lomentc.load_unit(path, ROOT)
+    tier = tier_of(mod)
+    if tier == ALPHA:
+        lomentc._gc_alpha_pass(mod, deps)
     rows = sites(mod)
-    return rows, histogram(rows)
+    return rows, histogram(rows), tier
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -262,10 +312,29 @@ def main(argv: list[str] | None = None) -> int:
     p = Path(a.file)
     if not p.is_absolute():
         p = (Path.cwd() / p).resolve()
-    rows, h = report(p)
+    # `#1463`：输入是**用户的参数** —— 路径写错、给了目录、文件不是 UTF-8，都要报一句
+    # 并给一个具名退码。原先这些一路抛到 `pathlib` / `lomentc`，用户看到的是 Python 栈
+    # （同类问题在别的 CLI 上已经修过一轮）；姊妹尺子 `loment_gc_surface.py` 也是这么做的。
+    if not p.exists():
+        print(f"[ERR] {a.file}: 文件不存在", file=sys.stderr)
+        return 2
+    if p.is_dir():
+        print(f"[ERR] {a.file}: 这是一个目录，不是源文件", file=sys.stderr)
+        return 2
+    try:
+        rows, h, tier = report(p)
+    except (OSError, UnicodeDecodeError, ValueError, lomentc.LomError) as e:
+        print(f"[ERR] {a.file}: 读不了这份源（{type(e).__name__}: {e}）", file=sys.stderr)
+        return 2
     if a.json:
-        print(json.dumps({"sites": rows, "ladder": h}, ensure_ascii=False, indent=2))
+        print(json.dumps({"sites": rows, "ladder": h, "tier": tier},
+                         ensure_ascii=False, indent=2))
         return 0
+    if tier != ALPHA:
+        # `#1485`：先把"这一档没有分层"说在前面 —— 否则下面那句"L3"看起来像是在
+        # 建议用户改写法，而改写法在 `gc_manual` 下不会把任何一处挪出 L3。
+        print(f"  这一档是 `{tier}` —— 分层（L0 / L1 / L2）只在 `choose gc_auto_alpha` "
+              f"下存在；下面每一处都是 L3，换写法也不会改变这一点。")
     for r in rows:
         why = "" if r["reason"] is None else f"   ← {REASONS[r['reason']]}"
         nm = f" `{r['name']}`" if r["name"] else ""

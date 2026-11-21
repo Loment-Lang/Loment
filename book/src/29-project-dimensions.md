@@ -12,7 +12,7 @@ object, so a consumer that does not read the source can still answer what kind o
 | Reclamation | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed |
 | Runtime | `runtime` · `no_runtime` | `no_runtime` | whether the runtime block may be carried |
 | Port | `sealed` · `hosted` | `sealed` | whether the artifact may link host libraries |
-| Execution | `vm` · `no_vm` | `no_vm` | which execution model the program targets |
+| Execution | `lvm` · `no_lvm` | `no_lvm` | which execution model the program targets |
 | Memory safety | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` · `lms_close_admin` | `lms_full` | which LMS levels are on |
 | Audit ledger | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger |
 
@@ -68,12 +68,13 @@ allowed, and the artifact links against the host. The door opened in 2026; its l
 
 When you invoke the linker directly, pass `--allow-ports` yourself.
 
-## Execution: `vm` and `no_vm`
+## Execution: `lvm` and `no_lvm`
 
-`vm` records the execution model. Today it only records it: the artifact is byte-identical to
-`no_vm`, and there is no bytecode in the product. The interpreted tier is a separate tool
-(`loment-lvm`) that runs LLVM IR; it is not carried by the artifact. The release gate opened in
-2026, so the value is accepted and recorded.
+`lvm` records the execution model (the spelling was `vm` / `no_vm` until 2026.11; the old
+spelling is not a switch any more). Today it only records it: the artifact is byte-identical
+to `no_lvm`, and there is no bytecode in the product. The interpreted tier is a separate tool
+(`loment-lvm`) that runs LLVM IR; it is not carried by the artifact. The release gate opened
+in 2026, so the value is accepted and recorded in both channels.
 
 ## Memory safety: `lms_*`
 

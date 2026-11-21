@@ -148,7 +148,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 这条是唯一一条**不靠"两个实现一致"**的判据。
                  "loment_oracle_test",
                  # 渠道（`docs/231` §5 判据 D/F）：发行版种子可重算、且与 dev 只差一个字节；
-                 # 发行版驱动器拒 `choose vm`、dev 收（后者要 clang + WSL，没有就 SKIP）。
+                 # 发行版驱动器与 dev 都收 `choose lvm`（判据留着、期望在 2026-10-17 反转）；要 clang + WSL，没有就 SKIP。
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",

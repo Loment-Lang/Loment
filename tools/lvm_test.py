@@ -8,7 +8,7 @@
 **判 B：支持面相同。** 语料里每一份若 VM 说"不支持"，则 `lomelf` 也必须发不出来 ——
 用一张**棘轮**表钉，只许变短。
 
-**判 G：`gc_ladder` 在 VM 档下含义不变。** 上半："加不加 `choose vm`，IR 逐字节相同"
+**判 G：`gc_ladder` 在 VM 档下含义不变。** 上半："加不加 `choose lvm`，IR 逐字节相同"
 （没有分配站点被搬动 ⇒ Potato 那个字段不动）。下半：一份四层各来一站的程序，原生产物与
 VM 逐字节相同 —— 而且那个收集器必须是 **`define`**（它在 IR 里，不在宿主上）。
 
@@ -202,8 +202,8 @@ def test_gc_ladder_under_vm() -> None:
 
     两半各钉一件事，都能证伪：
 
-    * **上半：没有分配站点被搬动。** 同一份源，加不加 `choose vm`，IR **逐字节相同**。
-      这条红了就说明 `vm` 这一维开始动梯子 —— 那时 Potato 的 `gc_ladder` 字段与它的版本号
+    * **上半：没有分配站点被搬动。** 同一份源，加不加 `choose lvm`，IR **逐字节相同**。
+      这条红了就说明 `lvm` 这一维开始动梯子 —— 那时 Potato 的 `gc_ladder` 字段与它的版本号
       都要按 `docs/231` §2.2 的先例重走一遍登记处。
     * **下半：四层的落地物 VM 跑得对。** 一份四层各来一站的程序（`gc_auto_alpha`），
       原生产物与 VM 逐字节相同。"L3 交给运行期"**不是**把梯子交给 VM：那个收集器是
@@ -214,9 +214,9 @@ def test_gc_ladder_under_vm() -> None:
         td = Path(tds)
         base = _fixture_ir(_LADDER_FIXTURE, td, "lvmladder")
         with_vm = _fixture_ir(_LADDER_FIXTURE.replace(
-            "choose runtime", "choose runtime\nchoose vm", 1), td, "lvmladder_vm")
+            "choose runtime", "choose runtime\nchoose lvm", 1), td, "lvmladder_vm")
     assert base == with_vm, (
-        "`choose vm` 把 IR 改了 —— 那说明它开始动 `gc_ladder`（`docs/232` §4.5）："
+        "`choose lvm` 把 IR 改了 —— 那说明它开始动 `gc_ladder`（`docs/232` §4.5）："
         "Potato 那个字段与它的版本号都要重审")
     # 收集器必须是 `define` —— 它是**这份 IR 的一部分**，不是宿主提供的运行期。
     for fn in ("__loment_alloc", "__loment_collect", "__loment_major", "__loment_wb"):
@@ -241,7 +241,7 @@ def test_gc_ladder_under_vm() -> None:
         f"四层那份两条路对不上：原生 rc={rc_native} {out_native[:40]!r} / "
         f"VM rc={rc_vm} {buf.getvalue()[:40]!r}")
     assert rc_vm == 13, f"退出码应当是 9+3+1=13（三层各读回一个字节），得到 {rc_vm}"
-    print("      `choose vm` 不改 IR（逐字节同）；四层那份原生 / VM 同为 rc=13")
+    print("      `choose lvm` 不改 IR（逐字节同）；四层那份原生 / VM 同为 rc=13")
 
 
 def test_command_unit_sees_its_own_name() -> None:

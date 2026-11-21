@@ -1,0 +1,18 @@
+module ir_class
+
+choose class_on
+
+class Point {
+    x: u32,
+    y: u32,
+    fn sum(self: &Point) -> u32 {
+        return self.x + self.y;
+    }
+}
+
+fn _start() -> u32 {
+    let p: Point = Point { x: 3, y: 4 };
+    let v: u32 = p.sum();
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}

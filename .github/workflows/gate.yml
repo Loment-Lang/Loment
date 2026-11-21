@@ -445,7 +445,9 @@ jobs:
   static-shard:
     name: 静态门禁 ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 180（2026-11-20）：分片 3 的 `loment_seed_test` 自带 3600 秒的自举护栏，
+    # 新红复跑还会再跑一遍 —— 60 分钟装不下一次满载的定点。其余片不受影响。
+    timeout-minutes: 180
     # `always()`：独占那片红了**也要**把其余九片跑完。`needs` 的默认行为是"依赖失败就
     # 跳过"，那样看到的是"五片没跑"而不是"这五片也红"。独占那片与这里并行**不会**踩到
     # 共享位置：它是**先跑完**的那一个。

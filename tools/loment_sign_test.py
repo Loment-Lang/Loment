@@ -246,6 +246,22 @@ def test_sums(tmp: Path) -> None:
 
 # ------------------------------------------------------------------ 6. print-cmd
 
+def test_gpg_identity() -> None:
+    """`#1782`：`--gpg-user` 是 **UID**，也可以给指纹 —— 两种都要能对上。
+
+    原先一律拿它和 `VALIDSIG` 的指纹比，于是任何 UID（包括默认那个）永远"与记录不符"，
+    签名明明 Good 也退 1。这里钉匹配函数本身，不需要真密钥。
+    """
+    f = "DBA33F516CD86D58B51004D6E067ADE07E1C1DB2"
+    u = "Loment Release Signing (dev)"
+    check("GPG 身份: 整串指纹匹配", loment_sign.gpg_identity_matches(f, f, u))
+    check("GPG 身份: 末 16 位密钥 ID 匹配", loment_sign.gpg_identity_matches(f[-16:], f, u))
+    check("GPG 身份: UID 匹配 (#1782)", loment_sign.gpg_identity_matches(u, f, u))
+    check("GPG 身份: 不同指纹不匹配",
+          not loment_sign.gpg_identity_matches("deadbeefdeadbeef", f, u))
+    check("GPG 身份: 空要求 = 不核对", loment_sign.gpg_identity_matches("", f, u))
+
+
 def test_print_cmd() -> None:
     r = subprocess.run([sys.executable, str(ROOT / "tools" / "loment_sign.py"), "--print-cmd",
                         "x.exe"], capture_output=True, text=True, shell=False,
@@ -274,6 +290,7 @@ def main() -> int:
         test_sums(tmp)
     except Exception as e:  # noqa: BLE001
         check("分离签名", False, f"{type(e).__name__}: {e}")
+    test_gpg_identity()
     test_print_cmd()
     # 自清理: 删掉测试证书 (用户自己的证书不动)
     try:

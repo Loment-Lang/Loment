@@ -20,7 +20,7 @@ module errdata
 // 细分规则在前、族码兜底在后 —— 与参考实现 `loment_diag.RULES` 的次序逐条相同：
 // `^(?:\d+: )?` 那个可选前缀是「语义错带行号、解析错不带」的同一口径。
 
-pub fn rule_count() -> u32 { return 243; }
+pub fn rule_count() -> u32 { return 248; }
 
 /// 第 `i` 条规则的码号（十进制；显示成 `E0xx` / `E0xxx` 是 `code_str` 的事）。
 pub fn rule_code(i: u32) -> u32 {
@@ -219,18 +219,18 @@ pub fn rule_code(i: u32) -> u32 {
     if i == 192 { return 233; }
     if i == 193 { return 234; }
     if i == 194 { return 235; }
-    if i == 195 { return 23; }
+    if i == 195 { return 236; }
     if i == 196 { return 23; }
     if i == 197 { return 23; }
     if i == 198 { return 23; }
     if i == 199 { return 23; }
-    if i == 200 { return 30; }
-    if i == 201 { return 2; }
-    if i == 202 { return 1; }
-    if i == 203 { return 3; }
-    if i == 204 { return 4; }
-    if i == 205 { return 5; }
-    if i == 206 { return 6; }
+    if i == 200 { return 23; }
+    if i == 201 { return 30; }
+    if i == 202 { return 2; }
+    if i == 203 { return 1; }
+    if i == 204 { return 3; }
+    if i == 205 { return 4; }
+    if i == 206 { return 5; }
     if i == 207 { return 7; }
     if i == 208 { return 8; }
     if i == 209 { return 9; }
@@ -267,6 +267,11 @@ pub fn rule_code(i: u32) -> u32 {
     if i == 240 { return 41; }
     if i == 241 { return 900; }
     if i == 242 { return 999; }
+    if i == 243 { return 237; }
+    if i == 244 { return 238; }
+    if i == 245 { return 239; }
+    if i == 246 { return 240; }
+    if i == 247 { return 6; }
     return 0;
 }
 
@@ -467,18 +472,18 @@ pub fn rule_pat(i: u32) -> str {
     if i == 192 { return "函数指针类型 .* 没有封闭目标集"; }
     if i == 193 { return "抽象类 .* 不能实例化"; }
     if i == 194 { return ".* 由编译器填"; }
-    if i == 195 { return "^native[ :]|^rust[ :]|^这个后端|目前只支持标量|后端拿到的单元不完整|的实参个数不符|^\\S+ 不是结构体$|^\\S+ 不是数组$|^match 的主体 \\S+ 不是枚举$|未知枚举变体|没有载荷$|没有字段 \\S+|是只读切片，不能写|不支持这条语句"; }
-    if i == 196 { return "嵌套超过"; }
-    if i == 197 { return "效应处理器的运行期|extern 上的效应行"; }
-    if i == 198 { return "写法写的单元里有 .* 处(转写不了|发不出来)|这份源读不通|^定不出源语法"; }
-    if i == 199 { return "^泛型实参的形状这一格不收"; }
-    if i == 200 { return "未知类型 "; }
-    if i == 201 { return "未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法|没有同名方法|父类 .* 不在本模块"; }
-    if i == 202 { return "类型 .*应为|表达式类型|return 类型|类型必须是整型|载荷类型|实参(期望|类型)|实参 [^，]*不是数组或切片|内建 .* 实参|只接 Option/Result 形状|要两变体的枚举|不是 Option/Result 形状|的兜底值类型|is not a named array or slice|is not an array or slice|override 签名|self 必须是"; }
-    if i == 203 { return "需要 \\d+ 个实参|载荷只能有一个实参"; }
-    if i == 204 { return "guard 引用了未声明的能力|quality 引用了未声明的能力|discharge 引用了未声明的能力|quality 只用于自适应域|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须|能力 .* 的 cyclic 周期|^\\d+: 域 .*|generation 只用于 revision 域|retire 只用于 revision 域|generation 引用了未声明的能力|retire 引用了未声明的能力|不能是 revision|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域|revoke|sibling"; }
-    if i == 205 { return "使用了 excluded 的空间"; }
-    if i == 206 { return "已被移动"; }
+    if i == 195 { return "里有子集外的写法"; }
+    if i == 196 { return "^native[ :]|^rust[ :]|^这个后端|目前只支持标量|后端拿到的单元不完整|的实参个数不符|^\\S+ 不是结构体$|^\\S+ 不是数组$|^match 的主体 \\S+ 不是枚举$|未知枚举变体|没有载荷$|没有字段 \\S+|是只读切片，不能写|不支持这条语句"; }
+    if i == 197 { return "嵌套超过"; }
+    if i == 198 { return "效应处理器的运行期|extern 上的效应行"; }
+    if i == 199 { return "写法写的单元里有 .* 处(转写不了|发不出来)|这份源读不通|^定不出源语法"; }
+    if i == 200 { return "^泛型实参的形状这一格不收"; }
+    if i == 201 { return "未知类型 "; }
+    if i == 202 { return "未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法|没有同名方法|父类 .* 不在本模块"; }
+    if i == 203 { return "类型 .*应为|表达式类型|return 类型|类型必须是整型|载荷类型|实参(期望|类型)|实参 [^，]*不是数组或切片|内建 .* 实参|只接 Option/Result 形状|要两变体的枚举|不是 Option/Result 形状|的兜底值类型|is not a named array or slice|is not an array or slice|override 签名|self 必须是"; }
+    if i == 204 { return "需要 \\d+ 个实参|载荷只能有一个实参"; }
+    if i == 205 { return "guard 引用了未声明的能力|quality 引用了未声明的能力|discharge 引用了未声明的能力|quality 只用于自适应域|discharge 只用于可达域|能力 .*域|能力 .*重复|能力 .*参数必须|能力 .* 的 cyclic 周期|^\\d+: 域 .*|generation 只用于 revision 域|retire 只用于 revision 域|generation 引用了未声明的能力|retire 引用了未声明的能力|不能是 revision|不能带空间|第二个实参|domain:for|child_of|couple|mutex|并行的几个域|revoke|sibling"; }
+    if i == 206 { return "使用了 excluded 的空间"; }
     if i == 207 { return "既被可变借用又被借用|被可变借用两次"; }
     if i == 208 { return "无变体|重复模式|不是枚举|match 主体|不穷尽|不能带参数|不能绑定|模式需绑定变量|与主体枚举"; }
     if i == 209 { return "与基类型同名|结构体 .* 为空|枚举 .* 为空"; }
@@ -515,12 +520,17 @@ pub fn rule_pat(i: u32) -> str {
     if i == 240 { return "返回借用，但签名里没有引用形参|区域标记|仍被借用时释放|不写区域标记|borrow 域|共享域|独占域|里的借用不能带出|还在域 .* 里被借用|要借用的 .* 不在作用域里|越窗|两半必须互斥|游标域|宽度必须是正的编译期整数|块内不能再用|已经移交过|所有权已经随|交给外部|epoch 域"; }
     if i == 241 { return "wrote no diagnostic record|没有写出诊断记录|died before it could report"; }
     if i == 242 { return "(?!)"; }
+    if i == 243 { return "^(?:\\d+: )?变量 .+ 的 `&mut` 已经用掉一次"; }
+    if i == 244 { return "^(?:\\d+: )?字段 .+ 已被移动, 不能再用"; }
+    if i == 245 { return "^(?:\\d+: )?字段 .+ 已被移动，不能再借它"; }
+    if i == 246 { return "^(?:\\d+: )?变量 .+ 的部分字段已被移动"; }
+    if i == 247 { return "已被移动"; }
     return "";
 }
 
 // ---------------------------------------------------------------- 码表
 
-pub fn n_codes() -> u32 { return 235; }
+pub fn n_codes() -> u32 { return 240; }
 pub fn internal_lo() -> u32 { return 900; }
 pub fn internal_hi() -> u32 { return 999; }
 
@@ -761,8 +771,13 @@ pub fn code_str(c: u32) -> str {
     if c == 233 { return "E0233"; }
     if c == 234 { return "E0234"; }
     if c == 235 { return "E0235"; }
+    if c == 236 { return "E0236"; }
     if c == 900 { return "E0900"; }
     if c == 999 { return "E0999"; }
+    if c == 237 { return "E0237"; }
+    if c == 238 { return "E0238"; }
+    if c == 239 { return "E0239"; }
+    if c == 240 { return "E0240"; }
     return "";
 }
 
@@ -962,6 +977,11 @@ pub fn code_family(c: u32) -> u32 {
     if c == 233 { return 22; }
     if c == 234 { return 19; }
     if c == 235 { return 19; }
+    if c == 236 { return 23; }
+    if c == 237 { return 6; }
+    if c == 238 { return 6; }
+    if c == 239 { return 6; }
+    if c == 240 { return 6; }
     return c;
 }
 
@@ -1439,10 +1459,20 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 469 { return "抽象类不能实例化"; }
     if k == 470 { return "a compiler-owned field was initialized"; }
     if k == 471 { return "编译器保留字段"; }
+    if k == 472 { return "the construct is outside the translated subset for that language"; }
+    if k == 473 { return "这写法在该门语法的翻译子集之外"; }
     if k == 1800 { return "the tool died without reporting (internal)"; }
     if k == 1801 { return "工具链进程死了，没留下诊断"; }
     if k == 1998 { return "unclassified (please report)"; }
     if k == 1999 { return "未分类（请报告）"; }
+    if k == 474 { return "a stored `&mut` is used only once"; }
+    if k == 475 { return "`&mut` 只能用掉一次"; }
+    if k == 476 { return "the field was moved out and cannot be used"; }
+    if k == 477 { return "字段已经被移走，不能再用"; }
+    if k == 478 { return "the moved field cannot be borrowed"; }
+    if k == 479 { return "字段已经被移走，不能再借"; }
+    if k == 480 { return "part of the variable was moved out"; }
+    if k == 481 { return "变量的一部分字段已经被移走"; }
     return "";
 }
 
@@ -1684,8 +1714,17 @@ pub fn code_hint(c: u32, lang: u32) -> str {
     if k == 467 { return "在程序里给同型函数取址（`let f: (T) -> R = inc;`）。"; }
     if k == 469 { return "实例化一个具体子类。"; }
     if k == 471 { return "删掉字面量里的 `__vtable`。"; }
+    if k == 473 { return "改写成该语言里更普通的写法（报错消息末尾点名了是哪一种）。"; }
     if k == 1801 { return "编译器 / 链接器 / 报错器之一在能写出结构化诊断之前就死了（信号或异常退出）。这不是你源码的语义错 —— 它是**实现自己的失败**，修法与改你那一行无关。"; }
     if k == 1999 { return "报错器没有认出这条消息属于哪一类。把消息原文、源码与命令报告上来，分类表会补一条。"; }
+    if k == 474 { return "reborrow explicitly (`&mut *r`) or take a copy at the first use"; }
+    if k == 475 { return "要再用一次就显式重借 `&mut *r`，或在第一次使用处取一份拷贝"; }
+    if k == 476 { return "borrow it (`&o.i`) or use only the fields that stayed"; }
+    if k == 477 { return "改成借它（`&o.i`），或只用没被移走的字段"; }
+    if k == 478 { return "get the field back, or borrow the source instead of moving it"; }
+    if k == 479 { return "先把字段拿回来，或者那一处本来就该借而不是移"; }
+    if k == 480 { return "use only the fields that stayed, or put the moved one back"; }
+    if k == 481 { return "只用留下来的字段，或者把移走的那个填回去"; }
     return "";
 }
 
@@ -2161,10 +2200,20 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 469 { return "抽象类只提供布局/槽位，具体对象必须来自实现了全部抽象方法的子类。"; }
     if k == 470 { return "The class vtable header is written by the compiler; user literals cannot set it."; }
     if k == 471 { return "类的 vtable 头由编译器写入，用户字面量里不能手写。"; }
+    if k == 472 { return "The front door translates this source into Loment, and `Stage A` has no rule for this construct. That language is all-or-nothing: nothing is silently dropped."; }
+    if k == 473 { return "前门把这份源翻成 Loment 时，`Stage A` 的子集里没有这个构造 —— 那一门整份是全有或全无，丢了的部分不会悄悄跳过。"; }
     if k == 1800 { return "A process in the toolchain died **before it could write a structured diagnostic** - killed by a signal, or exited abnormally, with no record in `--diag-out`."; }
     if k == 1801 { return "工具链里的一个进程在**能写出结构化诊断之前**就死了 —— 被信号打死，或者以异常状态退出，而 `--diag-out` 一份记录都没写。"; }
     if k == 1998 { return "The compiler reported an error that is not in the classification table -- even the toolchain did not recognise which code this message belongs to."; }
     if k == 1999 { return "编译器报了一条错，而分类表里没有它 —— 连工具链自己都没认出这条消息属于哪个码。"; }
+    if k == 474 { return "This `&mut` already left (passed as an argument, assigned to another binding, or returned). `&mut` is not Copy: a second use is a second exclusive borrow of the same place."; }
+    if k == 475 { return "这把 `&mut` 已经交给别处了（当实参传走、赋给别的绑定、或作为返回值）。`&mut` 不是 Copy：再用一次就是同一处上的第二把独占借用。"; }
+    if k == 476 { return "Ownership of this non-Copy field already left (`let a = o.i;` or passed by value). Reading it again reads an emptied slot."; }
+    if k == 477 { return "这个非 Copy 字段的所有权已经交给了别处（`let a = o.i;` 或按值传参）。再读它就是读一个已经空了的格子。"; }
+    if k == 478 { return "Borrowing a moved-out place borrows an empty slot: the field no longer owns anything."; }
+    if k == 479 { return "借一个已经被移走的位置等于借一块空槽 —— 所有权已经不在这个字段上了。"; }
+    if k == 480 { return "The value still has usable sibling fields, but using it as a whole (passing it, returning it, assigning it) no longer has complete contents."; }
+    if k == 481 { return "这个变量仍有兄弟字段可用，但把它当整体用（传参、返回、赋值）已经没有完整的内容了。"; }
     return "";
 }
 
@@ -2640,10 +2689,20 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 469 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
     if k == 470 { return "Loment's **own syntax is close to Rust but drops** a few things: single-quoted character literals, value-less `return;`, expression-style `match` arms, and `mut` as a binding modifier. Writing from Rust habits lands on these easily - they are not \"not supported yet\", the language simply does not have them. (That is the native syntax only: the same logic can also be written the C / C++ / Java / C# / Go / Python way, which is a different layer - see `docs/188`.)"; }
     if k == 471 { return "Loment 的**原生语法与 Rust 很接近，但去掉了**几样东西：单引号字符字面量、无值 `return;`、表达式式的 `match` 臂、`mut` 作为绑定修饰词。照 Rust 的习惯写很容易踩到这几处 —— 它们不是“暂时不支持”，是这门语言没有。（说的只是**原生语法**：同一段逻辑也能用 C / C++ / Java / C# / Go / Python 的写法写，那是另一层，见 `docs/188`。）"; }
+    if k == 472 { return "The front door translates another language into Loment so that source really compiles and runs (`docs/186`). `Stage A` takes only a small subset with clear semantics and rejects the whole unit when it cannot cover it - a half-translated program would silently change behaviour. So this is neither a missing rule in the table nor a mistake of yours; it has its own code because \"rewrite this construct\" and \"fix that line as the compiler suggests\" are different jobs."; }
+    if k == 473 { return "前门把别的语法翻成 Loment，是为了让那份源真能编、能跑（`docs/186`）。`Stage A` 只收一块语义明确的子集，收不全时**整份拒掉** —— 半翻出来的程序会悄悄改变行为，那比报错糟得多。所以这不是分类表漏了一条，也不是你写错了；它单独一个码，是因为「改写这一处」和「照编译器建议改那一行」是两件事。"; }
     if k == 1800 { return "The diagnostics channel can only describe failures that were **successfully serialized before the failure**. A compiler crash, a linker crash, or the renderer crashing on its own all go the same way: the JSONL is empty and there is nothing for the renderer to do. The launcher now closes that gap: it reads the exit status / signal name and synthesizes this record, so \"no record\" no longer means \"nothing happened\" (#773). This is not a semantic error in your source - it is the **implementation failing on itself**."; }
     if k == 1801 { return "诊断系统只能描述**在失败之前已经成功序列化**的失败。编译器崩溃、链接器崩溃、报错器自己崩溃，走的都是这条路：JSONL 是空的，渲染器无事可做。启动器现在替它收尸：拿到退出状态 / 信号名，合成这一条记录，于是「没有任何记录」不再等于「什么都没有发生」（`#773`）。这不是你源码的语义错 —— 它是**实现自己的失败**。"; }
     if k == 1998 { return "The table and the compiler come out of the same repository and the same build. A message landing here means it has not been classified yet, not that the toolchain versions disagree: fix by the message, then report it so a rule can be added."; }
     if k == 1999 { return "分类表与编译器是同一个仓、同一次构建出来的。消息在这里落空，意思是它还没被归类，不是版本不齐：先按原文去改，再把这条消息报上来，下一条规则就补在它上面。"; }
+    if k == 474 { return "Loment models a stored `&mut` the way Rust does: it is the right to write a place, and handing it over ends this variable's right. Two live `&mut` to one place is the exact aliasing the borrow checker exists to stop (`docs/299` section 11)."; }
+    if k == 475 { return "Loment 与 Rust 同一条：存下来的 `&mut` 是「写这块地方的权」，交出去之后这变量就没有它了。两把同时活着的 `&mut` 指向同一处，正是借用检查器要挡的别名（`docs/299` §11）。"; }
+    if k == 476 { return "A struct is a set of places; moving one out empties that place while its siblings stay usable. The checker tracks the path (`o.i`), so the second read is caught where it happens (`docs/299` section 12)."; }
+    if k == 477 { return "结构体是一组地方；移走一个字段就空了那一格，兄弟字段仍然可用。检查器按路径（`o.i`）记，所以第二次读在发生的那一行被抓到（`docs/299` §12）。"; }
+    if k == 478 { return "A borrow must point at a live place; after the move the field is a hole in the struct. The same rule as reading it, seen from the borrow side (`docs/299` section 12)."; }
+    if k == 479 { return "借用必须指向一块还活着的地方；移走之后那个字段是结构体里的一个洞。与「再读」同一条规则，换到借用这一侧看（`docs/299` §12）。"; }
+    if k == 480 { return "A partial move leaves the aggregate incomplete; the whole-value operations would copy the hole as if it were a value (`docs/299` section 12)."; }
+    if k == 481 { return "部分移动让聚合值不完整；整体操作会把那个洞当成值一起搬走（`docs/299` §12）。"; }
     return "";
 }
 
@@ -3119,10 +3178,20 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 469 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
     if k == 470 { return "the Rust-subset syntax; `//` and `/* */` comments; `let x: T = e;`"; }
     if k == 471 { return "Rust 风味那套语法；`//` `/* */` 注释；`let x: T = e;`"; }
+    if k == 472 { return "the plainer forms of that language - `for` / `if` / scalar arithmetic / `return` - are the shapes `Stage A` takes"; }
+    if k == 473 { return "该语言里更普通的写法 —— `for` / `if` / 标量算术 / `return` 这些 Stage A 收的形状"; }
     if k == 1800 { return "a tool exits 0 (no diagnostics) or 1 (diagnostics, and it left a record)"; }
     if k == 1801 { return "工具链以 0 退出（无诊断）或 1 退出（有诊断并留下了记录）"; }
     if k == 1998 { return "classified messages after a report lands"; }
     if k == 1999 { return "报告之后有专属分类的消息"; }
+    if k == 474 { return "`g(&mut *r)` reborrows; `*r` reads through it and is not a use"; }
+    if k == 475 { return "`g(&mut *r)` 是显式重借；`*r` 是透过它读，不算用掉"; }
+    if k == 476 { return "`&o.i` borrows without moving; a Copy field (`o.n`) is never moved out"; }
+    if k == 477 { return "`&o.i` 只借不移；Copy 字段（`o.n`）根本不会被移走"; }
+    if k == 478 { return "borrow before moving, or have the receiver return the value"; }
+    if k == 479 { return "先借再移，或让接收方按值还回来"; }
+    if k == 480 { return "`o.j` / `o.n` stay usable; `&o` borrows the whole without moving"; }
+    if k == 481 { return "`o.j` / `o.n` 照常可用；`&o` 只借不搬"; }
     return "";
 }
 
@@ -3598,10 +3667,20 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 469 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
     if k == 470 { return "single-quoted character literals; value-less `return;`; expression-style match arms; `let mut x: T` (`mut` is not a keyword)"; }
     if k == 471 { return "单引号字符字面量；无值 `return;`；表达式式 match 臂；`let mut x: T`（`mut` 不是关键字）"; }
+    if k == 472 { return "`+=`, `switch`, exceptions, class inheritance, string methods - the message names the one you hit"; }
+    if k == 473 { return "`+=`、`switch`、异常、类继承、字符串方法 —— 报错消息末尾点名的是哪一种"; }
     if k == 1800 { return "killed by a signal / exited abnormally without writing any structured diagnostic"; }
     if k == 1801 { return "被信号打死 / 异常退出，而且一份结构化诊断都没写"; }
     if k == 1998 { return "guessing a code"; }
     if k == 1999 { return "自动猜一个码"; }
+    if k == 474 { return "`g(r); g(r);` or `let s = r; g(r); g(s);`"; }
+    if k == 475 { return "`g(r); g(r);` 或 `let s = r; g(r); g(s);`"; }
+    if k == 476 { return "`let a = o.i; let b = o.i;`"; }
+    if k == 477 { return "`let a = o.i; let b = o.i;`"; }
+    if k == 478 { return "`let a = o.i; let r: &I = &o.i;`"; }
+    if k == 479 { return "`let a = o.i; let r: &I = &o.i;`"; }
+    if k == 480 { return "`let a = o.i; g(o);`"; }
+    if k == 481 { return "`let a = o.i; g(o);`"; }
     return "";
 }
 
@@ -5068,6 +5147,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 3761 { return "删掉字面量里的 `__vtable`。"; }
     if k == 3763 { return "只写用户字段。"; }
     if k == 3765 { return "要改派发行为就改方法/继承，不要碰对象头。"; }
+    if k == 3776 { return "Rewrite it in a plainer form of that language (the message names the construct, e.g. write `+=` as `x = x + 1;`)."; }
+    if k == 3778 { return "If it must stay as written, implement it on the source-language side and link it through `extern fn` / the C ABI."; }
+    if k == 3780 { return "If there is no workaround, report the message: it is a gap in the translated subset, not an error in your syntax."; }
+    if k == 3777 { return "改写成该语言里更普通的写法（报错消息末尾点名了是哪一种，例如 `+=` 写成 `x = x + 1;`）。"; }
+    if k == 3779 { return "要保留原样：先在源语言侧写完整实现，再用 `extern fn` / C ABI 接进来。"; }
+    if k == 3781 { return "绕不开就把这条消息贴到 issue 上 —— 它是翻译子集的缺口，不是你的语法错。"; }
     if k == 14400 { return "Report the smallest source that reproduces it together with this record - a crash is a compiler defect, not something you can work around in your code."; }
     if k == 14402 { return "Include the exit status / signal name (already in this message) and the output of `loment version`."; }
     if k == 14404 { return "If the message names the **linker** (`loment-lomelf`), also include the `-o` path and the target platform."; }
@@ -5082,6 +5167,30 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 15985 { return "按消息原文去改 —— 它说的仍然是真话，只是此刻缺一张解释卡。"; }
     if k == 15987 { return "把消息原文、出错的那几行源码和跑的命令一起报告上来。"; }
     if k == 15989 { return "顺手写一下工具链版本（`loment version`），分类表按它对齐。"; }
+    if k == 3792 { return "reborrow explicitly when you need it again: `g(&mut *r)`."; }
+    if k == 3793 { return "要再用一次就显式重借：`g(&mut *r)`。"; }
+    if k == 3794 { return "if it really is used twice, take a copy at the first use, or borrow it shared: `&r`."; }
+    if k == 3795 { return "确实要用两次就取一份拷贝值，或改成共享借用 `&r`。"; }
+    if k == 3796 { return "otherwise reorder so the two uses do not overlap."; }
+    if k == 3797 { return "都不行就重排顺序：把两次使用错开成两段借用。"; }
+    if k == 3808 { return "if you need it later, borrow: `&o.i`."; }
+    if k == 3809 { return "后面还要用就借：`&o.i`。"; }
+    if k == 3810 { return "to keep a copy, copy it first (a Copy field never moves)."; }
+    if k == 3811 { return "要留一份就先复制（字段是 Copy 时本来就不会移走）。"; }
+    if k == 3812 { return "or reorder so the use comes before the move."; }
+    if k == 3813 { return "顺序反了：把还要用的那段挪到移走之前。"; }
+    if k == 3824 { return "get the field back first (have the receiver return it by value)."; }
+    if k == 3825 { return "先把字段拿回来（让接收方按值还回来）。"; }
+    if k == 3826 { return "borrow the source instead: that spot should have used `&`, not a move."; }
+    if k == 3827 { return "改成借原始来源：那一处本来就该用 `&` 而不是移动。"; }
+    if k == 3828 { return "for long-lived access, store a reference in the field (`&T`)."; }
+    if k == 3829 { return "要长期访问就给字段换成引用类型（`&T` 字段）。"; }
+    if k == 3840 { return "use only the fields that were not moved (`o.j` / `o.n`)."; }
+    if k == 3841 { return "只使用没被移走的那些字段（`o.j` / `o.n`）。"; }
+    if k == 3842 { return "if you need the whole value, put the moved field back first."; }
+    if k == 3843 { return "确实要整体用：先把移走的字段填回去。"; }
+    if k == 3844 { return "or borrow it: `&o` does not require complete contents."; }
+    if k == 3845 { return "改成借用：`&o` 不要求整块完整。"; }
     return "";
 }
 
@@ -5322,8 +5431,13 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 233 { return 3; }
     if c == 234 { return 3; }
     if c == 235 { return 3; }
+    if c == 236 { return 3; }
     if c == 900 { return 4; }
     if c == 999 { return 3; }
+    if c == 237 { return 3; }
+    if c == 238 { return 3; }
+    if c == 239 { return 3; }
+    if c == 240 { return 3; }
     return 0;
 }
 
@@ -5564,8 +5678,13 @@ pub fn code_ascii(c: u32) -> str {
     if c == 233 { return "the function-pointer type has no closed target set"; }
     if c == 234 { return "an abstract class cannot be instantiated"; }
     if c == 235 { return "a compiler-owned field was initialized"; }
+    if c == 236 { return "the construct is outside the translated subset for that language"; }
     if c == 900 { return "a tool in the chain died before it could report (internal) - report it with the unit"; }
     if c == 999 { return "unclassified - please report it"; }
+    if c == 237 { return "a stored `&mut` is used only once"; }
+    if c == 238 { return "the field was moved out and cannot be used"; }
+    if c == 239 { return "the moved field cannot be borrowed"; }
+    if c == 240 { return "part of the variable was moved out"; }
     return "";
 }
 

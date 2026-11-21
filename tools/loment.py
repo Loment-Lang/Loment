@@ -540,6 +540,38 @@ def cmd_lspe_verify(a) -> int:
     return 0
 
 
+def cmd_lnotary_verify(a) -> int:
+    """`loment lnotary verify <potato.json>` —— 独立公证（`docs/361`）。
+
+    与 `loment lspe verify` 的区别：这一条**不 import lspe**。它只读产物，
+    所以它可以核对 LSPE 自己写下的账而不共享那条代码路径。
+    """
+    import json
+    import lnotary.verify as _lnotary
+    try:
+        doc = json.loads(Path(a.artifact).read_text(encoding="utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了：{e}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as e:
+        print(f"[ERR] 不是 JSON：{e}", file=sys.stderr)
+        return 2
+    v = _lnotary.verify_potato(doc)
+    if getattr(a, "json", False):
+        print(json.dumps({
+            "ok": v.ok,
+            "version": v.version,
+            "claimed_switches": sorted(v.claimed_switches),
+            "errors": [{"code": e.code, "message": e.message} for e in v.errors],
+        }, ensure_ascii=False))
+    elif v.ok:
+        print(f"[LNOTARY] ok: {a.artifact} (potato v{v.version})")
+    else:
+        for e in v.errors:
+            print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
+    return 0 if v.ok else 1
+
+
 def _ai_ingest(path_or_obj, sites, unit):
     """把一份回答（路径或已解析的 dict）变成 Q014；出错返回 `None` 并打印原因。"""
     import json
@@ -876,6 +908,12 @@ def main(argv: list[str] | None = None) -> int:
     lpe.add_argument("--strict", action="store_true",
                      help="有硬发现时退出码 1（报告面，不影响编译）")
     lpe.set_defaults(fn=cmd_lspe_effects)
+    ln = sub.add_parser("lnotary")
+    lnsub = ln.add_subparsers(dest="lnotary_cmd", required=True)
+    lnv = lnsub.add_parser("verify")
+    lnv.add_argument("artifact")
+    lnv.add_argument("--json", action="store_true")
+    lnv.set_defaults(fn=cmd_lnotary_verify)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

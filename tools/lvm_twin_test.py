@@ -870,7 +870,127 @@ def test_checkpoint_cross_carries_the_command_line() -> None:
     print("      停点 0/20/40/50：两边都按快照里的命令行与游标接着读")
 
 
+#: `docs/368` dismemory 的孪生夹具：一份**真前端**的合法程序 + 五份**手写**的禁止操作。
+#: 手写的那几份在 Loment 源里写不出来（`ptrtoint` / 跨体减法 / `inttoptr`）—— 那正是
+#: 这一档要的；要证明边界拒绝它们，只能直接喂 IR。
+_DIS_SRC = """module dis_twin
+choose lvm_dismemory_true
+choose runtime
+use bytes
+
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        s = s + a[i];
+        i = i + 1;
+    }
+    let p: ptr = alloc(16);
+    store32(p, 0, s);
+    let v: u32 = load32(p, 0);
+    free(p);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+_DIS_FAULTS = {
+    "oob": """; loment-memory: dismemory
+@x = global [4 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %q = getelementptr [4 x i8], ptr @x, i64 0, i64 4
+  %v = load i8, ptr %q
+  ret void
+}
+""",
+    "pti": """; loment-memory: dismemory
+@x = global [4 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %n = ptrtoint ptr @x to i64
+  ret void
+}
+""",
+    "cross": """; loment-memory: dismemory
+@x = global [4 x i8] zeroinitializer
+@y = global [4 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %d = sub i64 @x, @y
+  ret void
+}
+""",
+    "dang": """; loment-memory: dismemory
+define ptr @mk() {
+entry:
+  %p = alloca [4 x i8]
+  ret ptr %p
+}
+define void @_start() {
+entry:
+  %p = call ptr @mk()
+  store i8 1, ptr %p
+  ret void
+}
+""",
+    "null": """; loment-memory: dismemory
+define void @_start() {
+entry:
+  %v = load i8, ptr null
+  ret void
+}
+""",
+}
+
+
+@test
+def test_dismemory_matches_reference() -> None:
+    """判 L（`docs/368`）：没有地址那一档的孪生 —— 合法程序的 rc/stdout + 故障的码/站点。
+
+    详细块的**文案可以不同**（`docs/366` §5.3：两边不主张逐字节同文），但 `lvm: F0k`
+    的码与 `函数:块#序号` 必须同 —— 那是"两边死在同一处"的那句话。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang/WSL（要它把种子编成 stage1）")
+        return
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "dis.lomt"
+        src.write_text(_DIS_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, errs[:2]
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        ll = td / "dis.ll"
+        ll.write_text(ir, encoding="utf-8", newline="\n")
+        for k in (0, 1, 7):
+            buf = io.BytesIO()
+            ref_rc = lvm.run_ir(ir, buf, relocate_every=k)
+            rc, out, err = _run_mirror_args(mir, ll, [f"relocate={k}"])
+            assert ref_rc == 10, (ref_rc, k)
+            assert (rc, out) == (ref_rc, buf.getvalue()), (
+                k, rc, ref_rc, out[:80], buf.getvalue()[:80], err[-300:])
+        for name, body in _DIS_FAULTS.items():
+            p = td / f"{name}.ll"
+            p.write_text(body, encoding="utf-8", newline="\n")
+            e = io.StringIO()
+            with contextlib.redirect_stderr(e):
+                ref_rc = lvm.run_ir(body, io.BytesIO())
+            rc, _out, err = _run_mirror_args(mir, p, [])
+            merr = err.decode("utf-8", "replace")
+            assert rc == ref_rc, (name, rc, ref_rc, merr[-300:])
+            assert _fault_line(e.getvalue()) == _fault_line(merr), (
+                name, e.getvalue()[:200], merr[:200])
+    print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+
 
 
 def main() -> int:

@@ -168,6 +168,9 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "no_lvm") {
         return true;
     }
+    if sw_tok_is(unit, toks, k, "lvm_dismemory_true") {
+        return true;
+    }
     // 第六维（`docs/253` §11.3，2026-10-18 改判）：四个**档名**，不是开/关。
     // 与 `gc` **正交**（同一张图上相反的两个方向，`docs/210` §6.2）。
     // ⚠ 上面那段第五维的教训**同样适用**：漏了这里，`choose lms_full` 会被当成**开关**

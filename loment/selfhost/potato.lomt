@@ -2266,7 +2266,8 @@ fn pt_lvm(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
                 d = d - 1;
             }
         } else if d == 0 && pt_tis(unit, t, i, "choose")
-                && (pt_tis(unit, t, i + 1, "lvm") || pt_tis(unit, t, i + 1, "no_lvm")) {
+                && (pt_tis(unit, t, i + 1, "lvm") || pt_tis(unit, t, i + 1, "no_lvm")
+                    || pt_tis(unit, t, i + 1, "lvm_dismemory_true")) {
             return pt_q(out, o, unit, pt_off(t, i + 1), pt_tlen(t, i + 1));
         }
         i = i + 1;

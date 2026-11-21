@@ -5,6 +5,9 @@
 > `choose vm` 从今天起是**未定义的开关**（E022），v13–v23 已发出的 Potato 对象仍按 `vm`
 > 回放（`tools/potato.py` / `lompotato.lomt` 按版本选键）。本文下面的 `vm` / `no_vm` /
 > `choose vm` 一律读作今天的 `lvm` / `no_lvm` / `choose lvm` —— 历史段落不改写。
+> **2026-11-21 第三个取值**：`lvm_dismemory_true`（LVM 在没有地址的内存模型上跑，
+> `docs/368`）。它仍是第五维的取值；IR 因此多一行 `; loment-memory: dismemory`，
+> 原生链接器点名拒。
 
 > **2026-10-17 更新 —— 本片的闸已经放开。** 用户裁决：「VM 应该得开了，LVM 完成一大半」。
 > 发行版现在**接受** `choose vm`。后果写清楚，免得下面几节读起来像还活着：

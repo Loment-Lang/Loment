@@ -3633,7 +3633,11 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **2026-11-21 改名**（用户裁决）：`vm` / `no_vm` → `lvm` / `no_lvm`。
     # 旧拼写**不是别名** —— `choose vm` 从此是未定义的开关（E022），Potato v13–v23
     # 的对象仍按旧拼写回放（v24 起才是这一格）。
-    "lvm": ("lvm", "no_lvm"),
+    # **2026-11-21 第三个取值**（用户裁决，`docs/368`）：`lvm_dismemory_true` ——
+    # LVM 在**没有地址**的内存模型上跑（体 + 句柄 + 三维排他）。它仍然是一个 `lvm`
+    # 取值（第五维），只是给引擎多一句"按 dismemory 跑"的声明；IR 末尾因此多一行
+    # `; loment-memory: dismemory`（与 `; loment-gc: no_gc` 同一条路），原生链接器拒收。
+    "lvm": ("lvm", "no_lvm", "lvm_dismemory_true"),
     # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）。与 `gc` **正交** ——
     # `gc` 管"谁归还"（生命周期的**内向可达**），这一维管"谁能碰"（许可的**外向**）；
     # `docs/210` §6.2 那句"箭头反了"说的就是这两条是同一张图上的相反方向。
@@ -3761,7 +3765,7 @@ CORE_DIM_ZH = {
     "gc": "回收档（`gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc`）",
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
-    "lvm": "执行模型（`lvm` / `no_lvm`）",
+    "lvm": "执行模型（`lvm` / `no_lvm` / `lvm_dismemory_true`）",
     "lms": "内存安全档（`lms_full` / `lms_forensic_admin` / "
            "`lms_daily_admin` / `lms_manage_only_admin`）",
     "lspe": "安全审计（`lspe_open_admin` / `lspe_close_admin`）",
@@ -17491,6 +17495,11 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 只有 `no_gc` 才多发这一行，其余档的 IR 一个字节都不变。
     if mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "no_gc":
         out.append("; loment-gc: no_gc")
+    # `choose lvm_dismemory_true`（`docs/368`）：产物**自己声明**"我按没有地址的那一档跑"。
+    # 与 `no_gc` 同一条纪律：只有这一档才多发一行，默认 `no_lvm` / `lvm` 的 IR 一个字节
+    # 都不变。**原生链接器读到这行就拒**（原生有地址，链出来只会静默错编）。
+    if mod.chooses.get("lvm", CORE_DEFAULTS["lvm"]) == "lvm_dismemory_true":
+        out.append("; loment-memory: dismemory")
     out.append("")
     globals_: list[str] = []
     #: 闭包 / 函数值包装的函数体（`docs/348`）：**全部函数体之后**统一发，两个实现同序。

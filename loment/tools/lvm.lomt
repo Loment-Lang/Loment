@@ -1352,6 +1352,16 @@ fn cap_check(a: ptr, addr: u32, sz: u32, io: u32, il: u32, oo: u32, ol: u32) {
 
 /// 栈帧返回：这一帧登记过的对象全部归还。
 fn frame_retire(a: ptr, d: u32) {
+    if d_on(a) == 1 {
+        let dq: u32 = rd(a, FBASE_OFF, d * 4);
+        let dn: u32 = ctx_get(a, C_NFOBJ);
+        while dq < dn {
+            d_retire_body(a, rd(a, FOBJ_OFF, dq));
+            dq = dq + 1;
+        }
+        ctx_set(a, C_NFOBJ, rd(a, FBASE_OFF, d * 4));
+        return;
+    }
     if ctx_get(a, C_SUB) == 0 {
         return;
     }
@@ -2113,7 +2123,14 @@ fn place_globals(a: ptr, m: ptr) {
         init_write(a, m, hi32(is), lo32(is), hi32(ts), lo32(ts), va);
         let no: u32 = rd(a, G_OFF, i * 6);
         let nl: u32 = rd(a, G_OFF, i * 6 + 1);
-        wr(a, G_OFF, i * 6 + 4, va);                     // 这一格改存**地址**
+        if d_on(a) == 1 {
+            // 全局 = 一颗体；G 表不存地址，令牌进 GD（u64 拆两格）。
+            let gbi: u32 = d_body_new(a, DK_GLOBAL, sz, va);
+            let gtk: u64 = d_tok_new(a, gbi, 0);
+            wr(a, GD_OFF, i * 2, d_tok_lo(gtk));
+            wr(a, GD_OFF, i * 2 + 1, d_tok_hi(gtk));
+            i = i + 1;
+        } else {
         if ctx_get(a, C_SUB) != 0 {
             // `@__loment_heap` 是**外层容器**：它盖住所有堆对象，登记它会让每个已归还
             // 的堆地址都被"救活"。堆对象自己一条条登记，所以这块跳过。
@@ -2122,6 +2139,7 @@ fn place_globals(a: ptr, m: ptr) {
             }
         }
         i = i + 1;
+        }
     }
 }
 
@@ -2156,6 +2174,9 @@ fn operand(a: ptr, m: ptr, fr: u32, tyo: u32, tyl: u32, vo: u32, vl: u32) -> u64
         return vget(m, fr, i);
     }
     if c == 64 {                                         // @global
+        if d_on(a) == 1 {
+            return d_gaddr(a, vo, vl);
+        }
         return gaddr(a, vo, vl) as u64;
     }
     if c == 117 || c == 110 {                            // undef / null
@@ -2202,6 +2223,9 @@ fn divop(a: ptr, m: ptr, fr: u32, io: u32, il: u32, k: u32) -> u64 {
     let a2: u64 = operand(a, m, fr, hi32(ts), lo32(ts),
                           hi32(trim_span(a, p2, e)), lo32(trim_span(a, p2, e)));
     let bits: u32 = bits_of(a, hi32(ts), lo32(ts));
+    if d_on(a) == 1 && (d_is_tok(a1) == 1 || d_is_tok(a2) == 1) {
+        return d_fault(a, DF_NOADDR, a1, 0, 0, 8, 1, io, il, 0, 0) as u64;
+    }
     let sgn: u32 = 0;
     if k == K_SDIV || k == K_SREM {
         sgn = 1;
@@ -2254,6 +2278,39 @@ fn arith(a: ptr, m: ptr, fr: u32, io: u32, il: u32, k: u32) -> u64 {
     let a2: u64 = operand(a, m, fr, hi32(ts), lo32(ts),
                           hi32(trim_span(a, p2, e)), lo32(trim_span(a, p2, e)));
     let bits: u32 = bits_of(a, hi32(ts), lo32(ts));
+    if d_on(a) == 1 && (d_is_tok(a1) == 1 || d_is_tok(a2) == 1) {
+        if k == K_ADD {
+            if d_is_tok(a1) == 1 && d_is_tok(a2) == 1 {
+                return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
+            }
+            if d_is_tok(a1) == 1 {
+                return d_derive(a, a1, a2 as u32, io, il, 0, 0);
+            }
+            return d_derive(a, a2, a1 as u32, io, il, 0, 0);
+        }
+        if k == K_SUB {
+            if d_is_tok(a1) == 1 && d_is_tok(a2) == 1 {
+                let x1: u32 = d_find(a, a1);
+                let x2: u32 = d_find(a, a2);
+                if x1 == NONE || x2 == NONE {
+                    return d_fault(a, DF_DANGLING, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
+                }
+                let b1: u32 = rd(a, DT_OFF, x1 * 4 + 2);
+                let b2: u32 = rd(a, DT_OFF, x2 * 4 + 2);
+                if b1 != b2 {
+                    return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
+                }
+                let o1: u32 = rd(a, DT_OFF, x1 * 4 + 3);
+                let o2: u32 = rd(a, DT_OFF, x2 * 4 + 3);
+                return mask_bits((o1 - o2) as u64, bits);
+            }
+            if d_is_tok(a1) == 1 {
+                return d_derive(a, a1, (0 - a2) as u32, io, il, 0, 0);
+            }
+            return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
+        }
+        return d_fault(a, DF_NOADDR, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
+    }
     // issue #717：移位量按**指令上写的宽度**读成有符号数 —— 负数不是值，是一个错。
     // 参考实现那边抛 `LvmError("移位量是负数")`；这里报同一句话（`fail` 退 2）。
     // 以前 `-1` 在这里是 u64 的最大值，于是静默返回一个值（`ashr` 走符号位那支），
@@ -2328,6 +2385,38 @@ fn icmp(a: ptr, m: ptr, fr: u32, io: u32, il: u32, sub: u32) -> u64 {
     let a2: u64 = operand(a, m, fr, hi32(ts), lo32(ts),
                           hi32(trim_span(a, p2, e)), lo32(trim_span(a, p2, e)));
     let bits: u32 = bits_of(a, hi32(ts), lo32(ts));
+    if d_on(a) == 1 && (d_is_tok(a1) == 1 || d_is_tok(a2) == 1) {
+        if sub == P_EQ || sub == P_NE {
+            let same1: u32 = 0;
+            if d_is_tok(a1) == 1 && d_is_tok(a2) == 1 && a1 == a2 {
+                same1 = 1;
+            }
+            if (sub == P_EQ && same1 == 1) || (sub == P_NE && same1 == 0) {
+                return 1;
+            }
+            return 0;
+        }
+        if d_is_tok(a1) == 1 && d_is_tok(a2) == 1 {
+            let x1: u32 = d_find(a, a1);
+            let x2: u32 = d_find(a, a2);
+            if x1 != NONE && x2 != NONE
+                    && rd(a, DT_OFF, x1 * 4 + 2) == rd(a, DT_OFF, x2 * 4 + 2) {
+                let o1: u64 = rd(a, DT_OFF, x1 * 4 + 3) as u64;
+                let o2: u64 = rd(a, DT_OFF, x2 * 4 + 3) as u64;
+                let r2: u32 = 0;
+                if sub == P_UGT && o1 > o2 { r2 = 1; }
+                if sub == P_UGE && o1 >= o2 { r2 = 1; }
+                if sub == P_ULT && o1 < o2 { r2 = 1; }
+                if sub == P_ULE && o1 <= o2 { r2 = 1; }
+                if sub == P_SGT && o1 > o2 { r2 = 1; }
+                if sub == P_SGE && o1 >= o2 { r2 = 1; }
+                if sub == P_SLT && o1 < o2 { r2 = 1; }
+                if sub == P_SLE && o1 <= o2 { r2 = 1; }
+                return r2 as u64;
+            }
+        }
+        return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
+    }
     let sm: u64 = (1 as u64) << ((bits - 1) as u64);
     let x: u64 = a1 ^ sm;
     let y: u64 = a2 ^ sm;
@@ -2386,6 +2475,9 @@ fn cast_op(a: ptr, m: ptr, fr: u32, io: u32, il: u32, k: u32) -> u64 {
     let vs: u64 = trim_span(a, p, word_end(a, p, e));
     let a1: u64 = operand(a, m, fr, hi32(fts), lo32(fts), hi32(vs), lo32(vs));
     if k == K_PTRTOINT || k == K_INTTOPTR {
+        if d_on(a) == 1 {
+            return d_fault(a, DF_NOADDR, a1, 0, 0, 8, 1, io, il, 0, 0) as u64;
+        }
         return a1;
     }
     if k == K_TRUNC {
@@ -2447,6 +2539,9 @@ fn gep(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
         }
         k = k + 1;
         q = seg_next(a, qe, e);
+    }
+    if d_on(a) == 1 && d_is_tok(base) == 1 {
+        return d_derive(a, base, acc, io, il, 0, 0);
     }
     return base + (acc as u64);
 }
@@ -2518,6 +2613,9 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         }
         let rp: u32 = x2 as u32;
         let rw: u32 = x3 as u32;
+        if d_on(a) == 1 {
+            rp = d_addr(a, x2, rw, 0, 0, 0, 0);
+        }
         let ro: u32 = ctx_get(a, C_ARG0);
         let rk: u32 = ctx_get(a, C_VFD_POS);
         let rl: u32 = ctx_get(a, C_ARG0N) - rk;
@@ -2547,6 +2645,9 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         let fd: u64 = x1;
         let buf: u32 = x2 as u32;
         let n: u32 = x3 as u32;
+        if d_on(a) == 1 {
+            buf = d_addr(a, x2, n, 0, 0, 0, 0);
+        }
         if buf + n > MEM_SIZE {
             fail("write 越界");
         }
@@ -2554,6 +2655,10 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
             write_all(1, ptr_add(m, buf), n as u64);
         }
         return n as u64;
+    }
+    if nr == 12 && d_on(a) == 1 {
+        let _f: u32 = d_fault(a, DF_NOORDER, x1, 0, 0, 8, 0, 0, 0, 0, 0);
+        return 0;
     }
     if nr == 12 {                                        // brk(addr)
         let want: u32 = x1 as u32;
@@ -2574,6 +2679,9 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         // ⚠ **合成，不转宿主** —— 它描述的是**目标平台**（`docs/243` §3.4）：
         // 宿主是什么都不影响，这里给的就是 `Linux`，判据 A 才有意义。
         let up: u32 = x1 as u32;
+        if d_on(a) == 1 {
+            up = d_addr(a, x1, 390, 0, 0, 0, 0);
+        }
         if up + 390 > MEM_SIZE {
             fail("uname 越界");
         }
@@ -2597,10 +2705,21 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         if rr < 0 {
             return rr as u64;                            // 与内核同侧：读不到就回负值
         }
+        let tsd: u32 = 0;
+        let tsgo: u32 = 0;
+        if d_on(a) == 1 {
+            tsd = d_addr(a, x2, 16, 0, 0, 0, 0);
+            tsgo = 1;
+        }
         let sec: u64 = mr(tb, 0, 8);
         let nsec: u64 = mr(tb, 8, 8);
-        mw(m, x2 as u32, 8, sec);
-        mw(m, x2 as u32 + 8, 8, nsec);
+        if tsgo == 1 {
+            mw(m, tsd, 8, sec);
+            mw(m, tsd + 8, 8, nsec);
+        } else {
+            mw(m, x2 as u32, 8, sec);
+            mw(m, x2 as u32 + 8, 8, nsec);
+        }
         return 0;
     }
     // ⚠ 317 在这里**不实现** —— 它在 Linux 上是 `seccomp` 不是 `getrandom`
@@ -2608,7 +2727,11 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     if nr == 257 {                                       // openat(dirfd, path, flags)
         // **只认识 `/proc/self/cmdline`**，而且给它的是**被解释程序自己的**命令行，
         // 不是解释器的（下面 `run` 里那段）。别的路径**点名拒**（`docs/243` §3.4）。
-        if lit_is_cmdline(m, x2 as u32) {
+        let cpath: u32 = x2 as u32;
+        if d_on(a) == 1 {
+            cpath = d_addr(a, x2, 1, 0, 0, 0, 0);
+        }
+        if lit_is_cmdline(m, cpath) {
             ctx_set(a, C_VFD_OPEN, VFD as u32);
             ctx_set(a, C_VFD_POS, 0);
             return VFD;
@@ -2670,11 +2793,552 @@ fn do_asm(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
 }
 
 /// 一个指令的求值（控制流那五条在 `exec_body` 里就地处理，不走这儿）。
+// ---------------------------------------------------------------- dismemory（docs/368）
+//
+// **guest 的指针是一个不透明令牌**：高 8 位 `0xD1`，其余 48 位是**永不复用**的序号。
+// 令牌表在运行期（`DT` 按令牌有序、`DR` 按 (体,偏移) 有序）：值里没有体号、没有偏移。
+// 访存查表；派生查表再插入。体的数据用 `vm_alloc` 落在 VM 内存里，**三维坐标只在表里**。
+//
+// 这一档与 sw_cap 互斥；只在 T0 落地（T2 的折叠表里没有令牌那一层）。
+
+const C_DIS: u32 = 256;              // 1 = dismemory 开着
+const C_DTSLO: u32 = 260;            // 下一个令牌序号（u64 拆两半）
+const C_DTSHI: u32 = 264;
+const C_DNB: u32 = 268;              // 体条数
+const C_DNT: u32 = 272;              // 令牌表条数（按令牌有序）
+const C_DNR: u32 = 276;              // 反向表条数（按 (体,偏移) 有序）
+const C_DROUND: u32 = 280;           // 重定位轮次（排版的起点偏移）
+const C_DREL: u32 = 284;             // 每 K 条指令重定位一次（0 = 关）
+
+const DB_OFF: u32 = 14258948;        // 体表 stride 12 u32
+const MAX_DB: u32 = 4096;
+const DT_OFF: u32 = 14455556;        // 令牌表 stride 4 u32：lo, hi, body, off
+const MAX_DT: u32 = 16384;
+const DR_OFF: u32 = 14717700;        // 反向表 stride 4 u32：body, off, lo, hi
+const MAX_DR: u32 = 16384;
+const GD_OFF: u32 = 14979844;        // 全局令牌（每全局 2 个 u32）
+const MAX_GD: u32 = 256;
+
+const DK_GLOBAL: u32 = 1;
+const DK_ALLOCA: u32 = 2;
+const DK_HEAP: u32 = 3;
+
+const DF_BOUNDS: u32 = 1;
+const DF_DANGLING: u32 = 2;
+const DF_NULL: u32 = 3;
+const DF_NOADDR: u32 = 4;
+const DF_NOORDER: u32 = 5;
+const DF_LIMIT: u32 = 6;
+
+fn d_on(a: ptr) -> u32 {
+    return ctx_get(a, C_DIS);
+}
+
+/// IR 里有没有 `; loment-memory: dismemory`（只扫一遍；输入 ≤ 4 MiB）。
+fn d_marker(a: ptr, n: u32) -> u32 {
+    let i: u32 = 0;
+    while i + 26 <= n {
+        if has_at(a, i, n, "; loment-memory: dismemory") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn d_body(a: ptr, bi: u32, f: u32) -> u32 {
+    return rd(a, DB_OFF, bi * 12 + f);
+}
+
+fn d_bset(a: ptr, bi: u32, f: u32, v: u32) {
+    wr(a, DB_OFF, bi * 12 + f, v);
+}
+
+fn d_kind_word(k: u32) {
+    if k == DK_GLOBAL {
+        wstr(2, "global");
+    } else if k == DK_ALLOCA {
+        wstr(2, "alloca");
+    } else {
+        wstr(2, "heap");
+    }
+}
+
+fn d_nib(a: ptr, nib: u32) {
+    if nib < 10 {
+        store8(a, WNUM_SCRATCH, (48 + nib) as u8);
+    } else {
+        store8(a, WNUM_SCRATCH, (87 + nib) as u8);
+    }
+    let _w: u64 = write_all(2, ptr_add(a, WNUM_SCRATCH), 1);
+}
+
+/// `%#x`：`0x` + 最少位数的十六进制（0 印成 `0x0`）。
+fn d_whex(a: ptr, v: u64) {
+    wstr(2, "0x");
+    let started: u32 = 0;
+    let i: u32 = 15;
+    let go: u32 = 1;
+    while go == 1 {
+        let nib: u32 = ((v >> ((i * 4) as u64)) & 15) as u32;
+        if nib != 0 {
+            started = 1;
+        }
+        if started == 1 || i == 0 {
+            d_nib(a, nib);
+        }
+        if i == 0 {
+            go = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+}
+
+fn d_whex16(a: ptr, v: u64) {
+    wstr(2, "0x");
+    let i: u32 = 15;
+    let go: u32 = 1;
+    while go == 1 {
+        d_nib(a, ((v >> ((i * 4) as u64)) & 15) as u32);
+        if i == 0 {
+            go = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+}
+
+fn d_is_tok(t: u64) -> u32 {
+    if ((t >> 56) & 255) == 209 {
+        return 1;
+    }
+    return 0;
+}
+
+fn d_tok_lo(t: u64) -> u32 { return (t & 4294967295) as u32; }
+fn d_tok_hi(t: u64) -> u32 { return ((t >> 32) & 4294967295) as u32; }
+
+fn d_ser_next(a: ptr) -> u64 {
+    let lo: u32 = ctx_get(a, C_DTSLO) + 1;
+    let hi: u32 = ctx_get(a, C_DTSHI);
+    if lo == 0 {
+        if hi >= 65536 {
+            let _f: u32 = d_fault(a, DF_LIMIT, 0, 0, 0, 0, 8, 0, 0, 0, 0);
+            return 0;
+        }
+        ctx_set(a, C_DTSHI, hi + 1);
+    }
+    ctx_set(a, C_DTSLO, lo);
+    return ((209 as u64) << 56) | ((hi as u64) << 32) | (lo as u64);
+}
+
+fn d_tok_new(a: ptr, bi: u32, off: u32) -> u64 {
+    // 反向表按 (体,偏移) 有序：同一个引用点只发一个令牌。
+    let n: u32 = ctx_get(a, C_DNR);
+    let lo: u32 = 0;
+    let hi: u32 = n;
+    while lo < hi {
+        let mid: u32 = (lo + hi) / 2;
+        let mb: u32 = rd(a, DR_OFF, mid * 4);
+        let mo: u32 = rd(a, DR_OFF, mid * 4 + 1);
+        if mb < bi || (mb == bi && mo < off) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < n && rd(a, DR_OFF, lo * 4) == bi && rd(a, DR_OFF, lo * 4 + 1) == off {
+        return (((rd(a, DR_OFF, lo * 4 + 3) as u64)) << 32)
+               | (rd(a, DR_OFF, lo * 4 + 2) as u64);
+    }
+    if n >= MAX_DR || ctx_get(a, C_DNT) >= MAX_DT {
+        fail("dismemory：令牌表满了（抬 MAX_DT / MAX_DR）");
+        return 0;
+    }
+    let s: u64 = d_ser_next(a);
+    let tl: u32 = d_tok_lo(s);
+    let th: u32 = d_tok_hi(s);
+    let i: u32 = n;
+    while i > lo {
+        wr(a, DR_OFF, i * 4, rd(a, DR_OFF, (i - 1) * 4));
+        wr(a, DR_OFF, i * 4 + 1, rd(a, DR_OFF, (i - 1) * 4 + 1));
+        wr(a, DR_OFF, i * 4 + 2, rd(a, DR_OFF, (i - 1) * 4 + 2));
+        wr(a, DR_OFF, i * 4 + 3, rd(a, DR_OFF, (i - 1) * 4 + 3));
+        i = i - 1;
+    }
+    wr(a, DR_OFF, lo * 4, bi);
+    wr(a, DR_OFF, lo * 4 + 1, off);
+    wr(a, DR_OFF, lo * 4 + 2, tl);
+    wr(a, DR_OFF, lo * 4 + 3, th);
+    ctx_set(a, C_DNR, n + 1);
+    let m: u32 = ctx_get(a, C_DNT);
+    let l2: u32 = 0;
+    let h2: u32 = m;
+    while l2 < h2 {
+        let mid: u32 = (l2 + h2) / 2;
+        let mh: u32 = rd(a, DT_OFF, mid * 4 + 1);
+        let ml: u32 = rd(a, DT_OFF, mid * 4);
+        if mh < th || (mh == th && ml < tl) {
+            l2 = mid + 1;
+        } else {
+            h2 = mid;
+        }
+    }
+    let j: u32 = m;
+    while j > l2 {
+        wr(a, DT_OFF, j * 4, rd(a, DT_OFF, (j - 1) * 4));
+        wr(a, DT_OFF, j * 4 + 1, rd(a, DT_OFF, (j - 1) * 4 + 1));
+        wr(a, DT_OFF, j * 4 + 2, rd(a, DT_OFF, (j - 1) * 4 + 2));
+        wr(a, DT_OFF, j * 4 + 3, rd(a, DT_OFF, (j - 1) * 4 + 3));
+        j = j - 1;
+    }
+    wr(a, DT_OFF, l2 * 4, tl);
+    wr(a, DT_OFF, l2 * 4 + 1, th);
+    wr(a, DT_OFF, l2 * 4 + 2, bi);
+    wr(a, DT_OFF, l2 * 4 + 3, off);
+    ctx_set(a, C_DNT, m + 1);
+    return s;
+}
+
+/// 令牌 -> 令牌表下标（NONE = 不在表里）。
+fn d_find(a: ptr, t: u64) -> u32 {
+    let n: u32 = ctx_get(a, C_DNT);
+    let tl: u32 = d_tok_lo(t);
+    let th: u32 = d_tok_hi(t);
+    let lo: u32 = 0;
+    let hi: u32 = n;
+    while lo < hi {
+        let mid: u32 = (lo + hi) / 2;
+        let mh: u32 = rd(a, DT_OFF, mid * 4 + 1);
+        let ml: u32 = rd(a, DT_OFF, mid * 4);
+        if mh < th || (mh == th && ml < tl) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < n && rd(a, DT_OFF, lo * 4) == tl && rd(a, DT_OFF, lo * 4 + 1) == th {
+        return lo;
+    }
+    return NONE;
+}
+
+fn d_body_new(a: ptr, kind: u32, size: u32, data: u32) -> u32 {
+    let n: u32 = ctx_get(a, C_DNB);
+    if n >= MAX_DB {
+        fail("dismemory：体表满了（抬 MAX_DB）");
+        return 0;
+    }
+    let bi: u32 = n;
+    d_bset(a, bi, 0, kind);
+    d_bset(a, bi, 1, size);
+    d_bset(a, bi, 2, data);
+    let d: u32 = 1;
+    while d * d * d < size {
+        d = d + 1;
+    }
+    d_bset(a, bi, 3, d);
+    d_bset(a, bi, 4, d);
+    d_bset(a, bi, 5, (size + d * d - 1) / (d * d));
+    d_bset(a, bi, 6, 0);
+    d_bset(a, bi, 7, 0);
+    d_bset(a, bi, 8, 0);
+    d_bset(a, bi, 9, 1);
+    ctx_set(a, C_DNB, n + 1);
+    d_place(a, bi);
+    return bi;
+}
+
+fn d_overlap(a: ptr, x: u32, y: u32, z: u32, dx: u32, dy: u32, dz: u32, me: u32) -> u32 {
+    let n: u32 = ctx_get(a, C_DNB);
+    let i: u32 = 0;
+    while i < n {
+        if i != me && d_body(a, i, 9) == 1 {
+            let bx: u32 = d_body(a, i, 6);
+            let by: u32 = d_body(a, i, 7);
+            let bz: u32 = d_body(a, i, 8);
+            if x < bx + d_body(a, i, 3) && bx < x + dx
+                    && y < by + d_body(a, i, 4) && by < y + dy
+                    && z < bz + d_body(a, i, 5) && bz < z + dz {
+                return 1;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn d_place(a: ptr, bi: u32) -> u32 {
+    let dx: u32 = d_body(a, bi, 3);
+    let dy: u32 = d_body(a, bi, 4);
+    let dz: u32 = d_body(a, bi, 5);
+    let x: u32 = ctx_get(a, C_DROUND);
+    let y: u32 = 0;
+    let z: u32 = 0;
+    let go: u32 = 1;
+    while go == 1 {
+        if d_overlap(a, x, y, z, dx, dy, dz, bi) == 0 {
+            d_bset(a, bi, 6, x);
+            d_bset(a, bi, 7, y);
+            d_bset(a, bi, 8, z);
+            return 0;
+        }
+        x = x + dx;
+        if x > 65536 {
+            x = ctx_get(a, C_DROUND);
+            y = y + dy;
+            if y > 65536 {
+                y = 0;
+                z = z + dz;
+            }
+        }
+    }
+    return 0;
+}
+
+fn d_reloc(a: ptr) {
+    ctx_set(a, C_DROUND, ctx_get(a, C_DROUND) + 1);
+    let n: u32 = ctx_get(a, C_DNB);
+    let i: u32 = 0;
+    while i < n {
+        if d_body(a, i, 9) == 1 {
+            d_place(a, i);
+        }
+        i = i + 1;
+    }
+}
+
+fn d_retire_body(a: ptr, bi: u32) {
+    if bi >= ctx_get(a, C_DNB) || d_body(a, bi, 9) == 0 {
+        return;
+    }
+    d_bset(a, bi, 9, 0);
+    // 把这一颗体的令牌从两张有序表里删掉（令牌永不复用，不需要代号）。
+    let n: u32 = ctx_get(a, C_DNT);
+    let i: u32 = 0;
+    let w: u32 = 0;
+    while i < n {
+        if rd(a, DT_OFF, i * 4 + 2) == bi {
+            i = i + 1;
+        } else {
+            wr(a, DT_OFF, w * 4, rd(a, DT_OFF, i * 4));
+            wr(a, DT_OFF, w * 4 + 1, rd(a, DT_OFF, i * 4 + 1));
+            wr(a, DT_OFF, w * 4 + 2, rd(a, DT_OFF, i * 4 + 2));
+            wr(a, DT_OFF, w * 4 + 3, rd(a, DT_OFF, i * 4 + 3));
+            w = w + 1;
+            i = i + 1;
+        }
+    }
+    ctx_set(a, C_DNT, w);
+    let r: u32 = ctx_get(a, C_DNR);
+    let j: u32 = 0;
+    let v: u32 = 0;
+    while j < r {
+        if rd(a, DR_OFF, j * 4) == bi {
+            j = j + 1;
+        } else {
+            wr(a, DR_OFF, v * 4, rd(a, DR_OFF, j * 4));
+            wr(a, DR_OFF, v * 4 + 1, rd(a, DR_OFF, j * 4 + 1));
+            wr(a, DR_OFF, v * 4 + 2, rd(a, DR_OFF, j * 4 + 2));
+            wr(a, DR_OFF, v * 4 + 3, rd(a, DR_OFF, j * 4 + 3));
+            v = v + 1;
+            j = j + 1;
+        }
+    }
+    ctx_set(a, C_DNR, v);
+}
+
+/// 令牌 -> 体数据地址。所有失败都按 dismemory 的码报。
+fn d_addr(a: ptr, t: u64, sz: u32, io: u32, il: u32, oo: u32, ol: u32) -> u32 {
+    if t == 0 {
+        let _f: u32 = d_fault(a, DF_NULL, t, 0, 0, sz, 0, io, il, oo, ol);
+        return 0;
+    }
+    if d_is_tok(t) == 0 {
+        let _f: u32 = d_fault(a, DF_NOADDR, t, 0, 0, sz, 1, io, il, oo, ol);
+        return 0;
+    }
+    let ix: u32 = d_find(a, t);
+    if ix == NONE {
+        let _f: u32 = d_fault(a, DF_DANGLING, t, 0, 0, sz, 0, io, il, oo, ol);
+        return 0;
+    }
+    let bi: u32 = rd(a, DT_OFF, ix * 4 + 2);
+    let off: u32 = rd(a, DT_OFF, ix * 4 + 3);
+    let size: u32 = d_body(a, bi, 1);
+    if off + sz > size {
+        let _f: u32 = d_fault(a, DF_BOUNDS, t, bi, off, sz, 0, io, il, oo, ol);
+        return 0;
+    }
+    return d_body(a, bi, 2) + off;
+}
+
+/// 令牌 + 整数：在表里派生一个新令牌（体内偏移）；出体 → F01。
+fn d_derive(a: ptr, t: u64, delta: u32, io: u32, il: u32, oo: u32, ol: u32) -> u64 {
+    let ix: u32 = d_find(a, t);
+    if ix == NONE {
+        let _f: u32 = d_fault(a, DF_DANGLING, t, 0, 0, 0, 0, io, il, oo, ol);
+        return 0;
+    }
+    let bi: u32 = rd(a, DT_OFF, ix * 4 + 2);
+    let off: u32 = rd(a, DT_OFF, ix * 4 + 3);
+    let n: u32 = off + delta;
+    if n > d_body(a, bi, 1) {
+        let _f: u32 = d_fault(a, DF_BOUNDS, t, bi, n, 1, 0, io, il, oo, ol);
+        return 0;
+    }
+    return d_tok_new(a, bi, n);
+}
+
+fn d_alloc_body(a: ptr, kind: u32, size: u32) -> u64 {
+    let sz: u32 = size;
+    if sz == 0 {
+        sz = 1;
+    }
+    let data: u32 = vm_alloc(a, sz, 8);
+    mz(ptr_add(a, MEM_OFF), data, sz);
+    let bi: u32 = d_body_new(a, kind, sz, data);
+    return d_tok_new(a, bi, 0);
+}
+
+fn d_gaddr(a: ptr, no: u32, nl: u32) -> u64 {
+    let ng: u32 = ctx_get(a, C_NG);
+    let i: u32 = 0;
+    while i < ng {
+        let o: u32 = rd(a, G_OFF, i * 6);
+        let l: u32 = rd(a, G_OFF, i * 6 + 1);
+        if l == nl && same(a, no, a, o, nl) {
+            return ((rd(a, GD_OFF, i * 2 + 1) as u64) << 32)
+                   | (rd(a, GD_OFF, i * 2) as u64);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 一条 dismemory fault：**首行**与参考逐字节同；详细块是同一形状的 Lomenterr 块。
+fn d_fault(a: ptr, kind: u32, tok: u64, bi: u32, off: u32, sz: u32,
+           reason: u32, io: u32, il: u32, oo: u32, ol: u32) -> u32 {
+    let fi: u32 = ctx_get(a, C_SITE_FI);
+    let bii: u32 = ctx_get(a, C_SITE_BI);
+    let j: u32 = ctx_get(a, C_SITE_J);
+    wstr(2, "lvm: ");
+    if kind == DF_BOUNDS {
+        wstr(2, "F01 bounds violation");
+    } else if kind == DF_DANGLING {
+        wstr(2, "F02 dangling reference");
+    } else if kind == DF_NULL {
+        wstr(2, "F03 null dereference");
+    } else if kind == DF_NOADDR {
+        wstr(2, "F04 no addresses");
+    } else if kind == DF_NOORDER {
+        wstr(2, "F05 no address space");
+    } else {
+        wstr(2, "F06 identity exhausted");
+    }
+    wstr(2, " at ");
+    w_fn_name(a, fi);
+    wstr(2, ":");
+    w_blk_name(a, bii);
+    wstr(2, "#");
+    wnum32(a, 2, j);
+    wstr(2, " (");
+    if kind == DF_BOUNDS {
+        wstr(2, "offset="); wnum32(a, 2, off);
+        wstr(2, " size="); wnum32(a, 2, sz);
+        wstr(2, " limit="); wnum32(a, 2, d_body(a, bi, 1));
+    } else if kind == DF_DANGLING {
+        wstr(2, "token=");
+        d_whex(a, tok);
+        wstr(2, " not live");
+    } else if kind == DF_NULL {
+        wstr(2, "size="); wnum32(a, 2, sz);
+    } else if kind == DF_NOADDR {
+        wstr(2, "handle used as a number");
+    } else if kind == DF_NOORDER {
+        wstr(2, "no global space");
+    } else {
+        wstr(2, "identity budget");
+    }
+    wstr(2, ")\n");
+    wstr(2, "error[F0");
+    wnum32(a, 2, kind);
+    wstr(2, "]: ");
+    if kind == DF_BOUNDS {
+        wstr(2, "越出体的体积（这一档没有\"隔壁\"）\n");
+    } else if kind == DF_DANGLING {
+        wstr(2, "悬垂引用（dangling）\n");
+    } else if kind == DF_NULL {
+        wstr(2, "空指针解引用（null）\n");
+    } else if kind == DF_NOADDR {
+        wstr(2, "没有地址（no addresses）\n");
+    } else if kind == DF_NOORDER {
+        wstr(2, "没有全局空间（no address space）\n");
+    } else {
+        wstr(2, "身份预算用尽（identity exhausted）\n");
+    }
+    wstr(2, "  --> IR:");
+    w_fn_name(a, fi);
+    wstr(2, ":");
+    w_blk_name(a, bii);
+    wstr(2, "#");
+    wnum32(a, 2, j);
+    if il > 0 {
+        wstr(2, "\n   |\n   |   ");
+        let _i: u64 = write_all(2, ptr_add(a, io), il as u64);
+    }
+    wstr(2, "\n   | 令牌：");
+    d_whex16(a, tok);
+    if bi < ctx_get(a, C_DNB) {
+        wstr(2, "\n   | 体：#");
+        wnum32(a, 2, bi + 1);
+        wstr(2, "（");
+        d_kind_word(d_body(a, bi, 0));
+        wstr(2, "）");
+        if d_body(a, bi, 9) == 1 {
+            wstr(2, " 在 (");
+            wnum32(a, 2, d_body(a, bi, 6)); wstr(2, ",");
+            wnum32(a, 2, d_body(a, bi, 7)); wstr(2, ",");
+            wnum32(a, 2, d_body(a, bi, 8)); wstr(2, ")，体积 ");
+            wnum32(a, 2, d_body(a, bi, 3)); wstr(2, "×");
+            wnum32(a, 2, d_body(a, bi, 4)); wstr(2, "×");
+            wnum32(a, 2, d_body(a, bi, 5));
+            wstr(2, "（"); wnum32(a, 2, d_body(a, bi, 1)); wstr(2, " 字节）");
+        }
+        wstr(2, "\n   | 访问：偏移 ");
+        wnum32(a, 2, off);
+        wstr(2, "，宽 ");
+        wnum32(a, 2, sz);
+    }
+    wstr(2, "\n   |\n   = 站点：函数 ");
+    w_fn_name(a, fi);
+    wstr(2, " / 块 ");
+    w_blk_name(a, bii);
+    wstr(2, " / 第 ");
+    wnum32(a, 2, j);
+    wstr(2, " 条指令；栈深 ");
+    wnum32(a, 2, ctx_get(a, C_DEPTH));
+    wstr(2, "\n   = 建议：体是实心长方体；任何跨越体表的访问都是 fault，跨体/整数化/排序同样如此。令牌永不复用。\n");
+    return die((100 + kind) as u64);
+}
+
 fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: u32,
                do_: u32, dl: u32) -> u64 {
     if k == K_ALLOCA {
         let ts: u64 = ty_span(a, after_op(a, io, io + il), io + il);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
+        if d_on(a) == 1 {
+            let atk: u64 = d_alloc_body(a, DK_ALLOCA, sz);
+            let aix: u32 = d_find(a, atk);
+            let abi: u32 = rd(a, DT_OFF, aix * 4 + 2);
+            if ctx_get(a, C_NFOBJ) >= MAX_FOBJ {
+                fail("dismemory 帧对象栈满了");
+            }
+            wr(a, FOBJ_OFF, ctx_get(a, C_NFOBJ), abi);
+            ctx_set(a, C_NFOBJ, ctx_get(a, C_NFOBJ) + 1);
+            return atk;
+        }
         let s2: u32 = sz;
         if s2 < 8 {
             return fr_alloc(a, m, fr, 8, 8) as u64;  // 与参考实现的 max(SLOT, size) 同
@@ -2687,6 +3351,15 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
         let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
         let addr: u64 = operand_text(a, m, fr, p, e);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
+        if d_on(a) == 1 {
+            let da: u32 = d_addr(a, addr, sz, io, il, p, e - p);
+            if is_agg(a, hi32(ts), lo32(ts)) {
+                let d2: u32 = fr_agg(a, m, fr, do_, dl, sz);
+                mc(m, d2, da, sz);
+                return (d2 as u64) | (((sz as u64)) << 32);
+            }
+            return mr(m, da, sz);
+        }
         cap_check(a, addr as u32, sz, io, il, p, e - p);
         if is_agg(a, hi32(ts), lo32(ts)) {
             let d: u32 = fr_agg(a, m, fr, do_, dl, sz);
@@ -2706,6 +3379,15 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
         let ps: u32 = seg_next(a, q, e);
         let addr: u64 = operand_text(a, m, fr, ps, e);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
+        if d_on(a) == 1 {
+            let da2: u32 = d_addr(a, addr, sz, io, il, ps, e - ps);
+            if is_agg(a, hi32(ts), lo32(ts)) {
+                mc(m, da2, val as u32, sz);
+            } else {
+                mw(m, da2, sz, val);
+            }
+            return 0;
+        }
         cap_check(a, addr as u32, sz, io, il, ps, e - ps);
         if is_agg(a, hi32(ts), lo32(ts)) {
             mc(m, addr as u32, val as u32, sz);
@@ -2829,6 +3511,20 @@ fn do_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -> 
     let fi: u32 = hi32(b);
     let fr: u32 = lo32(b);
     let d: u32 = ctx_get(a, C_DEPTH);
+    if d_on(a) == 1 && ctx_get(a, C_BIND_HOOK) != 0 {
+        let hook: u32 = ctx_get(a, C_BIND_HOOK);
+        let a0: u64 = ((ctx_get(a, C_BIND_A0HI) as u64) << 32)
+                      | (ctx_get(a, C_BIND_A0LO) as u64);
+        ctx_set(a, C_DEPTH, ctx_get(a, C_DEPTH) - 1);
+        if hook == 1 {
+            return d_alloc_body(a, DK_HEAP, a0 as u32);
+        }
+        let fxi: u32 = d_find(a, a0);
+        if fxi != NONE {
+            d_retire_body(a, rd(a, DT_OFF, fxi * 4 + 2));
+        }
+        return 0;
+    }
     let is_priv: bool = ctx_get(a, C_BIND_PRIV) != 0;
     if is_priv {
         ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
@@ -2957,6 +3653,9 @@ fn exec_body(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u6
         let jumped: u32 = 0;
         while j < ni && jumped == 0 {
             let ii: u32 = io + j;
+            // 站点是**每条指令**的：嵌套调用会把 C_SITE_FI 改成被调者，回来必须重新锚到本函数
+            // （2026-11-21 实测：`mk` 返回后的悬垂被报成 `mk:entry#1`）。
+            ctx_set(a, C_SITE_FI, fi);
             ctx_set(a, C_SITE_J, j);
             let k: u32 = rd(a, I_OFF, ii * 8 + 4);
             let sub: u32 = rd(a, I_OFF, ii * 8 + 5);
@@ -2979,6 +3678,10 @@ fn exec_body(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u6
                 return die(2) as u64;
             }
             ctx_set(a, C_STEPS, ns);
+            if d_on(a) == 1 && ctx_get(a, C_DREL) != 0
+                    && ns % ctx_get(a, C_DREL) == 0 {
+                d_reloc(a);
+            }
             if k == K_BR_UNCOND {
                 bump_edge(a, ii, 0);
                 prev = here;
@@ -3779,6 +4482,11 @@ fn is_opt_arg(ab: ptr, f: u64) -> bool {
     if lo32(arg_tail(ab, f, "resume=")) > 0 {
         return true;
     }
+    // `docs/368`：重定位档。**必须在这里认**，否则它会被当成第二个位置实参（剖面文件），
+    // 于是 `relocate=0` 变成一个被写出来的文件名 —— 实测在工作目录里留下了这三个空文件。
+    if lo32(arg_tail(ab, f, "relocate=")) > 0 {
+        return true;
+    }
     return false;
 }
 
@@ -3966,7 +4674,7 @@ const COP_OFF: u32 = 11507968;                 // CC_OFF + 32768*48；操作数�
 const CX_OFF: u32 = 13605120;                  // COP_OFF + 131072*16；附加池
 const CSL_OFF: u32 = 13867264;                 // CX_OFF + 65536*4；槽名表 2 u32
 const FS2_OFF: u32 = 14129408;                 // CSL_OFF + 32768*8；每函数 4 u32
-const ARENA_T2: u64 = 14258948;                // NAME_SCRATCH + 256（docs/365 的共同快照）
+const ARENA_T2: u64 = 14982148;                // NAME_SCRATCH + 256（docs/365 的共同快照）
 
 //: 编译记录 12 格
 const CR_KIND: u32 = 0;
@@ -5134,6 +5842,17 @@ fn run(a: ptr) -> u32 {
     }
     ctx_set(a, C_NSRC, n as u32);
     ctx_set(a, C_IFHASH, fnv32(a, n as u32));
+    ctx_set(a, C_DIS, 0);
+    ctx_set(a, C_DTSLO, 0);
+    ctx_set(a, C_DTSHI, 0);
+    ctx_set(a, C_DNB, 0);
+    ctx_set(a, C_DNT, 0);
+    ctx_set(a, C_DNR, 0);
+    ctx_set(a, C_DROUND, 0);
+    ctx_set(a, C_DREL, 0);
+    if d_marker(a, n as u32) == 1 {
+        ctx_set(a, C_DIS, 1);
+    }
     // 附加实参（位置 2..10）：`sw_cap` / `ckpt=N` / `ckpt-out=PATH` / `resume=PATH`。
     // 它们可以落在任何一格（第 2 格平常是剖面文件），所以开文件前要跳过。
     let f2: u64 = argv_n(ab, 8192, 2);
@@ -5166,6 +5885,10 @@ fn run(a: ptr) -> u32 {
                 store32(a, SNAP_HDR + 40, hi32(o));
                 store32(a, SNAP_HDR + 44, lo32(o));
                 ctx_set(a, C_MODE, 1);
+            }
+            let dk: u64 = arg_tail(ab, f, "relocate=");
+            if lo32(dk) > 0 {
+                ctx_set(a, C_DREL, dec_u64(ab, hi32(dk), hi32(dk) + lo32(dk)) as u32);
             }
             let r: u64 = arg_tail(ab, f, "resume=");
             if lo32(r) > 0 {
@@ -5222,6 +5945,12 @@ fn run(a: ptr) -> u32 {
     }
     if ctx_get(a, C_SUB) != 0 && ctx_get(a, C_TIER) == 1 {
         return fail("sw_cap 只在 T0（docs/363）");
+    }
+    if ctx_get(a, C_DIS) != 0 && ctx_get(a, C_SUB) != 0 {
+        return fail("dismemory 与基质（sw_cap）不叠加（docs/368 §1.6）");
+    }
+    if ctx_get(a, C_DIS) != 0 && ctx_get(a, C_TIER) == 1 {
+        return fail("dismemory 只在 T0（docs/368）");
     }
     if ctx_get(a, C_MODE) == 1 {
         if ctx_get(a, C_PROF_FD) != 0 || ctx_get(a, C_STATS_FD) != 0 {

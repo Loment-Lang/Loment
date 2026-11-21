@@ -15105,6 +15105,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     if contains_ident(src, toks, "no_gc") == 1 {
         emit_str(s, out, "; loment-gc: no_gc\n");
     }
+    // `choose lvm_dismemory_true`（`docs/368`）：与 `no_gc` 同一条认法 ——
+    // 只有这一档才多发一行，其余 IR 一个字节都不变；原生链接器读到就拒。
+    if contains_ident(src, toks, "lvm_dismemory_true") == 1 {
+        emit_str(s, out, "; loment-memory: dismemory\n");
+    }
     emit_str(s, out, "\n");
     if load32(s, 512) == 1 {
         emit_runtime(s, out);

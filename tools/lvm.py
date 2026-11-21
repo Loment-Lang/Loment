@@ -15,6 +15,7 @@ phi 的两趟模型。
 from __future__ import annotations
 
 import bisect
+import collections
 import os
 import re
 import struct
@@ -201,8 +202,94 @@ def _obj_line(o) -> str:
             f"（{o.size()} 字节），第 {o.gen} 代，{state}")
 
 
+def _render_dismem(kind: int, site, d: dict) -> str:
+    """`docs/368` 的详细块：体的三维位形 + 令牌 + 越出体表的那一点。"""
+    fn, blk, idx = site
+    code, title = _FAULT_TITLE.get(kind, ("F0?", "故障"))
+    out = [f"error[{code}]: {title}", f"  --> IR:{fn}:{blk}#{idx}"]
+    ins = d.get("ins") or ""
+    if ins:
+        out += ["   |", f"   |   {ins}"]
+    tok = d.get("token")
+    if isinstance(tok, int):
+        out.append(f"   | 令牌：0x{tok:016x}")
+    bid = d.get("body_id")
+    if bid is not None:
+        kb = d.get("body_kind") or "?"
+        out.append(f"   | 体：#{bid}（{kb}）")
+    origin, extent = d.get("origin"), d.get("extent")
+    if origin is not None and extent is not None:
+        out.append(f"   | 位形：({origin[0]},{origin[1]},{origin[2]})，"
+                   f"体积 {extent[0]}×{extent[1]}×{extent[2]}（{d.get('size')} 字节）")
+    off, w, vox = d.get("offset"), d.get("width") or 0, d.get("voxel")
+    if off is not None and vox is not None:
+        out.append(f"   | 访问：偏移 {off}，宽 {w} —— 体素 ({vox[0]},{vox[1]},{vox[2]})")
+    elif off is not None:
+        out.append(f"   | 访问：偏移 {off}，宽 {w}")
+    out.append("   |")
+    reason = d.get("reason") or ""
+    size = d.get("size")
+    if reason == "over":
+        fact = (f"偏移 {off} + 宽 {w} 越过体的上限 {size}：这一次跨出了体表（右越界）。"
+                "这一档没有\"隔壁\"—— 体表之外不是内存。")
+    elif reason == "walk":
+        fact = (f"体内偏移 {off} 加上这个增量得到 {d.get('new_offset')}，"
+                f"越出 [0,{size}]：令牌只能在**自己的体**里移动。")
+    elif reason == "retired":
+        fact = "这个令牌不在任何活体里：它属于已经退休的体（或从未存在）。令牌永不复用，所以它不会重新生效。"
+    elif reason == "null":
+        fact = f"令牌是 0（空引用），试图访问 {w} 字节。"
+    elif reason in ("not-token", "code"):
+        fact = ("这个值不是内存令牌（是普通整数/代码令牌）—— 这一档里指针只能是令牌；"
+                "`inttoptr` 与 `ptrtoint` 都是 fault。")
+    elif reason == "cast":
+        fact = f"`{d.get('op')}` 把令牌与整数互转 —— 令牌不是数。"
+    elif reason == "arith":
+        fact = f"`{d.get('op')}` 把令牌当数用了 —— 只有体内偏移的加减是允许的。"
+    elif reason == "add-bodies":
+        fact = "两个令牌相加：没有地址空间可以把两颗体拼起来。"
+    elif reason == "sub-bodies":
+        fact = f"体 #{d.get('body_a')} 与体 #{d.get('body_b')} 相减：没有地址空间可以量。"
+    elif reason == "order-bodies":
+        fact = f"体 #{d.get('body_a')} 与体 #{d.get('body_b')} 比大小：没有地址序。"
+    elif reason == "order-handle":
+        fact = "令牌与整数比大小：没有地址序。"
+    elif reason == "int-sub-body":
+        fact = "整数减令牌：没有地址空间可以走。"
+    elif reason == "brk-number":
+        fact = "brk 拿到了一个整数：堆只能由**堆体的令牌 + 偏移**来长大。"
+    elif reason == "brk-body":
+        fact = (f"brk 拿到的是体 #{d.get('body_a')} 的令牌，而堆是体 "
+                f"#{d.get('body_b')}。")
+    elif reason == "size":
+        fact = "申请的体超过 4 GiB：令牌的偏移字段放不下。"
+    elif reason == "tokens":
+        fact = "令牌序号用尽了（48 位，永不复用）—— 这是显式的身份预算，不是静默复用。"
+    elif reason == "ids":
+        fact = "运行期的体编号用尽了。"
+    else:
+        fact = f"令牌 0x{(tok or 0):016x}，访问 {w} 字节。"
+    out.append(f"   = 事实：{fact}")
+    depth = d.get("depth")
+    where = f"   = 站点：函数 {fn} / 块 {blk} / 第 {idx} 条指令"
+    if depth:
+        where += f"；栈深 {depth}"
+    out.append(where)
+    dtip = {
+        FAULT_BOUNDS: "体是实心长方体；任何跨越体表的访问都是 fault —— "
+                      "它不是地址空间的下一页。检查下标，或换一个令牌。",
+        FAULT_DANGLING: "令牌不在任何活体里：体已经退休。这一档没有代号可以比对，"
+                        "令牌也永不复用 —— 它不会重新生效。",
+        FAULT_NULL: "令牌是 0（空引用）；先判空。",
+    }.get(kind, _FAULT_TIP.get(kind, ""))
+    out.append(f"   = 建议：{dtip}")
+    return "\n".join(out)
+
+
 def render_fault(kind: int, site, detail: dict) -> str:
     """把一次故障渲染成 Lomenterr 形状的多行诊断（`docs/366`）。"""
+    if detail.get("dismem"):
+        return _render_dismem(kind, site, detail)
     fn, blk, idx = site
     code, title = _FAULT_TITLE.get(kind, ("F0?", "故障"))
     out = [f"error[{code}]: {title}",
@@ -783,11 +870,14 @@ class Frame:
         self.caps: dict[str, tuple[int, int, int]] = {}
         self.objs: list[int] = []
         #: 槽从**值表之后**起（`FRAME_SLOTS`），与自举镜像的 `FR_SLOTS` 同址。
-        self.next = base + FRAME_SLOTS
+        #: dismemory 下 `next` 是**体内偏移**，槽由令牌表派生（`base + n` 对不透明令牌没有意义）。
+        self.next = (FRAME_SLOTS if isinstance(mem, Dismem) else base + FRAME_SLOTS)
 
     def slot(self) -> int:
         a = (self.next + SLOT - 1) // SLOT * SLOT
         self.next = a + SLOT
+        if isinstance(self.mem, Dismem):
+            return self.mem.add_off(self.base, a)
         return a
 
 
@@ -861,8 +951,14 @@ class Profile:
 class Vm:
     def __init__(self, globals_: list, funcs: list, externs: list, out,
                  profile: Profile | None = None, argv: list[str] | None = None,
-                 counters: "Counters | None" = None, sub: "SwCap | None" = None) -> None:
-        self.mem = Mem()
+                 counters: "Counters | None" = None, sub: "SwCap | None" = None,
+                 dismemory: bool = False, relocate_every: int = 0) -> None:
+        #: `docs/368`：没有地址的那一档。关着时 `mem` 仍是 `Mem`，一个字节都不多走。
+        self.dismemory = dismemory
+        self.relocate_every = relocate_every
+        self.mem = Dismem() if dismemory else Mem()
+        if dismemory:
+            self.mem.site = ("?", "?", 0)
         #: 基质（`docs/362`）。`None` = 今天的 LVM，**一个字节都不写**。
         self.sub = sub
         #: 处在运行期内部函数（`__loment_*`）里时 > 0 —— 它们是**基座自己的代码**：
@@ -902,7 +998,8 @@ class Vm:
         for g in self.globals.values():
             data = g.data or b"\0" * lomelf.size_of(g.ty)
             align = max(1, min(8, lomelf.size_of(g.ty) or 1))
-            g.addr = self.mem.alloc(len(data), align)
+            g.addr = (self.mem.alloc(len(data), align, kind="global")
+                      if self.dismemory else self.mem.alloc(len(data), align))
             self.mem.put(g.addr, data)
             if self.sub is not None:
                 oid = self.sub.new_obj(g.addr, len(data), "global")
@@ -935,17 +1032,282 @@ class Vm:
 
     def load(self, ty: str, addr: int):
         n = lomelf.size_of(ty)
+        if self.dismemory:
+            self.mem.site = self.site
         raw = self.mem.get(addr, n)
         if _is_agg(ty):
             return raw
         return int.from_bytes(raw, "little")
 
     def store(self, ty: str, addr: int, val) -> None:
+        if self.dismemory:
+            self.mem.site = self.site
         if _is_agg(ty):
             self.mem.put(addr, val if isinstance(val, bytes) else bytes(val))
             return
         n = lomelf.size_of(ty)
         self.mem.put(addr, (int(val) & ((1 << (n * 8)) - 1)).to_bytes(n, "little"))
+
+
+
+# ---------------------------------------------------------------- Dismemory（docs/368）
+#
+# **这一档没有地址。** guest 的"指针"是**体的句柄**：`[tag=D1][gen][body][offset]`。
+# 访存只在**这颗体**的 `offset < size` 里；句柄不是数（ptrtoint/inttoptr/位运算都是
+# fault），也没有全局序（跨体相减/排序是 fault）。体被排进一个**隐藏的、不重叠的
+# 三维格子**里；重定位只改运行期的坐标，不改任何 guest 值 —— 所以没有悬空指针。
+#
+# 关着时（默认）这条路一个字节都不走：`Vm.mem` 仍是 `Mem`，所有分支都由
+# `self.dismemory` 把着。
+
+DISM_TAG = 0xD1          # 内存令牌（不透明）
+CODE_TAG = 0xC0          # 代码令牌（`@fn`）—— 另一域，不是内存
+TOKEN_MAX = 1 << 48      # 令牌序号 48 位；**永不复用**
+
+FAULT_NOADDR = 4         # F04：令牌不是数
+FAULT_NOORDER = 5        # F05：没有跨体的地址空间
+FAULT_LIMIT = 6          # F06：令牌序号/表容量用尽
+FAULT_CODES[FAULT_NOADDR] = "F04 no addresses"
+FAULT_CODES[FAULT_NOORDER] = "F05 no address space"
+FAULT_CODES[FAULT_LIMIT] = "F06 identity exhausted"
+_FAULT_TITLE[FAULT_NOADDR] = ("F04", "没有地址（no addresses）")
+_FAULT_TITLE[FAULT_NOORDER] = ("F05", "没有全局空间（no address space）")
+_FAULT_TITLE[FAULT_LIMIT] = ("F06", "身份预算用尽（identity exhausted）")
+_FAULT_TIP[FAULT_NOADDR] = (
+    "这一档里指针是一个**不透明令牌**，不是数：ptrtoint / inttoptr / 把令牌拿去做"
+    "位运算是 fault。要跨内存就用多个令牌或显式链接，不要把它算成整数。")
+_FAULT_TIP[FAULT_NOORDER] = (
+    "令牌只在它自己的体里有意义；跨体相减、排序、brk 都是 fault —— 没有地址空间可以走。")
+_FAULT_TIP[FAULT_LIMIT] = (
+    "64 位令牌的序号 48 位、**永不复用**；用尽或令牌表满就走这里。它是显式失败，"
+    "不是静默复用（docs/368 §1.7）。")
+
+
+def d_is_handle(v) -> bool:
+    return isinstance(v, int) and 0 <= v < (1 << 64) and (v >> 56) == DISM_TAG
+
+
+def d_is_code(v) -> bool:
+    return isinstance(v, int) and 0 <= v < (1 << 64) and (v >> 56) == CODE_TAG
+
+
+class _DismBody:
+    """运行期内部的**体**。编号与坐标**不进 guest 值** —— 只活在令牌表后面。"""
+
+    __slots__ = ("id", "kind", "size", "dx", "dy", "dz", "x", "y", "z",
+                 "data", "alive", "tokens")
+
+    def __init__(self, bid: int, kind: str, n: int) -> None:
+        self.id, self.kind = bid, kind
+        self.size = max(0, int(n))
+        d = 1
+        while d * d * d < self.size:
+            d += 1
+        self.dx = d
+        self.dy = d
+        self.dz = max(1, (self.size + d * d - 1) // (d * d))
+        self.x = self.y = self.z = 0
+        self.data = bytearray(self.size)
+        self.alive = True
+        self.tokens: set[int] = set()
+
+
+class Dismem:
+    """**一张令牌表 + 一组体。** guest 拿到的 64 位值是一个**不透明令牌**：里面既没有
+    体的编号，也没有偏移 —— 唯一的含义是"表里的那一行"。访存=查表，算术=在表里派生
+    一个新令牌（到体外的派生直接 fault）。"""
+
+    HEAP_VOLUME = STACK_LIMIT - GLOBAL_BASE
+
+    def __init__(self) -> None:
+        self.bodies: dict[int, _DismBody] = {}
+        self.next_bid = 1
+        #: 令牌 -> (体编号, 体内偏移)。**永不外露**。
+        self.tokens: dict[int, tuple[int, int]] = {}
+        #: (体编号, 偏移) -> 令牌。同一个引用点只有**一个**令牌：a[i] 取一万次
+        #: 也只烧一个序号（`docs/368` §1.7）。
+        self.rev: dict[tuple[int, int], int] = {}
+        self.next_serial = 1
+        #: 退休令牌的墓碑（只为诊断；令牌永不复用，所以它只增不减，按容量截断）。
+        self.tomb: dict[int, tuple[int, str]] = {}
+        self.round = 0
+        self.site = None
+        #: 当前指令的现场（指令文本/栈深），由 VM 在访存前放进；
+        #: `map_detail` 把它并进故障现场。
+        self.hint: dict = {}
+        self.sp = 0
+        self.heap = self.alloc(self.HEAP_VOLUME, kind="heapspan")
+
+    # ------------------------------------------------------------ 排版
+    def _overlap(self, x, y, z, dx, dy, dz, me=None) -> bool:
+        for b in self.bodies.values():
+            if not b.alive or b is me:
+                continue
+            if (x < b.x + b.dx and b.x < x + dx
+                    and y < b.y + b.dy and b.y < y + dy
+                    and z < b.z + b.dz and b.z < z + dz):
+                return True
+        return False
+
+    def _place(self, b: "_DismBody") -> None:
+        x = self.round
+        y = 0
+        z = 0
+        while True:
+            if not self._overlap(x, y, z, b.dx, b.dy, b.dz, b):
+                b.x, b.y, b.z = x, y, z
+                return
+            x += max(1, b.dx)
+            if x > 1 << 16:
+                x = self.round
+                y += max(1, b.dy)
+                if y > 1 << 16:
+                    y = 0
+                    z += max(1, b.dz)
+
+    def relocate(self) -> None:
+        """重排全部活体 —— 改的是**运行期坐标**，令牌与 guest 值一个都不动。"""
+        self.round += 1
+        for b in sorted(self.bodies.values(), key=lambda q: q.id):
+            if b.alive:
+                self._place(b)
+
+    # ------------------------------------------------------------ 令牌
+    def _new_token(self, b: "_DismBody", off: int) -> int:
+        key = (b.id, off)
+        got = self.rev.get(key)
+        if got is not None:
+            return got
+        serial = self.next_serial
+        if serial >= TOKEN_MAX:
+            self._fault(FAULT_LIMIT, "token serials exhausted (%d)" % serial,
+                        {"dismem": True, "reason": "tokens", "width": 8})
+        self.next_serial = serial + 1
+        t = (DISM_TAG << 56) | serial
+        self.tokens[t] = key
+        self.rev[key] = t
+        b.tokens.add(t)
+        return t
+
+    def map_detail(self, h, width: int, reason: str) -> dict:
+        key = self.tokens.get(h) if isinstance(h, int) else None
+        d: dict = {"dismem": True, "reason": reason, "token": h, "width": width}
+        if self.hint:
+            d.update(self.hint)
+        if key is None:
+            dead = self.tomb.get(h) if isinstance(h, int) else None
+            if dead is not None:
+                d.update({"body_id": dead[0], "body_kind": dead[1],
+                          "dead": True})
+            return d
+        bid, off = key
+        b = self.bodies.get(bid)
+        d.update({"body_id": bid, "offset": off})
+        if b is not None:
+            d.update({"body_kind": b.kind, "origin": (b.x, b.y, b.z),
+                      "extent": (b.dx, b.dy, b.dz), "size": b.size})
+            if b.size:
+                d["voxel"] = (off % b.dx, (off // b.dx) % b.dy,
+                              off // (b.dx * b.dy))
+        return d
+
+    def _fault(self, kind: int, witness: str, detail: dict):
+        raise _Fault(kind, self.site or ("?", "?", 0), witness, detail)
+
+    def decode(self, h, width: int):
+        """令牌 -> (体, 偏移)。**表里没有 = 身份不存在**（F02），没有代号可以比对。"""
+        if not isinstance(h, int) or h == 0:
+            self._fault(FAULT_NULL, "size=%d" % width,
+                        self.map_detail(0, width, "null"))
+        if not d_is_handle(h):
+            if d_is_code(h):
+                self._fault(FAULT_NOADDR, "code token used as memory",
+                            {"dismem": True, "reason": "code", "token": h,
+                             "width": width})
+            self._fault(FAULT_NOADDR, "not a reference token",
+                        {"dismem": True, "reason": "not-token", "token": h,
+                         "width": width})
+        key = self.tokens.get(h)
+        if key is None:
+            self._fault(FAULT_DANGLING, "token=%#x not live" % h,
+                        self.map_detail(h, width, "retired"))
+        bid, off = key
+        b = self.bodies.get(bid)
+        if b is None or not b.alive:
+            self._fault(FAULT_DANGLING, "token=%#x body=%d retired" % (h, bid),
+                        self.map_detail(h, width, "retired"))
+        if off + width > b.size:
+            self._fault(FAULT_BOUNDS, "offset=%d size=%d limit=%d" % (off, width, b.size),
+                        self.map_detail(h, width, "over"))
+        return b, off
+
+    # ------------------------------------------------------------ Mem 接口
+    def alloc(self, n: int, align: int = 8, kind: str = "heap") -> int:
+        size = max(0, int(n))
+        if size > 0xFFFFFFFF:
+            self._fault(FAULT_LIMIT, "body size=%d > 4 GiB" % size,
+                        {"dismem": True, "reason": "size", "width": 0})
+        bid = self.next_bid
+        self.next_bid += 1
+        b = _DismBody(bid, kind, size)
+        self.bodies[bid] = b
+        self._place(b)
+        return self._new_token(b, 0)
+
+    def retire(self, h: int) -> None:
+        key = self.tokens.get(h) if isinstance(h, int) else None
+        if key is None:
+            return
+        bid, off = key
+        b = self.bodies.get(bid)
+        if b is None or not b.alive:
+            return
+        # **这一颗体的所有令牌一起作废**：它们从此不在表里 —— 不需要代号，也没有 ABA。
+        for t in list(b.tokens):
+            key2 = self.tokens.pop(t, None)
+            if key2 is not None:
+                self.rev.pop(key2, None)
+            self.tomb[t] = (bid, b.kind)
+        if len(self.tomb) > 4096:
+            for t in list(self.tomb)[:1024]:
+                self.tomb.pop(t, None)
+        b.tokens.clear()
+        b.alive = False
+        b.data = bytearray()
+
+    def put(self, h, data) -> None:
+        b, off = self.decode(h, len(data))
+        b.data[off:off + len(data)] = data
+
+    def get(self, h, n: int) -> bytes:
+        b, off = self.decode(h, n)
+        return bytes(b.data[off:off + n])
+
+    def cstr(self, h, limit: int = 4096) -> bytes:
+        b, off = self.decode(h, 1)
+        out = bytearray()
+        i = off
+        while i < b.size and len(out) < limit and b.data[i] != 0:
+            out.append(b.data[i])
+            i += 1
+        return bytes(out)
+
+    # ------------------------------------------------------------ 令牌算术（在表里派生）
+    def off_of(self, h: int):
+        return self.decode(h, 0)
+
+    def add_off(self, h: int, delta: int) -> int:
+        b, off = self.decode(h, 0)
+        n = off + delta
+        if n < 0 or n > b.size:
+            d = self.map_detail(h, 1, "walk")
+            d["new_offset"] = n
+            self._fault(FAULT_BOUNDS, "offset=%d -> %d limit=%d" % (off, n, b.size), d)
+        return self._new_token(b, n)
+
+
+def _d_num(v) -> bool:
+    return isinstance(v, int) and not d_is_handle(v) and not d_is_code(v)
 
 
 class _Exit(Exception):
@@ -1021,6 +1383,25 @@ class Executor(Vm):
                 raise LvmError(f"close: fd {a[0]} 不是 VM 合成的那一个"
                                "（`docs/243` §3.4）")
             return 0
+        if nr == 12 and self.dismemory:                 # brk —— 只认堆体
+            want = a[0]
+            heap_body, _h = self.mem.off_of(self.mem.heap)
+            if want == 0:
+                return self.mem.heap
+            if not d_is_handle(want):
+                raise _Fault(FAULT_NOORDER, self.site, "brk on a number",
+                             {"dismem": True, "reason": "brk-number", "width": 8})
+            b, off = self.mem.off_of(want)
+            if b is not heap_body:
+                raise _Fault(FAULT_NOORDER, self.site,
+                             "brk on body #%d (heap is #%d)" % (b.id, heap_body.id),
+                             {"dismem": True, "reason": "brk-body",
+                              "body_a": b.id, "body_b": heap_body.id, "width": 8})
+            if off > b.size:
+                raise _Fault(FAULT_BOUNDS, self.site,
+                             "brk offset=%d limit=%d" % (off, b.size),
+                             self.mem.map_detail(want, 1, "over"))
+            return want
         if nr == 12:                                   # brk(addr)
             # `_IR_HEAP` 的分配器用它向 OS 要页。解释器的堆本来就在地址空间里，
             # 所以这里只需把"当前可信的堆底"如实回一个数：给了就认，没给就报现值。
@@ -1120,6 +1501,17 @@ class Executor(Vm):
             raise LvmError("实参个数与形参不符")
         if self.profile is not None and self.site is not None:
             self.profile.call_site(self.site, name)
+        # **dismemory 的分配器是模型原生的**（`docs/368` §1.5）：地址式的空闲链在
+        # 这一档里根本不存在（指针不是数），所以 `__loment_alloc` / `__loment_free`
+        # 在**调用边界**换成"造一颗体 / 退休一颗体"，不进去跑那段运行期代码。
+        if self.dismemory and self.sub is None and name in ("__loment_alloc",
+                                                            "__loment_free"):
+            if name == "__loment_alloc":
+                _t, sz = self.operand(fr, args[0])
+                return self.mem.alloc(max(1, int(sz)), kind="heap")
+            _t, pp = self.operand(fr, args[0])
+            self.mem.retire(int(pp))
+            return 0
         # `sw_cap` 的两个对象生命周期事件。**在返回之后**登记 / 归还：分配器自己
         # 要写块头、写已归还的块（那是它的活），进去之前它还不知道这块归谁。
         hook_alloc = self.sub is not None and name == "__loment_alloc"
@@ -1148,10 +1540,14 @@ class Executor(Vm):
         if self.depth + 1 > MAX_DEPTH:
             raise LvmError(f"栈溢出（调用深度上限 {MAX_DEPTH}）")
         self.depth += 1
-        base = STACK_TOP - self.depth * FRAME_SIZE
-        if base <= self.mem.heap:
-            self.depth -= 1
-            raise LvmError("栈溢出")
+        if self.dismemory:
+            # 帧 = 一颗体；`base` 是它的句柄（偏移 0）。返回时退休，旧句柄 → F02。
+            base = self.mem.alloc(FRAME_SIZE, kind="frame")
+        else:
+            base = STACK_TOP - self.depth * FRAME_SIZE
+            if base <= self.mem.heap:
+                self.depth -= 1
+                raise LvmError("栈溢出")
         # 运行期内部函数（分配器 / 收集器）是**基座自己的代码**：它们写块头、
         # 扫已归还的块。能力检查在它们里面没有意义（`docs/362` §2）。
         internal = self.sub is not None and fn.name.startswith("__loment_")
@@ -1162,6 +1558,8 @@ class Executor(Vm):
         finally:
             if internal:
                 self.priv -= 1
+            if self.dismemory:
+                self.mem.retire(base)
             self.depth -= 1
 
     def _run_body(self, fn, argtexts: list[str], caller: Frame | None, base: int,
@@ -1190,6 +1588,9 @@ class Executor(Vm):
             if self.sub is not None:
                 for oid in fr.objs:
                     self.sub.retire_oid(oid)
+            if self.dismemory:
+                for h in fr.objs:
+                    self.mem.retire(h)
 
     def _run_loop(self, fn, fr: Frame):
         label = fn.blocks[0].label
@@ -1208,13 +1609,18 @@ class Executor(Vm):
             #: `gc_auto` 的空闲块永远不复用，arena 提前耗尽（#1027）。
             _pending_phi: list[tuple[str, object, tuple[int, int] | None]] = []
             for idx, ins in enumerate(blk.instrs):
-                if self.profile is not None or self.sub is not None:
-                    # 剖面与 `sw_cap` 都需要**每条指令**的站点；两者都关着时，
+                if self.profile is not None or self.sub is not None or self.dismemory:
+                    # 剖面 / `sw_cap` / dismemory 都需要**每条指令**的站点；都关着时，
                     # 只有 `call` 记（`llvm.trap` 用），不给每条指令付一次元组的代价。
                     self.site = (fn.name, blk.label, idx)
+                    if self.dismemory:
+                        self.mem.hint = {}
                 elif ins.text.startswith("call "):
                     self.site = (fn.name, blk.label, idx)
                 steps += 1
+                if (self.dismemory and self.relocate_every
+                        and steps % self.relocate_every == 0):
+                    self.mem.relocate()
                 if self.counters is not None:
                     # T0 的"解码"就是这一条指令本身：每执行一次就把文本重解一次。
                     self.counters.instructions += 1
@@ -1267,12 +1673,51 @@ class Executor(Vm):
     # ------------------------------------------------------------ 单条指令
     def _diag(self, fr: Frame, text: str, op: str, width: int) -> dict:
         """故障渲染的现场（`docs/366`）：指令文本、指针操作数、宽度、栈深。"""
-        return {"ins": text, "op": op, "width": width,
-                "depth": (STACK_TOP - fr.base) // FRAME_SIZE}
+        depth = self.depth if self.dismemory else (STACK_TOP - fr.base) // FRAME_SIZE
+        return {"ins": text, "op": op, "width": width, "depth": depth}
+
+    def _d_arith(self, op: str, a, b, ty: str):
+        """句柄参与的算术（`docs/368` §1.4）。**只有 `add`/`sub` 的体内偏移是允许的。**
+        体内偏移有顺序（数组下标），所以同体相减/比较照常；跨体一律 F05。"""
+        ha, hb = d_is_handle(a), d_is_handle(b)
+        if op == "add":
+            if ha and hb:
+                raise _Fault(FAULT_NOORDER, self.site, "add two bodies",
+                             {"dismem": True, "reason": "add-bodies",
+                              "width": 8})
+            if ha:
+                return self.mem.add_off(a, int(b))
+            if hb:
+                return self.mem.add_off(b, int(a))
+        if op == "sub":
+            if ha and hb:
+                ba, oa = self.mem.off_of(a)
+                bb, ob = self.mem.off_of(b)
+                if ba is not bb:
+                    raise _Fault(FAULT_NOORDER, self.site,
+                                 "subtract bodies #%d and #%d" % (ba.id, bb.id),
+                                 {"dismem": True, "reason": "sub-bodies",
+                                  "body_a": ba.id, "body_b": bb.id, "width": 8})
+                return mask(oa - ob, ty)
+            if ha:
+                return self.mem.add_off(a, -int(b))
+            if hb:
+                raise _Fault(FAULT_NOORDER, self.site, "integer - body",
+                             {"dismem": True, "reason": "int-sub-body", "width": 8})
+        if ha or hb:
+            raise _Fault(FAULT_NOADDR, self.site, op,
+                         {"dismem": True, "reason": "arith", "op": op,
+                          "width": 8})
+        return None
 
     def _eval(self, fr: Frame, text: str):
         if text.startswith("alloca"):
             ty, _ = lomelf.parse_type(text[len("alloca "):])
+            if self.dismemory:
+                # `alloca` 是一颗自己的体（`docs/368` §1.5）：返回句柄；帧返回时退休。
+                h = self.mem.alloc(max(1, lomelf.size_of(ty)), kind="alloca")
+                fr.objs.append(h)
+                return h
             a = fr.slot()
             fr.next = a + max(SLOT, lomelf.size_of(ty))
             fr.slots[text] = a
@@ -1282,6 +1727,8 @@ class Executor(Vm):
             ty, i = lomelf.parse_type(body)
             ptr_s = body[i:].lstrip(", ").strip()
             _bty, addr = self.operand(fr, ptr_s)
+            if self.dismemory:
+                self.mem.hint = self._diag(fr, text, ptr_s, lomelf.size_of(ty))
             if self.sub is not None and not self.priv:
                 self.sub.check(addr, lomelf.size_of(ty), self._cap_of(fr, ptr_s),
                                self.site, self._diag(fr, text, ptr_s, lomelf.size_of(ty)))
@@ -1293,6 +1740,8 @@ class Executor(Vm):
             val_s, ptr_s = lomelf.split_top(body[i:].lstrip(", "))
             _vty, val = self.operand(fr, ty + " " + val_s)
             _pty, addr = self.operand(fr, ptr_s)
+            if self.dismemory:
+                self.mem.hint = self._diag(fr, text, ptr_s, lomelf.size_of(ty))
             if self.sub is not None and not self.priv:
                 self.sub.check(addr, lomelf.size_of(ty), self._cap_of(fr, ptr_s),
                                self.site, self._diag(fr, text, ptr_s, lomelf.size_of(ty)))
@@ -1326,6 +1775,10 @@ class Executor(Vm):
             _t2, b = self.operand(fr, ty + " " + b_s)
             if op in ("sdiv", "srem"):
                 a, b = signed(a, ty), signed(b, ty)
+            if self.dismemory:
+                bad = self._d_arith(op, a, b, ty)
+                if bad is not None:
+                    return bad
             if b == 0:
                 raise LvmError("除以零")
             q = abs(a) // abs(b)
@@ -1342,6 +1795,10 @@ class Executor(Vm):
             op, ty, a_s, b_s = m.groups()
             _t, a = self.operand(fr, ty + " " + a_s)
             _t2, b = self.operand(fr, ty + " " + b_s)
+            if self.dismemory:
+                got = self._d_arith(op, a, b, ty)
+                if got is not None:
+                    return got
             return arith(op, a, b, ty)
         raise LvmError(f"这个指令 T0 没实现: {text!r}")
 
@@ -1420,7 +1877,10 @@ class Executor(Vm):
         parts = lomelf.split_top(body[i:].lstrip(", "))
         _bty, base = self.operand(fr, parts[0])
         idxs = [self.operand(fr, s)[1] for s in parts[1:]]
-        return base + gep_offset(ty, idxs, text)
+        off = gep_offset(ty, idxs, text)
+        if self.dismemory and d_is_handle(base):
+            return self.mem.add_off(base, off)
+        return base + off
 
     def _extractvalue(self, fr: Frame, text: str):
         ty, i = lomelf.parse_type(text[len("extractvalue "):])
@@ -1455,6 +1915,21 @@ class Executor(Vm):
         pred, ty, a_s, b_s = m.groups()
         _t, a = self.operand(fr, ty + " " + a_s)
         _t2, b = self.operand(fr, ty + " " + b_s)
+        if self.dismemory and (d_is_handle(a) or d_is_handle(b)):
+            if pred in ("eq", "ne"):
+                same = (a == b) if (d_is_handle(a) and d_is_handle(b)) else False
+                return 1 if (same == (pred == "eq")) else 0
+            if d_is_handle(a) and d_is_handle(b):
+                ba, oa = self.mem.off_of(a)
+                bb, ob = self.mem.off_of(b)
+                if ba is not bb:
+                    raise _Fault(FAULT_NOORDER, self.site,
+                                 "compare bodies #%d and #%d" % (ba.id, bb.id),
+                                 {"dismem": True, "reason": "order-bodies",
+                                  "body_a": ba.id, "body_b": bb.id, "width": 8})
+            else:
+                raise _Fault(FAULT_NOORDER, self.site, "order handle vs number",
+                             {"dismem": True, "reason": "order-handle", "width": 8})
         if pred in _SIGNED_CMP:
             a, b = signed(a, ty), signed(b, ty)
         return 1 if _ICMP[pred](a, b) else 0
@@ -1487,6 +1962,10 @@ class Executor(Vm):
             return zeroext(a, fty)
         if op == "sext":
             return signed(a, fty) & ((1 << (lomelf.size_of(tty) * 8)) - 1)
+        if self.dismemory:
+            raise _Fault(FAULT_NOADDR, self.site, op,
+                         {"dismem": True, "reason": "cast", "op": op,
+                          "handle": a, "width": 8})
         return a                                       # ptrtoint / inttoptr：地址就是整数
 
     # ------------------------------------------------------------ 控制流
@@ -2295,6 +2774,8 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     """
     if substrate not in ("none", "sw_cap", "sw_tag"):
         raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
+    if "; loment-memory: dismemory" in text:
+        raise LvmError("dismemory 暂时没有快照/恢复（docs/368 §6）—— 去掉 --checkpoint-at / --resume")
     shape = entry_kind(text)
     if shape is None:
         raise LvmError(NO_ENTRY)
@@ -2356,7 +2837,7 @@ def run_checkpointed(text: str, out, substrate: str = "none",
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
            values=None, deopts=None, counters: "Counters | None" = None,
-           substrate: str = "none") -> int:
+           substrate: str = "none", relocate_every: int = 0) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -2387,6 +2868,10 @@ def run_ir(text: str, out, profile: Profile | None = None,
         raise LvmError(f"没有这一档: {tier!r}（只有 t0 / t2 / t3）")
     if substrate not in ("none", "sw_cap", "sw_tag"):
         raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
+    dismemory = "; loment-memory: dismemory" in text
+    if dismemory and substrate != "none":
+        raise LvmError("dismemory 与基质（sw_cap / sw_tag）不叠加："
+                       "这一档自己的规则已经覆盖了谁能碰（docs/368 §1.6）")
     shape = entry_kind(text)
     if shape is None:
         raise LvmError(NO_ENTRY)
@@ -2398,7 +2883,9 @@ def run_ir(text: str, out, profile: Profile | None = None,
         profile.bind(funcs)
     sub = (SwCap("cap") if substrate == "sw_cap"
            else SwCap("tag") if substrate == "sw_tag" else None)
-    vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub)
+    vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub,
+                  dismemory=dismemory,
+                  relocate_every=relocate_every)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
         raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
@@ -2422,13 +2909,13 @@ def run_ir(text: str, out, profile: Profile | None = None,
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
                values=None, deopts=None, counters: "Counters | None" = None,
-               substrate: str = "none") -> int:
+               substrate: str = "none", relocate_every: int = 0) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts, counters, substrate)
+                  values, deopts, counters, substrate, relocate_every)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -2476,6 +2963,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
                     help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
                          "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
+    ap.add_argument("--dismemory-relocate-every", type=int, default=0, metavar="K",
+                    help="dismemory（docs/368）：每 K 条指令把全部活体重排一次（0 = 关；"
+                         "句柄不变，所以两次的 stdout/rc 必须一样）")
     ap.add_argument("--substrate", choices=("none", "sw_cap", "sw_tag"), default="none",
                     help="LVM-A 的执行基质（docs/362/364）：none（默认，今天的行为）、"
                          "sw_cap（对象表 + 边界 + 对象代）、sw_tag（4 位标签，概率检测）；"
@@ -2614,7 +3104,7 @@ def main(argv: list[str] | None = None) -> int:
                                       fusion, hot, counters=counters)
             else:
                 rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters,
-                            a.substrate)
+                            a.substrate, a.dismemory_relocate_every)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
@@ -2624,7 +3114,8 @@ def main(argv: list[str] | None = None) -> int:
                                       fusion, hot, counters=counters)
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
-                                a.tier, values, deopts, counters, a.substrate)
+                                a.tier, values, deopts, counters, a.substrate,
+                                a.dismemory_relocate_every)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())

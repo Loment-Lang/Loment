@@ -208,7 +208,7 @@ REPOS: dict[str, dict] = {
             "tools/lvm_stability_test.py",
             "tools/lvm_a0_test.py",
             "tools/lvm_cap_test.py",
-            "tools/lvm_seal.py", "tools/lvm_cp_test.py", "tools/lvm_seal_test.py", "tools/loment_segv.py", "tools/loment_segv_test.py",
+            "tools/lvm_seal.py", "tools/lvm_cp_test.py", "tools/lvm_seal_test.py", "tools/lvm_dismemory_test.py", "tools/loment_segv.py", "tools/loment_segv_test.py",
             "tools/lvm_perf_test.py",
             # **L0 契约的对照物**（见文件顶部 `COUNTERPARTS` 的说明）。整目录收不得：
             # `kernel/` 其余是 FujoOS 内核（几 MB 的 Rust），`sdk/` 其余是 ISO/字库/驱动。

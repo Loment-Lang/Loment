@@ -225,6 +225,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # LVM-A 的底层设施（`docs/363` / `docs/364`）：显式栈引擎 + checkpoint/resume。
                  # 两个引擎同答；任意指令边界存/取；调用栈进快照；链式；`sw_tag` 状态也进快照。
                  "lvm_cp_test",
+                 # **没有地址**的那一档（`docs/368`）：令牌/体/三维排他、K=0/1/7 同答、
+                 # F01–F06 的码与站点、身份预算、原生拒绝、与基质不叠加。
+                 "lvm_dismemory_test",
                  # 盘古的三件（`docs/363`）：封印 / 零 import 验证器 / 同产物创世衰减。
                  # 篡改三种都红；hw_cap 降级与伪造；B5 同字节码；`sw_tag` 的 no_dangling 必须 floored。
                  "lvm_seal_test",
@@ -536,6 +539,7 @@ SHARD_COST = {
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
     "lvm_twin_test": 91.5,     # 2026-11-21：本机 Windows 实测 91.1s（跨实现 + 详细块形状）
+    "lvm_dismemory_test": 4.0, # 2026-11-21：本机（纯进程内 + 五份手写 IR）
     "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,

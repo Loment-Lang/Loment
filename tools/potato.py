@@ -213,7 +213,9 @@ PORTS = ("sealed", "hosted")
 VMS = ("vm", "no_vm")
 #: `lvm` 的取值（v24 起，2026-11-21 改名）：与 `VMS` 同一条纪律，只换拼写。
 #: 旧 `vm` 在 v24 的对象里是**未知顶层字段**，不是别名（宁拒勿猜）。
-LVMS = ("lvm", "no_lvm")
+#: **2026-11-21 第三个取值**（`docs/368`）：`lvm_dismemory_true` —— LVM 在没有地址的
+#: 内存模型上跑。它仍是第五维的取值，只是 IR 多一行 `; loment-memory: dismemory`。
+LVMS = ("lvm", "no_lvm", "lvm_dismemory_true")
 #: `lifetime` 的取值（`docs/299`，用户 2026-11-08 定第八维）：
 #: `lifetime_no` = **绝对关闭**（今天的形状，`&` 进不了类型位置）；
 #: `lifetime_auto` = 区域推断 + 省略规则，源码零标注（2026.3 起的默认）；

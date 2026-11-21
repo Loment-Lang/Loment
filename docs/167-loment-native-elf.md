@@ -173,7 +173,8 @@ stage1"那一步出现（见 §5）。
    * 装完后 `loment run` 在本机编出 PE 并跑出 `PASS loment-user`（无 WSL、无 clang）；
    * `loment.cmd` 里**不再出现 `wsl`**。
 
-   **还没做**：`tools/loment.py` 的 `ir`/`bench`/`cov`/`dbg` 四处还在调 clang。
+   **还没做**：`tools/loment.py` 的 `bench`/`cov`/`dbg` 三处还在调 clang。`ir` 已经改走
+   仓库自己的原生后端（`tools/loment.py:151`），只借 `llvm-objdump` 反汇编。
 
    **PE 的四个节钉在固定 RVA**（`.text` 0x1000 / `.idata` 0x1000000 / `.data` 0x2000000 /
    状态挂在 `.data` 的零填充尾巴上 0x3000000）。这样 shim 里对 IAT 与静态状态的取址全是

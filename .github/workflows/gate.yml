@@ -63,6 +63,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # merge queue（`main` 的保护规则里"Require merge queue"打开后，入队的 PR 会以
+  # `merge_group` 事件重跑必需检查）。**没有这一条，队列会永远等一个不会跑的检查。**
+  merge_group:
   workflow_dispatch:
     inputs:
       suite:
@@ -156,8 +159,9 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.event.after }}
+          # merge_group 的对照面是 `base_sha..head_sha`；push 用 before/after。
+          BEFORE: ${{ github.event.before || github.event.merge_group.base_sha }}
+          AFTER: ${{ github.event.after || github.event.merge_group.head_sha }}
         run: |
           set -uo pipefail
           err=$(mktemp)
@@ -877,6 +881,8 @@ jobs:
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
           else
             base="${{ github.event.before }}"
           fi
@@ -927,6 +933,8 @@ jobs:
           set +e
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "merge_group" ]; then
+            base="${{ github.event.merge_group.base_sha }}"
           else
             base="${{ github.event.before }}"
           fi

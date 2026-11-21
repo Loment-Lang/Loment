@@ -32,6 +32,9 @@ import potato  # noqa: E402  (边界内建那份清单的**单一真源**: potat
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "loment" / "tools" / "lomcli.lomt"
+#: stage1 编 `lomcli.lomt` 的上限。300 秒在并行分片下不够（本机约 115 秒、CI 上
+#: 330 秒以上，`#1770`）；与 `loment_potato_emit_test.STAGE1_TIMEOUT` 同一个数。
+STAGE1_TIMEOUT = 900
 IS_WIN = sys.platform == "win32"
 #: 目录里至少要有这么多命令 (用户 2026-09-15 的要求: 至少 30 条)
 CATALOG_FLOOR = 30
@@ -150,7 +153,7 @@ def test_reference_backend_agrees_with_selfhost_ir():
     want = lomentc.emit_llvm(*_load_src())
     r = subprocess.run([str(stage1), SRC.relative_to(ROOT).as_posix()],
                        cwd=str(ROOT), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", shell=False, timeout=300)
+                       encoding="utf-8", errors="replace", shell=False, timeout=STAGE1_TIMEOUT)
     assert r.returncode == 0, f"stage1 编译失败: {r.stderr[-300:]}"
     # 参考经 Python stdout 出去时会被 Windows 文本模式翻成 CRLF, 镜直接 write 是 LF ——
     # 读时统一成 LF 再比 (语义上两边都是 LF)。
@@ -706,6 +709,23 @@ def test_reference_pages_are_nonempty():
 
 
 @test
+def test_builtins_page_lists_every_syscall_builtin():
+    """`#1523`：编译器收的每一个 `syscallN`，`loment builtins` 页都要列出来。
+
+    两边各有一个真源：编译器那张 `lomentc.SYSCALL_BUILTINS` 决定"收不收"，CLI 页是用户
+    唯一会去查的地方。少一行不是措辞问题 —— 有人照着"最大五个实参"去写系统程序，把
+    `mmap` 的第六个参数丢掉，改用了更慢的路子（`#1523` 里 FUAI 就是这么绕开的）。
+    """
+    want = sorted(lomentc.SYSCALL_BUILTINS)
+    assert want, "编译器那边一个 syscall 内建都没有？"
+    rc, out, _ = _run(["builtins"] + _no_color())
+    assert rc == 0, rc
+    missing = [n for n in want if n not in out]
+    assert not missing, f"`loment builtins` 少了 {missing}（编译器收这几种）"
+    print(f"      {len(want)} 个 syscall 内建都在 builtins 页里: {', '.join(want)}")
+
+
+@test
 def test_reference_page_columns_never_touch():
     """首列 ≥10 宽时也必须与说明隔开（`#35`）。
 
@@ -1001,9 +1021,10 @@ def test_both_launchers_forward_the_renderer_output_modes():
     assert cmd.count('if /I "%~1"=="--short" goto barg_om') == 1, "cmd: build/run 不认 --short"
     assert cmd.count('if /I "%~1"=="--json" goto barg_om') == 1, "cmd: build/run 不认 --json"
     assert ':barg_om' in cmd and ':scan_om' in cmd, "cmd: 两个分支缺一个落点"
-    # 累加式的写法出现在三处：check 那路的 `:scan_om`、`--max` 的值（`:scan_max_val`，
-    # 见 `test_both_launchers_honour_diag_out`），与 build/run 那路的 `--max=N` 落点
-    assert cmd.count('set "com=%com% %~1"') == 3, "cmd: 没把这个开关累加进 com"
+    # 累加式的写法出现在四处：check 那路的 `:scan_om`、`--max` 的值（`:scan_max_val`，
+    # 见 `test_both_launchers_honour_diag_out`）、build/run 那路的 `--max=N`
+    # （`:barg_max_eq`）与 check/ir 那路的 `--max=N`（`:scan_max_eq`，`#1789` 补的）
+    assert cmd.count('set "com=%com% %~1"') == 4, "cmd: 没把这个开关累加进 com"
     assert cmd.count('set "com=%~1"') == 1, "cmd: build/run 那路没记下这个开关"
     # 五处：check/ir 一处、build 的驱动与链接器各一处、run 的驱动与链接器各一处。
     # 链接器那两处是 `issue #8` 加上的 —— lomelf 现在也有自己的 `--diag-out`，
@@ -1018,8 +1039,11 @@ def test_both_launchers_forward_the_renderer_output_modes():
         "cmd: 跳过一个词的机制不在（--max 的值会被当成源文件）"
     # 值同样先过数值校验再累加（`#659`；`:barg_max` 用的是校验过的 `%bmax%`）。
     assert cmd.count('set "com=%com% --max %bmax%"') == 1, "cmd: build/run 没带上 --max 的值"
-    assert cmd.count('for /f "delims=0123456789"') == 2, \
-        "cmd: 两处 --max 的值都没做数值校验（缺值/非数要当启动器的用法错）"
+    # 四处：`--max N` / `--max=N` 各两条路（`#1789` 把那两个 `=` 拼法也接上了校验）
+    assert cmd.count('for /f "delims=0123456789"') == 4, \
+        "cmd: 有一处 --max 的值没做数值校验（缺值/非数要当启动器的用法错）"
+    assert ':barg_max_eq' in cmd and ':scan_max_eq' in cmd, \
+        "cmd: `--max=N` 的两个落点缺一个（会绕过校验直接转交）"
 
 
 @test

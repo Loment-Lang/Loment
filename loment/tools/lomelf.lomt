@@ -2416,6 +2416,24 @@ fn do_gep(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: 
     let cur_o: u32 = co;
     let cur_l: u32 = cl;
     let k2: u32 = skip_comma(t, pe, le);
+    // LLVM 的第一个下标按 **pointee 整块**步进, 类型停在 pointee; 之后的下标才进入
+    // 数组/结构体。把数组规则也套在首下标上, `[64 x i64], i64 cap` 只走 8 字节而不是
+    // 一整行 512 —— 每个有状态能力的行因此互相重叠 (`#1830`)。**与参考实现同形**。
+    if k2 < le {
+        let ie0: u32 = opnd(tab, t, k2, le);
+        let vo0: u32 = load32(tab, C_VLOFF);
+        let vl0: u32 = load32(tab, C_VLLEN);
+        let to0: u32 = load32(tab, C_TYOFF);
+        let tl0: u32 = load32(tab, C_TYLEN);
+        d = emit_get_signed(tab, out, d, t, to0, tl0, vo0, vl0, RCX);
+        let step0: u32 = ty_size(t, cur_o, cur_l);
+        if step0 != 1 {
+            d = em_mov_ri64(out, d, RDX, step0 as u64);
+            d = em_imul_rr(out, d, RCX, RDX);
+        }
+        d = em_alu_rr(out, d, 1, RAX, RCX);
+        k2 = skip_comma(t, ie0, le);
+    }
     while k2 < le {
         let ie: u32 = opnd(tab, t, k2, le);
         let vo: u32 = load32(tab, C_VLOFF);

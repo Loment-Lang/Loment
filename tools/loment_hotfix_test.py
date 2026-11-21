@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -44,12 +45,34 @@ _COPY = (
 )
 
 
+_KEYDIR: Path | None = None
+
+
+def _keydir() -> Path:
+    global _KEYDIR
+    if _KEYDIR is not None:
+        return _KEYDIR
+    d = Path(tempfile.mkdtemp(prefix="loment-hotfix-key-"))
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(d / "key.pem"), "-out", str(d / "cert.pem"),
+                    "-subj", "/CN=loment-hotfix-test", "-days", "1"],
+                   check=True, capture_output=True)
+    pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout",
+                          "-in", str(d / "cert.pem")], check=True, capture_output=True)
+    (d / "pub.pem").write_bytes(pub.stdout)
+    _KEYDIR = d
+    return d
+
+
 def _tree(dst: Path, *, append: tuple[str, str] | None = None) -> Path:
     for pattern in _COPY:
         for src in sorted(ROOT.glob(pattern)):
             target = dst / src.relative_to(ROOT)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, target)
+    pin = dst / "loment" / "hotswap" / "release-key.pem"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_keydir() / "pub.pem", pin)
     if append is not None:
         rel, text = append
         with (dst / rel).open("a", encoding="utf-8", newline="\n") as f:
@@ -76,14 +99,7 @@ def _candidate(dst: Path, tree: Path, release: str) -> Path:
     sums = dst / "SHA256SUMS"
     sums.write_text(f"{man['artifact']['sha256']}  {payload.name}\n",
                     encoding="utf-8", newline="\n")
-    kd = Path(tempfile.mkdtemp(prefix="loment-hotfix-key-"))
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                    "-keyout", str(kd / "key.pem"), "-out", str(kd / "cert.pem"),
-                    "-subj", "/CN=loment-hotfix-test", "-days", "1"],
-                   check=True, capture_output=True)
-    pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout",
-                          "-in", str(kd / "cert.pem")], check=True, capture_output=True)
-    (dst / "loment-signing.pub.pem").write_bytes(pub.stdout)
+    kd = _keydir()
     subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(kd / "key.pem"),
                     "-out", str(dst / "SHA256SUMS.asc"), str(sums)],
                    check=True, capture_output=True)

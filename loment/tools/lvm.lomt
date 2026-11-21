@@ -2131,6 +2131,7 @@ fn place_globals(a: ptr, m: ptr) {
             wr(a, GD_OFF, i * 2 + 1, d_tok_hi(gtk));
             i = i + 1;
         } else {
+        wr(a, G_OFF, i * 6 + 4, va);                     // 这一格改存**地址**
         if ctx_get(a, C_SUB) != 0 {
             // `@__loment_heap` 是**外层容器**：它盖住所有堆对象，登记它会让每个已归还
             // 的堆地址都被"救活"。堆对象自己一条条登记，所以这块跳过。

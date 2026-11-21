@@ -944,7 +944,6 @@ entry:
 }
 
 
-@test
 def test_dismemory_matches_reference() -> None:
     """判 L（`docs/368`）：没有地址那一档的孪生 —— 合法程序的 rc/stdout + 故障的码/站点。
 

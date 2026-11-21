@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,15 +50,42 @@ def test_surface_is_non_vacuous_and_layers_fire():
     """语料里**真有** alloc 站点，而且 L0 与 L3 都**真的**接住了东西（尺子没空转）。"""
     rows = surf.measure()
     t = surf.total(rows)
-    print(f"      证明面：L0={t['l0']} L1={t['l1']} L2={t['l2']} L3={t['l3']} "
-          f"/ total={t['total_sites']}")
+    print(f"      证明面：L0={t['l0']} L0.5={t['l0_5']} L1={t['l1']} L2={t['l2']} "
+          f"L3={t['l3']} / total={t['total_sites']}")
     assert t["total_sites"] >= 20, f"语料里 alloc 站点太少了，尺子量的是空气：{t}"
     assert t["l0"] >= 3, f"L0 一格都没接住 —— 提升那一层坏了？{t}"
     assert t["l3"] >= 1, f"没有残差？那 L3 那半的判据也没意义了：{t}"
-    # `gc_ladder` 的自洽（promise 由 v10 保证，这里顺带钉一把）
-    assert t["l0"] + t["l1"] + t["l2"] + t["l3"] == t["total_sites"], t
-    # 已经在源里写了 `choose gc` 的（`gc_ladder` 那份）必须被跳过，不是被硬翻
-    assert any(g.get("skipped") for _rel, g in rows), "该跳过的那份不见了"
+    # `#1479`：L2 要有语料接住。原先 alpha 语料被整份跳过，L2 恒为 0 ——
+    # 把 L2 那一层删了这条判据也不会红。（L0.5 语料里没有产出者，另有一条夹具判据。）
+    assert t["l2"] >= 1, f"L2 一次都没出现 —— 纪元那一层坏了，或者 alpha 语料又被跳过了：{t}"
+    # `gc_ladder` 的自洽（promise 由 v10 保证，这里顺带钉一把）。**五格都要算** ——
+    # 原先漏了 L0.5：语料里第一份有 L0.5 的单元会让这条在**正确的代码**上变红（`#1479`）。
+    assert (t["l0"] + t["l0_5"] + t["l1"] + t["l2"] + t["l3"]
+            == t["total_sites"]), t
+    # 声明了别的档（`gc_manual` 等）的源必须被跳过，不是被硬翻
+    assert any(g.get("skipped") and not g.get("why") for _rel, g in rows), (
+        "声明了别的档的那几份没有被跳过")
+
+
+@test
+def test_the_l05_layer_is_reachable():
+    """`#1479`：L0.5（函数级栈区）要有**能产出它的**判据 —— 语料里没有两处 L0 的函数。
+
+    夹具是最小形状：一个函数、两处字面量尺寸且不外逃的 `alloc` ⇒ 两处都进同一条栈区。
+    """
+    src = ("module m" + chr(10) + "choose gc_auto_alpha" + chr(10) + "choose runtime"
+           + chr(10) + chr(10)
+           + "fn f() -> u32 {" + chr(10)
+           + "    let a: ptr = alloc(8);" + chr(10) + "    store8(a, 0, 1);" + chr(10)
+           + "    let b: ptr = alloc(8);" + chr(10) + "    store8(b, 0, 2);" + chr(10)
+           + "    return 0;" + chr(10) + "}" + chr(10))
+    with tempfile.TemporaryDirectory() as tds:
+        p = Path(tds) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        lad = surf._ladder_of(p)
+    assert not lad.get("skipped"), lad
+    assert lad["l0_5"] == 2 and lad["l0"] == 0, lad
+    print("      两处 L0 站点共用一个函数级栈区（L0.5 = 2）")
 
 
 @test

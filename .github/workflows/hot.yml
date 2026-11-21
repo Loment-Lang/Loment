@@ -1,0 +1,234 @@
+# 热更新发布 —— `v<RELEASE>-hot.<N>` 这条通道
+#
+# release.yml 只认 `tag == RELEASE` 的完整发行；热更新**不动 `RELEASE`**（动了就是改语言
+# 版本，正好违反准入的等式二），所以它需要自己的通道（`docs/278` §5.2）。这条 workflow 只做
+# 四件事：
+#
+#   1. 把 `v<RELEASE>-hot.<N>` 的基线、门禁、附注 tag 核一遍（与完整发行同一套判据，
+#      `#889`：发出去的必须是 main 上、且门禁绿过的那一笔）；
+#   2. 在基线 tag 的克隆上重放**声明为 fix** 的提交（`loment_projection`），
+#      产生投影树与投影清单；
+#   3. 从投影树编装载件（`loment_hotart`），**不是**从 R 编 —— 功能不许跟着进来；
+#   4. 用发行密钥给 `SHA256SUMS` 做分离签名，把候选挂成 GitHub Pre-Release。
+#
+# **信任锚在跑着的那棵树里**（`#1695`）：候选自带的公钥不参与验证。这里仍然把发行公钥
+# 作为 asset 一起发（`loment-signing.asc` / `FINGERPRINT`），那是给人核对的第二渠道，
+# 不是准入的输入。
+#
+# 边界：
+# * 载荷是 `loment/tools/lsp.lomt` 编出来的 ELF（`docs/281`）—— 热更新换的是跑着的
+#   工具链映像；链接器/编译器这类**构建期**修复不在载荷里，它们随下一次完整发行走。
+# * 一个没有声明 fix 的 tag **不出件**，这里直接红：热更新 tag 必须带东西。
+# * 同一个 tag 已发布 → 拒绝覆盖（`#438`）。
+
+name: hot
+
+on:
+  push:
+    tags: ['v*-hot.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '热更新 tag（如 v0.1.5.1-hot.1）'
+        required: true
+      dry_run:
+        description: '只构建、产物挂成 workflow artifact，不碰 GitHub Release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  checks: read
+
+concurrency:
+  group: hot-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  hot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: tag 的形状与基线
+        id: ver
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          case "$TAG" in
+            v*-hot.*) ;;
+            *) echo "::error::热更新 tag 必须是 v<RELEASE>-hot.<N> —— 现在拿到 '$TAG'"; exit 1 ;;
+          esac
+          base=${TAG#v}
+          base=${base%%-hot.*}
+          want=$(python -c "import sys;sys.path.insert(0,'tools');import loment_release;print(loment_release.RELEASE)")
+          if [ "$base" != "$want" ]; then
+            echo "::error::$TAG 的基线是 $base，而树里 RELEASE=$want —— 一份清单不能同时属于两条基线"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "hot 版本 $TAG / 基线 $base"
+
+      - name: tag 必须落在 main 上，而且那一笔的门禁必须绿过
+        id: where
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          git fetch -q --no-tags origin \
+            "+refs/heads/main:refs/remotes/origin/main" \
+            "+refs/tags/$TAG:refs/tags/$TAG"
+          sha=$(git rev-parse "$TAG^{commit}")
+          if ! git merge-base --is-ancestor "$sha" refs/remotes/origin/main; then
+            echo "::error::$TAG 指向 $sha，而这一笔不在 main 上 —— 不发布"
+            exit 1
+          fi
+          got=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${sha}/check-runs?filter=latest&per_page=100" \
+            --jq '[.check_runs[] | select(.name == "ci.py --static-only") | .conclusion] | last // "missing"')
+          if [ "$got" != "success" ]; then
+            echo "::error::$sha 的 \`ci.py --static-only\` 是 \`$got\` —— 不发布"
+            exit 1
+          fi
+          if [ "$(git cat-file -t "$TAG")" != "tag" ]; then
+            echo "::error::$TAG 是轻量 tag —— 请用 \`git tag -a\` 打附注 tag"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "祖先与门禁: $sha 在 main 上, ci.py --static-only = success"
+
+      - name: 取出基线树
+        env:
+          BASE_TAG: v${{ steps.ver.outputs.base }}
+        run: |
+          set -eu
+          git fetch -q --no-tags origin "+refs/tags/$BASE_TAG:refs/tags/$BASE_TAG"
+          git worktree add --detach "$RUNNER_TEMP/hot-base" "$BASE_TAG"
+          echo "基线树: $RUNNER_TEMP/hot-base ($BASE_TAG)"
+
+      - name: 投影（只保留声明为 fix 的提交）
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          BASE_TAG: v${{ steps.ver.outputs.base }}
+        run: |
+          set -eu
+          python tools/loment_projection.py \
+            --base "$BASE_TAG" --tip HEAD --release "$TAG" \
+            --work-dir loment/build/hot-tree \
+            --out loment/build/hot-projection.json
+          echo '--- 投影：'
+          cat loment/build/hot-projection.json
+
+      - name: 编热更新件
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -eu
+          python tools/loment_hotart.py \
+            --old "$RUNNER_TEMP/hot-base" \
+            --new loment/build/hot-tree \
+            --entry loment/tools/lsp.lomt \
+            --release "$TAG" \
+            --out loment/build/hot \
+            --projection loment/build/hot-projection.json
+          test -f loment/build/hot/candidate.hot || {
+            echo "::error::$TAG 里没有声明为 fix 的提交（或全被剔除）—— 热更新 tag 必须带东西"
+            exit 1
+          }
+
+      - name: 分离签名（发行密钥）
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          SIGNING_KEY: ${{ secrets.LOMENT_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY:-}" ]; then
+            echo "::error::没有 LOMENT_RELEASE_SIGNING_KEY —— 拒绝发布一个没有外部完整性锚的热更新"
+            exit 1
+          fi
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
+          chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --quiet --import
+          fpr=$(gpg --batch --with-colons --list-secret-keys \
+            | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ -z "$fpr" ]; then
+            echo "::error::导入了签名密钥但读不到指纹"; exit 1
+          fi
+          gpg --batch --yes --armor --detach-sign --local-user "$fpr" \
+            --output loment/build/hot/SHA256SUMS.asc loment/build/hot/SHA256SUMS
+          gpg --batch --yes --armor --export "$fpr" > loment/build/hot/loment-signing.asc
+          printf '%s\n' "$fpr" > loment/build/hot/FINGERPRINT
+          gpg --batch --verify loment/build/hot/SHA256SUMS.asc loment/build/hot/SHA256SUMS
+          echo "signed hot SHA256SUMS with $fpr"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loment-hot-${{ steps.ver.outputs.tag }}
+          path: loment/build/hot/*
+          if-no-files-found: error
+
+      - name: 建 Pre-Release
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes=".github/release-notes/$TAG.md"
+          if [ -f "$notes" ]; then
+            set -- --notes-file "$notes"
+          else
+            set -- --generate-notes
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG 已发布 —— 拒绝覆盖 asset (#438)"
+            exit 1
+          fi
+          gh release create "$TAG" --prerelease --title "Loment hot $TAG" "$@" \
+            loment/build/hot/candidate.hot \
+            loment/build/hot/hotfix.json \
+            loment/build/hot/SHA256SUMS \
+            loment/build/hot/SHA256SUMS.asc \
+            loment/build/hot/loment-signing.asc \
+            loment/build/hot/FINGERPRINT
+
+      - name: 核对挂上去的 asset
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -eu
+          have=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
+          want=$(printf '%s\n' \
+            "FINGERPRINT" \
+            "SHA256SUMS" \
+            "SHA256SUMS.asc" \
+            "candidate.hot" \
+            "hotfix.json" \
+            "loment-signing.asc" | sort)
+          if [ "$have" != "$want" ]; then
+            echo "::error::热更新 $TAG 的 asset 与预期不符"
+            echo "--- 实有 ---"; echo "$have"
+            echo "--- 应有 ---"; echo "$want"
+            exit 1
+          fi
+          echo "$have"
+          echo "六个 asset 齐了（装载件 + 清单 + 分离签名 + 公钥与指纹）"

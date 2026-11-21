@@ -23,9 +23,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import loment_hotfix as hf
@@ -44,7 +46,11 @@ IDENTITY_GLOBS = (
 CAPABILITY_GLOBS = ("loment/tools/*.lomt", "loment/selfhost/*.lomt")
 FIXED_CORE_LIST = "loment/hotswap/fixed.txt"
 
-SIG_FILES = ("SHA256SUMS", "SHA256SUMS.asc", "loment-signing.pub.pem")
+SIG_FILES = ("SHA256SUMS", "SHA256SUMS.asc")
+
+#: 信任锚**只在跑的这棵树里**。候选自带公钥等于自己给自己发证书（`#1695`）；
+#: 所以这里一个候选目录里的路径都不许出现。PEM 给测试与本机自签用，.asc 是发行密钥。
+PINNED_KEYS = ("loment/hotswap/release-key.asc", "loment/hotswap/release-key.pem")
 
 #: 版本可以有**三段以上**（`0.1.5.1` 就是四段）。与 `loment_staging._TAG_RE` 同一条。
 _TAG_RE = re.compile(r"^v(?P<base>\d+(?:\.\d+)*)(?:-(?P<kind>[A-Za-z0-9.]+))?$")
@@ -151,20 +157,51 @@ def read_sums(candidate: Path) -> dict[str, str]:
     return sums
 
 
-def verify_signature(candidate: Path) -> None:
+def pinned_key(tree: Path) -> Path:
+    """运行树里钉死的那把公钥。**找不到就拒绝**，不退回候选自带的任何一把。"""
+    for rel in PINNED_KEYS:
+        p = tree / rel
+        if p.is_file():
+            return p
+    raise Reject("trust-anchor", "运行树里没有固定的发布公钥 —— 拒绝从候选里取")
+
+
+def _gpg_verify(key: Path, sig: Path, data: Path) -> subprocess.CompletedProcess:
+    """只用钉住的那把公钥的临时 keyring 验签 —— 用户自己的 keyring 不参与信任判断。"""
+    env = dict(os.environ)
+    with tempfile.TemporaryDirectory(prefix="loment-trust-") as home:
+        env["GNUPGHOME"] = home
+        try:
+            # 导入的退出码不能当判据：有些宿主起不了 gpg-agent（本机 Git Bash 实测
+            # 返回 2），而公钥其实已经进了 keyring。真正的判据是下面这次 verify。
+            subprocess.run(["gpg", "--batch", "--quiet", "--import", str(key)],
+                           capture_output=True, text=True, env=env)
+        except FileNotFoundError:
+            raise Reject("signature-unverifiable", "找不到 gpg —— 拒绝，不猜") from None
+        return subprocess.run(
+            ["gpg", "--batch", "--quiet", "--verify", str(sig), str(data)],
+            capture_output=True, text=True, env=env,
+        )
+
+
+def verify_signature(candidate: Path, tree: Path) -> None:
     missing = [n for n in SIG_FILES if not (candidate / n).is_file()]
     if missing:
         raise Reject("signature-missing", ", ".join(missing))
+    key = pinned_key(tree)
+    sig = candidate / "SHA256SUMS.asc"
+    sums = candidate / "SHA256SUMS"
     try:
-        r = subprocess.run(
-            ["openssl", "dgst", "-sha256",
-             "-verify", str(candidate / "loment-signing.pub.pem"),
-             "-signature", str(candidate / "SHA256SUMS.asc"),
-             str(candidate / "SHA256SUMS")],
-            capture_output=True, text=True,
-        )
+        if key.suffix.lower() == ".pem":
+            r = subprocess.run(
+                ["openssl", "dgst", "-sha256",
+                 "-verify", str(key), "-signature", str(sig), str(sums)],
+                capture_output=True, text=True,
+            )
+        else:
+            r = _gpg_verify(key, sig, sums)
     except FileNotFoundError:
-        raise Reject("signature-unverifiable", "找不到 openssl —— 拒绝，不猜")
+        raise Reject("signature-unverifiable", "找不到 openssl —— 拒绝，不猜") from None
     if r.returncode != 0:
         raise Reject("signature", (r.stdout + r.stderr).strip()[:200])
 
@@ -215,7 +252,7 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
         raise Reject("not-prerelease", release)
 
     steps.tick()
-    verify_signature(candidate)
+    verify_signature(candidate, tree)
 
     artifact = cand.get("artifact") or {}
     name = artifact.get("name", "")

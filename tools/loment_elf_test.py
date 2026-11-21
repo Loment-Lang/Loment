@@ -2292,8 +2292,8 @@ def test_lomelf_reports_unsupported_instead_of_miscompiling():
     字节比对在 `_MIRROR_SHAPE_IR["indirect_call"]` 那一格。
     """
     bad = [
-        ("结构体动态下标 GEP",
-         "define void @_start() {\nentry:\n  %p = alloca { i32, i32 }\n  %i = load i32, ptr %p\n  %q = getelementptr { i32, i32 }, ptr %p, i32 %i\n  ret void\n}\n"),
+        ("结构体动态字段下标 GEP",
+         "define void @_start() {\nentry:\n  %p = alloca { i32, i32 }\n  %i = load i32, ptr %p\n  %q = getelementptr { i32, i32 }, ptr %p, i32 0, i32 %i\n  ret void\n}\n"),
         ("直接调用超过 16 个实参",
          "define void @_start() {\nentry:\n  call void @f("
          + ", ".join(f"i32 {i}" for i in range(17)) + ")\n  ret void\n}\n\n"
@@ -2715,7 +2715,7 @@ fn _start() {
         let y: u32 = perform Log.add(x);
         x + y
     } with {
-        add(base) => { resume(base + 1); }
+        add(arg) => { resume(arg + 1); }
     };
     print_num(n as i64);
     print("\\n");
@@ -2723,6 +2723,63 @@ fn _start() {
 }
 """,
         f"{(5 + 1) + ((5 + 1) + 1)}\n".encode()),
+    # 捕获（A3b）：臂读外层 `base`，而 handle 体里又声明了一个同名局部。
+    # 捕获在**进入处理器时**取值 —— 臂读到的必须是 40，不是体里的 7。
+    "capture": (
+        """choose write grammar tur2026.2
+
+module effects_run_capture
+choose lspe_effects_true
+choose runtime
+
+effect Log {
+    fn get() -> u32;
+}
+
+fn _start() {
+    let base: u32 = 40;
+    let n: u32 = handle Log {
+        let a: u32 = perform Log.get();
+        a + 1
+    } with {
+        get() => { resume(base + 1); }
+    };
+    print_num(n as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        f"{((40 + 1) + 1)}\n".encode()),
+    # abort（A3b）：`stop` 的臂不 resume，整个 handle 直接取 9（还捕获了外层 `k`），
+    # 体里 `a + b` 不执行。
+    "abort": (
+        """choose write grammar tur2026.2
+
+module effects_run_abort
+choose lspe_effects_true
+choose runtime
+
+effect Log {
+    fn get() -> u32;
+    fn stop() -> u32;
+}
+
+fn _start() {
+    let k: u32 = 9;
+    let n: u32 = handle Log {
+        let a: u32 = perform Log.get();
+        let b: u32 = perform Log.stop();
+        a + b
+    } with {
+        get() => { resume(40); }
+        stop() => { return k; }
+    };
+    print_num(n as i64);
+    print("\\n");
+    syscall4(60, 0, 0, 0);
+}
+""",
+        b"9\n"),
 }
 
 
@@ -5302,6 +5359,103 @@ def test_manual_with_lgc_collects_when_the_arena_runs_out():
         f"暂停窗口里居然跑完了（rc={rc['paused']}）—— 那说明它没收也过来了，"
         "这一格测不出救援")
     print(f"      manual+lgc：窗口里 OOM 被救回 (rc=7)；暂停窗口里耗尽 (rc=132)")
+
+
+#: `#1830`：两个**有状态**的能力各占 `[64 x i64]` 的一整行。首下标若只走 8 字节，
+#: c1 的 guard 会读到 c0 的 slot 1（已被消费）—— 必须活着跑完。
+_CAP_ROWS_SRC = """module caprows
+choose runtime
+capability c0 : sp[0..3] consumed(1)
+capability c1 : sp[0..3] consumed(1)
+fn main() {
+    guard c0(0);
+    guard c0(1);
+    guard c1(0);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+#: `#1830`：`@a[1]` 是第二行 `[i8 67, i8 68]`，再取 `[0]` 该是 `C`(67)。
+#: 首下标按元素大小步进时，两次下标合起来只走 1 字节 —— 读到 `B`(66)。
+_NESTED_GEP_IR = """@a = internal global [2 x [2 x i8]] [ [2 x i8] [i8 65, i8 66], [2 x i8] [i8 67, i8 68] ]
+
+define i32 @_start() {
+entry:
+  %p = getelementptr [2 x [2 x i8]], ptr @a, i32 0, i32 1
+  %c = load i8, ptr %p
+  %r = zext i8 %c to i32
+  %r64 = zext i32 %r to i64
+  %x = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %r64, i64 0, i64 0)
+  ret i32 0
+}
+"""
+
+
+@test
+def test_a_second_stateful_capability_gets_its_own_row():
+    """`#1830`：首下标按 **pointee 整块**步进 —— 两个有状态能力的行不许重叠。
+
+    未修时参考链接器读到 c0 的 slot 1（1 >= 参数），`guard c1(0)` 变 ud2，rc=132。
+    自举镜像发的是同一个 +8 步长，所以两侧都要跑、都要 0。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    llrepo = ROOT / "loment" / "build" / "_caprows.ll"
+    mirrepo = ROOT / "loment" / "build" / "_caprows_mirror.elf"
+    try:
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            src = td / "caprows.lomt"
+            src.write_text(_CAP_ROWS_SRC, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            llrepo.write_text(ll.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / "caprows.native"
+            nat.write_bytes(blob)
+            rc, _out = _run_bin(nat, "caprows_ref", td)
+        assert rc == 0, f"参考链接器：c1 的 guard 读到了 c0 的行（rc={rc}）"
+        rc, err = _mirror_run(mir, "loment/build/_caprows.ll",
+                              "loment/build/_caprows_mirror.elf")
+        assert rc == 0, f"镜像退出 {rc}: {err[-200:]}"
+        with tempfile.TemporaryDirectory() as tds:
+            rc, _out = _run_bin(mirrepo, "caprows_mir", Path(tds))
+        assert rc == 0, f"自举镜像：c1 的 guard 读到了 c0 的行（rc={rc}）"
+    finally:
+        llrepo.unlink(missing_ok=True)
+        mirrepo.unlink(missing_ok=True)
+    print("      两个有状态能力各占一整行：两份链接器的产物都跑通")
+
+
+@test
+def test_a_nested_array_gep_steps_by_the_element_type():
+    """`#1830`：嵌套数组的 `[i32 0, i32 1]` 该落在第二行（67），不是第二个字节（66）。"""
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    llrepo = ROOT / "loment" / "build" / "_nested_gep.ll"
+    mirrepo = ROOT / "loment" / "build" / "_nested_gep_mirror.elf"
+    try:
+        blob, _info = lomelf.compile_ll(_NESTED_GEP_IR)
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            nat = td / "nested.native"
+            nat.write_bytes(blob)
+            rc, _out = _run_bin(nat, "nested_ref", td)
+        assert rc == 67, f"参考链接器：期望 67（'C'），得到 {rc}"
+        llrepo.write_text(_NESTED_GEP_IR, encoding="utf-8", newline="\n")
+        rc, err = _mirror_run(mir, "loment/build/_nested_gep.ll",
+                              "loment/build/_nested_gep_mirror.elf")
+        assert rc == 0, f"镜像退出 {rc}: {err[-200:]}"
+        with tempfile.TemporaryDirectory() as tds:
+            rc, _out = _run_bin(mirrepo, "nested_mir", Path(tds))
+        assert rc == 67, f"自举镜像：期望 67，得到 {rc}"
+    finally:
+        llrepo.unlink(missing_ok=True)
+        mirrepo.unlink(missing_ok=True)
+    print("      嵌套数组 GEP：首下标按 pointee 步进（两份链接器都得到 67）")
 
 
 def main() -> int:

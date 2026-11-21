@@ -898,7 +898,20 @@ class Emitter:
         _pty, pval = parse_operand(parts[0])
         self.get_ptr(pval, RAX)
         cur = ty
-        for p in parts[1:]:
+        idxs = parts[1:]
+        # LLVM 的**第一个**下标按**指针指向的类型**整块步进，类型停在 pointee；之后的下标
+        # 才进入数组/结构体。把数组规则也套在首下标上，`[64 x i64], i64 cap` 就只走 8 字节
+        # 而不是一整行 512 —— 每个有状态能力的行因此互相重叠（`#1830`）。
+        if idxs:
+            ity, ival = parse_operand(idxs[0])
+            self.get_signed(ity, ival, RCX)
+            step = size_of(ty)
+            if step != 1:
+                self.asm.emit(mov_ri(RDX, step))
+                self.asm.emit(imul_rr(RCX, RDX))
+            self.asm.emit(alu_rr(0x01, RAX, RCX))
+            idxs = idxs[1:]
+        for p in idxs:
             ity, ival = parse_operand(p)
             # **GEP 的下标是**符号扩展的（LLVM LangRef）—— `get` 按设计零扩展，所以这里
             # 必须走 `get_signed`：`getelementptr i8, ptr %p, i32 -4` 要的是 `%p - 4`，
@@ -911,7 +924,7 @@ class Emitter:
                 cur = et
             elif cur.startswith("{"):
                 if not re.match(r"^-?[0-9]+$", ival):
-                    raise Unsupported("v0 只支持常量下标的结构体 GEP（动态下标请用 extractvalue）")
+                    raise Unsupported("v0 只支持常量**字段**下标的结构体 GEP（动态下标请用 extractvalue）")
                 off, cur = field_offset(cur, int(ival))
                 if off:
                     self.asm.emit(alu_ri(ADD, RAX, off))
@@ -2816,18 +2829,55 @@ def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
 
     a.label("__ws_open_create")
     movi(RCX, PE_STATE_VA + WS_TMP)                # lpFileName
-    movi32(RDX, 0x80000000)                     # GENERIC_READ
     ld(R11, RSP, 0x30)                          # flags
-    a.emit(b"\x41\xF6\xC3\x01")                 # test r11b, O_WRONLY
-    jcc_l("e", "__ws_o_acc")
+    a.emit(b"\x45\x89\xDA")                     # mov r10d, r11d
+    a.emit(b"\x41\x83\xE2\x03")                 # and r10d, O_ACCMODE
+    a.emit(b"\x41\x83\xFA\x03")                 # cmp r10d, 3（不是合法访问模式）
+    jcc_l("e", "__ws_fail")                     # Linux 这里返回 EINVAL
+    movi32(RDX, 0x80000000)                     # GENERIC_READ（O_RDONLY）
+    a.emit(b"\x41\x83\xFA\x01")                 # cmp r10d, O_WRONLY
+    jcc_l("ne", "__ws_o_acc_rw")
     movi32(RDX, 0x40000000)                     # GENERIC_WRITE
-    a.label("__ws_o_acc")
+    jmp_l("__ws_o_acc_ap")
+    a.label("__ws_o_acc_rw")
+    a.emit(b"\x41\x83\xFA\x02")                 # cmp r10d, O_RDWR
+    jcc_l("ne", "__ws_o_acc_ap")
+    movi32(RDX, 0xC0000000)                     # GENERIC_READ|GENERIC_WRITE
+    a.label("__ws_o_acc_ap")
+    # O_APPEND 只对可写句柄有意义；**FILE_APPEND_DATA 且不含 FILE_WRITE_DATA**
+    # 才是 Windows 的"每次写都落到末尾"（GENERIC_WRITE 含 FILE_WRITE_DATA，不行）。
+    a.emit(b"\x45\x85\xD2")                     # test r10d, r10d（O_RDONLY）
+    jcc_l("e", "__ws_o_share")
+    a.emit(b"\x41\xF7\xC3\x00\x04\x00\x00")     # test r11d, O_APPEND
+    jcc_l("e", "__ws_o_share")
+    a.emit(b"\x41\x83\xFA\x02")                 # cmp r10d, O_RDWR
+    jcc_l("e", "__ws_o_ap_rw")
+    movi32(RDX, 0x00000004)                     # FILE_APPEND_DATA
+    jmp_l("__ws_o_share")
+    a.label("__ws_o_ap_rw")
+    movi32(RDX, 0x80000004)                     # GENERIC_READ|FILE_APPEND_DATA
+    a.label("__ws_o_share")
     movi32(R8, 3)                               # FILE_SHARE_READ|WRITE
     a.emit(b"\x45\x31\xC9")                     # xor r9d, r9d
     movi32(RAX, 3)                              # OPEN_EXISTING
     a.emit(b"\x41\xF6\xC3\x40")                 # test r11b, O_CREAT
+    jcc_l("e", "__ws_o_trunc")
+    a.emit(b"\x41\xF6\xC3\x80")                 # test r11b, O_EXCL
+    jcc_l("e", "__ws_o_creat")
+    movi32(RAX, 1)                              # O_CREAT|O_EXCL -> CREATE_NEW
+    jmp_l("__ws_o_disp")
+    a.label("__ws_o_creat")
+    a.emit(b"\x41\xF7\xC3\x00\x02\x00\x00")     # test r11d, O_TRUNC
+    jcc_l("e", "__ws_o_always")
+    movi32(RAX, 2)                              # CREATE_ALWAYS（清空）
+    jmp_l("__ws_o_disp")
+    a.label("__ws_o_always")
+    movi32(RAX, 4)                              # OPEN_ALWAYS（保留原有内容）
+    jmp_l("__ws_o_disp")
+    a.label("__ws_o_trunc")
+    a.emit(b"\x41\xF7\xC3\x00\x02\x00\x00")     # test r11d, O_TRUNC
     jcc_l("e", "__ws_o_disp")
-    movi32(RAX, 2)                              # CREATE_ALWAYS
+    movi32(RAX, 5)                              # TRUNCATE_EXISTING
     a.label("__ws_o_disp")
     st(RSP, 0x20, RAX)
     movi32(RAX, 0x80)                           # FILE_ATTRIBUTE_NORMAL

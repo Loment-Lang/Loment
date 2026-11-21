@@ -1,14 +1,15 @@
 # 344 · LSPE 框架：宏观检查器、调度器与两档 SDK
 
-> 状态: **V0–V3 已落地**（2026-11-18；Python 包），V4 等 SDK 冻结
-> 基准: `origin/main`（`663b93ff`，2026-11-13）
+> 状态: **V0–V4 已落地**（2026-11-21；Python 包，`lspe-sdk/1.0` 已冻结）。
+> SDK 的单入口与冻结面见 `docs/361-lspe-sdk.md`。
+> 基准: `origin/main`（`7802be9c`，2026-11-21）
 > 上游: `docs/262-lspe-safety-police-espace.md`（LSPE）· `docs/317-lspe-borrow-checker.md`（E10）·
 > `docs/320-capability-temporal-safety.md` · `docs/328-authority-temporal-safety.md` ·
 > `docs/345-loment-classes-and-indirect.md`（类继承/间接引用，本框架的地基）·
 > `docs/253`（LMS）· `docs/210`（LGC）· `docs/146`（能力域）· `docs/158`（冻结面）·
 > `docs/182`（诊断与 `choose`）
 > 一句话: **LSPE 已经是独立包；这次把它做成真正的框架：`MacroChecker` 抽象基类、
-> 所有检查器作为子类、`LspeHost` 持 `checker` + `scheduler`、调度器按适用性决定
+> `MainChecker` 是唯一顶层检查器并持 `checker` + `scheduler`、调度器按适用性决定
 > 谁跑谁不跑，并把“为什么没跑”写进台账。类继承与间接引用由
 > `choose class_on` / `indirect_on` 打开；默认关闭，`_off` 产物逐字节不变。**
 
@@ -16,16 +17,17 @@
 
 ## 0. 三句话
 
-1. **现状不是零**：`loment/lspe/` 已经是独立包 —— 14 条义务、9 个引擎（E1–E9）+ E10、
-   证据子集格上的工作列表求解器、站点普查、派生树、台账、LSPC、问题码。编译器只是
-   客户端；引擎顺序今天**手写固定**。
-2. **这次做的是“框架化”**：`MacroChecker` 是抽象基类；`LspeHost` 是宏观检查器实例，
-   持有 `checker`（子类登记/派发）与 `scheduler`（适用性/顺序/预算/跳过）；所有
-   引擎、主检查器、Advisory 都是 `MacroChecker` 的子类。派发用 `class_on` 的
-   vtable + `indirect_on` 的封闭世界间接调用。
+1. **现状不是零**：`loment/lspe/` 已经是独立包 —— 20 条义务、9 个引擎（E1–E9）+
+   E10/E11/E12、证据子集格上的工作列表求解器、站点普查、派生树、台账、LSPC、
+   问题码。编译器只是客户端；引擎顺序今天**手写固定**。
+2. **这次做的是“框架化”**：`MacroChecker` 是抽象基类；`MainChecker` 是**唯一的
+   顶层检查器**，持有 `checker`（子类登记/派发）与 `scheduler`（适用性/顺序/
+   预算/跳过）；域检查器、借用检查器、效应检查器等都登记在它下面。派发用
+   `class_on` 的 vtable + `indirect_on` 的封闭世界间接调用（语言面未落地时，
+   Python 侧先做同一形状）。
 3. **不做的**：不做运行期插件加载（产物是静态 ELF）、不做开放世界的间接引用
-   （目标集必须可枚举）、不现在发公开 SDK 1.0（义务/证据面还没定型）。
-   **语义留在原处；这次搬的是派发。**
+   （目标集必须可枚举）。**语义留在原处；这次搬的是派发。** SDK 1.0 已在
+   2026-11-21 冻结（`docs/361`）。
 
 ---
 
@@ -35,10 +37,13 @@
 
 | 模块 | 角色 |
 |---|---|
-| `loment/lspe/registry.py` | 14 条义务、8 种证据、级别门、站点种类、Q 码、三问、地板键 |
+| `loment/lspe/registry.py` | 20 条义务、8 种证据、级别门、站点种类、Q 码、三问、地板键 |
 | `loment/lspe/solver.py` | 证据子集格上的工作列表；确定性步数预算与深度上限 |
-| `loment/lspe/census.py` | 词法普查 + 引擎 E1–E4、E9 |
+| `loment/lspe/census.py` | 词法普查 + 引擎 E1–E4、E9、E12 |
 | `loment/lspe/loans.py` | E10 借用检查（报告面，A0/A1） |
+| `loment/lspe/effects.py` | E11 效应检查（报告面，A0/A1） |
+| `loment/lspe/framework.py` | `MacroChecker` / `MainChecker` / 子检查器 / 登记表 / 调度器 |
+| `loment/lspe/sdk.py` | 冻结的公开面（`lspe-sdk/1.0`，`SDK_SURFACE`） |
 | `loment/lspe/derive.py` | 派生树、规范序列化、证明哈希 |
 | `loment/lspe/ledger.py` | Potato v16 `lspe` 字段与 `.lspe` 旁挂 |
 | `loment/lspe/lspc.py` | 编译前风险单（警察） |
@@ -47,11 +52,11 @@
 | `loment/lspe/aicheck.py` / `aiask.py` | AI 检查器：只产 Q014，**永不进证据** |
 | `loment/lspe/lspe.lomt` | 自举侧同一套普查与引擎（token 级、固定容量） |
 
-编译器在 `tools/lomentc.py` 的 `load()` 里调一次普查、在 `emit_potato()` 里调一次台账，
-再加一个名字根；它**不定义**义务、证据、求解器。这条边界由 `lspe_test` 钉住
-（`docs/262` §5.14）。
+编译器在 `tools/lomentc.py` 的 `load()` 里调一次 `main_checker().audit(...)`、
+在 `emit_potato()` 里调一次台账，再加一个名字根；它**不定义**义务、证据、求解器。
+这条边界由 `lspe_test` 钉住（`docs/262` §5.14）。
 
-### 1.2 九个引擎 + E10
+### 1.2 九个引擎 + E10/E11/E12
 
 | 引擎 | 证什么 | 默认级别 | 确定性要求 |
 |---|---|---|---|
@@ -65,6 +70,8 @@
 | **E8 反证探针** | 关掉检查有没有探针变红 | L0（离线） | 探针表机械生成 |
 | **E9 域检查器** | 域声明良构、`guard` 静态包含性、撤销 | L0/L1/L3 | 词法 + 循环归纳 |
 | **E10 借用** | loan 图、kill=最后使用、悬垂、`free` 时仍借 | A0/A1 | 报告面，不改判决 |
+| **E11 效应** | 行、处理器、`resume`、续延捕获 | A0/A1 | 报告面，不改判决 |
+| **E12 GC** | `alloc` 站点的回收判决指到唯一声明 | L0/L1 | 只做作用域解析 |
 
 ### 1.3 今天的“调度器”是隐式的
 
@@ -83,49 +90,51 @@
 ### 2.1 一张图
 
 ```
-LspeHost（宏观检查器实例）
-├── checker   : CheckerRegistry        // 子类登记与派发
+MainChecker（唯一顶层检查器；Producer / P0）
+├── checker   : CheckerRegistry        // 子检查器登记与派发
 └── scheduler : Scheduler              // 适用性 / 顺序 / 预算 / 跳过
 
 MacroChecker（抽象基类）
-├── ProducerChecker   extends MacroChecker   // 主检查器的判决
-├── E1Constant        extends MacroChecker
-├── E2Typed           extends MacroChecker
-├── E3LocalFlow       extends MacroChecker
-├── E4Interproc       extends MacroChecker
-├── E5GlobalInvariant extends MacroChecker
-├── E6Substitution    extends MacroChecker   // 强制
-├── E7Differential    extends MacroChecker   // Gate
-├── E8Falsification   extends MacroChecker   // Gate
-├── E9Domain          extends MacroChecker
-├── E10Loans          extends MacroChecker
-└── AdvisoryChecker   extends MacroChecker   // AI / 第三方，只产 Q
+├── ConstantChecker      (E1/E2/E5)   // 共用一遍词法
+├── BoundsChecker        (E2b)        // 强制
+├── LocalFlowChecker     (E3)
+├── InterprocChecker     (E4)
+├── SubstitutionChecker  (E6)         // 强制
+├── DomainChecker        (E9)
+├── BorrowChecker        (E10)        // 报告面
+├── EffectChecker        (E11)        // 报告面
+├── GCChecker            (E12)
+├── DifferentialGate     (E7)         // Gate
+├── FalsificationGate    (E8)         // Gate
+└── AdvisoryChecker      (A1)         // AI / 第三方，只产 Q
 ```
 
-- **`MacroChecker` 是抽象基类**：定义 `desc()` / `role()` / `applies()` / `check()`。
-- **`LspeHost` 是宏观检查器实例**：它持有 `checker`（登记/派发）与 `scheduler`
-  （调度）；它本身不产证据、不改判决。
-- **所有检查器都是子类**：主检查器是 `ProducerChecker`，引擎是 E1–E10，
-  Advisory 是第三方/AI。子类只实现 `check()`；`applies()` 默认用描述符的触发器。
+- **`MacroChecker` 是抽象基类**：定义 `desc()` / `role()` / `applies()` /
+  `check()` / `scan()`。
+- **`MainChecker` 是唯一的顶层检查器**：它持有 `checker`（登记/派发）与
+  `scheduler`（调度）；它自己承担 Producer 角色，不登记进自己的表。子检查器
+  要么走 `check()` 产 `Claim`/问题，要么走 `scan()` 产站点。
+- **所有引擎都是它的子检查器**：域检查器（E9）、借用检查器（E10）、效应
+  检查器（E11）、GC 检查器（E12）等。`applies()` 默认用描述符的触发器。
 - **角色不是继承层级**：所有子类都 `extends MacroChecker`，但 `role()` 决定
   它能产什么（Producer/Evidence/Gate/Advisory）、能不能被跳过、要不要进 LSPC。
   继承给“统一接口”，角色给“权限”。
 
-**为什么主检查器是 `ProducerChecker` 子类，而不是宿主**：`docs/262` §0.1 的价值是
-**质疑器审问编译器自己的判决**。如果生产判决的 `check()` 同时是宿主，审问就变成
-自己审自己；如果它只是子类，它仍与审计器平级，但**阶段**（P0）与**角色**
-（Producer）把它和证据引擎分开。角色与阶段是审计独立性的落点，不是继承。
+**为什么主检查器不登记进自己的表**：它是 P0 的生产者，不是“被调度”的对象。
+如果主检查器也是一个可跳过的子检查器，调度器就能把生产阶段变成 `skipped`；
+那会让“审问编译器自己的判决”失去主体。P0 固定由主检查器承担，调度器只决定
+它下面的证据/闸门子检查器跑不跑。这条分界是审计独立性的落点。
 
 ### 2.2 角色（继承之上的第二轴）
 
 | 角色 | 子类 | 能产什么 | 能不能跳过 |
 |---|---|---|---|
-| **Producer** | `ProducerChecker` | 判决/站点 | 否（P0 固定） |
-| **Evidence** | E1–E6、E9、E10 | 证据节点 | 可按适用性跳过 |
-| **Gate** | `E7Differential`、`E8Falsification` | `Differential` / `REFUTED` | E7 可按“孪生不可用”跳过；E8 按探针表 |
-| **Advisory** | `AdvisoryChecker` | **只有 Q 码** | 可按开关跳过 |
-| **Resolver** | `LspeSolver`（宿主固定） | 证据格定点 | 否 |
-| **Ledger** | `ledger.py` / `lspc.py`（宿主固定） | 台账 / 预检单 | 否 |
+| **Producer** | `MainChecker`（顶层） | 判决/站点 | 否（P0 固定） |
+| **Evidence** | E1–E6、E9、E10、E11、E12 | 证据节点 | 可按适用性跳过 |
+| **Gate** | `DifferentialGate`（E7）、`FalsificationGate`（E8） | `Differential` / `REFUTED` | E7 可按“孪生不可用”跳过；E8 按探针表 |
+| **Advisory** | `AdvisoryChecker`（A1） | **只有 Q 码** | 可按开关跳过 |
+| **Resolver** | `LspeSolver`（主检查器固定） | 证据格定点 | 否 |
+| **Ledger** | `ledger.py` / `lspc.py`（主检查器固定） | 台账 / 预检单 | 否 |
 
 **角色是数据，不是类。** 一个检查器可以声明多个义务，但只能有一个角色；
 角色决定它能不能写证据、能不能被跳过、要不要进 LSPC。
@@ -133,13 +142,13 @@ MacroChecker（抽象基类）
 ### 2.3 阶段 DAG（固定）
 
 ```
-P0 Producer  ProducerChecker：判决 / 站点
+P0 Producer  MainChecker：判决 / 站点
       │
-P1 Census    站点普查：E1–E4 / E9 / E10 的站点
+P1 Census    站点普查：E1–E4 / E9 / E10 / E11 / E12 的站点
       │
-P2 Evidence  E1–E6 / E9 / E10：产证据节点
+P2 Evidence  E1–E6 / E9–E12：产证据节点
       │
-P3 Solver    证据子集格上的工作列表（宿主固定）
+P3 Solver    证据子集格上的工作列表（主检查器固定）
       │
 P4 Gates     E7 差分 / E8 反证（永不单独 PROVED；E8 可 REFUTED）
       │
@@ -148,8 +157,8 @@ P5 Ledger    Potato v16 + .lspe 旁挂 + 证明根
 P6 LSPC      编译前风险单
 ```
 
-**只有 P1/P2/P4 的检查器是可调度的**；P0/P3/P5/P6 是宿主固定阶段。
-这条分界是“调度器不能改变语义”的硬保证：调度器只能决定**证据引擎跑不跑**，
+**只有 P1/P2/P4 的检查器是可调度的**；P0/P3/P5/P6 是主检查器固定阶段。
+这条分界是“调度器不能改变语义”的硬保证：调度器只能决定**子检查器跑不跑**，
 不能决定**求解器怎么算**、**台账怎么写**。
 
 ---
@@ -175,7 +184,8 @@ abstract class MacroChecker {
     fn desc() -> EngineDesc;          // id / role / obligations / triggers / budget
     fn role() -> Role;
     fn applies(facts: &UnitFacts) -> bool;   // 默认用 desc.triggers
-    fn check(ctx: &Ctx) -> [Claim];          // 子类实现；基类默认空
+    fn check(ctx: &Ctx) -> [Claim | AdvisoryQuestion];  // 框架面；基类默认空
+    fn scan(stage: &mut CensusStage);        // 普查面；基类默认空
 }
 
 struct EngineDesc {
@@ -197,11 +207,11 @@ struct EngineDesc {
 
 ### 3.3 登记与派发
 
-- **登记**：`CheckerRegistry` 持有一张 `[&MacroChecker]`（或类构造器表）；
-  每个子类在编译期登记；顺序按 `(phase, id)` 固定。
-- **派发**：`scheduler.plan(facts)` 对每个子类调 `applies()`；跑的子类按固定顺序
-  调 `check()`。`class_on` 的 vtable 负责 `check()` 的多态；`indirect_on` 负责
-  登记表里的函数指针。
+- **登记**：`MainChecker.checker` 持有一张 `[&MacroChecker]`（或类构造器表）；
+  每个子类在编译期登记；顺序按 `(phase, id)` 固定。主检查器自己不登记。
+- **派发**：`MainChecker.plan(facts)` 对每个子类调 `applies()`；跑的子类按固定
+  顺序调 `check()`（框架面）或 `scan()`（普查面）。`class_on` 的 vtable 负责
+  `check()` 的多态；`indirect_on` 负责登记表里的函数指针。
 - **封闭世界**：所有子类在编译期已知；没有运行期 `register()`，没有 `dlopen`。
   这与 `docs/345` §4 的目标集规则同一条。
 - **孪生**：参考侧与自举侧的 `EngineDesc`、计划、跳过原因、计划哈希逐字节相同；
@@ -323,7 +333,7 @@ sites = run_sites + skipped_sites(0) + undecided_sites
 
 | 面 | 是什么 | 什么时候 |
 |---|---|---|
-| **编译器侧 SDK** | 写一个 `MacroChecker` 子类，登记进 `LspeHost`；构建期插件 | **先做**（in-tree v0） |
+| **编译器侧 SDK** | 写一个 `MacroChecker` 子类，登记进 `MainChecker`；构建期插件 | **已做**（`lspe-sdk/1.0`） |
 | **程序侧 API** | 程序读自己的 Potato/台账 | 以后；当前 LSPE 是编译期 |
 
 “发布 LSPE SDK”默认读作**编译器侧**。程序侧是另一个产品（运行期读台账），
@@ -351,7 +361,8 @@ abstract class MacroChecker {
     fn desc() -> EngineDesc;
     fn role() -> Role;
     fn applies(facts: &UnitFacts) -> bool;
-    fn check(ctx: &Ctx) -> [Claim];
+    fn check(ctx: &Ctx) -> [Claim | AdvisoryQuestion];
+    fn scan(stage: &mut CensusStage);   // 普查面；与 check() 共用一份子检查器
 }
 
 struct Claim {
@@ -379,12 +390,12 @@ struct EvidenceNode {
 
 ### 5.4 版本与发布
 
-- **`lspe-sdk/0`（in-tree，不稳定）**：现在就能写；API 可改；只在仓内测试用。
-- **`lspe-sdk/1.0`（公开）**：等义务表、证据种类、`MacroChecker` 形状**冻结**之后。
-  它是**跨线契约**，按 `lom/*.lom` 的纪律：单独提交、写清下游、变更要升版。
-- **发布时机**：`docs/262` 的对外故事本来就排在开发完成之后；SDK 是这个故事里
-  最硬的一份契约，**更不应该现在发**。先发 in-tree v0，公开 1.0 等 0.1.5.x
-  的 LSPE 面稳定。
+- **`lspe-sdk/0`（已退役）**：V0–V3 期间的 in-tree 面；2026-11-21 起被 1.0 取代。
+- **`lspe-sdk/1.0`（已冻结，2026-11-21）**：义务表、证据种类、`MacroChecker`
+  形状与 `SDK_SURFACE` 一起冻结。它是**跨线契约**，按 `lom/*.lom` 的纪律：
+  单独提交、写清下游、变更要升版。冻结面与兼容规则见 `docs/361` §4。
+- **发布时机**：`docs/262` 的对外故事仍排在开发完成之后；仓内先按 1.0 的冻结面
+  写，公开叙事等 LSPE 的 E10/E11 台账计数落地后再发。
 
 ---
 
@@ -423,8 +434,8 @@ struct EvidenceNode {
 7. **调度器只能过近似。** 不确定就多跑，不能少跑；少跑是漏检，多跑只是成本。
 8. **孪生成本是真的。** 自举侧每加一个函数 ≈ +4.7s；60s 护栏只剩 ~1%；
    种子 ~3.88MB 悬崖；框架层必须薄，容量要先进 `LSPE_CAPACITIES`。
-9. **公开 SDK 会冻结合同。** 义务/证据面还在动（E10 A0/A1、E9、S1.5）；
-   现在发 1.0 会把未定型的东西钉死。
+9. **SDK 1.0 已经冻结。** 义务/证据面从 2026-11-21 起按 `docs/361` §4.2 升版；
+   E10/E11 的台账计数仍是报告面，不在冻结面里。
 10. **类/间接不是免费的。** L0 契约、两套实现、`lomelf`、vtable、种子/容量
     都要付；框架只是第一个消费者，不是豁免。
 
@@ -443,7 +454,7 @@ struct EvidenceNode {
 | **G** | 每条 skip 有原因；`skipped` 不计入 `proved`；覆盖率恒等式成立 | 静默跳过 ⇒ 新的“沉默写穿” |
 | **H** | 不注册任何插件 ⇒ 产物与今天逐字节相同 | 变了 ⇒ 默认档被破坏 |
 | **I** | 每引擎预算耗尽记 `Q005`，不静默成功 | 静默 ⇒ 预算失效 |
-| **J** | `lspe-sdk/0` 只在树内；公开 1.0 必须等义务/证据冻结 | 提前发 ⇒ 合同冻错 |
+| **J** | `lspe-sdk/1.0` 的公开面 = `SDK_SURFACE`；加名字必须升版 | 多导出 ⇒ 合同冻错 |
 
 ---
 
@@ -455,28 +466,31 @@ struct EvidenceNode {
 | **V1** | 调度器 + 跳过原因 + 计划哈希 + 台账 `skipped[]` | B / C / G / I |
 | **V2** | Advisory SDK（只能问，不能证） | E |
 | **V3** | Evidence SDK（义务 opt-in + 身份/版本） | F |
-| **V4** | 公开 `lspe-sdk/1.0`（冻结后） | J |
+| **V4** | 冻结 `lspe-sdk/1.0`（`SDK_SURFACE` + 兼容规则） | J |
 
 V0 依赖 `docs/345` 的 **C0**（`choose` 两维 + 语法骨架）；V1 依赖 **C2**（vtable +
 间接调用）；V2/V3 依赖 **C3**（封闭世界目标集）。每一步都走 `docs/158` §5：
 两侧同判决、判据先红、生成物单独提交、种子 `--emit` 不手合。
 
-### 9.1 V0–V3 落地状态（2026-11-18）
+### 9.1 V0–V4 落地状态（2026-11-21）
 
 - `loment/lspe/framework.py`：`MacroChecker` / `EngineDesc` / `CheckerRegistry` /
-  `Scheduler` / `LspeHost` / `Ctx` / `Claim` / `AdvisoryQuestion`；14 个内置检查器
-  （P0、E1–E11、A1）。登记表按 `(phase, id)` 固定排序，上限 64；调度器给每条
-  skip 一个原因，计划哈希对 `(run, skip, budgets, facts)` 内容寻址。
+  `Scheduler` / `MainChecker` / `Ctx` / `Claim` / `AdvisoryQuestion` /
+  `AuditResult`；**唯一顶层检查器** + 14 个下辖子检查器（E1–E12、A1）。
+  登记表按 `(phase, id)` 固定排序，上限 64；调度器给每条 skip 一个原因，
+  计划哈希对 `(run, skip, budgets, facts)` 内容寻址。`Plan.run` 里没有
+  `P0Producer` —— 主检查器自己就是生产器。
 - **SDK 两档**：`PluginChecker` 默认 Advisory；Evidence 插件必须带
   `plugin_id` / `plugin_version`，且义务的 `accept` 集合要含 `External`/`Plugin`
   （今天没有义务 opt-in，所以插件证据一律被拒）。`LSPE_SDK_VERSION =
-  "lspe-sdk/0"`，V4 公开 1.0 仍未启动。
-- **编译器接入**：`load()` 先算 `mod.lspe_plan`，再交给 `census()`；计划只跳过
-  “这一阶段一定没有站点”的阶段，站点集合/顺序与旧路径相同。计划放在台账的
-  `_plan` 内部字段，`public()` 剥掉，Potato 产物不变。`loment lspe state` 在
-  stderr 打 `[LSPE] plan / skip / budgets`。
-- **判据**：`lspe_test` 新增 10 条（V0–V3 的 A–J 里可包级验证的部分），
-  `lomentc_test`、`loment_potato_emit_test`、`loment_choose_matrix_test` 旧绿不变。
+  "lspe-sdk/1.0"`，公开面冻结在 `loment/lspe/sdk.py`（`docs/361` §4）。
+- **编译器接入**：`load()` 只有一次 `lspe.main_checker().audit(...)`；计划、站点、
+  pass 块与效应追加都由主检查器返回。计划放在台账的 `_plan` 内部字段，
+  `public()` 剥掉，Potato 产物不变。`loment lspe state` 在 stderr 打
+  `[LSPE] plan / skip / budgets`。
+- **判据**：`lspe_test` 从 78 条增到 86 条；新增 8 条钉住“单一主检查器、
+  域/借用在其下、审计顺序不变、编译器只有一条入口、公开面冻结”。
+  `lomentc_test` 271/271、`loment_potato_emit_test` 旧绿不变。
 - **边界**：`docs/345` 的 C2–C4（vtable / 自举侧类）仍是语言面梯子，不属于
   这一层派发；本层用 Python 子类做同一条“基类 + 登记表 + 固定顺序”的派发。
 
@@ -488,8 +502,8 @@ V0 依赖 `docs/345` 的 **C0**（`choose` 两维 + 语法骨架）；V1 依赖 
 2. **不主张开放世界的继承/间接。** `class_on`/`indirect_on` 必须封闭；
    `class_off`/`indirect_off` 是默认且字节不变。
 3. **不主张运行期插件。** 产物是静态 ELF；SDK 是编译期的。
-4. **不主张现在发公开 SDK 1.0。** 义务/证据面还在动；先 in-tree v0。
-5. **不主张“所有检查器平级”。** 生产者/审计器/求解器/台账角色不同，阶段不同；
-   它们都继承 `MacroChecker`，但角色与阶段把它们分开。
+4. **不主张 1.0 之后还能随意改义务表。** 1.0 已冻结；改动按 `docs/361` §4.2 升版。
+5. **不主张“所有检查器平级”。** 顶层只有主检查器；域检查器、借用检查器等是
+   它下面的子检查器。生产者/证据/闸门/Advisory 的角色与阶段仍分开。
 6. **不主张“跳过是免费的”。** 跳过要原因、要进台账、要进 LSPC 的可见面。
 7. **不主张第三方证据默认可信。** 默认 Advisory；Evidence 要 opt-in + 评审。

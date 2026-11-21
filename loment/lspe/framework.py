@@ -1,13 +1,17 @@
-"""LSPE 的框架面（`docs/344` V0-V3）。
+"""LSPE 的框架面（`docs/344` V0-V4，`docs/361` SDK 1.0）。
 
-这一层只搬**派发**：义务、证据、求解器和台账仍由原模块拥有。`MacroChecker`
-定义统一接口，`CheckerRegistry` 是编译期登记表，`Scheduler` 按适用性给出
-`Plan`，`LspeHost` 按计划调用子类。Advisory 子类只能产问题，Evidence 插件
-还要过义务的 `accept` 集合；求解器仍是唯一裁决者。
+这一层只搬**派发**：义务、证据、求解器和台账仍由原模块拥有。
 
-默认路径不依赖本模块：`census()` 不传 `plan` 时按旧顺序跑全部阶段。编译器
-在 `load()` 里算一次计划并传进来；计划本身进台账的 `_plan` 内部字段（`public()`
-会剥掉），所以 Potato 产物不变。
+顶层只有一个检查器 —— `MainChecker`（主检查器）。它自己承担 Producer 角色，
+下辖域检查器（`DomainChecker` / E9）、借用检查器（`BorrowChecker` / E10）、
+效应检查器（`EffectChecker` / E11）、GC 检查器（`GCChecker` / E12）等子检查器。
+`CheckerRegistry` 是编译期登记表，`Scheduler` 按适用性给出 `Plan`；主检查器按
+计划调用子检查器。Advisory 子类只能产问题，Evidence 插件还要过义务的 `accept`
+集合；求解器仍是唯一裁决者。
+
+编译器只有一条入口：`main_checker().audit(...)`。它把“算计划 → 跑普查阶段 →
+追加效应/借用结果”收在一次调用里；`census()` / `plan_for_tokens()` 保留给包内
+与旧判据，内部也走同一个主检查器。默认路径的站点集合、顺序与内容寻址 id 不变。
 """
 
 from __future__ import annotations
@@ -17,11 +21,13 @@ import json
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import effects as _effects
+from . import loans as _loans
+from .census import (census_bounds, census_constant, census_domain, census_drop,
+                     census_e3, census_e4, census_frame, census_reclaim,
+                     census_wf, site_id_factory)
 from .registry import LSPE_OBLIGATIONS
 from .solver import LSPE_DEFAULT_BUDGET
-
-#: in-tree SDK 的版本。公开 1.0 要等义务/证据冻结（`docs/344` §5.4）。
-LSPE_SDK_VERSION = "lspe-sdk/0"
 
 PHASES = ("P0", "P1", "P2", "P3", "P4", "P5", "P6")
 ROLES = ("Producer", "Evidence", "Gate", "Advisory", "Resolver", "Ledger")
@@ -229,6 +235,7 @@ class Ctx:
     budget: int = 0
     spent: int = 0
     budget_hit: bool = False
+    plan: "Plan | None" = None
 
     def spend(self, steps: int = 1) -> bool:
         """检查器从本引擎预算里扣步数；耗尽返回 False 并记 Q005。"""
@@ -248,8 +255,41 @@ class HostResult:
     errors: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class CensusStage:
+    """一次普查的共享状态。子检查器只往这里追加自己那段。"""
+
+    toks: list
+    unit: str
+    sid: Callable[[str, str], str]
+    sites: list
+    unsourced: list
+    passes: list
+    cover: Callable[[int], str | None]
+    lms: frozenset = frozenset()
+    instances: tuple = ()
+    shadowed: dict | None = None
+    scoped: bool = False
+    effects: bool = False
+    borrows: bool = False
+    effects_out: dict | None = None
+    loans_out: dict | None = None
+
+
+@dataclass
+class AuditResult:
+    """主检查器的一次审计：计划 + 站点 + 两条报告面。"""
+
+    plan: Plan
+    sites: list[dict]
+    unsourced: list[int]
+    passes: list[dict]
+    effects: dict | None = None
+    loans: dict | None = None
+
+
 class MacroChecker:
-    """所有检查器的统一接口；子类只实现 `check()`（`docs/344` §2.1）。"""
+    """所有检查器的统一接口；子类实现 `check()` 和/或 `scan()`（`docs/344` §2.1）。"""
 
     desc: EngineDesc = EngineDesc("?", 2, "Evidence")
 
@@ -264,96 +304,140 @@ class MacroChecker:
         fn = ctx.engines.get(self.desc.id)
         return list(fn(ctx)) if fn is not None else []
 
+    def scan(self, stage: CensusStage) -> None:
+        """普查阶段；默认不是站点生产者（`docs/361` §2）。"""
+        return None
+
     #: 插件身份（内置检查器为空）。Evidence 插件必须带齐三项（`docs/344` §5.2）。
     plugin_id = ""
     plugin_version = 0
     plugin_hash = ""
 
 
-class ProducerChecker(MacroChecker):
-    desc = EngineDesc("P0Producer", 0, "Producer", budget=0)
+class ConstantChecker(MacroChecker):
+    """E1/E2/E5 共用的词法遍：guard、下标、循环归纳。"""
 
-
-class E1Constant(MacroChecker):
     desc = EngineDesc("E1Constant", 2, "Evidence",
                       obligations=("InBounds", "InDomain"),
                       triggers=("indices", "literals"))
 
+    def scan(self, stage: CensusStage) -> None:
+        census_constant(stage.toks, stage.sid, stage.sites, stage.unsourced,
+                        stage.cover)
 
-class E2Typed(MacroChecker):
+
+class TypedChecker(MacroChecker):
     desc = EngineDesc("E2Typed", 2, "Evidence",
                       obligations=("InDomain", "CapabilityLive", "GuardHolds",
                                    "NoRuntime"),
                       triggers=("guards", "domains", "excluded", "revocable", "types"))
 
 
-class E2bBounds(MacroChecker):
+class BoundsChecker(MacroChecker):
     desc = EngineDesc("E2bBounds", 2, "Evidence",
                       obligations=("InBounds",), mandatory=True,
                       triggers=("bounds",))
 
+    def scan(self, stage: CensusStage) -> None:
+        census_bounds(stage.toks, stage.sid, stage.sites, stage.cover, stage.lms)
 
-class E3LocalFlow(MacroChecker):
+
+class LocalFlowChecker(MacroChecker):
     desc = EngineDesc("E3LocalFlow", 2, "Evidence",
                       obligations=("Alive", "Exclusive", "Initialized", "NotDangling",
                                    "FreeOwnership"),
                       triggers=("locals", "borrows", "guards", "calls"))
 
+    def scan(self, stage: CensusStage) -> None:
+        census_e3(stage.toks, stage.sid, stage.sites, stage.cover)
 
-class E4Interproc(MacroChecker):
+
+class InterprocChecker(MacroChecker):
     desc = EngineDesc("E4Interproc", 2, "Evidence",
                       obligations=("SummaryContract", "FreeOwnership"),
                       triggers=("calls",))
 
+    def scan(self, stage: CensusStage) -> None:
+        census_e4(stage.toks, stage.sid, stage.sites, (), stage.cover)
 
-class E5GlobalInvariant(MacroChecker):
+
+class GlobalInvariantChecker(MacroChecker):
     desc = EngineDesc("E5GlobalInvariant", 2, "Evidence",
                       obligations=("InDomain", "GuardHolds"),
                       triggers=("loops", "indices"))
 
 
-class E6Substitution(MacroChecker):
+class SubstitutionChecker(MacroChecker):
     desc = EngineDesc("E6Substitution", 2, "Evidence",
                       obligations=("TypeWellFormed",), mandatory=True,
                       triggers=("generics", "drop"), budget=8192)
 
+    def scan(self, stage: CensusStage) -> None:
+        census_drop(stage.toks, stage.sid, stage.sites)
+        census_wf(stage.instances, stage.sid, stage.sites)
 
-class E9Domain(MacroChecker):
+
+class DomainChecker(MacroChecker):
+    """域检查器（E9）：域声明、`guard` 包含性、撤销。"""
+
     desc = EngineDesc("E9Domain", 2, "Evidence",
                       obligations=("InDomain", "CapabilityLive", "GuardHolds"),
                       triggers=("domains", "guards", "revocable"))
 
+    def scan(self, stage: CensusStage) -> None:
+        census_domain(stage.toks, stage.sid, stage.sites, stage.cover)
 
-class E10Loans(MacroChecker):
+
+class BorrowChecker(MacroChecker):
+    """借用检查器（E10，报告面）：loan 图、kill = 最后使用、冲突与悬垂。"""
+
     desc = EngineDesc("E10Loans", 2, "Evidence",
                       obligations=("Alive", "Exclusive", "NotDangling"),
                       triggers=("borrows",))
 
+    def scan(self, stage: CensusStage) -> None:
+        if stage.borrows:
+            stage.loans_out = _loans.analyze(stage.toks, stage.unit)
 
-class E11Effects(MacroChecker):
+    def analyze(self, toks: list, unit: str = "m") -> dict:
+        return _loans.analyze(toks, unit)
+
+
+class EffectChecker(MacroChecker):
+    """效应检查器（E11，报告面）：行、处理器、`resume` 与续延捕获。"""
+
     desc = EngineDesc("E11Effects", 2, "Evidence",
                       obligations=("EffectAllowed", "HandlerExhaustive",
                                    "ResumeLinear", "EffectBounded",
                                    "CaptureReclaim"),
                       triggers=("effects",))
 
+    def scan(self, stage: CensusStage) -> None:
+        if not stage.effects:
+            return
+        rep = _effects.analyze(stage.toks, stage.unit)
+        stage.effects_out = rep
+        stage.sites.extend(rep.get("sites", []))
 
-class E12GC(MacroChecker):
-    """GC 检查器（`docs/353` §5）：把每个 `alloc` 站点的回收判决指到**唯一**一个声明。
 
-    它不拥有 L0/L1/L2 的判决（那仍是编译器的 Producer 面），只负责**作用域解析**
-    与证据：没有遮蔽 ⇒ `Syntactic`；有遮蔽 ⇒ `Assumed`，编译器在那一格保守退出。
-    """
+class GCChecker(MacroChecker):
+    """GC 检查器（E12，`docs/353` §5）：每个 `alloc` 的回收判决指到唯一声明。"""
+
     desc = EngineDesc("E12GC", 2, "Evidence",
                       obligations=("ReclaimScoped",),
                       triggers=("locals", "loops", "free"))
 
+    def scan(self, stage: CensusStage) -> None:
+        if stage.scoped:
+            census_reclaim(stage.toks, stage.sid, stage.sites, stage.cover,
+                           stage.shadowed)
 
-class E7Differential(MacroChecker):
+
+class DifferentialGate(MacroChecker):
     desc = EngineDesc("E7Differential", 4, "Gate", budget=0)
 
 
-class E8Falsification(MacroChecker):
+class FalsificationGate(MacroChecker):
     desc = EngineDesc("E8Falsification", 4, "Gate", budget=0)
 
 
@@ -381,11 +465,13 @@ class PluginChecker(MacroChecker):
         return list(self._fn(ctx))
 
 
+#: 主检查器下面的内置子检查器。主检查器自己不在表里 —— 它是 P0 的生产者，
+#: 不是自己下辖的对象（`docs/361` §1）。
 BUILTIN_CHECKERS = (
-    ProducerChecker(),
-    E1Constant(), E2Typed(), E2bBounds(), E3LocalFlow(), E4Interproc(),
-    E5GlobalInvariant(), E6Substitution(), E9Domain(), E10Loans(), E11Effects(),
-    E12GC(), E7Differential(), E8Falsification(), AdvisoryChecker(),
+    ConstantChecker(), TypedChecker(), BoundsChecker(), LocalFlowChecker(),
+    InterprocChecker(), GlobalInvariantChecker(), SubstitutionChecker(),
+    DomainChecker(), BorrowChecker(), EffectChecker(), GCChecker(),
+    DifferentialGate(), FalsificationGate(), AdvisoryChecker(),
 )
 
 
@@ -483,8 +569,32 @@ def evidence_allowed(obligation: str) -> bool:
     return bool(accept & {"External", "Plugin"})
 
 
-class LspeHost:
-    """宏观检查器实例：持有登记表与调度器（`docs/344` §2.1）。"""
+class MainChecker(MacroChecker):
+    """LSPE SDK 的唯一主检查器（`docs/361`）。
+
+    它自己承担 Producer 角色（P0），下辖所有子检查器；编译器的唯一入口是
+    `audit()`。子检查器分两用：`check()` 走 `MacroChecker` 统一接口产
+    `Claim`/问题，`scan()` 走普查阶段产站点。两者都由主检查器调度，登记表
+    与计划仍是唯一的“谁跑谁不跑”的依据。
+    """
+
+    desc = EngineDesc("MainChecker", 0, "Producer", budget=0)
+
+    #: 普查阶段的固定顺序（`docs/361` §2）。第一列是**任何**一个在计划里就触发
+    #: 该阶段的引擎 id；第二列是该阶段的唯一所有者（共享词法遍只跑一次）。
+    STAGES: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("E1Constant", "E2Typed", "E5GlobalInvariant"), "E1Constant"),
+        (("E9Domain",), "E9Domain"),
+        (("E2bBounds",), "E2bBounds"),
+        (("E3LocalFlow",), "E3LocalFlow"),
+        (("E4Interproc",), "E4Interproc"),
+        (("E6Substitution",), "E6Substitution"),
+        (("E12GC",), "E12GC"),
+        # E11/E10 是报告面，追加在普查之后：与旧编译器“普查 + 追加效应”的
+        # 站点顺序逐字节相同。
+        (("E11Effects",), "E11Effects"),
+        (("E10Loans",), "E10Loans"),
+    )
 
     def __init__(self, plugins: tuple[MacroChecker, ...] = ()) -> None:
         self.checker = CheckerRegistry()
@@ -494,11 +604,29 @@ class LspeHost:
             self.checker.register(p)
         self.scheduler = Scheduler()
 
+    # ---- 子检查器 -------------------------------------------------------
+    def sub(self, engine: str) -> MacroChecker:
+        return self.checker.get(engine)
+
+    @property
+    def subcheckers(self) -> tuple[MacroChecker, ...]:
+        """按 `(phase, id)` 固定排序的全部子检查器。"""
+        return self.checker.checkers()
+
+    @property
+    def domain_checker(self) -> MacroChecker:
+        return self.sub("E9Domain")
+
+    @property
+    def borrow_checker(self) -> MacroChecker:
+        return self.sub("E10Loans")
+
+    # ---- 调度 -----------------------------------------------------------
     def plan(self, facts: UnitFacts) -> Plan:
         return self.scheduler.plan(facts, self.checker)
 
     def run(self, ctx: Ctx, plan: Plan | None = None) -> HostResult:
-        plan = plan or self.plan(ctx.facts)
+        plan = plan or ctx.plan or self.plan(ctx.facts)
         result = HostResult(plan)
         budgets = dict(plan.budgets)
         for cid in plan.run:
@@ -523,6 +651,13 @@ class LspeHost:
                     })
         return result
 
+    def check(self, ctx: Ctx) -> list:
+        """`MacroChecker` 统一接口：主检查器是所有子检查器的组合。"""
+        result = self.run(ctx)
+        if result.errors:
+            raise ValueError(result.errors[0]["message"])
+        return list(result.claims) + list(result.questions)
+
     def _accept_claim(self, checker: MacroChecker, claim: Claim, result: HostResult) -> None:
         if checker.role() == "Advisory":
             result.errors.append({
@@ -545,9 +680,75 @@ class LspeHost:
             return
         result.claims.append(claim)
 
+    # ---- 普查 / 审计（编译器的唯一入口） --------------------------------
+    def _scan(self, toks: list, unit: str, *, plan: Plan | None,
+              lms, instances, shadowed, scoped: bool, effects: bool,
+              borrows: bool) -> CensusStage:
+        sid = site_id_factory(unit)
+        spans, cover = census_frame(toks, sid)
+        stage = CensusStage(
+            toks=toks, unit=unit, sid=sid, sites=[], unsourced=[],
+            passes=spans, cover=cover, lms=frozenset(lms or ()),
+            instances=tuple(instances or ()), shadowed=shadowed,
+            scoped=bool(scoped), effects=bool(effects), borrows=bool(borrows))
+        run = None if plan is None else set(plan.run)
+        for ids, owner in self.STAGES:
+            if run is not None and not (run & set(ids)):
+                continue
+            if owner == "E12GC" and not stage.scoped:
+                continue
+            self.checker.get(owner).scan(stage)
+        for s in stage.sites:
+            cid = s.get("covered_by")
+            if cid:
+                for ps in stage.passes:
+                    if ps["id"] == cid:
+                        ps["sites"] += 1
+        return stage
 
-def default_host() -> LspeHost:
-    return LspeHost()
+    def census(self, toks: list, unit: str, *, lms=frozenset(), instances=(),
+               plan: Plan | None = None,
+               shadowed: dict[str, frozenset[str]] | None = None,
+               scoped: bool = False) -> tuple[list[dict], list[int], list[dict]]:
+        """旧普查入口；内部仍由主检查器跑同一组子检查器。"""
+        st = self._scan(toks, unit, plan=plan, lms=lms, instances=instances,
+                        shadowed=shadowed, scoped=scoped, effects=False,
+                        borrows=False)
+        return st.sites, st.unsourced, st.passes
+
+    def audit(self, toks: list, unit: str, *, dims: dict | None = None,
+              level: int = 3, lms=frozenset(), instances=(),
+              slots: dict | None = None, twin_available: bool = True,
+              probes=(), scoped: bool = False,
+              shadowed: dict[str, frozenset[str]] | None = None,
+              effects: bool | None = None,
+              borrows: bool = False) -> AuditResult:
+        """编译器唯一入口：算计划、跑子检查器、返回台账要的站点。
+
+        `effects=None` 时按 `slots["effects"] == "true"` 推导；`borrows=True`
+        才跑 E10 的报告面（它今天不写台账，默认不付这份成本）。
+        """
+        slots_in = dict(slots or {})
+        if effects is True and slots_in.get("effects") != "true":
+            slots_in["effects"] = "true"
+        facts = UnitFacts.from_tokens(
+            toks, dims=dims, level=level, lms=frozenset(lms or ()),
+            instances=instances, slots=slots_in,
+            twin_available=twin_available, probes=probes)
+        plan = self.plan(facts)
+        use_effects = (bool(effects) if effects is not None
+                       else slots_in.get("effects") == "true")
+        st = self._scan(toks, unit, plan=plan, lms=lms, instances=instances,
+                        shadowed=shadowed, scoped=scoped,
+                        effects=use_effects, borrows=borrows)
+        return AuditResult(plan=plan, sites=st.sites, unsourced=st.unsourced,
+                           passes=st.passes, effects=st.effects_out,
+                           loans=st.loans_out)
+
+
+def main_checker(plugins: tuple[MacroChecker, ...] = ()) -> MainChecker:
+    """SDK 的唯一入口：一个主检查器，子检查器都在它下面。"""
+    return MainChecker(plugins)
 
 
 def plan_for_tokens(toks: list, unit: str, *, dims: dict | None = None,
@@ -557,7 +758,7 @@ def plan_for_tokens(toks: list, unit: str, *, dims: dict | None = None,
     facts = UnitFacts.from_tokens(toks, dims=dims, level=level, lms=lms,
                                   instances=instances, slots=slots,
                                   twin_available=twin_available, probes=probes)
-    return default_host().plan(facts)
+    return main_checker().plan(facts)
 
 
 def plan_lines(plan: Plan) -> list[str]:

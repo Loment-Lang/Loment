@@ -122,6 +122,29 @@ The loop forms it accepts are `for i in A..B`, unsigned `while i < B` and unsign
 `while i <= B`; signed loops are not proved. It adds no error code: what it cannot prove goes to
 the counter-asker and to LSPC, never to a rejection.
 
+## The SDK: one main checker
+
+LSPE 1.0 exposes a single top-level checker, `MainChecker`. It is the producer
+(P0) and owns every other checker as a sub-checker: the domain checker (E9),
+the borrow checker (E10), the effect checker (E11), the GC checker (E12), the
+bounds / local-flow / interprocedural engines, the differential and
+falsification gates, and the advisory channel. Built-in engine classes are not
+part of the public surface.
+
+```python
+main = lspe.main_checker()
+res = main.audit(toks, "m", dims={"lifetime": "lifetime_auto"},
+                 lms={"lms_guard"}, slots={"effects": "true"})
+res.sites, res.unsourced, res.plan
+main.domain_checker    # E9Domain
+main.borrow_checker    # E10Loans
+```
+
+The compiler reaches LSPE only through `main_checker().audit(...)`; it does not
+run the plan and the census as two separate steps. The scheduler still decides
+which sub-checkers run, and every skip carries a reason. The public surface is
+frozen at `lspe-sdk/1.0` (`SDK_SURFACE`): adding a name is a version bump.
+
 ## The counter-asker and LSPC
 
 An `UNDECIDED` site becomes a **question** (Q001–Q013) only after three interrogations have run:

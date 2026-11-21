@@ -5,6 +5,10 @@ Potato v16。义务、证据、接收关系与求解器都定义在这个包里�
 
 v2（0.1.6）把四件都补齐：质疑器（E1–E8）的判决、反问器（Q 码与回答通道）、
 警察 LSPC（预检单与模式）、台账（派生树与证明哈希、五条不变量）。
+
+SDK 1.0（`docs/361`）：顶层只有一个检查器 —— `MainChecker`。域检查器、借用
+检查器、效应检查器、GC 检查器都是它的子检查器；编译器只调
+`main_checker().audit(...)`。
 """
 
 from __future__ import annotations
@@ -16,28 +20,28 @@ from . import loans as _loans
 from .cache import Cache
 from .census import census, census_e4
 from .framework import (
-    LSPE_SDK_VERSION,
     MANDATORY_OBLIGATIONS,
     PHASES,
     ROLES,
     AdvisoryQuestion,
+    AuditResult,
     CheckerRegistry,
     Claim,
     Ctx,
     EngineDesc,
     EvidenceNode,
     HostResult,
-    LspeHost,
+    MainChecker,
     MacroChecker,
     Plan,
     PluginChecker,
     SkipRecord,
     UnitFacts,
-    default_host,
     evidence_allowed,
     plan_for_tokens,
     plan_lines,
 )
+from .sdk import LSPE_SDK_VERSION, SDK_SURFACE, audit, main_checker
 from .derive import (build_trees, derivation, proof_hash, proof_root, sidecar,
                      verify, why_lines)
 from .invariants import check as check_invariants
@@ -96,22 +100,25 @@ __all__ = [
     "MANDATORY_OBLIGATIONS",
     "PHASES",
     "ROLES",
+    "SDK_SURFACE",
     "LspeError",
     "AdvisoryQuestion",
+    "AuditResult",
     "CheckerRegistry",
     "Claim",
     "Ctx",
     "EngineDesc",
     "EvidenceNode",
     "HostResult",
-    "LspeHost",
+    "MainChecker",
     "MacroChecker",
     "Plan",
     "PluginChecker",
     "SkipRecord",
     "UnitFacts",
-    "default_host",
+    "audit",
     "evidence_allowed",
+    "main_checker",
     "plan_for_tokens",
     "plan_lines",
     "LspeSolver",

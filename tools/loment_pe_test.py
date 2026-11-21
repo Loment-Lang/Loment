@@ -258,7 +258,36 @@ def test_pe_runs_natively_matches_linux_behavior():
                     f"  linux ({len(want[1])}B): {want[1][:200]!r}\n"
                     f"  pe    ({len(got[1])}B): {got[1][:200]!r}")
             ok += 1
-    print(f"      {ok} 个程序的 PE 产物与 clang/Linux 产物 stdout 字节 + 退出码一致")
+        # `#1828`：openat 的三格标志语义 —— 同一份源，PE 原生跑 vs Linux ELF 跑。
+        src = td / "openprobe.lomt"
+        src.write_text(_OPENAT_PROG, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        pe = td / "openprobe.exe"
+        pe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        run = td / "pe-openat"
+        run.mkdir()
+        _seed_openat(run)
+        r = subprocess.run([str(pe)], cwd=str(run), capture_output=True, timeout=20)
+        assert r.returncode == 0, (
+            f"PE openat 探针 rc={r.returncode}（11x 读回 / 2x append / 3x O_EXCL）")
+        _check_openat(run)
+        elf = td / "openprobe.elf"
+        elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
+        wd = f"/tmp/loment-openat-{os.getpid()}"
+        script = (
+            f"rm -rf {wd} && mkdir -p {wd} && cd {wd} && "
+            f"printf x > probe.txt && printf 0123456789 > append.txt && "
+            f"printf KEEP > keep.txt && cp {_wsl_path(elf)} ./t && chmod +x t && "
+            f"./t; echo \"rc=$?\"; echo \"probe=$(cat probe.txt)\"; "
+            f"echo \"append=$(cat append.txt)\"; echo \"keep=$(cat keep.txt)\""
+        )
+        w = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                           capture_output=True, text=True, timeout=120)
+        assert "rc=0" in w.stdout, f"openat Linux 对拍失败：{w.stdout[-300:]}"
+        assert "probe=abcd" in w.stdout and "keep=KEEP" in w.stdout
+        assert "append=0123456789abcd" in w.stdout
+    print(f"      {ok} 个程序的 PE 产物与 clang/Linux 产物 stdout 字节 + 退出码一致；"
+          f"openat 三格与 Linux 语义一致")
 
 
 @test
@@ -2107,53 +2136,16 @@ fn main() {
 
 
 @test
-def test_pe_openat_flags_follow_linux_semantics():
-    """`#1828`：O_RDWR / O_APPEND / O_EXCL 三格必须按 Linux 语义走。
+def _seed_openat(d: Path) -> None:
+    (d / "probe.txt").write_bytes(b"x")
+    (d / "append.txt").write_bytes(b"0123456789")
+    (d / "keep.txt").write_bytes(b"KEEP")
 
-    未修时：O_RDWR 只给 GENERIC_READ（写被丢掉，读回还是 'x'）；O_CREAT 一律
-    CREATE_ALWAYS（append 打开就清空）；O_EXCL 被忽略（已存在的文件照样打开）。
-    PE 运行时判据只在 Windows 上跑（门禁没有 Windows runner），但 Linux 侧用同一份
-    源做对拍 —— 这是断言"PE 的行为 == Linux 的行为"的那一半。
-    """
-    if not _on_windows():
-        print("      SKIP: 非 Windows")
-        return
-    with tempfile.TemporaryDirectory() as tds:
-        td = Path(tds)
-        src = td / "openprobe.lomt"
-        src.write_text(_OPENAT_PROG, encoding="utf-8", newline="\n")
-        ll = _ir(src, td)
-        blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
-        exe = td / "openprobe.exe"
-        exe.write_bytes(blob)
-        run = td / "run"
-        run.mkdir()
-        (run / "probe.txt").write_bytes(b"x")
-        (run / "append.txt").write_bytes(b"0123456789")
-        (run / "keep.txt").write_bytes(b"KEEP")
-        r = subprocess.run([str(exe)], cwd=str(run), capture_output=True, timeout=20)
-        assert r.returncode == 0, (
-            f"PE openat 探针 rc={r.returncode}（11x 读回 / 2x append / 3x O_EXCL）")
-        assert (run / "probe.txt").read_bytes() == b"abcd"
-        assert (run / "append.txt").read_bytes() == b"0123456789abcd"
-        assert (run / "keep.txt").read_bytes() == b"KEEP"
-        if _wsl():
-            elf = td / "openprobe.elf"
-            elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
-            wd = f"/tmp/loment-openat-{os.getpid()}"
-            script = (
-                f"rm -rf {wd} && mkdir -p {wd} && cd {wd} && "
-                f"printf x > probe.txt && printf 0123456789 > append.txt && "
-                f"printf KEEP > keep.txt && cp {_wsl_path(elf)} ./t && chmod +x t && "
-                f"./t; echo \"rc=$?\"; echo \"probe=$(cat probe.txt)\"; "
-                f"echo \"append=$(cat append.txt)\"; echo \"keep=$(cat keep.txt)\""
-            )
-            w = subprocess.run([*_WSLCMD, "bash", "-lc", script],
-                               capture_output=True, text=True, timeout=120)
-            assert "rc=0" in w.stdout, f"Linux 对拍失败：{w.stdout[-300:]}"
-            assert "probe=abcd" in w.stdout and "keep=KEEP" in w.stdout
-            assert "append=0123456789abcd" in w.stdout
-    print("      O_RDWR / O_APPEND / O_EXCL 三格与 Linux 语义一致")
+
+def _check_openat(d: Path) -> None:
+    assert (d / "probe.txt").read_bytes() == b"abcd"
+    assert (d / "append.txt").read_bytes() == b"0123456789abcd"
+    assert (d / "keep.txt").read_bytes() == b"KEEP"
 
 
 def main() -> int:

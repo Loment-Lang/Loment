@@ -37,7 +37,6 @@ loment_multilang_test test_three_syntaxes_feed_one_program  # 环境: 需要 cla
 loment_multisyntax_test rust_10_leg  # 环境: 见该判据打的 SKIP 行
 loment_p7_test test_m67_m78_boot_programs  # 环境: 无 QEMU 或内核镜像
 loment_pe_test test_pe_and_elf_agree_on_net_programs  # 环境: 非 Windows 或无 WSL
-loment_pe_test test_pe_openat_flags_follow_linux_semantics  # 环境: 非 Windows（PE 运行时判据；门禁没有 Windows runner）
 loment_pe_test test_pe_builds_and_runs_without_clang_or_wsl  # 环境: 非 Windows
 loment_pe_test test_pe_links_capability_programs  # 环境: 非 Windows
 loment_pe_test test_pe_runs_natively_matches_linux_behavior  # 环境: 非 Windows 或无 clang/WSL

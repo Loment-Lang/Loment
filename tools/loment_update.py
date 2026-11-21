@@ -322,26 +322,77 @@ def check(candidate: Path, tree: Path, *, state: Path | None = None,
     return cand
 
 
+def _hot_fields(words: list[str], line: str) -> dict[str, str]:
+    """`名字=值` 那几格 -> 字典。不是这个形状就 `Reject`，别让 `KeyError` 冒出去。"""
+    kv: dict[str, str] = {}
+    for x in words:
+        if "=" not in x:
+            raise Reject("hot-meta", f"{line!r}: {x!r} 不是 `名字=值`")
+        k, v = x.split("=", 1)
+        if not k:
+            raise Reject("hot-meta", f"{line!r}: {x!r} 的名字是空的")
+        kv[k] = v
+    return kv
+
+
+def _hot_int(kv: dict[str, str], key: str, line: str) -> int:
+    if key not in kv:
+        raise Reject("hot-meta", f"{line!r}: 缺 `{key}=`")
+    try:
+        return int(kv[key])
+    except ValueError:
+        raise Reject("hot-meta", f"{line!r}: `{key}={kv[key]}` 不是整数") from None
+
+
 def parse_hot_meta(text: str) -> dict[str, dict]:
-    """`.lomhot`（`#1149`）-> {函数名: {frame, layout, calls}}。"""
+    """`.lomhot`（`#1149`）-> {函数名: {frame, layout, calls}}。
+
+    **坏输入要报得出，不能崩**（`#1705`）：这份文件由 `lomelf --hot-meta` 写，而它可以
+    被手改、也可能来自别的构建。原先短行 / 缺字段 / 非数字分别抛 `IndexError` /
+    `KeyError` / `ValueError` —— 用户看到的是一段 Python 栈，不是"第几行哪里不对"。
+    现在一律 `Reject("hot-meta", ...)`，由命令层印成一句诊断。
+    """
     funcs: dict[str, dict] = {}
     cur: dict | None = None
     for line in text.splitlines():
         w = line.split()
         if not w:
             continue
-        if w[0] == "func":
+        head = w[0]
+        # 头部与重定位表：`lomelf.hot_metadata` 会写这几种，照旧跳过。
+        if head in ("lomhot", "fixed", "base", "reloc"):
+            continue
+        if head == "func":
             if len(w) < 4:
-                raise Reject("hot-meta", line)
-            kv = dict(x.split("=", 1) for x in w[2:])
-            cur = {"frame": int(kv["frame"]), "layout": kv["layout"], "calls": []}
+                raise Reject("hot-meta", f"{line!r}: `func` 行要写成 "
+                                         f"`func 名字 entry=… frame=… layout=…`")
+            kv = _hot_fields(w[2:], line)
+            if "layout" not in kv:
+                raise Reject("hot-meta", f"{line!r}: `func` 行缺 `layout=`")
+            cur = {"frame": _hot_int(kv, "frame", line), "layout": kv["layout"],
+                   "calls": []}
             if "entry" in kv:
-                cur["entry"] = int(kv["entry"])
+                cur["entry"] = _hot_int(kv, "entry", line)
             if "tramp" in kv:
-                cur["tramp"] = int(kv["tramp"])
+                cur["tramp"] = _hot_int(kv, "tramp", line)
             funcs[w[1]] = cur
-        elif w[0] == "call" and cur is not None:
-            cur["calls"].append((w[1], int(w[2].split("=", 1)[1])))
+        elif head == "call":
+            if cur is None:
+                raise Reject("hot-meta", f"{line!r}: `call` 出现在任何 `func` 之前")
+            if len(w) < 3:
+                raise Reject("hot-meta", f"{line!r}: `call` 行要写成 `call 调用点 偏移=…`")
+            kv = _hot_fields(w[2:], line)
+            if len(kv) != 1:
+                raise Reject("hot-meta", f"{line!r}: `call` 行只要一个 `名字=偏移`")
+            try:
+                off = int(next(iter(kv.values())))
+            except ValueError:
+                raise Reject("hot-meta",
+                             f"{line!r}: 调用点偏移不是整数") from None
+            cur["calls"].append((w[1], off))
+        else:
+            raise Reject("hot-meta", f"{line!r}: 不认识的记录行（只认 "
+                                     f"`lomhot` / `fixed` / `func` / `call` / `base` / `reloc`）")
     return funcs
 
 
@@ -397,8 +448,13 @@ def cmd_manifest(args: argparse.Namespace) -> int:
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    old = parse_hot_meta(Path(args.old).read_text(encoding="utf-8"))
-    new = parse_hot_meta(Path(args.new).read_text(encoding="utf-8"))
+    # `#1705`：坏 `.lomhot` 是**用户的输入**，报一句，别把 `Reject` 冒成栈。
+    try:
+        old = parse_hot_meta(Path(args.old).read_text(encoding="utf-8"))
+        new = parse_hot_meta(Path(args.new).read_text(encoding="utf-8"))
+    except Reject as e:
+        print(f"REJECT {e.code}: {e.detail}", file=sys.stderr)
+        return 1
     for name, row in remap_plan(old, new).items():
         print(f"remap {name} {'yes' if row['remap'] else 'no'}"
               + (f" ({row['why']})" if row["why"] else ""))

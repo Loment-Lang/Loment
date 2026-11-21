@@ -231,6 +231,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
                  # ⚠ 挂在独占那一片之外：它跑 T0 的重的那份（~7s），但**不写仓库共享位置**。
                  "lvm_perf_test",
+                 # 原生档段错误报告器（`docs/367` stage 0）：ptrace 接住信号，按 Lomenterr
+                 # 形状报出信号/地址/PC；正常程序不误报，`ud2` 是 ILL。要 Linux/WSL。
+                 "loment_segv_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
@@ -525,6 +528,8 @@ SHARD_COST = {
     "lvm_cp_test": 21.0,
     # 封印/验证器/派生都是纯标准库；大头是判 F 的子进程与判 A/B 的编译。
     "lvm_seal_test": 1.0,
+    # 2026-11-21（`docs/367`）：本机 WSL 实测 3.8s（真前端 + lomelf 编三份 ELF，各跑一次）。
+    "loment_segv_test": 4.5,
     "lvm_fusion_test": 32.0,
     "lvm_t2_test": 138.6,
     "lvm_a0_test": 12.0,

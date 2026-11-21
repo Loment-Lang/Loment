@@ -232,7 +232,7 @@ GLOBS = [
     "tools/lvm_stability_test.py",
     "tools/lvm_a0_test.py",
     "tools/lvm_cap_test.py",
-    "tools/lvm_seal.py", "tools/lvm_cp_test.py", "tools/lvm_seal_test.py",
+    "tools/lvm_seal.py", "tools/lvm_cp_test.py", "tools/lvm_seal_test.py", "tools/loment_segv.py", "tools/loment_segv_test.py",
     "tools/lvm_perf_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。

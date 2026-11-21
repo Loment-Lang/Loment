@@ -959,6 +959,20 @@ shift
 shift
 goto barg_loop
 :barg_max_eq
+rem #1789: the `--max=N` spelling was forwarded without the check the two-word form gets,
+rem so `--max=abc` reached the renderer and printed its usage (the symptom of #659).
+set "bmaxeq=%~1"
+set "bmaxeq=%bmaxeq:--max=%"
+if "%bmaxeq%"=="" (
+    echo loment: --max needs a number 1>&2
+    exit /b 2
+)
+set "bmaxbad="
+for /f "delims=0123456789" %%A in ("%bmaxeq%") do set "bmaxbad=1"
+if defined bmaxbad (
+    echo loment: --max needs a number, got '%~1' 1>&2
+    exit /b 2
+)
 set "com=%com% %~1"
 shift
 goto barg_loop
@@ -1431,7 +1445,7 @@ if /I "%~1"=="--json" goto scan_om
 if /I "%~1"=="--max" goto scan_max
 if /I "%~1"=="--diag-out" goto scan_dout
 set "ss=%~1"
-if "%ss:~0,6%"=="--max=" goto scan_om
+if "%ss:~0,6%"=="--max=" goto scan_max_eq
 if "%ss:~0,11%"=="--diag-out=" goto scan_out_v
 rem An option that is not one of the above is REJECTED, not taken for the source file.
 rem This path scans the WHOLE command line (both `check FILE --no-color` and
@@ -1461,6 +1475,23 @@ exit /b 0
 set "cskip=1"
 set "cwantmax=1"
 :scan_om
+set "com=%com% %~1"
+exit /b 0
+:scan_max_eq
+rem #1789: `--max=N` must get the same check as `--max N` (see :barg_max_eq).
+set "cmaxeq=%ss:~6%"
+if "%cmaxeq%"=="" (
+    echo loment: --max needs a number 1>&2
+    set "cbad=1"
+    exit /b 0
+)
+set "cmaxbad="
+for /f "delims=0123456789" %%A in ("%cmaxeq%") do set "cmaxbad=1"
+if defined cmaxbad (
+    echo loment: --max needs a number, got '%ss%' 1>&2
+    set "cbad=1"
+    exit /b 0
+)
 set "com=%com% %~1"
 exit /b 0
 :scan_dout

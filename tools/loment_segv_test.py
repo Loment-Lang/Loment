@@ -4,12 +4,14 @@
 原生产物被信号杀死时自己不说话。`tools/loment_segv.py` 在宿主用 `ptrace` 接住现场，
 按 `lomenterr` 的形状报出：信号、`si_code`、故障地址、PC、RSP（可选函数/源行）。
 
-四条：
+八条：
 
 * **A 正常程序不误报** —— 退出码原样返回，stderr 没有 `error[`。
 * **B 空指针** —— rc=139，报告里有 `error[SEGV]`、`SIGSEGV`、`访问：0x0`、`PC：0x`。
 * **C `llvm.trap`（ud2）** —— rc=132，报告里有 `error[ILL]`、`SIGILL`。
 * **D `--json`** —— 一行 JSON，字段齐（signal / addr / pc / si_code）。
+* **E–H（stage 1）** —— 产物自己说：直接跑就有报告、站点名、栈溢出判据、`ud2` 是 ILL；
+  开关默认关时产物仍然沉默。
 
 夹具是**真前端 + 真链接器**编出来的 ELF（`lomentc` -> `lomelf`），不是手写的 IR。
 Windows 上经 WSL 跑（与 `loment_elf_test` 同一条路）；没有 WSL 就 SKIP。
@@ -58,7 +60,7 @@ def _wsl_path(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
-def _build(text: str, name: str, td: Path) -> Path:
+def _build(text: str, name: str, td: Path, fault_report: bool = False) -> Path:
     src = td / f"{name}.lomt"
     src.write_text(text, encoding="utf-8", newline="\n")
     mod = lomentc.load(src)
@@ -66,7 +68,7 @@ def _build(text: str, name: str, td: Path) -> Path:
     errs = lomentc.check(mod, deps=deps)
     assert not errs, f"{name}: {errs[:2]}"
     ir = lomentc.emit_llvm(mod, ROOT, deps)
-    blob, _meta = lomelf.compile_ll(ir)
+    blob, _meta = lomelf.compile_ll(ir, fault_report=fault_report)
     exe = td / name
     exe.write_bytes(blob)
     return exe
@@ -93,6 +95,24 @@ def _run(exe: Path, extra: list[str] | None = None) -> tuple[int, str]:
     return rc, raw.decode("utf-8", "replace")
 
 
+def _run_direct(exe: Path) -> tuple[int, str]:
+    """**直接跑产物**（不经报告器）-> `(rc, stderr)`。stage 1 的对象。"""
+    tag = f"/tmp/segv_self_{os.getpid()}"
+    script = (f"rm -f {tag} {tag}.err; cp {_wsl_path(exe)} {tag} && chmod +x {tag} && "
+              f"cd /tmp && timeout 10 {tag} 2> {tag}.err; echo -n $?")
+    r = subprocess.run([*_WSL, "bash", "-lc", script], capture_output=True, timeout=240)
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    if sys.platform.startswith("linux"):
+        p = Path(f"{tag}.err")
+        return rc, p.read_text(encoding="utf-8") if p.exists() else ""
+    got = subprocess.run([*_WSL, "bash", "-lc", f"base64 -w0 {tag}.err 2>/dev/null || true"],
+                         capture_output=True, timeout=120).stdout
+    return rc, base64.b64decode(got).decode("utf-8", "replace") if got.strip() else ""
+
+
 _OK = """module segv_ok
 choose runtime
 
@@ -110,6 +130,19 @@ fn _start() {
     let p: ptr = z as ptr;
     store32(p, 0, 1);
     syscall4(60, 0, 0, 0);
+}
+"""
+
+_REC = """module segv_rec
+choose runtime
+
+fn down(n: u32) -> u32 {
+    return down(n + 1);
+}
+
+fn _start() {
+    let r: u32 = down(0);
+    syscall4(60, r as u64, 0, 0);
 }
 """
 
@@ -179,6 +212,73 @@ def test_d_json_is_machine_readable() -> None:
         assert key in row, (key, row)
     assert row["signal"] == 11 and row["addr"] == 0, row
     print(f"      --json：signal={row['signal']} addr=0x{row['addr']:x} pc=0x{row['pc']:x}")
+
+
+def test_e_artifact_reports_its_own_fault() -> None:
+    """判 E（stage 1，`docs/367`）：**直接跑产物**就有 Lomenterr 形状的报告。"""
+    if not _wsl():
+        print("      SKIP: 没有 WSL/Linux")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        exe = _build(_NULL, "segv_self", Path(tds), fault_report=True)
+        rc, err = _run_direct(exe)
+    assert rc == 139, (rc, err[:300])
+    for want in ("loment: SIGSEGV", "error[SEGV]:", "段错误", "  --> 原生产物:0x",
+                 "地址：0x", "（写）", "PC：0x", "站点：store16 / entry / 第 11 条",
+                 "= 事实：", "= 建议："):
+        assert want in err, (want, err[:600])
+    print("      直接跑：首行 + error[SEGV] + 地址/读写 + PC/RSP + 站点 + 事实/建议")
+
+
+def test_f_artifact_reports_stack_overflow() -> None:
+    """判 F：栈溢出时 handler 在**备栈**上跑，报告认出"贴着 RSP"。"""
+    if not _wsl():
+        print("      SKIP: 没有 WSL/Linux")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        exe = _build(_REC, "segv_rec", Path(tds), fault_report=True)
+        rc, err = _run_direct(exe)
+    assert rc == 139, (rc, err[:300])
+    assert "站点：down / entry" in err, err[:600]
+    assert "像是栈溢出" in err, err[:600]
+    print("      无限递归：备栈接住，站点 down/entry，判据说像是栈溢出")
+
+
+def test_g_artifact_reports_ill() -> None:
+    """判 G：`ud2` 在产物里也是 ILL 那一块（不是只靠宿主报告器）。"""
+    if not _wsl():
+        print("      SKIP: 没有 WSL/Linux")
+        return
+    ir = """declare void @llvm.trap()
+
+define void @_start() {
+entry:
+  call void @llvm.trap()
+  ret void
+}
+"""
+    blob, _meta = lomelf.compile_ll(ir, fault_report=True)
+    with tempfile.TemporaryDirectory() as tds:
+        exe = Path(tds) / "segv_ill"
+        exe.write_bytes(blob)
+        rc, err = _run_direct(exe)
+    assert rc == 132, (rc, err[:300])
+    for want in ("error[ILL]:", "非法指令", "站点："):
+        assert want in err, (want, err[:600])
+    print("      ud2：产物自己报 error[ILL]，rc=132")
+
+
+def test_h_default_artifact_stays_silent() -> None:
+    """判 H：开关**默认关** —— 默认产物直接跑仍然只有内核那一行。"""
+    if not _wsl():
+        print("      SKIP: 没有 WSL/Linux")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        exe = _build(_NULL, "segv_plain", Path(tds))     # 不开 --fault-report
+        rc, err = _run_direct(exe)
+    assert rc == 139, (rc, err[:300])
+    assert "error[" not in err and "loment:" not in err, err[:400]
+    print("      默认产物：直接跑没有任何自述（开关默认关）")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -707,6 +707,8 @@ class Emitter:
         self._hot_entry = 0
         self._hot_calls: list[tuple[str, int]] = []
         self._hot_seq: dict[str, int] = {}
+        #: `docs/367` stage 1：置成字典时，`__lom_shim` 的体由链接器直接写机器码。
+        self.fault: dict | None = None
 
     # ---- 帧
 
@@ -1478,6 +1480,16 @@ class Emitter:
             body + f"stride={HOT_STRIDE}".encode("ascii")).hexdigest()
 
     def emit_func(self, f: Func) -> None:
+        if self.fault is not None and f.name == "__lom_shim":
+            # 内核按 SysV 传参、本链接器的内部调用是栈机 —— 这个 shim 只做寄存器落槽。
+            self.asm.label(f.name)
+            shim = self.asm.here()
+            handler = self.asm.labels["__lom_handler"]
+            g = self.globals
+            self.asm.emit(_fault_shim_bytes(g["@__lom_sig"].addr,
+                                            g["@__lom_info"].addr,
+                                            g["@__lom_uctx"].addr, handler, shim))
+            return
         self.cur = f
         self.plan_frame(f)
         self.asm.label(f.name)
@@ -1491,10 +1503,17 @@ class Emitter:
         if self.hotswap:
             self.asm.call("__loment_hot_gate")
             self._hot_record("__gate")
-        for blk in f.blocks:
+        plan = self.fault["plan"] if self.fault is not None else None
+        for bi, blk in enumerate(f.blocks):
             self.cur_block = blk.label
             self.asm.label(self.blk(blk.label))
-            for ins in blk.instrs:
+            bgi = plan["blk_idx"].get((f.name, bi)) if plan is not None else None
+            for ii, ins in enumerate(blk.instrs):
+                if bgi is not None:
+                    kw = _site_kind_width(ins.text)
+                    if kw is not None:
+                        plan["sites"].append((self.asm.here(), plan["fn_idx"][f.name],
+                                              bgi, ii, kw[0], kw[1]))
                 self.lower(ins)
         row = {
             "name": f.name,
@@ -6602,14 +6621,579 @@ def hot_metadata(funcs: list[dict], header: dict | None = None,
     return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------- 原生段错误报告（`docs/367` stage 1）
+#
+# 开关打开时，链接器往产物里注入一台很小的运行期：
+#   * 入口换成 `__lom_entry`：装备栈、给 5 个致命信号装 handler（SA_SIGINFO|
+#     SA_ONSTACK|SA_RESTORER），再调用用户的 `_start` / `main`；
+#   * handler 是普通 IR 函数（零形参），它从一个**机器码 shim** 填好的三个全局里读现场
+#     —— 内核按 SysV 传 rdi/rsi/rdx，而本链接器的内部调用是**栈机**，两者不能直接接；
+#   * 报告按 `lomenterr` 的形状写 stderr，然后恢复默认处置并用 tgkill 重发信号 ——
+#     进程仍然**死于信号**（shell 的 `Segmentation fault` 与退出码 139 不变）。
+#
+# **必须带 SA_RESTORER**：原型实测，只装 handler（flags=0）时 `rt_sigaction` 返回 0，
+# 但信号来了没人接。glibc 的 `sigaction()` 会替你补上，裸 `rt_sigaction` 不会。
+
+_FAULT_SIGNALS = (11, 7, 4, 8, 6)
+_FAULT_FLAGS = 0x04000000 | 0x08000000 | 0x00000004   # SA_RESTORER|SA_ONSTACK|SA_SIGINFO
+_FAULT_ALT = 32768
+
+_SYS3 = ('call i64 asm sideeffect "syscall", '
+         '"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"')
+_SYS6 = ('call i64 asm sideeffect "syscall", '
+         '"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}"')
+
+
+def _cstr(text: str) -> str:
+    """IR 的 `c"..."`：每个字节一个 `\\XX`（盘上的换行/引号也就都不需要转义）。"""
+    return 'c"' + "".join("\\%02X" % b for b in text.encode("utf-8")) + '"'
+
+
+def _site_kind_width(text: str) -> tuple[int, int] | None:
+    """一条指令是不是访存站点；是就给出 (kind, width)。
+
+    kind：0 load / 1 store / 2 atomicrmw。`getelementptr` **不算** —— 它不碰内存。
+    """
+    try:
+        if text.startswith("load "):
+            ty, _ = parse_type(text[len("load "):])
+            return (0, size_of(ty))
+        if text.startswith("store "):
+            ty, _ = parse_type(text[len("store "):])
+            return (1, size_of(ty))
+        if text.startswith("atomicrmw "):
+            m = re.match(r"atomicrmw \w+ ptr \S+,\s*(\w+)", text)
+            if m:
+                return (2, size_of(m.group(1)))
+    except (ElfError, Unsupported):
+        return None
+    return None
+
+
+def _fault_plan(funcs) -> dict:
+    """在注入运行期**之前**把名字表/编号定下来（用户函数是 0..n-1，运行期排在后面）。"""
+    fn_idx = {f.name: i for i, f in enumerate(funcs)}
+    blk_names: list[str] = []
+    blk_idx: dict[tuple[str, int], int] = {}
+    for fi, f in enumerate(funcs):
+        for bi, b in enumerate(f.blocks):
+            blk_idx[(f.name, bi)] = len(blk_names)
+            blk_names.append(b.label)
+    strs = bytearray()
+    off: dict[str, int] = {}
+
+    def intern(s: str) -> int:
+        if s not in off:
+            off[s] = len(strs)
+            strs.extend(s.encode("utf-8") + b"\0")
+        return off[s]
+
+    fn_off = [intern(f.name) for f in funcs]
+    blk_off = [intern(b) for b in blk_names]
+    nsites = sum(1 for f in funcs for b in f.blocks for ins in b.instrs
+                 if _site_kind_width(ins.text) is not None)
+    return {
+        "fn_idx": fn_idx, "blk_idx": blk_idx, "blk_names": blk_names,
+        "fn_off": fn_off, "blk_off": blk_off,
+        "strs": bytes(strs) or b"\0",
+        "nsites": nsites, "nfns": len(funcs), "nblks": len(blk_names),
+        "sites": [],                      # 发射期填：(addr, fn_idx, blk_idx, ins_idx, kind, width)
+    }
+
+
+def _fault_table_globals_ir(plan: dict) -> str:
+    """表放进 `.data`（先写一个非零标记字节，保证布局判它"有内容"；内容发射后回填）。"""
+    sizes = {
+        "@__lom_sites": 4 + 24 * plan["nsites"],
+        "@__lom_fns": 4 + 24 * plan["nfns"],
+        "@__lom_blks": 4 + 8 * plan["nblks"],
+        "@__lom_strs": len(plan["strs"]),
+    }
+    out = []
+    for name, size in sizes.items():
+        marker = "\\EE" + "\\00" * (size - 1)
+        out.append(f'{name} = global [{size} x i8] c"{marker}"')
+    return "\n".join(out)
+
+
+def _fault_patch_tables(em, plan: dict, data: bytearray, text_end: int) -> None:
+    """把站点/函数/块/名字四张表写进 `.data`（`em` 已经发完所有函数）。"""
+    def put(name: str, blob: bytes) -> None:
+        g = em.globals[name]
+        off = g.addr - DATA_VADDR
+        assert len(blob) == size_of(g.ty), (name, len(blob), size_of(g.ty))
+        data[off:off + len(blob)] = blob
+
+    sites = sorted(plan["sites"])
+    blob = bytearray(struct.pack("<I", len(sites)))
+    for addr, fi, bi, ii, kind, width in sites:
+        blob += struct.pack("<QIIIHH", addr, fi, bi, ii, kind, width)
+    put("@__lom_sites", bytes(blob))
+
+    # 函数区间：只收**用户函数**（表的下标就是它们的编号）。终点 = 下一个用户函数的
+    # 起点；最后一个用户函数的终点是**第一个运行期函数**的起点（别把运行期算进用户函数）。
+    funcs_order = [f for f in em.fault["funcs"] if f.name in plan["fn_idx"]]
+    starts = [em.asm.labels[f.name] for f in funcs_order]
+    tail = next((em.asm.labels[f.name] for f in em.fault["funcs"]
+                 if f.name not in plan["fn_idx"]), text_end)
+    blob = bytearray(struct.pack("<I", len(funcs_order)))
+    for i, f in enumerate(funcs_order):
+        end = starts[i + 1] if i + 1 < len(starts) else tail
+        fi = plan["fn_idx"].get(f.name)
+        if fi is None:
+            # 运行期函数不进名字表 —— 给一个空名字，PC 落进去时打印空。
+            blob += struct.pack("<QQII", starts[i], end, 0, 0)
+        else:
+            blob += struct.pack("<QQII", starts[i], end, plan["fn_off"][fi],
+                                len(f.name))
+    put("@__lom_fns", bytes(blob))
+
+    blob = bytearray(struct.pack("<I", plan["nblks"]))
+    # 块名长度从名字池里取：`blk_off` 指向的串以 NUL 结尾。
+    for off, label in zip(plan["blk_off"], plan["blk_names"]):
+        blob += struct.pack("<II", off, len(label.encode("utf-8")))
+    put("@__lom_blks", bytes(blob))
+    put("@__lom_strs", plan["strs"].ljust(len(plan["strs"]), b"\0"))
+
+
+
+
+
+#: 五个信号的人类名字/码/标题（顺序就是 `__lom_handler` 里的分派顺序）。
+_FAULT_TITLES = (
+    (11, "SIGSEGV", "SEGV", "段错误（segmentation fault）"),
+    (7, "SIGBUS", "BUS", "总线错误（bus error）"),
+    (4, "SIGILL", "ILL", "非法指令（illegal instruction）"),
+    (8, "SIGFPE", "FPE", "算术异常（floating-point exception）"),
+    (6, "SIGABRT", "ABRT", "进程自己 abort 了（abort）"),
+)
+
+
+def _fault_messages() -> list[tuple[str, str]]:
+    """（全局名，文本）。`__lom_handler` 按名字引用。"""
+    out = [
+        ("__lom_m_sig", "   | 信号："),
+        ("__lom_m_nl", "\n"),
+        ("__lom_m_addr", "   | 地址："),
+        ("__lom_m_wr", "（写）\n"),
+        ("__lom_m_rd", "（读）\n"),
+        ("__lom_m_pc", "   | PC："),
+        ("__lom_m_rsp", "；RSP："),
+        ("__lom_m_arrow", "  --> 原生产物:"),
+        ("__lom_m_so", "   | 判据：故障地址贴着 RSP（相差 < 64 KiB）—— 像是栈溢出\n"),
+        ("__lom_m_fact", "   |\n   = 事实：原生档在执行上述 PC 时收到该信号。它没有对象表，"
+                         "所以不给对象现场；站点由产物里的表解析。\n"),
+        ("__lom_m_tip", "   = 建议：要逐站点的对象诊断（对象表 / 对象代 / 现场），"
+                        "用 LVM 档运行（--substrate sw_cap，见 docs/366）；"
+                        "本报告由产物自己发出（docs/367 stage 1）。\n"),
+        ("__lom_ms1", "   | 站点："),
+        ("__lom_ms2", " / "),
+        ("__lom_ms3", " / 第 "),
+        ("__lom_ms4", " 条（距该指令 "),
+        ("__lom_ms5", "\n   | 站点：（PC 不在任何访存站点上）\n"),
+        ("__lom_ms6", "）\n"),
+    ]
+    for sig, name, tag, title in _FAULT_TITLES:
+        out += [
+            (f"__lom_hn{sig}", f"loment: {name}（信号 "),
+            (f"__lom_hd{sig}", "）\n"),
+            (f"__lom_he{sig}", f"error[{tag}]: {title}\n"),
+        ]
+    out += [("__lom_hgen", "loment: 信号 "),
+            ("__lom_hgen2", "）\n"),
+            ("__lom_hgen3", "error[FAULT]: 进程收到致命信号\n")]
+    return out
+
+
+def _fault_globals_ir(plan: dict) -> str:
+    out = [
+        _fault_table_globals_ir(plan),
+        "@__lom_sig = global [8 x i8] zeroinitializer",
+        "@__lom_info = global [8 x i8] zeroinitializer",
+        "@__lom_uctx = global [8 x i8] zeroinitializer",
+        "@__lom_act = global [32 x i8] zeroinitializer",
+        f"@__lom_alt = global [{_FAULT_ALT} x i8] zeroinitializer",
+        "@__lom_ss = global [24 x i8] zeroinitializer",
+        "@__lom_hexbuf = global [18 x i8] zeroinitializer",
+        "@__lom_decbuf = global [3 x i8] zeroinitializer",
+    ]
+    for name, text in _fault_messages():
+        out.append(f"@{name} = global [{len(text.encode('utf-8'))} x i8] {_cstr(text)}")
+    return "\n".join(out)
+
+
+def _ir_wrhex(fn: str = "__wrhex") -> str:
+    """定宽十六进制（`0x` + 16 位）。分支-free：`digit = nib + 48 + (nib>9)*39`。"""
+    body = [
+        f"define void @{fn}(i64 %v) {{",
+        "entry:",
+        "  %b = ptrtoint ptr @__lom_hexbuf to i64",
+        "  %pz = inttoptr i64 %b to ptr",
+        "  store i8 48, ptr %pz",
+        "  %b1 = add i64 %b, 1",
+        "  %p1 = inttoptr i64 %b1 to ptr",
+        "  store i8 120, ptr %p1",
+    ]
+    for i in range(16):
+        sh = 60 - 4 * i
+        off = 2 + i
+        body += [
+            f"  %sh{i} = lshr i64 %v, {sh}",
+            f"  %n{i} = and i64 %sh{i}, 15",
+            f"  %g{i} = icmp ugt i64 %n{i}, 9",
+            f"  %z{i} = zext i1 %g{i} to i64",
+            f"  %m{i} = mul i64 %z{i}, 39",
+            f"  %d{i} = add i64 %n{i}, 48",
+            f"  %e{i} = add i64 %d{i}, %m{i}",
+            f"  %p{i} = add i64 %b, {off}",
+            f"  %q{i} = inttoptr i64 %p{i} to ptr",
+            f"  store i8 %e{i}, ptr %q{i}",
+        ]
+    body += [
+        f"  %w = {_SYS3}(i64 1, i64 2, i64 %b, i64 18)",
+        "  ret void",
+        "}",
+    ]
+    return "\n".join(body)
+
+
+def _ir_wrdec(fn: str = "__wrnum") -> str:
+    """十进制，**不带前导零**（3 位够信号号与站点序号）。
+
+    三条出口：≥100 写三位；10..99 写两位；个位写一位。缓冲区是同一个，按起止切片。
+    """
+    lines = [
+        f"define void @{fn}(i64 %v) {{",
+        "entry:",
+        "  %b = ptrtoint ptr @__lom_decbuf to i64",
+        "  %h = udiv i64 %v, 100",
+        "  %h2 = urem i64 %h, 10",
+        "  %h3 = add i64 %h2, 48",
+        "  %t = udiv i64 %v, 10",
+        "  %t2 = urem i64 %t, 10",
+        "  %t3 = add i64 %t2, 48",
+        "  %o = urem i64 %v, 10",
+        "  %o2 = add i64 %o, 48",
+        "  %p0 = inttoptr i64 %b to ptr",
+        "  store i8 %h3, ptr %p0",
+        "  %b1 = add i64 %b, 1",
+        "  %p1 = inttoptr i64 %b1 to ptr",
+        "  store i8 %t3, ptr %p1",
+        "  %b2 = add i64 %b, 2",
+        "  %p2 = inttoptr i64 %b2 to ptr",
+        "  store i8 %o2, ptr %p2",
+        "  %h0 = icmp eq i64 %h, 0",
+        "  br i1 %h0, label %lt100, label %all3",
+        "all3:",
+        f"  %w3 = {_SYS3}(i64 1, i64 2, i64 %b, i64 3)",
+        "  ret void",
+        "lt100:",
+        "  %t0 = icmp eq i64 %t2, 0",
+        "  br i1 %t0, label %one, label %two",
+        "two:",
+        f"  %w2 = {_SYS3}(i64 1, i64 2, i64 %b1, i64 2)",
+        "  ret void",
+        "one:",
+        f"  %w1 = {_SYS3}(i64 1, i64 2, i64 %b2, i64 1)",
+        "  ret void",
+        "}",
+    ]
+    return "\n".join(lines)
+
+
+def _emit_msg_write(name: str, parts: list[str]) -> None:
+    # 同一条消息会在不同块里写多次，而 SSA 名字是**函数级唯一**的 —— 用位置做后缀，
+    # 免得 `%b_...` 被重定义（本链接器按名字分配槽，重定义会静默指到同一个槽）。
+    u = len(parts)
+    text = dict(_fault_messages())[name]
+    parts += [f"  %b{u} = ptrtoint ptr @{name} to i64",
+              f"  %w{u} = {_SYS3}(i64 1, i64 2, i64 %b{u}, "
+              f"i64 {len(text.encode('utf-8'))})"]
+
+
+def _ir_site_lookup(nsites: int, parts: list[str], from_block: str = "entry") -> None:
+    """站点查找 + 打印。表按地址升序；取 `addr <= rip` 的最大那一条。"""
+    parts += [
+        "  %sb0 = ptrtoint ptr @__lom_sites to i64",
+        "  %sb = add i64 %sb0, 4",
+        "  %fb0 = ptrtoint ptr @__lom_fns to i64",
+        "  %fb = add i64 %fb0, 4",
+        "  %kb0 = ptrtoint ptr @__lom_blks to i64",
+        "  %kb = add i64 %kb0, 4",
+        "  %xb0 = ptrtoint ptr @__lom_strs to i64",
+        "  %xb = add i64 %xb0, 0",
+        "  br label %sloop",
+        "sloop:",
+        f"  %si = phi i64 [0, %{from_block}], [%si2, %scont]",
+        f"  %sbi = phi i64 [-1, %{from_block}], [%sbi2, %scont]",
+        f"  %sba = phi i64 [0, %{from_block}], [%sba2, %scont]",
+        f"  %sdone = icmp sge i64 %si, {nsites}",
+        "  br i1 %sdone, label %safter, label %sbody",
+        "sbody:",
+        "  %so = mul i64 %si, 24",
+        "  %sa = add i64 %sb, %so",
+        "  %sap = inttoptr i64 %sa to ptr",
+        "  %sv = load i64, ptr %sap",
+        "  %sle = icmp ule i64 %sv, %rip",
+        "  %sgt = icmp ugt i64 %sv, %sba",
+        "  %sboth = and i1 %sle, %sgt",
+        "  br i1 %sboth, label %stake, label %sskip",
+        "stake:",
+        "  br label %scont",
+        "sskip:",
+        "  br label %scont",
+        "scont:",
+        "  %sbi2 = phi i64 [%si, %stake], [%sbi, %sskip]",
+        "  %sba2 = phi i64 [%sv, %stake], [%sba, %sskip]",
+        "  %si2 = add i64 %si, 1",
+        "  br label %sloop",
+        "safter:",
+        "  %shas = icmp sge i64 %sbi, 0",
+        "  br i1 %shas, label %showsite, label %sitenone",
+        "sitenone:",
+    ]
+    _emit_msg_write("__lom_ms5", parts)
+    parts += ["  br label %sitedone", "showsite:"]
+    # site[bi]：fn@+8(u32) blk@+12(u32) packed@+16(u64: ins 低 32 / kind / width)
+    parts += [
+        "  %se = mul i64 %sbi, 24",
+        "  %sp = add i64 %sb, %se",
+        "  %sp8 = add i64 %sp, 8",
+        "  %spp = inttoptr i64 %sp8 to ptr",
+        "  %siv = load i32, ptr %spp",
+        "  %sfi = zext i32 %siv to i64",
+        "  %sp12 = add i64 %sp, 12",
+        "  %sbp = inttoptr i64 %sp12 to ptr",
+        "  %sbv = load i32, ptr %sbp",
+        "  %sblk = zext i32 %sbv to i64",
+        "  %sp16 = add i64 %sp, 16",
+        "  %sxp = inttoptr i64 %sp16 to ptr",
+        "  %sxv = load i64, ptr %sxp",
+        "  %sins = and i64 %sxv, 4294967295",
+        # fn 名：fns[fi] = {start,end u64, off u32, len u32}
+        "  %fe = mul i64 %sfi, 24",
+        "  %fp = add i64 %fb, %fe",
+        "  %fp16 = add i64 %fp, 16",
+        "  %fpp = inttoptr i64 %fp16 to ptr",
+        "  %fno = load i32, ptr %fpp",
+        "  %fnov = zext i32 %fno to i64",
+        "  %fp20 = add i64 %fp, 20",
+        "  %fnlp = inttoptr i64 %fp20 to ptr",
+        "  %fnl = load i32, ptr %fnlp",
+        "  %fnlv = zext i32 %fnl to i64",
+        # blk 名：blks[bi] = {off u32, len u32}
+        "  %ke = mul i64 %sblk, 8",
+        "  %kp = add i64 %kb, %ke",
+        "  %kpp = inttoptr i64 %kp to ptr",
+        "  %kno = load i32, ptr %kpp",
+        "  %knov = zext i32 %kno to i64",
+        "  %kp4 = add i64 %kp, 4",
+        "  %knlp = inttoptr i64 %kp4 to ptr",
+        "  %knl = load i32, ptr %knlp",
+        "  %knlv = zext i32 %knl to i64",
+        "  %fnm = add i64 %xb, %fnov",
+        "  %knm = add i64 %xb, %knov",
+    ]
+    _emit_msg_write("__lom_ms1", parts)
+    parts += [f"  %w_fn = {_SYS3}(i64 1, i64 2, i64 %fnm, i64 %fnlv)"]
+    _emit_msg_write("__lom_ms2", parts)
+    parts += [f"  %w_kn = {_SYS3}(i64 1, i64 2, i64 %knm, i64 %knlv)"]
+    _emit_msg_write("__lom_ms3", parts)
+    parts += ["  call void @__wrnum(i64 %sins)"]
+    _emit_msg_write("__lom_ms4", parts)
+    parts += ["  %sdist = sub i64 %rip, %sba",
+              "  call void @__wrhex(i64 %sdist)"]
+    _emit_msg_write("__lom_ms6", parts)
+    parts += ["  br label %sitedone", "sitedone:"]
+
+
+def _ir_heading(parts: list[str]) -> None:
+    """`loment: <名字>（信号 N）` / `error[码]: 标题` / `--> 原生产物:0x…`。
+
+    五个信号各自一块（IR 里没有查表之外更便宜的分派）；都不是就走通用块。
+    """
+    n = len(_FAULT_TITLES)
+    parts += [f"  %h0 = icmp eq i64 %sig, {_FAULT_TITLES[0][0]}",
+              "  br i1 %h0, label %hb0, label %hc1"]
+    for i, (sig, name, tag, title) in enumerate(_FAULT_TITLES):
+        parts.append(f"hb{i}:")
+        _emit_msg_write(f"__lom_hn{sig}", parts)
+        parts += ["  call void @__wrnum(i64 %sig)"]
+        _emit_msg_write(f"__lom_hd{sig}", parts)
+        _emit_msg_write(f"__lom_he{sig}", parts)
+        _emit_msg_write("__lom_m_arrow", parts)
+        parts += ["  call void @__wrhex(i64 %rip)"]
+        _emit_msg_write("__lom_m_nl", parts)
+        parts += ["  br label %hdone"]
+        if i + 1 < n:
+            nxt = _FAULT_TITLES[i + 1][0]
+            parts += [f"hc{i+1}:", f"  %h{i+1} = icmp eq i64 %sig, {nxt}",
+                      f"  br i1 %h{i+1}, label %hb{i+1}, label %hc{i+2}"]
+    parts.append(f"hc{n}:")
+    _emit_msg_write("__lom_hgen", parts)
+    parts += ["  call void @__wrnum(i64 %sig)"]
+    _emit_msg_write("__lom_hgen2", parts)
+    _emit_msg_write("__lom_hgen3", parts)
+    _emit_msg_write("__lom_m_arrow", parts)
+    parts += ["  call void @__wrhex(i64 %rip)"]
+    _emit_msg_write("__lom_m_nl", parts)
+    parts += ["  br label %hdone"]
+
+
+def _fault_runtime_ir(entry: str, entry_is_main: bool, plan: dict) -> str:
+    """安装 + 报告（信号/地址/PC/RSP/站点）。站点表由链接器发射后回填。"""
+    parts = [_fault_globals_ir(plan), "", _ir_wrhex(), "", _ir_wrdec(), ""]
+    parts += [
+        # rt_sigreturn：handler 不返回，但内核要求有 restorer。
+        "define void @__lom_restore() {",
+        "entry:",
+        f'  %r = call i64 asm sideeffect "syscall", '
+        f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"(i64 15, i64 0, i64 0, i64 0)',
+        "  ret void",
+        "}",
+        "",
+        "define void @__lom_handler() {",
+        "entry:",
+        "  %sig = load i64, ptr @__lom_sig",
+        "  %inf = load i64, ptr @__lom_info",
+        "  %uct = load i64, ptr @__lom_uctx",
+        "  %ia = add i64 %inf, 16",
+        "  %iap = inttoptr i64 %ia to ptr",
+        "  %addr = load i64, ptr %iap",
+        "  %ra = add i64 %uct, 168",
+        "  %rap = inttoptr i64 %ra to ptr",
+        "  %rip = load i64, ptr %rap",
+        "  %sa = add i64 %uct, 160",
+        "  %sap = inttoptr i64 %sa to ptr",
+        "  %rsp = load i64, ptr %sap",
+        "  %ea = add i64 %uct, 192",
+        "  %eap = inttoptr i64 %ea to ptr",
+        "  %err = load i64, ptr %eap",
+    ]
+    _ir_heading(parts)
+    parts.append("hdone:")
+    _emit_msg_write("__lom_m_sig", parts)
+    parts += ["  call void @__wrnum(i64 %sig)"]
+    _emit_msg_write("__lom_m_nl", parts)
+    _emit_msg_write("__lom_m_addr", parts)
+    parts += ["  call void @__wrhex(i64 %addr)",
+              "  %isw = and i64 %err, 2",
+              "  %iswr = icmp ne i64 %isw, 0",
+              "  br i1 %iswr, label %dwr, label %drd",
+              "dwr:"]
+    _emit_msg_write("__lom_m_wr", parts)
+    parts += ["  br label %ddone", "drd:"]
+    _emit_msg_write("__lom_m_rd", parts)
+    parts += ["  br label %ddone", "ddone:"]
+    _emit_msg_write("__lom_m_pc", parts)
+    parts += ["  call void @__wrhex(i64 %rip)"]
+    _emit_msg_write("__lom_m_rsp", parts)
+    parts += ["  call void @__wrhex(i64 %rsp)"]
+    _emit_msg_write("__lom_m_nl", parts)
+    _ir_site_lookup(plan["nsites"], parts, from_block="ddone")
+    # 栈溢出时故障地址可能**高于** RSP（写进下一页的守卫页），所以两个方向都算；
+    # 无符号减法在反方向会回绕成一个巨大的数，不会被判成"近"。
+    parts += ["  %d1 = sub i64 %rsp, %addr",
+              "  %d2 = sub i64 %addr, %rsp",
+              "  %s1 = icmp ult i64 %d1, 65536",
+              "  %s2 = icmp ult i64 %d2, 65536",
+              "  %gstack = or i1 %s1, %s2",
+              "  br i1 %gstack, label %gso, label %gnoso",
+              "gso:"]
+    _emit_msg_write("__lom_m_so", parts)
+    parts += ["  br label %gsodone", "gnoso:", "  br label %gsodone", "gsodone:"]
+    _emit_msg_write("__lom_m_fact", parts)
+    _emit_msg_write("__lom_m_tip", parts)
+    parts += [
+        "  ; 恢复默认处置，再重发信号 —— 进程仍然死于信号。",
+        f"  %r0 = {_SYS6}(i64 13, i64 %sig, i64 0, i64 0, i64 8, i64 0, i64 0)",
+        f"  %pid = {_SYS6}(i64 39, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)",
+        f"  %tid = {_SYS6}(i64 186, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)",
+        f"  %r3 = {_SYS6}(i64 234, i64 %pid, i64 %tid, i64 %sig, i64 0, i64 0, i64 0)",
+        "  %add = add i64 %sig, 128",
+        f"  %r4 = {_SYS3}(i64 231, i64 %add, i64 0, i64 0)",
+        "  ret void",
+        "}",
+        "",
+        # 机器码 shim 的占位函数：名字是真的（`ptrtoint ptr @__lom_shim` 可取），
+        # 字节由 `Emitter.emit_func` 直接写出。它排在 handler **之后**：写 rel32 时
+        # 要拿 `__lom_handler` 的地址，标签那时才立起来。
+        "define void @__lom_shim() {",
+        "entry:",
+        "  ret void",
+        "}",
+        "",
+        "define i64 @__lom_entry() {",
+        "entry:",
+        "  %sb = ptrtoint ptr @__lom_ss to i64",
+        "  %sp = inttoptr i64 %sb to ptr",
+        "  %alt = ptrtoint ptr @__lom_alt to i64",
+        "  store i64 %alt, ptr %sp",
+        "  %f8 = add i64 %sb, 8",
+        "  %fp = inttoptr i64 %f8 to ptr",
+        "  store i32 0, ptr %fp",
+        "  %f16 = add i64 %sb, 16",
+        "  %sq = inttoptr i64 %f16 to ptr",
+        f"  store i64 {_FAULT_ALT}, ptr %sq",
+        f"  %rss = {_SYS6}(i64 131, i64 %sb, i64 0, i64 0, i64 0, i64 0, i64 0)",
+        "  %ab = ptrtoint ptr @__lom_act to i64",
+        "  %hs = ptrtoint ptr @__lom_shim to i64",
+        "  store i64 %hs, ptr @__lom_act",
+        "  %ff = add i64 %ab, 8",
+        "  %ffp = inttoptr i64 %ff to ptr",
+        f"  store i64 {_FAULT_FLAGS}, ptr %ffp",
+        "  %rs = ptrtoint ptr @__lom_restore to i64",
+        "  %rf = add i64 %ab, 16",
+        "  %rfp = inttoptr i64 %rf to ptr",
+        "  store i64 %rs, ptr %rfp",
+    ]
+    for k, sig in enumerate(_FAULT_SIGNALS):
+        parts.append(f"  %s{k} = {_SYS6}(i64 13, i64 {sig}, i64 %ab, i64 0, "
+                     f"i64 8, i64 0, i64 0)")
+    if entry_is_main:
+        parts += [f"  %rv = call i32 @{entry}",
+                  "  %rv2 = zext i32 %rv to i64",
+                  "  ret i64 %rv2"]
+    else:
+        parts += [f"  call void @{entry}()", "  ret i64 0"]
+    parts.append("}")
+    return "\n".join(parts)
+
+
+def _fault_shim_bytes(sig_addr: int, info_addr: int, uctx_addr: int,
+                      handler_addr: int, shim_addr: int) -> bytes:
+    """内核 → 栈机 的桥：把 rdi/rsi/rdx 落到三个全局，再 `call` handler。"""
+    b = bytearray()
+    b += bytes([0x89, 0x3C, 0x25]) + struct.pack("<I", sig_addr)      # mov [abs], edi
+    b += bytes([0x48, 0x89, 0x34, 0x25]) + struct.pack("<I", info_addr)   # mov [abs], rsi
+    b += bytes([0x48, 0x89, 0x14, 0x25]) + struct.pack("<I", uctx_addr)   # mov [abs], rdx
+    # call rel32：rel = target - (addr_of_next_instruction)
+    call_at = shim_addr + len(b)
+    b += bytes([0xE8]) + struct.pack("<i", handler_addr - (call_at + 5))
+    b += bytes([0x0F, 0x0B])                                          # ud2
+    return bytes(b)
+
+
 def compile_ll(text: str, objects: list | None = None,
                allow_ports: bool = False, interp: str | None = None,
                collect_hot: bool = True,
-               hotswap: bool = False) -> tuple[bytes, dict]:
+               hotswap: bool = False,
+               fault_report: bool = False) -> tuple[bytes, dict]:
     objects = objects or []
     global TEXT_VADDR, DATA_VADDR
     TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # PE 目标会改这两个全局
     globals_, funcs, externs = parse_ll(text)
+    fault_entry: str | None = None
+    fault_plan: dict | None = None
+    if fault_report:
+        if hotswap:
+            raise Unsupported("`--fault-report` 与热更新入口闸暂不叠加（docs/367 stage 1）")
+        user_entry = _entry_name(funcs)
+        user_is_main = user_entry == "main"
+        fault_plan = _fault_plan(funcs)
+        text = text + "\n" + _fault_runtime_ir(user_entry, user_is_main, fault_plan)
+        globals_, funcs, externs = parse_ll(text)
+        fault_entry = "__lom_entry"
     # A name that is both `declare`d and `define`d in this text is an internal call.
     # Multi-input linking (docs/283 sec 6.2) concatenates the app IR with library IRs;
     # the app's `declare __jl_x` then meets the library's `define __jl_x`. Keeping the
@@ -6762,6 +7346,8 @@ def compile_ll(text: str, objects: list | None = None,
     # 7/7 打到 4/7。所以这里滤掉 (除 llvm.* 之外没有别的内建 declare)。
     em = Emitter(globals_, {x for x in externs if not x.startswith("llvm.")},
                  hotswap=hotswap, swappable=[f.name for f in funcs])
+    if fault_entry is not None:
+        em.fault = {"entry": fault_entry, "plan": fault_plan, "funcs": funcs}
     if hotswap:
         # 入口闸写/读的两个字：epoch（`#1151`）与调用者的帧指针（`#1152`）。
         # 它们必须相邻且相隔 8 —— 闸里用 `[rax+8]` 存，固定核按 `epoch+8` 读。
@@ -6782,7 +7368,7 @@ def compile_ll(text: str, objects: list | None = None,
     has_foreign = bool(objects) and not shared
     if has_foreign:
         em.asm.labels["__loment_tls"] = tls_addr
-    entry = _entry_name(funcs)
+    entry = fault_entry or _entry_name(funcs)
     # 构造函数表的位置（`#611`）：表本身已经摆在 `data` 里，这里只把首尾地址立成标签，
     # 入口桩按它们走表。一个对象都没有时 `ctor_ranges` 为空，桩里一条指令都不多。
     ctor_ranges: list[tuple[int, int]] = []
@@ -6811,6 +7397,9 @@ def compile_ll(text: str, objects: list | None = None,
                        finis=len(fini_ranges), call_exit=call_exit)
     for f in funcs:
         em.emit_func(f)
+    if fault_plan is not None:
+        # 所有函数都发完了：站点地址、函数区间、名字池这一刻才是最终的。
+        _fault_patch_tables(em, fault_plan, data, em.asm.here())
     # **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把
     # "可闭合"那几个名字提供出来，于是它们**不再是未定义符号** —— 从表上划掉。
     # 判据是"有没有外部输入"，不是"有没有人要它"：精确到后者要链接器先算出需求集，
@@ -7149,6 +7738,7 @@ def main(argv: list[str] | None = None) -> int:
     interp = None
     hot_meta = None
     profile = "default"
+    fault_report = False
     files: list[str] = []
     link: list[Path] = []
     i = 0
@@ -7169,6 +7759,10 @@ def main(argv: list[str] | None = None) -> int:
         elif a == "--allow-ports":
             # 开发通道专用（`docs/222` §4 的端口门）：默认**不收**带未定义符号的外源对象。
             allow_ports = True
+        elif a == "--fault-report":
+            # 原生档段错误报告（`docs/367` stage 1）：产物自己说。默认关 —— 开了会改
+            # 入口、加备栈与站点表，产物字节随之改变（见 docs/367 §3）。
+            fault_report = True
         elif a == "--link":
             i += 1
             link.append(Path(argv[i]))
@@ -7188,7 +7782,7 @@ def main(argv: list[str] | None = None) -> int:
             or profile not in ("default", "hotswap")):
         print("用法: lomelf.py IN.ll [MORE.ll ...] [-o OUT] [--target elf|pe] [--check]"
               " [--link OBJ.o ...] [--allow-ports] [--interp PATH] [--hot-meta PATH]"
-              " [--profile default|hotswap]",
+              " [--profile default|hotswap] [--fault-report]",
               file=sys.stderr)
         return 2
     if link and target == "pe":
@@ -7196,6 +7790,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if profile == "hotswap" and target != "elf":
         print("[ERR] --profile hotswap 目前只支持 ELF 目标", file=sys.stderr)
+        return 2
+    if fault_report and target == "pe":
+        print("[ERR] --fault-report 目前只支持 ELF 目标（docs/367 stage 4 才做 PE）",
+              file=sys.stderr)
         return 2
     src = Path(files[0])
     try:
@@ -7206,7 +7804,8 @@ def main(argv: list[str] | None = None) -> int:
             blob, info = compile_pe(text)
         else:
             blob, info = compile_ll(text, objs, allow_ports, interp,
-                                    hotswap=(profile == "hotswap"))
+                                    hotswap=(profile == "hotswap"),
+                                    fault_report=fault_report)
     except Unsupported as e:
         print(f"[ERR] {e}", file=sys.stderr)
         return 1

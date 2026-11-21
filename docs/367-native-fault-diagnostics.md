@@ -1,13 +1,13 @@
 # 367 · 原生档的段错误详细化：从宿主报告器到产物自述
 
-> 状态: **设计 + stage 0 已实装**（2026-11-21）；stage 1 起在 `tools/lomelf.py`
+> 状态: **stage 0 + stage 1（参考 lomelf）已实装**（2026-11-21）；stage 2 起是计划
 > 上游: `docs/366`（LVM 档的同一件事）· `docs/356`（DSG：安全子集不段错误）·
 > `docs/182`（Lomenterr 的形状）· `docs/263`（上限）· `docs/167`（原生后端）
-> 判据: `tools/loment_segv_test.py`（stage 0）· 后文 §4 的 stage 1 判据
+> 判据: `tools/loment_segv_test.py`（8 条：stage 0 四条 + 产物自述四条）
 > ⚠ 不要把它和 `tools/loment_crash_test.py` 搞混：那一条管的是**编译器**在容量越界时
 > 不许出信号（`#805` / `#868`–`#874`），管的是构建期，不是运行期。
 > 一句话: **原生档现在只有内核那一行；这一页把它拆成两层 ——
-> 先在宿主把信号变成可读报告（stage 0），再把报告器嵌进产物自己说（stage 1）。**
+> 先在宿主把信号变成可读报告（stage 0），再把报告器嵌进产物自己说（stage 1 已落地）。**
 
 ---
 
@@ -182,7 +182,7 @@ stage 1 挂在 `compile_ll(..., fault_report=True)`（以及 CLI 的 `--fault-re
 | stage | 内容 | 判据 |
 |---|---|---|
 | **0** | 宿主报告器（`tools/loment_segv.py`） | `loment_segv_test`：正常程序不误报；空指针读/写、SIGILL 三格有报告；退出码 128+sig |
-| **1** | 参考 lomelf：入口包装 + shim + handler + 站点表（`--fault-report`，默认关） | `loment_segv_test` 的"产物自述"格：同一份崩溃程序，**直接跑**就有报告；PC 指回站点；PC 不在站点上时点名函数；栈溢出用备栈 |
+| **1** ✅ | 参考 lomelf：入口包装 + shim + handler + 站点表（`--fault-report`，默认关） | `loment_segv_test` E–H：同一份崩溃程序，**直接跑**就有报告；站点名（`store16 / entry / 第 11 条`）、读写方向、栈溢出判据、`ud2` 是 ILL；默认关时产物沉默 |
 | **2** | 自举镜像 `loment/tools/lomelf.lomt` 同形 | `loment_elf_test` 的孪生格：开关打开时两边产物**逐字节相同** |
 | **3** | 默认打开 | 现有 ELF 判据全绿；体积与启动开销记账（`docs/263`） |
 | **4** | Windows PE | PE 上不是信号，是异常处理器；形状相同、机制另写（lomelf 的 PE 发射器 + `win_shim`） |
@@ -191,11 +191,39 @@ stage 1 挂在 `compile_ll(..., fault_report=True)`（以及 CLI 的 `--fault-re
 **clang 路**（`loment_elf_test` 的 (a) 路）不在 stage 1–3 里：它不经 lomelf，注入点
 在构建命令上，是另一笔。stage 0 的宿主报告器对它是可用的。
 
+### 4.1 stage 1 的实际输出（本机实测）
+
+`--fault-report` 打开后，空指针写直接跑出来是：
+
+```text
+loment: SIGSEGV（信号 11）
+error[SEGV]: 段错误（segmentation fault）
+  --> 原生产物:0x00000000004006c8
+   | 信号：11
+   | 地址：0x0000000000000000（写）
+   | PC：0x00000000004006c8；RSP：0x00007ffe8c78b0c0
+   | 站点：store16 / entry / 第 11 条（距该指令 0x11）
+   |
+   = 事实：原生档在执行上述 PC 时收到该信号。它没有对象表，所以不给对象现场；站点由产物里的表解析。
+   = 建议：……
+```
+
+无限递归（栈溢出）那一格多一行判据：
+
+```text
+   | 判据：故障地址贴着 RSP（相差 < 64 KiB）—— 像是栈溢出
+```
+
+**代价**（同一份空指针夹具）：默认 17,144 B → 打开后 23,712 B（+38%），主要是
+32 KiB 备栈进 `.bss`（不进文件）与站点/名字表进 `.data`。表按每条访存 24 B 计。
+这两个数要在 stage 3（默认打开）之前再量一次并记账（`docs/263`）。
+
 ---
 
 ## 5. 我不主张
 
-1. **不主张 stage 0 让产物自己说话**。它在宿主；直接跑产物还是内核那一行。
+1. **stage 0 与 stage 1 是两条路**：0 在宿主（不经 lomelf 的产物、clang 路也能用），
+   stage 1 只有 `--fault-report` 打开的 lomelf 产物才有；默认关（§3）。
 2. **不主张原生能给 LVM 那种对象细节**。没有对象表就没有"右越界 28 字节"；
    原生能给的是信号、地址、PC、站点、访问种类与宽度，以及栈溢出的判据。
 3. **不主张源行**。默认产物没有行表；`--debug` + `--map` 是 stage 0 的一条可选路。

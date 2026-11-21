@@ -529,7 +529,7 @@ SHARD_COST = {
     # 封印/验证器/派生都是纯标准库；大头是判 F 的子进程与判 A/B 的编译。
     "lvm_seal_test": 1.0,
     # 2026-11-21（`docs/367`）：本机 WSL 实测 3.8s（真前端 + lomelf 编三份 ELF，各跑一次）。
-    "loment_segv_test": 4.5,
+    "loment_segv_test": 6.5,   # 2026-11-21：本机 WSL 实测 6.0s（stage 0 + 产物自述四条）
     "lvm_fusion_test": 32.0,
     "lvm_t2_test": 138.6,
     "lvm_a0_test": 12.0,

@@ -147502,11 +147502,11 @@ L83_else:
   br label %L84_end
 L84_end:
   %t82 = load i32, ptr %num.addr
-  %t83 = icmp eq i32 %t82, 60
+  %t83 = icmp eq i32 %t82, 39
   br i1 %t83, label %L86_sc_short, label %L85_sc_rhs
 L85_sc_rhs:
   %t84 = load i32, ptr %num.addr
-  %t85 = icmp eq i32 %t84, 4096
+  %t85 = icmp eq i32 %t84, 60
   br label %L87_sc_end
 L86_sc_short:
   br label %L87_sc_end
@@ -147515,18 +147515,54 @@ L87_sc_end:
   br i1 %t86, label %L89_sc_short, label %L88_sc_rhs
 L88_sc_rhs:
   %t87 = load i32, ptr %num.addr
-  %t88 = icmp eq i32 %t87, 4097
+  %t88 = icmp eq i32 %t87, 63
   br label %L90_sc_end
 L89_sc_short:
   br label %L90_sc_end
 L90_sc_end:
   %t89 = phi i1 [ %t88, %L88_sc_rhs ], [ true, %L89_sc_short ]
-  br i1 %t89, label %L91_then, label %L92_else
-L91_then:
+  br i1 %t89, label %L92_sc_short, label %L91_sc_rhs
+L91_sc_rhs:
+  %t90 = load i32, ptr %num.addr
+  %t91 = icmp eq i32 %t90, 201
+  br label %L93_sc_end
+L92_sc_short:
+  br label %L93_sc_end
+L93_sc_end:
+  %t92 = phi i1 [ %t91, %L91_sc_rhs ], [ true, %L92_sc_short ]
+  br i1 %t92, label %L95_sc_short, label %L94_sc_rhs
+L94_sc_rhs:
+  %t93 = load i32, ptr %num.addr
+  %t94 = icmp eq i32 %t93, 228
+  br label %L96_sc_end
+L95_sc_short:
+  br label %L96_sc_end
+L96_sc_end:
+  %t95 = phi i1 [ %t94, %L94_sc_rhs ], [ true, %L95_sc_short ]
+  br i1 %t95, label %L98_sc_short, label %L97_sc_rhs
+L97_sc_rhs:
+  %t96 = load i32, ptr %num.addr
+  %t97 = icmp eq i32 %t96, 4096
+  br label %L99_sc_end
+L98_sc_short:
+  br label %L99_sc_end
+L99_sc_end:
+  %t98 = phi i1 [ %t97, %L97_sc_rhs ], [ true, %L98_sc_short ]
+  br i1 %t98, label %L101_sc_short, label %L100_sc_rhs
+L100_sc_rhs:
+  %t99 = load i32, ptr %num.addr
+  %t100 = icmp eq i32 %t99, 4097
+  br label %L102_sc_end
+L101_sc_short:
+  br label %L102_sc_end
+L102_sc_end:
+  %t101 = phi i1 [ %t100, %L100_sc_rhs ], [ true, %L101_sc_short ]
+  br i1 %t101, label %L103_then, label %L104_else
+L103_then:
   ret i32 4
-L92_else:
-  br label %L93_end
-L93_end:
+L104_else:
+  br label %L105_end
+L105_end:
   ret i32 0
 }
 ; pt_tok_num -> u32

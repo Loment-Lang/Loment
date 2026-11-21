@@ -15513,7 +15513,7 @@ class _Ir:
                 self.terminated = True
                 self.label(bad)
                 join = None
-                if self.lms_reject:
+                if self.lms_reject and not self.lms_fault:
                     # **第 4 级**（`docs/253` §5.4）：这一条 `load` 被拒，值取 0，
                     # 控制流**从它继续** —— 赔进去的是这一条指令，不是这个进程。
                     join = self.l("lmsjoin")
@@ -15558,7 +15558,7 @@ class _Ir:
                 self.w(f"br i1 {c}, label %{ok}, label %{bad}")
                 self.terminated = True
                 self.label(bad)
-                if self.lms_reject:
+                if self.lms_reject and not self.lms_fault:
                     join = self.l("lmsjoin")
                     self.w(f"br label %{join}")
                 else:

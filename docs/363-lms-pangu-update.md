@@ -1,6 +1,6 @@
 # 363 · LMS 的盘古档：站点账本、fault ABI 与时间桥梁
 
-> 状态: **V1 已落地（参考实现 + 契约）**（2026-11-20）· 自举侧/种子待串行
+> 状态: **V1 已落地（两套实现 + 种子）**（2026-11-20）
 > 上游: `docs/357`（三件增量）· `docs/358`（只信产物）· `docs/359`（本世代的墙）·
 > `docs/360`（LVM-A 与 `sw_cap`）· `docs/356`（fault 类与 ABI）· `docs/253`（LMS 七级）·
 > `docs/361`（LNotary）· `docs/245`（`thread_spawn`）
@@ -66,8 +66,12 @@ LVM 的全量检查属于**基质**的账（`docs/360` §3.3），不塞进这�
 
 | 侧 | 命令 | 结果 |
 |---|---|---|
-| **原生** | `lms_pangu_true` + g1 开 + `reject` 关 | **rc = 101** |
+| **原生** | `lms_pangu_true`（盘古档优先于拒绝器） | **rc = 101** |
 | **LVM** | `--substrate sw_cap`，g1 关 | **rc = 101**，`F01 bounds violation at _start:entry#6 (offset=4 size=1 limit=4)` |
+
+**盘古档的语义**：开着它时，g1 的越界**不再走 `lms_reject` 的"跳过"**，一律变成
+fault（101）。这是刻意的：时间桥梁要的是"同一个语言事件"，跳过会给两侧不同的答案。
+拒绝器本身不变，只是被更强的档覆盖。
 
 第二条是在 LVM 线的 `feat/lvm-substrate` 工作树上跑的（本分支的 `tools/lvm.py`
 还没有 `--substrate`；判据 B 因此 SKIP，等它合进来自动激活）。
@@ -75,7 +79,7 @@ LVM 的全量检查属于**基质**的账（`docs/360` §3.3），不塞进这�
 **一个先后问题要写下来**：如果 g1 和 `sw_cap` 同时开，而 LVM 那条线的编译器还是旧的，
 g1 会先 `abort`（132），`sw_cap` 轮不到。两份探针因此各关一侧：
 
-* 验原生 fault ABI ⇒ 关 `lms_reject`（让 g1 走致命分支），保留 g1；
+* 验原生 fault ABI ⇒ 开 `lms_pangu_true`（它覆盖拒绝器，让 g1 走致命分支）；
 * 验 `sw_cap` ⇒ 关 `lms_guard`（不让 g1 先死），让基质检查。
 
 两条线合到一起、LVM 的编译器拿到同一个 fault ABI 之后，同一份源可以直接两侧同跑。
@@ -154,18 +158,41 @@ LNotary 的 `sites.verify_sites` 只核自洽与绑定，不重扫 IR（零工�
 
 ---
 
+## 6.5 自举侧：同一契约的第二个实现
+
+`loment/selfhost/codegen.lomt` 加了三处，文本与参考实现逐字节同：
+
+* `lms_mask` 的第 **128** 位（**非级位**，七级只占 0..6）：`choose lms_pangu_true` 置位，
+  `choose close lms_pangu_true` 清位；
+* 两个 g1 坏块：位开着发 `call void @__loment_fault(i32 1)`，否则保持 `__loment_abort`；
+* `emit_runtime` 末尾：位开着追加 `_IR_FAULT` 的同一段文本。
+
+种子重算：`loment/build/selfhost_driver.ll` 7,283,635 → **7,289,202 B**，
+sha256 `26b69c1afae8b96c7da5d789f88153fea2b5100b22182c4ca7c75cc50a44e628`；
+`docs/270` §4 的地板数同步更新（`loment_lms_test` 21/21）。
+种子是生成物，单独一笔提交（`CLAUDE.md`）。
+
+**驱动器要传一个参数**：`lms_pangu_true` 是用户开关，`apply_switches` 会先把它
+从 token 流里抹掉，所以 `lms_mask` 扫不到它。`emit_module` 因此多收第 7 个参数
+`pangu`，由驱动器从开关表取值；置位后 `lms_mask` 的**第 128 位**（非级位）。
+
+孪生对拍：同一份 pangu 探针，`stage1` 与 `lomentc --print llvm` 的
+`__loment_fault` 定义与 `call void @__loment_fault(i32 1)` 调用点**逐字节相同**
+（`lms_bridge_test` 的 E）。全量 IR 在 `choose runtime` 上有一条**既有**的镜像差异
+（分配器注释），不归这一笔管；判据只核本次特性的那一段，并额外核"默认档两侧都没有
+fault 符号"。
+
+---
+
 ## 7. 没做的（每条都写清为什么）
 
-1. **自举侧的 fault ABI 与站点表。** `lms_pangu_true` 是**用户开关**，参考实现实现了它；
-   自举镜像还没有。补它要改 `loment/selfhost/codegen.lomt` + `potato.lomt` 并重算种子 ——
-   种子改动必须串行，而 LVM 线正在并行。这条是下一笔串行提交，不是"以后再说"。
-2. **原生侧报站点文本。** V1 只报 kind（退出码）。文本要一段 syscall-only 的写路径，
+1. **原生侧报站点文本。** V1 只报 kind（退出码）。文本要一段 syscall-only 的写路径，
    与 `no_runtime` 的 fixed stub 一起做（`docs/356` §5.3）。
-3. **原生的 F02/F03。** 对象代与空指针检查在原生侧还没有；LVM `sw_cap` 有。
+2. **原生的 F02/F03。** 对象代与空指针检查在原生侧还没有；LVM `sw_cap` 有。
    站点账本把它们标 `unsafe`，不冒充。
-4. **`proven` 等级。** 站点表 V1 只有 `checked` / `unsafe`；R1–R4 的规则引用
+3. **`proven` 等级。** 站点表 V1 只有 `checked` / `unsafe`；R1–R4 的规则引用
    （`docs/356` §6.2）是下一档。
-5. **`race_free`。** `docs/357` §5.1 的候选第四规律，要动线程内存模型。
+4. **`race_free`。** `docs/357` §5.1 的候选第四规律，要动线程内存模型。
 
 ---
 

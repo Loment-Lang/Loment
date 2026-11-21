@@ -43,8 +43,7 @@ fn _start() {{
 }}
 """
 
-_PANGU = """choose close lms_reject
-set choose lms_pangu_true {
+_PANGU = """set choose lms_pangu_true {
 }
 choose lms_pangu_true"""
 
@@ -56,6 +55,14 @@ choose close lms_crash"""
 def _wsl_path(p: Path) -> str:
     s = p.resolve().as_posix()
     return "/mnt/" + s[0].lower() + s[2:]
+
+
+def _fault_block(ir: str) -> str:
+    start = ir.find("define internal void @__loment_fault")
+    if start < 0:
+        return ""
+    end = ir.find("\n}", start)
+    return ir[start:end + 2] if end >= 0 else ir[start:]
 
 
 class LmsBridgeTest(unittest.TestCase):
@@ -148,6 +155,29 @@ class LmsBridgeTest(unittest.TestCase):
         kb = loment_cache.key_for(b, None, flags={})
         self.assertIsNotNone(ka)
         self.assertNotEqual(ka, kb, "开关变了，IR 缓存键没变 —— 会读到旧 IR")
+
+    # E · 孪生：stage1（自举）与参考实现的 **fault 那段**逐字节同
+    def test_selfhost_mirror_matches_reference(self) -> None:
+        """全量 IR 在 `choose runtime` 上有一条**既有的**镜像差异（分配器注释），
+        不归这一笔管；这里核的是本次特性的那段：fault 定义 + 调用点 + 默认无符号。"""
+        import loment_dist
+        import lomentc
+
+        try:
+            stage1 = loment_dist.build_stage1()
+        except (SystemExit, Exception) as e:  # noqa: BLE001
+            self.skipTest(f"stage1_unavailable: {e}")
+        got = loment_dist.emit_ir(
+            stage1, str(self.tmp / "pangu.lomt"), ".").read_text(encoding="utf-8")
+        mod, deps = lomentc.load_unit(self.tmp / "pangu.lomt", ROOT)
+        want = lomentc.emit_llvm(mod, ROOT, deps)
+        self.assertIn("call void @__loment_fault(i32 1)", want)
+        self.assertIn("call void @__loment_fault(i32 1)", got)
+        self.assertTrue(_fault_block(got), "自举侧没有 __loment_fault 定义")
+        self.assertEqual(_fault_block(got), _fault_block(want))
+        plain = loment_dist.emit_ir(
+            stage1, str(self.tmp / "plain.lomt"), ".").read_text(encoding="utf-8")
+        self.assertNotIn("__loment_fault", plain)
 
 
 if __name__ == "__main__":

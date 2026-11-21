@@ -4462,7 +4462,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 emit_str(s, out, "\n");
                 store32(s, 476, 1);
                 lab_def(s, out, lbad, "lmsbad");
-                if mk & 8 != 0 {
+                if mk & 8 != 0 && mk & 128 == 0 {
                     join = load32(s, 480) + 1;
                     store32(s, 480, join);
                     emit_str(s, out, "  br label ");
@@ -4470,7 +4470,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                     emit_str(s, out, "\n");
                     store32(s, 476, 1);
                 } else {
-                    emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+                    if mk & 128 != 0 {
+                        emit_str(s, out, "  call void @__loment_fault(i32 1)\n  unreachable\n");
+                    } else {
+                        emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+                    }
                     store32(s, 476, 1);
                 }
                 lab_def(s, out, lok, "lmsok");
@@ -4547,7 +4551,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 emit_str(s, out, "\n");
                 store32(s, 476, 1);
                 lab_def(s, out, lok2 + 1, "lmsbad");
-                if mk2 & 8 != 0 {
+                if mk2 & 8 != 0 && mk2 & 128 == 0 {
                     join2 = load32(s, 480) + 1;
                     store32(s, 480, join2);
                     emit_str(s, out, "  br label ");
@@ -4555,7 +4559,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                     emit_str(s, out, "\n");
                     store32(s, 476, 1);
                 } else {
-                    emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+                    if mk2 & 128 != 0 {
+                        emit_str(s, out, "  call void @__loment_fault(i32 1)\n  unreachable\n");
+                    } else {
+                        emit_str(s, out, "  call void @__loment_abort()\n  unreachable\n");
+                    }
                     store32(s, 476, 1);
                 }
                 lab_def(s, out, lok2, "lmsok");
@@ -11757,6 +11765,15 @@ fn lms_mask(src: ptr, toks: ptr) -> u32 {
                 if tok_is(src, toks, j, "lms_seed") {
                     bit = 64;
                 }
+                // 盘古档（`docs/363`）：第 **128** 位是**非级位** —— 七级只占 0..6。
+                // `choose lms_pangu_true` 把 g1 的致命出口换成 `__loment_fault(1)`。
+                if tok_is(src, toks, j, "lms_pangu_true") {
+                    if neg == 1 {
+                        m = m & 127;
+                    } else {
+                        m = m | 128;
+                    }
+                }
                 if bit != 0 {
                     if neg == 1 {
                         m = m & (127 - bit);
@@ -13931,6 +13948,10 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
     emit_str(s, out, "define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %q = getelementptr i8, ptr %p, i64 %i\n  store i8 %v, ptr %q\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %sp = getelementptr i8, ptr %s, i64 %i\n  %b = load i8, ptr %sp\n  %dp = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %dp\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
+    // 盘古档（`docs/363`）：与参考实现的 `_IR_FAULT` 逐字节同。
+    if load32(s, 588) & 128 != 0 {
+        emit_str(s, out, "\n; ---- LMS fault ABI (docs/363): 100 + kind ----\ndefine internal void @__loment_fault(i32 %kind) {\n  %c = add i32 %kind, 100\n  %c64 = sext i32 %c to i64\n  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 60, i64 %c64, i64 0, i64 0)\n  unreachable\n}\n");
+    }
     return 0;
 }
 
@@ -14484,7 +14505,8 @@ out:
 ");
 }
 
-pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32) -> u32 {
+pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32,
+                   pangu: u32) -> u32 {
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
@@ -14520,7 +14542,13 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32)
     // **LMS 七级开关的实际集合**（`docs/253` §11.4，2026-10-18）：档铺初值 + 显式覆盖。
     // 位序 = 七级的次序（check=1 manage=2 guard=4 reject=8 crash=16 restart=32 seed=64）。
     // 与参考实现 `_lms_level` 同一个来源，判据是产物的字节。
-    store32(s, 588, lms_mask(src, toks));
+    // 盘古档（`docs/363`）：`lms_pangu_true` 是**用户开关**，`apply_switches` 已经
+    // 把它从 token 流里抹掉，所以 `lms_mask` 看不到它 —— 由驱动器从开关表取值传进来。
+    let lm: u32 = lms_mask(src, toks);
+    if pangu == 1 {
+        lm = lm | 128;
+    }
+    store32(s, 588, lm);
     // 这两个预扫描要读 572 —— **顺序不能反** (它们在 alpha 档要跳过被提升的 alloc)
     store32(s, 512, runtime_needed(s, src, toks));
     if load32(s, CG_LGC) == 1 {

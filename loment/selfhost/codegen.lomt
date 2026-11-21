@@ -14663,7 +14663,7 @@ out:
 }
 
 pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32,
-                   pangu: u32) -> u32 {
+                   lms_bits: u32) -> u32 {
     store32(s, 0, 0);
     store32(s, 4, 0);
     store32(s, 12, 0);
@@ -14699,10 +14699,25 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32,
     // **LMS 七级开关的实际集合**（`docs/253` §11.4，2026-10-18）：档铺初值 + 显式覆盖。
     // 位序 = 七级的次序（check=1 manage=2 guard=4 reject=8 crash=16 restart=32 seed=64）。
     // 与参考实现 `_lms_level` 同一个来源，判据是产物的字节。
-    // 盘古档（`docs/363`）：`lms_pangu_true` 是**用户开关**，`apply_switches` 已经
-    // 把它从 token 流里抹掉，所以 `lms_mask` 看不到它 —— 由驱动器从开关表取值传进来。
+    //
+    // **显式覆盖来自 `lms_bits`**（驱动器预扫开关表后传进来）：`apply_switches` 把
+    // `choose` 从 token 流里删掉了，`lms_mask` 在真驱动那条路上看不见它们。低 7 位 =
+    // 明确打开，位 7..13 = 明确关闭，位 128 = 盘古钩子（同样是被删掉的用户开关）。
+    // 直接拿 token 流调 `emit_module` 的夹具（`loment_p8_test`）没有这一步，
+    // 因此 `lms_mask` 里那条按 token 的扫描**保留**着 —— 两条路径各自成立。
     let lm: u32 = lms_mask(src, toks);
-    if pangu == 1 {
+    let q: u32 = 0;
+    while q < 7 {
+        let bit: u32 = (1 as u32) << q;
+        if lms_bits & bit != 0 {
+            lm = lm | bit;
+        }
+        if lms_bits & ((1 as u32) << (q + 7)) != 0 {
+            lm = lm & (127 - bit);
+        }
+        q = q + 1;
+    }
+    if lms_bits & 128 != 0 {
         lm = lm | 128;
     }
     store32(s, 588, lm);

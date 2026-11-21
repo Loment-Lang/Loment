@@ -60,14 +60,6 @@ def _wsl_path(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
-def _fault_block(ir: str) -> str:
-    start = ir.find("define internal void @__loment_fault")
-    if start < 0:
-        return ""
-    end = ir.find("\n}", start)
-    return ir[start:end + 2] if end >= 0 else ir[start:]
-
-
 class LmsBridgeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -80,6 +72,9 @@ class LmsBridgeTest(unittest.TestCase):
             _SRC.format(name="plain", switches=""), encoding="utf-8")
         (cls.tmp / "lvm.lomt").write_text(
             _SRC.format(name="lvmonly", switches=_LVM_ONLY), encoding="utf-8")
+        # 显式关三级：曾经在自举侧被判成 E0169 / 当没写（`docs/363` §6.5）。
+        (cls.tmp / "toggles.lomt").write_text(
+            _SRC.format(name="toggles", switches=_LVM_ONLY), encoding="utf-8")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -173,10 +168,15 @@ class LmsBridgeTest(unittest.TestCase):
         self.assertIsNotNone(ka)
         self.assertNotEqual(ka, kb, "开关变了，IR 缓存键没变 —— 会读到旧 IR")
 
-    # E · 孪生：stage1（自举）与参考实现的 **fault 那段**逐字节同
+    # E · 孪生：stage1（自举）与参考实现的 **整份 IR** 逐字节同
     def test_selfhost_mirror_matches_reference(self) -> None:
-        """全量 IR 在 `choose runtime` 上有一条**既有的**镜像差异（分配器注释），
-        不归这一笔管；这里核的是本次特性的那段：fault 定义 + 调用点 + 默认无符号。"""
+        """三个形状全量对拍：默认 / 盘古 / 显式关三级（`choose close …`）。
+
+        从前这里只比 `__loment_fault` 那一段，因为全量 IR 有一条既有的分配器注释差
+        （`docs/363` §6.5）。2026-11-21 把两边都修干净了：参考侧 `_IR_FAULT` 的尾随换行、
+        自举侧把七个细开关当未定义（E0169）且 `apply_switches` 删掉后 codegen 看不见。
+        **现在比整份 IR** —— 任何一处漂移都红，这才是"参考与自举同一份产物"的尺。
+        """
         import loment_dist
         import lomentc
 
@@ -184,17 +184,45 @@ class LmsBridgeTest(unittest.TestCase):
             stage1 = loment_dist.build_stage1()
         except (SystemExit, Exception) as e:  # noqa: BLE001
             self.skipTest(f"stage1_unavailable: {e}")
-        got = loment_dist.emit_ir(
-            stage1, str(self.tmp / "pangu.lomt"), ".").read_text(encoding="utf-8")
-        mod, deps = lomentc.load_unit(self.tmp / "pangu.lomt", ROOT)
-        want = lomentc.emit_llvm(mod, ROOT, deps)
-        self.assertIn("call void @__loment_fault(i32 1)", want)
-        self.assertIn("call void @__loment_fault(i32 1)", got)
-        self.assertTrue(_fault_block(got), "自举侧没有 __loment_fault 定义")
-        self.assertEqual(_fault_block(got), _fault_block(want))
+        for name in ("plain", "pangu", "toggles"):
+            entry = str(self.tmp / f"{name}.lomt")
+            got = loment_dist.emit_ir(stage1, entry, ".").read_text(encoding="utf-8")
+            mod, deps = lomentc.load_unit(self.tmp / f"{name}.lomt", ROOT)
+            want = lomentc.emit_llvm(mod, ROOT, deps)
+            self.assertEqual(want, got, f"{name}: 自举侧与参考实现不是同一份产物")
         plain = loment_dist.emit_ir(
             stage1, str(self.tmp / "plain.lomt"), ".").read_text(encoding="utf-8")
         self.assertNotIn("__loment_fault", plain)
+
+    # F · 账本也要对齐：`--emit-potato` 两份逐字段同（LNotary 读的就是它）
+    def test_selfhost_potato_matches_reference(self) -> None:
+        """显式关掉的级必须在 `lms_levels` 里如实写出来。
+
+        IR 对齐不代表账对：`apply_switches` 删掉 `choose` 之后，自举侧曾把
+        `choose close lms_guard` 当成"没写"，Potato 仍报七级全真 —— 而 LNotary
+        的判决读的就是这份账（`docs/361`）。这条同时挡住两个方向的漂移。
+        """
+        import loment_dist
+
+        try:
+            stage1 = loment_dist.build_stage1()
+        except (SystemExit, Exception) as e:  # noqa: BLE001
+            self.skipTest(f"stage1_unavailable: {e}")
+        src = self.tmp / "toggles.lomt"
+        ref = self.tmp / "toggles.ref.potato.json"
+        r = subprocess.run([sys.executable, str(LOMENTC), str(src),
+                            "--emit-potato", str(ref)],
+                           cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        own = subprocess.run([str(stage1), str(src), "--emit-potato"],
+                             cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(own.returncode, 0, own.stdout + own.stderr)
+        want = json.loads(ref.read_text(encoding="utf-8"))
+        got = json.loads(own.stdout)
+        self.assertEqual(want, got, "自举侧 Potato 与参考实现不同")
+        for name in ("lms_guard", "lms_reject", "lms_crash"):
+            self.assertFalse(got["lms_levels"][name],
+                             f"`choose close {name}` 没写进 lms_levels")
 
 
 #: `loment_tools_test::test_every_criterion_is_registered` 要看见它们；

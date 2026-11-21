@@ -145,7 +145,7 @@ LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重�
 
 ---
 
-## 6. 判据（`tools/lms_bridge_test.py`，4 条）
+## 6. 判据（`tools/lms_bridge_test.py`，5 条）
 
 | # | 判据 | 现状 |
 |---|---|---|
@@ -153,6 +153,8 @@ LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重�
 | **B** | LVM `--substrate sw_cap` 的 F01 退出 **101** + 站点 | **不进地板**（本树没有 `--substrate`；"生来就跳过"的判据不许登记）。手动探针 `--probe-lvm`，对 `feat/lvm-substrate` 实测绿；基质合进来后改回 `test_` |
 | **C** | 默认档 IR 里**没有** `__loment_fault` | 绿 |
 | **D** | 改一行用户开关 ⇒ IR 缓存键变 | 绿 |
+| **E** | 自举与参考的**整份 IR** 逐字节同（默认 / 盘古 / 显式关三级） | 绿（2026-11-21 起从"只比 fault 段"升级） |
+| **F** | 自举与参考的 **Potato** 逐字段同，且显式关掉的级在 `lms_levels` 里如实为假 | 绿（LNotary 读的就是这份账） |
 
 外加 `lnotary_test` 的 34 条（含站点表 5 条、V4 的 R1–R3、V5 的派生链）：
 
@@ -163,7 +165,7 @@ LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重�
 * 站点表自己的封印被改 ⇒ `LNT-SEAL`。
 
 登记：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt`
-（`lnotary_test 34`、`lms_bridge_test 4`）。
+（`lnotary_test 34`、`lms_bridge_test 5`）。
 
 ---
 
@@ -182,14 +184,35 @@ sha256 `26b69c1afae8b96c7da5d789f88153fea2b5100b22182c4ca7c75cc50a44e628`；
 种子是生成物，单独一笔提交（`CLAUDE.md`）。
 
 **驱动器要传一个参数**：`lms_pangu_true` 是用户开关，`apply_switches` 会先把它
-从 token 流里抹掉，所以 `lms_mask` 扫不到它。`emit_module` 因此多收第 7 个参数
-`pangu`，由驱动器从开关表取值；置位后 `lms_mask` 的**第 128 位**（非级位）。
+从 token 流里抹掉，所以 `lms_mask` 扫不到它。`emit_module` 的第 7 个参数因此是
+**用户开关位图**（低 7 位明确打开、位 7..13 明确关闭、位 128 盘古），由驱动器用
+`sw_lms_bits` 从开关表预扫后传进来。
 
-孪生对拍：同一份 pangu 探针，`stage1` 与 `lomentc --print llvm` 的
-`__loment_fault` 定义与 `call void @__loment_fault(i32 1)` 调用点**逐字节相同**
-（`lms_bridge_test` 的 E）。全量 IR 在 `choose runtime` 上有一条**既有**的镜像差异
-（分配器注释），不归这一笔管；判据只核本次特性的那一段，并额外核"默认档两侧都没有
-fault 符号"。
+### 6.5.1 2026-11-21：整份 IR 对齐（三处修复）
+
+全量对拍暴露了两边的三处不一致，现在都修了；判据从"只比 fault 段"升级为
+**整份 IR 逐字节相同**（`lms_bridge_test` 的 E，三个形状：默认 / 盘古 / 显式关三级）。
+
+1. **参考侧 `_IR_FAULT` 的尾随换行**：它多出一个空行，因为 `out` 是 `"\n".join(...)`。
+   字符串结尾去掉那个 `\n`，自举侧不用为"后面有没有块"分情况。
+2. **七个 LMS 细开关在自举侧没有定义**：参考实现 `_seed_lms()` 预扫期就铺了它们，
+   自举侧却把 `choose lms_guard` 判成 E0169「未定义的开关」。`switches.lomt` 现在有
+   `sw_lms_index`（名单 = `LMS_TOGGLES`），`switch_rules` 不再要求它们有 `set choose`。
+3. **显式关掉的开关在自举侧看不见**：`apply_switches` 把 `choose` 删掉之后 codegen 才
+   算 `lms_mask`，于是 `choose close lms_guard` 被**静默忽略**（比报错更糟）。
+   `sw_lms_bits` 把七开关与盘古钩子的显式取值扫成一张位图，`emit_module` 叠在档位上。
+   盘古本来就是这个原因才单传一个参数，现在两者共用同一条路。
+
+直接拿 token 流调 `emit_module` 的夹具（`loment_p8_test`）不经 `apply_switches`，
+所以 `lms_mask` 里按 token 的扫描**保留**着；两条路径各自成立（夹具传 0 表示"没有显式开关"）。
+
+4. **Potato 的 `lms_levels` 也曾漏掉显式开关**：IR 修好之后，`--emit-potato` 仍报七级全真。
+   `potato.lomt` 的 `pt_lms_mask` / `pt_lms_levels` / `pt_systems` 现在收同一张
+   `sw_lms_bits` 位图。**这是 LNotary 的输入**（`docs/361` 读 Potato 的 `lms_levels`），
+   所以它不能是第二条账。判据 F 把两份 Potato 逐字段对拍。
+
+种子重算：`loment/build/selfhost_driver.ll` → **7,407,754 B**，
+sha256 `b1912a53…`；`docs/270` §4 的地板数同步更新。
 
 ---
 
@@ -199,8 +222,8 @@ fault 符号"。
    与 `no_runtime` 的 fixed stub 一起做（`docs/356` §5.3）。
 2. **原生的 F02/F03。** 对象代与空指针检查在原生侧还没有；LVM `sw_cap` 有。
    站点账本把它们标 `unsafe`，不冒充。
-3. **`proven` 等级。** 站点表 V1 只有 `checked` / `unsafe`；R1–R4 的规则引用
-   （`docs/356` §6.2）是下一档。
+3. **`proven` 的 R4。** R1–R3 已落（`docs/361` §6.6：常量下标 / 规范循环 / 支配分支）；
+   R4（按 GC 层自证）还缺一份"GC 层 → IR 站点"的映射，站点账本不冒充它。
 4. **`race_free`。** `docs/357` §5.1 的候选第四规律，要动线程内存模型。
 
 ---
@@ -212,7 +235,8 @@ fault 符号"。
    `docs/356` §11 第 7 条同一条。
 3. **不主张站点表能证明"没有漏站点"。** 它只枚举 IR 里**已经存在**的访存；
    源码级完备不在这一档（`docs/358` §1A）。
-4. **不主张自举侧已经跟上。** 见 §7 第 1 条。
+4. **不主张原生侧已经跟上。** 见 §7 第 1 条（站点文本只有 LVM `sw_cap` 有）。
+   自举侧的 **IR 与 Potato** 对齐由判据 E/F 钉住；那是"同一份产物"，不是"原生也会报站点"。
 5. **不主张性能。** fault ABI 的代价是一条 `call` + 一次系统调用；站点表是离线成本；
    都没测。
 

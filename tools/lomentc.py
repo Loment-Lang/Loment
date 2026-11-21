@@ -220,8 +220,7 @@ define internal void @__loment_fault(i32 %kind) {
   %c64 = sext i32 %c to i64
   %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %c64, i64 0, i64 0)
   unreachable
-}
-'''
+}'''
 
 #: 能力域运行时（`docs/306`–`docs/308`）：虚拟钟 + 形状/极性/时律的统一判决。
 #: **只在真用到 `guard` / `tick;` 时发**（与自举侧 `emit_guard_runtime` 同位置）。

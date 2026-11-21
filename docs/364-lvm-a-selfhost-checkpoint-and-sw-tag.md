@@ -4,7 +4,7 @@
 > 上游: `docs/360`（时间桥梁）· `docs/362`（`sw_cap`）· `docs/363`（P5 / 封印 / 验证器）·
 > `docs/359` §0（本世代的六个原语）· `docs/320` §1.2 ⑧（MTE 是检测不是保证）
 > 判据: `tools/lvm_cp_test.py`（7 条）· `tools/lvm_cap_test.py`（9 条）·
-> `tools/lvm_seal_test.py`（9 条）· `tools/lvm_twin_test.py`（8 条）
+> `tools/lvm_seal_test.py`（9 条）· `tools/lvm_twin_test.py`（14 条）
 > 一句话: **自举镜像也会存/取自己的 guest 状态；第二档基质用 4 位标签模拟 MTE，
 > 并把「它抓不住什么」写进封印。**
 
@@ -15,11 +15,12 @@
 | # | 内容 | 落点 |
 |---|---|---|
 | **1** | **自举 checkpoint / resume** | `loment/tools/lvm.lomt::exec_stack` |
-| **2** | **`sw_tag` 基质**（4 位标签，概率检测） | `tools/lvm.py::SwCap(mode="tag")` |
+| **2** | **`sw_tag` 基质**（4 位标签，概率检测） | `tools/lvm.py::SwCap(mode="tag")` + `loment/tools/lvm.lomt`（`sw_tag` 实参） |
 
 配套判据：自举的存/取与参考**各自**跑同一份 IR，最后 `rc + stdout` 相同
 （`lvm_twin_test::test_checkpoint_matches_reference`）；`sw_tag` 的碰撞由
-`lvm_cap_test::test_sw_tag_reuse_is_probabilistic` 钉住。
+`lvm_cap_test::test_sw_tag_reuse_is_probabilistic` 钉住，两侧同答由
+`lvm_twin_test::test_sw_tag_matches_reference` 钉住。
 
 ---
 
@@ -105,7 +106,26 @@ lvm IN.ll resume=/tmp/a.snap [ckpt=80 ckpt-out=/tmp/b.snap]
 `test_corpus_has_no_false_positives`：10 份合法语料在 `none / sw_cap / sw_tag` 三档下
 逐字节同答。
 
-### 2.3 封印跟着降级
+### 2.3 自举镜像也有一份（2026-11-21）
+
+`loment/tools/lvm.lomt` 用实参 `sw_tag` 打开第二档基质（`C_SUB = 2`）。形状与参考同：
+
+* 对象表旁边一条**并行标签数组**（按下标，归还时随 `obj_copy` 一起搬）；标签在
+  `obj_new` 里按 `1 + seq % 15` 轮转。`@__loment_heap` 在外层容器这一档**不登记**，
+  但**吃掉一个标签号**，于是整条序列与参考逐位对齐；`brk` 与参考的 `grant_brk` 同形，
+  同一块只登记一次、之后只延长上界。
+* 每帧每个 SSA 值另存一格 `(对象基址, 标签)`（`CAP_OFF`，按 `深度 * MAX_VALS + 槽号`）；
+  `alloca` / 分配器返回值 / `gep` 的基指针 / 调用实参把能力带过去。
+* 指针**存进内存再读回**走影子表（`SH_OFF`，`addr / 基址 / 标签` 的环形缓冲）；
+  对象归还时把落在它体内的影子条目作废 —— 否则下一次调用复用同一个帧槽地址时，
+  旧能力会"复活"。
+* 访问检查 `cap_check_tag`：标签对上按活对象判边界；对不上而能力的对象还在就按它判；
+  否则 F02。`ptrtoint`/`inttoptr` 照参考一样丢能力，退回按地址那一半。
+* 判据：`lvm_twin_test::test_sw_tag_matches_reference` —— 合法程序、未复用悬垂、
+  复用长度 N=0..16：两边的 rc/stdout 相同，故障的 `F0k + 站点` 相同，**碰撞漏在同一批 N**。
+  本机是 16 抓 / 1 漏（N=10）。
+
+### 2.4 封印跟着降级
 
 `lvm_seal_test::test_sw_tag_declares_no_dangling_floored`：`sw_tag` 封印里
 `no_segv` 是 `checked`、`no_dangling` 是 `floored`，`P3.gen` 不在 guarantees，
@@ -149,7 +169,8 @@ lvm IN.ll resume=/tmp/a.snap [ckpt=80 ckpt-out=/tmp/b.snap]
 4. **不主张自举 checkpoint 覆盖外部输入。** 合成 cmdline 与真实文件不在快照里；
    恢复要在同一输入下。
 5. **不主张性能。** 快照 4 MiB 裸写、每次访问多一次对象表/标签查，全部未测。
-6. **不主张自举有 `sw_tag`。** 这一档只有参考实现；孪生只比 `sw_cap`。
+6. ~~不主张自举有 `sw_tag`~~ —— **2026-11-21 已补**：镜像有第二档基质，孪生判据 M 钉两侧同答；
+   自举侧的 `sw_tag` **checkpoint** 仍不支持（跨实现恢复只认 `none` / `sw_cap`）。
 
 ---
 

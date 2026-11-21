@@ -72,7 +72,11 @@ MAX_VERIFIER_BYTES = 128 * 1024
 #: **解释器标价**（`docs/360` §7 B8）：时间桥梁把信任从硅片移到解释器，解释器就必须
 #: **小到能审**。预算是**决定**，不是测出来的数 —— 越过它，这座桥只是把信任搬进一个
 #: 更大的东西。两份实现各自记，总数也记；封印里同时带价与预算（`docs/363` §6）。
-INTERPRETER_BUDGET = {"lines": 8000, "bytes": 320 * 1024}
+#: 解释器（参考 + 自举两份源码）的声明价格。**这是标价，不是目标**：越过就拒绝封印，
+#: 因为"信任只是搬家"（`docs/360` B8）。2026-11-21 的实测是 9,450 行 / 372,293 字节
+#: —— 段错误详细化、dismemory 与自举 `sw_tag` 都落进了这两份源码，原来的 8,000/320 KiB
+#: 已经装不下；抬到 10,000 行 / 400 KiB，并在 `docs/363` §2 记下这次抬价。
+INTERPRETER_BUDGET = {"lines": 10000, "bytes": 400 * 1024}
 INTERPRETER_SOURCES = {
     "reference": Path(__file__).resolve().parent / "lvm.py",
     "selfhost": Path(__file__).resolve().parent.parent / "loment" / "tools" / "lvm.lomt",

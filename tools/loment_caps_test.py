@@ -137,8 +137,11 @@ def test(fn):
 #: 三条都有 `fail(`（引擎的定长表，抬上限是链接期的活），条数 281 → **284**、沉默不变。
 #: （新增的那处沉默是归还窗口的**滚动**：满了丢最旧的一条，不是写穿，来路写在
 #: `EXPLAINED`）。
-CAPACITY_SITES = 284
-SILENT_SITES = 179
+#: `sw_tag`（`docs/364` §2.3）又加两处：`CAP_SLOTS`（每帧值能力的槽数，**下标由
+#: `MAX_DEPTH * MAX_VALS` 结构保证**）与 `SH_CAP`（影子表环形缓冲，满了**覆盖最旧**
+#: 是设计）；`SH_END` 是 arena 尺寸、有 `fail(`。条数 284 → **287**、沉默 179 → **181**。
+CAPACITY_SITES = 287
+SILENT_SITES = 181
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
@@ -155,6 +158,7 @@ SILENT_NAMES = frozenset((
     "FILE_CAP",
     "FIX_STRIDE",
     "PAT_CAP",
+    "SH_CAP",
     "TXT_CAP",
     "CHK_ENV_MAX",
     "CASES_CAP",
@@ -170,6 +174,7 @@ SILENT_NAMES = frozenset((
     "CACHE_DIR_CAP",
     "CACHE_PATH_CAP",
     "CW",
+    "CAP_SLOTS",
     "C_CAND",
     "DECL_KW",
     "DELIM_CAP",

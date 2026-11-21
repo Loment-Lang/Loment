@@ -252,6 +252,20 @@ const SNAP_HDR: u32 = 14258628;
 const WNUM_SCRATCH: u32 = 14258660;  // SNAP_HDR + 32（只在报错时写 1 字节）
 //: 恢复扩展里的名字暂存（最多 240 字节；扩展在**内存读完之后**，不能借 `m`）。
 const NAME_SCRATCH: u32 = 14258692;  // SNAP_HDR + 64
+//: `sw_tag`（`docs/364`）：对象标签并行数组（下标 = 对象表下标）+ 每帧值的
+//: 「能力（对象基址, 标签）」表。两块都**追加在旧 arena 末尾之后**，所以既有偏移
+//: 一个都不用挪；arena 的分配量随之涨到 `CAP_END`。
+const TAG_OFF: u32 = 14982148;       // = ARENA_T2（旧 arena 末尾）
+const CAP_OFF: u32 = 14998532;       // TAG_OFF + MAX_OBJS * 4
+const CAP_SLOTS: u32 = 32768;        // MAX_DEPTH * MAX_VALS
+const CAP_END: u32 = 15260676;       // CAP_OFF + CAP_SLOTS * 8
+//: 指针存进内存之后的影子表（参考实现的 `SwCap.shadow`）：`addr / 对象基址 / 标签`。
+//: 环形缓冲，查是从最新往回扫 —— 同一个槽被反复写时旧条目不会先被看到。
+const SH_OFF: u32 = 15260676;        // = CAP_END
+const SH_CAP: u32 = 4096;
+const SH_END: u32 = 15309828;        // SH_OFF + SH_CAP * 12
+const C_TAGSEQ: u32 = 288;           // 标签轮转序列（1 + seq % 15）
+const C_SHN: u32 = 292;              // 影子表写了几条（环形下标 = 它 % SH_CAP）
 
 const OBJ_GLOBAL: u32 = 1;
 const OBJ_BRK: u32 = 2;
@@ -942,6 +956,8 @@ fn vm_alloc(a: ptr, n: u32, align: u32) -> u32 {
 fn obj_base(a: ptr, o: u32) -> u32 { return rd(a, OBJ_OFF, o * 5); }
 fn obj_limit(a: ptr, o: u32) -> u32 { return rd(a, OBJ_OFF, o * 5 + 1); }
 fn obj_kind(a: ptr, o: u32) -> u32 { return rd(a, OBJ_OFF, o * 5 + 4); }
+/// `sw_tag` 的 4 位标签（1..15；0 = 没有标签，`sw_cap` 全是 0）。并行数组，按对象下标。
+fn obj_tag(a: ptr, o: u32) -> u32 { return rd(a, TAG_OFF, o); }
 
 fn obj_put(a: ptr, o: u32, b: u32, l: u32, k: u32) {
     wr(a, OBJ_OFF, o * 5, b);
@@ -949,6 +965,7 @@ fn obj_put(a: ptr, o: u32, b: u32, l: u32, k: u32) {
     wr(a, OBJ_OFF, o * 5 + 2, 0);
     wr(a, OBJ_OFF, o * 5 + 3, 1);
     wr(a, OBJ_OFF, o * 5 + 4, k);
+    wr(a, TAG_OFF, o, 0);
 }
 
 fn obj_copy(a: ptr, dst: u32, src: u32) {
@@ -957,6 +974,93 @@ fn obj_copy(a: ptr, dst: u32, src: u32) {
     wr(a, OBJ_OFF, dst * 5 + 2, rd(a, OBJ_OFF, src * 5 + 2));
     wr(a, OBJ_OFF, dst * 5 + 3, rd(a, OBJ_OFF, src * 5 + 3));
     wr(a, OBJ_OFF, dst * 5 + 4, rd(a, OBJ_OFF, src * 5 + 4));
+    wr(a, TAG_OFF, dst, rd(a, TAG_OFF, src));
+}
+
+//: `sw_tag` 的每帧值能力：`(对象基址, 标签)`，下标 = 深度 * MAX_VALS + 槽号。
+//: 值为 0 表示「这一格没带着能力」—— 访问就退回按地址那一半（与参考的 `cap=None` 同）。
+fn cap_at(a: ptr, fr: u32, i: u32) -> ptr {
+    let d: u32 = (MEM_SIZE - fr) / FRAME_SIZE;
+    return ptr_add(a, CAP_OFF + (d * MAX_VALS + i) * 8);
+}
+
+fn cap_put(a: ptr, fr: u32, i: u32, b: u32, t: u32) {
+    let r: ptr = cap_at(a, fr, i);
+    store32(r, 0, b);
+    store32(r, 4, t);
+}
+
+fn cap_base(a: ptr, fr: u32, i: u32) -> u32 { return load32(cap_at(a, fr, i), 0); }
+fn cap_tag(a: ptr, fr: u32, i: u32) -> u32 { return load32(cap_at(a, fr, i), 4); }
+
+/// 类型是不是 `ptr`（影子表只在指针的存/取上工作）。
+fn is_ptr_ty(a: ptr, to: u32, tl: u32) -> bool {
+    let s: u32 = skip_sp(a, to, to + tl);
+    if to + tl - s != 3 {
+        return false;
+    }
+    return load8(a, s) == 112 && load8(a, s + 1) == 116 && load8(a, s + 2) == 114;
+}
+
+fn sh_at(a: ptr, i: u32) -> ptr {
+    return ptr_add(a, SH_OFF + (i % SH_CAP) * 12);
+}
+
+fn sh_put(a: ptr, addr: u32, b: u32, t: u32) {
+    let i: u32 = ctx_get(a, C_SHN);
+    let r: ptr = sh_at(a, i);
+    store32(r, 0, addr);
+    store32(r, 4, b);
+    store32(r, 8, t);
+    ctx_set(a, C_SHN, i + 1);
+}
+
+/// 影子表里**最新**的一条：返回 `(标签 << 32) | 对象基址`；没有就是 0。
+fn sh_get(a: ptr, addr: u32) -> u64 {
+    let n: u32 = ctx_get(a, C_SHN);
+    if n == 0 {
+        return 0;
+    }
+    let lim: u32 = n;
+    if lim > SH_CAP {
+        lim = SH_CAP;
+    }
+    let k: u32 = 1;
+    let out: u64 = 0;
+    let go: u32 = 1;
+    while k <= lim && go == 1 {
+        let i: u32 = (n - k) % SH_CAP;
+        let r: ptr = sh_at(a, i);
+        if load32(r, 0) == addr {
+            out = ((load32(r, 8) as u64) << 32) | (load32(r, 4) as u64);
+            go = 0;
+        }
+        k = k + 1;
+    }
+    return out;
+}
+
+/// 对象归还时把影子表里**落在它体内**的条目作废（参考实现的 `_drop_shadow` 同形）。
+/// 不这么做，帧槽的地址被下一次调用复用时，旧能力会从影子表里"复活"。
+fn sh_drop(a: ptr, base: u32, limit: u32) {
+    if ctx_get(a, C_SUB) != 2 {
+        return;
+    }
+    let n: u32 = ctx_get(a, C_SHN);
+    let lim: u32 = n;
+    if lim > SH_CAP {
+        lim = SH_CAP;
+    }
+    let k: u32 = 0;
+    while k < lim {
+        let i: u32 = (n - 1 - k) % SH_CAP;
+        let r: ptr = sh_at(a, i);
+        let ad: u32 = load32(r, 0);
+        if ad >= base && ad < limit {
+            store32(r, 0, NONE);
+        }
+        k = k + 1;
+    }
 }
 
 fn ret_copy(a: ptr, dst: u32, src: u32) {
@@ -1201,6 +1305,7 @@ fn obj_find_pos(a: ptr, base: u32) -> u32 {
 }
 
 fn obj_retire_idx(a: ptr, idx: u32) {
+    sh_drop(a, rd(a, OBJ_OFF, idx * 5), rd(a, OBJ_OFF, idx * 5 + 1));
     let n: u32 = ctx_get(a, C_NOBJ);
     let nr: u32 = ctx_get(a, C_NRET);
     if nr >= MAX_RET {
@@ -1256,6 +1361,12 @@ fn obj_new(a: ptr, base: u32, limit: u32, kind: u32) {
         i = i - 1;
     }
     obj_put(a, p2, base, limit, kind);
+    if ctx_get(a, C_SUB) == 2 {
+        // 确定轮转：1..15。第 16 次分配回到 1 —— 4 位只有 15 个非零值，
+        // 撞上时悬垂就漏（`docs/364` §2）。序列与参考实现同为「每次 new_obj 加一」。
+        wr(a, TAG_OFF, p2, 1 + (ctx_get(a, C_TAGSEQ) % 15));
+        ctx_set(a, C_TAGSEQ, ctx_get(a, C_TAGSEQ) + 1);
+    }
     ctx_set(a, C_NOBJ, m + 1);
 }
 
@@ -1314,6 +1425,127 @@ fn obj_find_retired(a: ptr, addr: u32) -> u32 {
         }
     }
     return found;
+}
+
+/// `operand_text` 那一半：从一段 `类型 值` 里取出**值**的 (起点, 长度)。
+fn operand_value_span(a: ptr, off: u32, n: u32) -> u64 {
+    let ts: u64 = ty_span(a, off, n);
+    let vo: u32 = skip_sp(a, hi32(ts) + lo32(ts), n);
+    return trim_span(a, vo, n);
+}
+
+/// 指针操作数的能力（`sw_tag`）：`%name` 查本帧的值表，`@g` 查全局对象。
+/// 返回 `(标签 << 32) | 对象基址`；0 = 没有能力 —— 访问退回按地址那一半
+/// （与参考实现的 `cap=None` 同一条路）。
+fn operand_cap(a: ptr, m: ptr, fr: u32, vo: u32, vl: u32) -> u64 {
+    if ctx_get(a, C_SUB) != 2 || vl == 0 {
+        return 0;
+    }
+    let c: u32 = load8(a, vo);
+    if c == 37 {                                         // %name
+        let i: u32 = vfind(a, m, fr, vo, vl);
+        if i == NONE {
+            return 0;
+        }
+        let t: u32 = cap_tag(a, fr, i);
+        if t == 0 {
+            return 0;
+        }
+        return ((t as u64) << 32) | (cap_base(a, fr, i) as u64);
+    }
+    if c == 64 {                                         // @global
+        let ga: u32 = gaddr(a, vo, vl);
+        let pos: u32 = obj_find_pos(a, ga);
+        if pos < ctx_get(a, C_NOBJ) && obj_base(a, pos) == ga {
+            let t: u32 = obj_tag(a, pos);
+            if t != 0 {
+                return ((t as u64) << 32) | (ga as u64);
+            }
+        }
+    }
+    return 0;
+}
+
+/// 一个**对象基址**的能力（`alloca` / 分配器 / 返回基址的调用）。
+fn cap_of_base(a: ptr, v: u64) -> u64 {
+    if ctx_get(a, C_SUB) != 2 || v >= (MEM_SIZE as u64) {
+        return 0;
+    }
+    let b: u32 = v as u32;
+    let pos: u32 = obj_find_pos(a, b);
+    if pos < ctx_get(a, C_NOBJ) && obj_base(a, pos) == b {
+        let t: u32 = obj_tag(a, pos);
+        if t != 0 {
+            return ((t as u64) << 32) | (b as u64);
+        }
+    }
+    return 0;
+}
+
+/// `getelementptr` 的结果保留**基指针**的能力（参考实现的 `_derive` 同形）。
+fn gep_cap(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
+    let e: u32 = io + il;
+    let p: u32 = after_op(a, io, e);
+    if has_at(a, p, e, "inbounds") {
+        p = skip_sp(a, p + 8, e);
+    }
+    let ts: u64 = ty_span(a, p, e);
+    let op: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+    let vs: u64 = operand_value_span(a, op, seg_end(a, op, e));
+    return operand_cap(a, m, fr, hi32(vs) as u32, lo32(vs) as u32);
+}
+
+/// 一条指令**结果值**的能力：只有三种会产生带标签的指针。
+fn result_cap(a: ptr, m: ptr, fr: u32, k: u32, to: u32, tl: u32, v: u64) -> u64 {
+    if ctx_get(a, C_SUB) != 2 {
+        return 0;
+    }
+    if k == K_ALLOCA || k == K_CALL {
+        return cap_of_base(a, v);
+    }
+    if k == K_GEP {
+        return gep_cap(a, m, fr, to, tl);
+    }
+    if k == K_LOAD {
+        // 指针从内存读回来：影子表把它存进去时的能力还回来（参考的 `shadow` 同形）。
+        let e: u32 = to + tl;
+        let ts: u64 = ty_span(a, after_op(a, to, e), e);
+        if !is_ptr_ty(a, hi32(ts) as u32, lo32(ts) as u32) {
+            return 0;
+        }
+        let p: u32 = seg_next(a, hi32(ts) + lo32(ts), e);
+        let addr: u64 = operand_text(a, m, fr, p, e);
+        return sh_get(a, addr as u32);
+    }
+    return 0;
+}
+
+/// `sw_tag` 的访问检查：比**4 位标签**，不是对象代（`docs/364` §2）。
+/// 标签对上 ⇒ 按活对象判边界；对不上而「能力的对象」还在 ⇒ 按它判边界；
+/// 否则就是悬垂。同标签的复用会漏 —— 那是声明里的概率，不是缺陷。
+fn cap_check_tag(a: ptr, addr: u32, sz: u32, cb: u32, ct: u32,
+                 io: u32, il: u32, oo: u32, ol: u32) {
+    if ctx_get(a, C_SUB) != 2 || ctx_get(a, C_PRIV) != 0 {
+        return;
+    }
+    let live: u32 = obj_find_live(a, addr);
+    if live != NONE && obj_tag(a, live) == ct {
+        if addr + sz > obj_limit(a, live) {
+            let _c0: u32 = cap_fault(a, 1, addr, sz, FR_OVER, io, il, oo, ol);
+        }
+        return;
+    }
+    let pos: u32 = obj_find_pos(a, cb);
+    if pos < ctx_get(a, C_NOBJ) && obj_base(a, pos) == cb && obj_tag(a, pos) == ct {
+        if addr < cb {
+            let _c1: u32 = cap_fault(a, 1, addr, sz, FR_OVER, io, il, oo, ol);
+        }
+        if addr + sz > obj_limit(a, pos) {
+            let _c2: u32 = cap_fault(a, 1, addr, sz, FR_OVER, io, il, oo, ol);
+        }
+        return;
+    }
+    let _c3: u32 = cap_fault(a, 2, addr, sz, FR_RETIRED, io, il, oo, ol);
 }
 
 /// 一次访存前的 `cap_check`（`docs/360` P2/P3 的地址那一半）。
@@ -1455,6 +1687,11 @@ fn vfind(a: ptr, m: ptr, fr: u32, no: u32, nl: u32) -> u32 {
 }
 
 fn vput(a: ptr, m: ptr, fr: u32, no: u32, nl: u32, v: u64) {
+    vputc(a, m, fr, no, nl, v, 0, 0);
+}
+
+/// 带能力的 `vput`（`sw_tag`）：标签随值走，访问时按它判（`docs/364` §2）。
+fn vputc(a: ptr, m: ptr, fr: u32, no: u32, nl: u32, v: u64, cb: u32, ct: u32) {
     let n: u32 = rd(m, fr, 0);
     if n >= MAX_VALS {
         fail("一个帧里的值太多了");
@@ -1463,13 +1700,19 @@ fn vput(a: ptr, m: ptr, fr: u32, no: u32, nl: u32, v: u64) {
     store32(m, fr + FR_VALS + n * VAL_REC + 4, nl);
     store32(m, fr + FR_VALS + n * VAL_REC + 8, lo32(v));
     store32(m, fr + FR_VALS + n * VAL_REC + 12, hi32(v));
+    cap_put(a, fr, n, cb, ct);
     wr(m, fr, 0, n + 1);
 }
 
 /// 把一个**已经存在**的值改成新值（`phi` 每轮改写自己那一格）。
 fn vset(a: ptr, m: ptr, fr: u32, i: u32, v: u64) {
+    vsetc(a, m, fr, i, v, 0, 0);
+}
+
+fn vsetc(a: ptr, m: ptr, fr: u32, i: u32, v: u64, cb: u32, ct: u32) {
     store32(m, fr + FR_VALS + i * VAL_REC + 8, lo32(v));
     store32(m, fr + FR_VALS + i * VAL_REC + 12, hi32(v));
+    cap_put(a, fr, i, cb, ct);
 }
 
 /// 帧里第 i 条记录的**值**（低位在 +8，高位在 +12）。
@@ -2135,7 +2378,13 @@ fn place_globals(a: ptr, m: ptr) {
         if ctx_get(a, C_SUB) != 0 {
             // `@__loment_heap` 是**外层容器**：它盖住所有堆对象，登记它会让每个已归还
             // 的堆地址都被"救活"。堆对象自己一条条登记，所以这块跳过。
-            if !eqw(a, no, nl, "@__loment_heap") {
+            if eqw(a, no, nl, "@__loment_heap") {
+                // 参考实现**登记**这块外层容器；这一份按地址查归属，登记它会救活所有已归还的
+                // 堆地址（见 `docs/362` §5.1 那条注释）。标签序列要对齐，所以只**吃掉一个号**。
+                if ctx_get(a, C_SUB) == 2 {
+                    ctx_set(a, C_TAGSEQ, ctx_get(a, C_TAGSEQ) + 1);
+                }
+            } else {
                 obj_new(a, va, va + sz, OBJ_GLOBAL);
             }
         }
@@ -2666,7 +2915,14 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         let h: u32 = ctx_get(a, C_HEAP);
         if want != 0 && h <= want && want < STACK_LIMIT {
             if ctx_get(a, C_SUB) != 0 && want > h {
-                obj_new(a, h, want, OBJ_BRK);
+                // 与参考的 `grant_brk` 同形：同一块 `brk` 只登记一次，之后只延长上界。
+                let pos: u32 = obj_find_pos(a, h);
+                if pos < ctx_get(a, C_NOBJ) && obj_base(a, pos) == h
+                        && obj_kind(a, pos) == OBJ_BRK {
+                    wr(a, OBJ_OFF, pos * 5 + 1, want);
+                } else {
+                    obj_new(a, h, want, OBJ_BRK);
+                }
             }
             ctx_set(a, C_HEAP, want);
         }
@@ -3361,7 +3617,13 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
             }
             return mr(m, da, sz);
         }
-        cap_check(a, addr as u32, sz, io, il, p, e - p);
+        let lps: u64 = operand_value_span(a, p, e);
+        let pc: u64 = operand_cap(a, m, fr, hi32(lps) as u32, lo32(lps) as u32);
+        if hi32(pc) != 0 && addr != 0 {
+            cap_check_tag(a, addr as u32, sz, lo32(pc) as u32, hi32(pc) as u32, io, il, p, e - p);
+        } else {
+            cap_check(a, addr as u32, sz, io, il, p, e - p);
+        }
         if is_agg(a, hi32(ts), lo32(ts)) {
             let d: u32 = fr_agg(a, m, fr, do_, dl, sz);
             mc(m, d, addr as u32, sz);
@@ -3389,7 +3651,19 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
             }
             return 0;
         }
-        cap_check(a, addr as u32, sz, io, il, ps, e - ps);
+        let sps: u64 = operand_value_span(a, ps, e);
+        let pc: u64 = operand_cap(a, m, fr, hi32(sps) as u32, lo32(sps) as u32);
+        if hi32(pc) != 0 && addr != 0 {
+            cap_check_tag(a, addr as u32, sz, lo32(pc) as u32, hi32(pc) as u32, io, il, ps, e - ps);
+        } else {
+            cap_check(a, addr as u32, sz, io, il, ps, e - ps);
+        }
+        if is_ptr_ty(a, hi32(ts) as u32, lo32(ts) as u32) {
+            let vc: u64 = operand_cap(a, m, fr, hi32(vs) as u32, lo32(vs) as u32);
+            if hi32(vc) != 0 {
+                sh_put(a, addr as u32, lo32(vc) as u32, hi32(vc) as u32);
+            }
+        }
         if is_agg(a, hi32(ts), lo32(ts)) {
             mc(m, addr as u32, val as u32, sz);
         } else {
@@ -3478,10 +3752,13 @@ fn bind_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -
         let ae: u32 = seg_end(a, ap, rp);
         let pnm: u64 = pspan(a, fp + k, 2);
         let av: u64 = operand_text(a, m, caller, ap, ae);
+        let acs: u64 = operand_value_span(a, ap, ae);
+        let ac: u64 = operand_cap(a, m, caller, hi32(acs) as u32, lo32(acs) as u32);
         if k == 0 {
             a0 = av;
         }
-        vput(a, m, fr, hi32(pnm), lo32(pnm), av);
+        vputc(a, m, fr, hi32(pnm), lo32(pnm), av,
+              lo32(ac) as u32, hi32(ac) as u32);
         ap = seg_next(a, ae, rp);
         k = k + 1;
     }
@@ -3724,11 +4001,12 @@ fn exec_body(a: ptr, m: ptr, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32) -> u6
             } else {
                 let v: u64 = eval_instr(a, m, fr, cfr, to, tl, k, sub, do_, dl);
                 if dl > 0 {
+                    let cp: u64 = result_cap(a, m, fr, k, to, tl, v);
                     let ex: u32 = vfind(a, m, fr, do_, dl);
                     if ex == NONE {
-                        vput(a, m, fr, do_, dl, v);
+                        vputc(a, m, fr, do_, dl, v, lo32(cp) as u32, hi32(cp) as u32);
                     } else {
-                        vset(a, m, fr, ex, v);
+                        vsetc(a, m, fr, ex, v, lo32(cp) as u32, hi32(cp) as u32);
                     }
                 }
             }
@@ -3800,12 +4078,17 @@ fn push_cont(a: ptr, d: u32, fi: u32, fr: u32, cfr: u32, ro: u32, rl: u32,
 }
 
 fn store_val(a: ptr, m: ptr, fr: u32, do_: u32, dl: u32, v: u64) {
+    store_valc(a, m, fr, do_, dl, v, 0, 0);
+}
+
+fn store_valc(a: ptr, m: ptr, fr: u32, do_: u32, dl: u32, v: u64,
+              cb: u32, ct: u32) {
     if dl > 0 {
         let ex: u32 = vfind(a, m, fr, do_, dl);
         if ex == NONE {
-            vput(a, m, fr, do_, dl, v);
+            vputc(a, m, fr, do_, dl, v, cb, ct);
         } else {
-            vset(a, m, fr, ex, v);
+            vsetc(a, m, fr, ex, v, cb, ct);
         }
     }
 }
@@ -3952,7 +4235,8 @@ fn exec_stack(a: ptr, m: ptr, fresh: u32) {
             cont_set(a, d, 6, j + 1);
         } else {
             let v: u64 = eval_instr(a, m, fr, cfr, to, tl, k, sub, dst, dl2);
-            store_val(a, m, fr, dst, dl2, v);
+            let cp: u64 = result_cap(a, m, fr, k, to, tl, v);
+            store_valc(a, m, fr, dst, dl2, v, lo32(cp) as u32, hi32(cp) as u32);
             cont_set(a, d, 6, j + 1);
         }
     }
@@ -4472,6 +4756,9 @@ fn is_opt_arg(ab: ptr, f: u64) -> bool {
         return false;
     }
     if eqw(ab, hi32(f), lo32(f), "sw_cap") {
+        return true;
+    }
+    if eqw(ab, hi32(f), lo32(f), "sw_tag") {
         return true;
     }
     if lo32(arg_tail(ab, f, "ckpt=")) > 0 {
@@ -5854,7 +6141,7 @@ fn run(a: ptr) -> u32 {
     if d_marker(a, n as u32) == 1 {
         ctx_set(a, C_DIS, 1);
     }
-    // 附加实参（位置 2..10）：`sw_cap` / `ckpt=N` / `ckpt-out=PATH` / `resume=PATH`。
+    // 附加实参（位置 2..10）：`sw_cap` / `sw_tag` / `ckpt=N` / `ckpt-out=PATH` / `resume=PATH`。
     // 它们可以落在任何一格（第 2 格平常是剖面文件），所以开文件前要跳过。
     let f2: u64 = argv_n(ab, 8192, 2);
     let f3: u64 = argv_n(ab, 8192, 3);
@@ -5874,6 +6161,10 @@ fn run(a: ptr) -> u32 {
         if lo32(f) > 0 {
             if eqw(ab, hi32(f), lo32(f), "sw_cap") {
                 ctx_set(a, C_SUB, 1);
+            }
+            if eqw(ab, hi32(f), lo32(f), "sw_tag") {
+                ctx_set(a, C_SUB, 2);
+                ctx_set(a, C_TAGSEQ, 0);
             }
             let c: u64 = arg_tail(ab, f, "ckpt=");
             if lo32(c) > 0 {
@@ -5998,7 +6289,8 @@ fn run(a: ptr) -> u32 {
 }
 
 fn _start() -> u32 {
-    let a: ptr = sys_alloc(ARENA_T2) as ptr;
+    // 末尾多留 `sw_tag` 的标签/能力表（`TAG_OFF` / `CAP_OFF`）—— 既有偏移一个都不挪。
+    let a: ptr = sys_alloc(SH_END as u64) as ptr;
     if a as u64 == 0 {
         return fail("oom (brk 失败)");
     }

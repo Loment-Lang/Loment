@@ -988,6 +988,169 @@ def test_dismemory_matches_reference() -> None:
     print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同")
 
 
+#: 判 M 的夹具：合法程序 + 未复用悬垂 + 碰撞扫描（与 `lvm_cap_test` 判 H/I 同一形状，
+#: 但这里的重点是**两边同答**，不是参考自己）。
+_TAG_SAFE = """module tag_safe
+choose runtime
+use bytes
+
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        s = s + a[i];
+        i = i + 1;
+    }
+    let p: ptr = alloc(16);
+    store32(p, 0, s);
+    let v: u32 = load32(p, 0);
+    free(p);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+_TAG_UAF = """module tag_uaf
+choose runtime
+use bytes
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    free(p);
+    let q: ptr = r64(slot, 0) as ptr;
+    let v: u32 = load32(q, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+_TAG_COLL = """module tag_coll
+choose runtime
+use bytes
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    let alias: ptr = r64(slot, 0) as ptr;
+    free(alias);
+    let k: u32 = 0;
+    while k < @N@ {
+        let q: ptr = alloc(16);
+        free(q);
+        k = k + 1;
+    }
+    let last: ptr = alloc(16);
+    store32(last, 0, 9);
+    let v: u32 = load32(p, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+
+def _run_ref_tag(ir: str) -> tuple[int, bytes, str]:
+    """参考侧跑一遍 `sw_tag`；stderr 单独要回来（故障行在里面）。"""
+    out, err = io.BytesIO(), io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = lvm.run_ir(ir, out, None, ["prog"], "t0", substrate="sw_tag")
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_sw_tag_matches_reference() -> None:
+    """判 M（`docs/364` §2）：自举镜像也有 `sw_tag`，且与参考**同答**。
+
+    4 位标签、确定性轮转、概率检测：合法程序两边都过；未复用的悬垂两边都是 F02；
+    复用长度 N=0..16 扫一遍，两边在**同一个 N** 漏（标签碰撞）—— 那才是"模拟了 4 位"
+    的证据，而不是"恰好都抓得住"。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang/WSL（要它把种子编成 stage1）")
+        return
+    mir = _mirror()
+
+    def build(name: str, body: str, td: Path) -> tuple[str, Path]:
+        src = td / f"{name}.lomt"
+        src.write_text(body, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, errs[:2]
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        ll = td / f"{name}.ll"
+        ll.write_text(ir, encoding="utf-8", newline="\n")
+        return ir, ll
+
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ir, ll = build("tag_safe", _TAG_SAFE, td)
+        ref_rc, ref_out, _e = _run_ref_tag(ir)
+        rc, out, _err = _run_mirror_args(mir, ll, ["sw_tag"])
+        assert (rc, out) == (ref_rc, ref_out) == (10, b""), (rc, ref_rc, out)
+        ir, ll = build("tag_uaf", _TAG_UAF, td)
+        ref_rc, ref_out, ref_err = _run_ref_tag(ir)
+        rc, out, err = _run_mirror_args(mir, ll, ["sw_tag"])
+        assert (rc, out) == (ref_rc, ref_out), (rc, ref_rc, out[:60])
+        assert _fault_line(err.decode("utf-8", "replace")) == _fault_line(ref_err), (
+            ref_err[:160], err[:160])
+        passes = faults = 0
+        for n in range(17):
+            ir, ll = build(f"tag_coll_{n}", _TAG_COLL.replace("@N@", str(n)), td)
+            ref_rc, ref_out, ref_err = _run_ref_tag(ir)
+            rc, out, err = _run_mirror_args(mir, ll, ["sw_tag"])
+            assert (rc, out) == (ref_rc, ref_out), (
+                f"N={n}: rc {rc} vs {ref_rc}", n, out[:40], ref_out[:40])
+            if ref_rc == 100 + lvm.FAULT_DANGLING:
+                assert _fault_line(err.decode("utf-8", "replace")) == _fault_line(ref_err), (
+                    n, ref_err[:120], err[:120])
+                faults += 1
+            else:
+                passes += 1
+        assert passes and faults, f"没有出现标签碰撞（过 {passes} / 故障 {faults}）"
+    print(f"      sw_tag：合法同答、未复用悬垂同码同站点；N=0..16 里 "
+          f"{faults} 抓 / {passes} 漏（两边同一批）")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

@@ -1426,10 +1426,11 @@ class Executor(Vm):
         if nr == 201:                                  # time(NULL)
             return int(time.time())
         if nr == 228:                                  # clock_gettime(id, struct timespec *)
-            # `lgc` 的预算读它（`docs/309`）。**单调**钟：从宿主读，按 Linux x86-64 的
-            # `timespec`（两个 i64：秒、纳秒）写进 guest 内存。钟的**绝对值**不是判决面
-            # （与 201 同一条口径），窗口只比先后与差。
-            ns = time.monotonic_ns()
+            # `lgc` 的预算读它（`docs/309`）。**按 clockid 分流**：0 是墙钟（与 201 同源），
+            # 其余是单调钟 —— 实测 ELF 侧两者差一个数量级，拿单调钟回答 realtime 会让
+            # "同一份源在 PE 与 ELF 上"的形状不同（`docs/311` §2 的 F 类）。
+            # 按 Linux x86-64 的 `timespec`（两个 i64：秒、纳秒）写进 guest 内存。
+            ns = time.time_ns() if a[0] == 0 else time.monotonic_ns()
             self.mem.put(a[1], (ns // 1_000_000_000).to_bytes(8, "little", signed=True)
                          + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
             return 0

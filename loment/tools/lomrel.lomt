@@ -266,6 +266,9 @@ tools/mono_trace.py
 tools/loment_ir_diff.py
 tools/loment_rule_parity.py
 tools/loment_lms_test.py
+tools/lnotary_test.py
+tools/lms_sites.py
+tools/lms_bridge_test.py
 tools/loment_channel.py
 tools/loment_channel_test.py
 tools/loment_seed.py

@@ -180,5 +180,11 @@ class LmsBridgeTest(unittest.TestCase):
         self.assertNotIn("__loment_fault", plain)
 
 
+#: `loment_tools_test::test_every_criterion_is_registered` 要看见它们；
+#: `unittest` 的 loader 不经过 `TESTS`，所以两条路各留一份名字。
+TESTS = [(n, getattr(LmsBridgeTest, n)) for n in dir(LmsBridgeTest)
+         if n.startswith("test_")]
+
+
 if __name__ == "__main__":
     unittest.main()

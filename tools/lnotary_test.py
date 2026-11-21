@@ -414,5 +414,11 @@ class LNotaryTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+#: `loment_tools_test::test_every_criterion_is_registered` 要看见它们；
+#: `unittest` 的 loader 不经过 `TESTS`，所以两条路各留一份名字。
+TESTS = [(n, getattr(LNotaryTest, n)) for n in dir(LNotaryTest)
+         if n.startswith("test_")]
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,7 @@ loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 11
 loment_lms_test 21
-loment_grammar_test 41
+loment_grammar_test 42
 loment_tools_test 66
 loment_p7_test 9
 loment_p8_test 61
@@ -91,7 +91,7 @@ loment_lumtui_test 7
 loment_lompi_test 49
 lompicheck_test 7
 loment_register_test 9
-loment_multisyntax_test 73
+loment_multisyntax_test 74
 loment_multisyntax_projects_test 3
 loment_megaproject_test 8
 loment_state_test 8

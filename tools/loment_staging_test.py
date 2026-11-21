@@ -47,12 +47,35 @@ _COPY = (
 )
 
 
+_KEYDIR: Path | None = None
+
+
+def _keydir() -> Path:
+    global _KEYDIR
+    if _KEYDIR is not None:
+        return _KEYDIR
+    d = Path(tempfile.mkdtemp(prefix="loment-stage-key-"))
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(d / "key.pem"), "-out", str(d / "cert.pem"),
+                    "-subj", "/CN=loment-staging-test", "-days", "1"],
+                   check=True, capture_output=True)
+    pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout",
+                          "-in", str(d / "cert.pem")], check=True, capture_output=True)
+    (d / "pub.pem").write_bytes(pub.stdout)
+    _KEYDIR = d
+    return d
+
+
 def _tree(dst: Path, *, release: str | None = None) -> Path:
     for pattern in _COPY:
         for src in sorted(ROOT.glob(pattern)):
             target = dst / src.relative_to(ROOT)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, target)
+    # 信任锚在运行树里（`#1695`）；候选目录不再带公钥。
+    pin = dst / "loment" / "hotswap" / "release-key.pem"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_keydir() / "pub.pem", pin)
     if release is not None:
         p = dst / "tools" / "loment_release.py"
         text = p.read_text(encoding="utf-8")
@@ -73,14 +96,7 @@ def _candidate(dst: Path, tree: Path, release: str, *, sign: bool = True) -> Pat
     sums.write_text(f"{man['artifact']['sha256']}  {payload.name}\n",
                     encoding="utf-8", newline="\n")
     if sign:
-        kd = Path(tempfile.mkdtemp(prefix="loment-stage-key-"))
-        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                        "-keyout", str(kd / "key.pem"), "-out", str(kd / "cert.pem"),
-                        "-subj", "/CN=loment-staging-test", "-days", "1"],
-                       check=True, capture_output=True)
-        pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout",
-                              "-in", str(kd / "cert.pem")], check=True, capture_output=True)
-        (dst / "loment-signing.pub.pem").write_bytes(pub.stdout)
+        kd = _keydir()
         subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(kd / "key.pem"),
                         "-out", str(dst / "SHA256SUMS.asc"), str(sums)],
                        check=True, capture_output=True)
@@ -106,6 +122,7 @@ def test_a_staged_candidate_is_picked_up_in_one_poll() -> None:
         got = st.poll(BASE)
         assert got is not None and (got / "hotfix.json").is_file(), got
         assert got.name == f"v{BASE}-hot.1"
+        assert (got / st.MARKER).is_file(), "准入记号没写"
         print(f"      放进去一次轮询就捡到：{got.relative_to(h)}")
 
 
@@ -188,6 +205,41 @@ def test_the_swap_path_opens_no_socket() -> None:
         finally:
             socket.socket = real  # type: ignore[assignment]
         print("      禁掉 socket 之后 stage/poll 照常工作 —— 那条路不做网络 I/O")
+
+
+@test
+def test_an_old_candidate_without_a_marker_is_reverified_not_discarded() -> None:
+    """升级前 stage 过的候选没有 `.admitted`：再次 stage 时重验并补记号，不丢掉它。"""
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        h = _home(t)
+        tree = _tree(t / "tree")
+        src = _candidate(t / "src", tree, f"v{BASE}-hot.6")
+        first = st.stage(src, tree, f"v{BASE}-hot.6")
+        (first / st.MARKER).unlink()
+        second = st.stage(src, tree, f"v{BASE}-hot.6")
+        assert second == first and (second / st.MARKER).is_file()
+        assert st.poll(BASE) == second
+        print("      旧候选没有记号：重验通过、补上记号，仍然是同一条")
+
+
+@test
+def test_a_directory_dropped_into_incoming_is_not_polled() -> None:
+    """`#1695`：绕过 stage 直接写进 `incoming/` 的目录**没有准入记号**，轮询不认。"""
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        h = _home(t)
+        tree = _tree(t / "tree")
+        cand = _candidate(t / "cand", tree, f"v{BASE}-hot.5")
+        dest = h / BASE / "incoming" / f"v{BASE}-hot.5"
+        dest.mkdir(parents=True)
+        for p in cand.iterdir():
+            if p.is_file():
+                shutil.copyfile(p, dest / p.name)
+        assert st.poll(BASE) is None
+        (dest / st.MARKER).write_text("0" * 64 + "\n", encoding="utf-8", newline="\n")
+        assert st.poll(BASE) is None, "记号与清单对不上也被认了"
+        print("      直接写进 incoming/（无记号 / 记号不符）→ 轮询不认")
 
 
 def main() -> int:

@@ -150,12 +150,34 @@ def _wsl(p: Path) -> str:
     return "/mnt/" + s[0].lower() + s[2:]
 
 
+_KEYDIR: Path | None = None
+
+
+def _keydir() -> Path:
+    global _KEYDIR
+    if _KEYDIR is not None:
+        return _KEYDIR
+    d = Path(tempfile.mkdtemp(prefix="loment-demo-key-"))
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", str(d / "key.pem"), "-out", str(d / "cert.pem"),
+                    "-subj", "/CN=loment-demo", "-days", "1"],
+                   check=True, capture_output=True)
+    pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout",
+                          "-in", str(d / "cert.pem")], check=True, capture_output=True)
+    (d / "pub.pem").write_bytes(pub.stdout)
+    _KEYDIR = d
+    return d
+
+
 def _tree(dst: Path, *, version: int, cand: str) -> Path:
     for pattern in _COPY:
         for src in sorted(ROOT.glob(pattern)):
             target = dst / src.relative_to(ROOT)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, target)
+    pin = dst / "loment" / "hotswap" / "release-key.pem"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_keydir() / "pub.pem", pin)
     p = dst / "loment" / "tools" / "demotool.lomt"
     p.write_text(DEMO.format(version=version, cand=cand), encoding="utf-8", newline="\n")
     return dst
@@ -176,14 +198,7 @@ def _build(tree: Path) -> bytes:
 
 
 def _sign(out: Path) -> None:
-    kd = Path(tempfile.mkdtemp(prefix="loment-demo-key-"))
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                    "-keyout", str(kd / "key.pem"), "-out", str(kd / "cert.pem"),
-                    "-subj", "/CN=loment-demo", "-days", "1"],
-                   check=True, capture_output=True)
-    pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout", "-in", str(kd / "cert.pem")],
-                         check=True, capture_output=True)
-    (out / "loment-signing.pub.pem").write_bytes(pub.stdout)
+    kd = _keydir()
     subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(kd / "key.pem"),
                     "-out", str(out / "SHA256SUMS.asc"), str(out / "SHA256SUMS")],
                    check=True, capture_output=True)

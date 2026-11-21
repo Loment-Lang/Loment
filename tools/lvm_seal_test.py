@@ -15,6 +15,9 @@
 * **E** 创世衰减：越权/超预算/超深度被拒；同父同差量逐字节同。
 * **F** 验证器零 import：子进程里挡住编译器/链接器/LSPE，它照样给出判决。
 * **G** 验证器的字节/行数进封印，超预算就红；验证器文件本身也对得上。
+* **H** 两份解释器（`tools/lvm.py` / `loment/tools/lvm.lomt`）的**行数与字节数进封印**，
+  预算也进去（`docs/360` §7 B8）。
+* **I** 解释器越过预算 / 封印里的总数与来源对不上 —— 两种都红。
 
 用法: python tools/lvm_seal_test.py
 """
@@ -241,6 +244,54 @@ def test_verifier_price_is_in_the_seal() -> None:
         got = lvm_seal.verify(ir, seal2)
         assert not got["ok"] and any("budget" in r for r in got["reasons"]), got
     print(f"      验证器 {meta['lines']} 行 / {meta['bytes']} 字节；超预算与错字节都红")
+
+
+def test_interpreter_price_is_in_the_seal() -> None:
+    """判 H（B8，`docs/360` §7）：解释器也要标价，预算进封印。"""
+    ir = _ir()
+    seal = lvm_seal.build_seal(ir, "sw_cap")
+    ip = seal.get("interpreter") or {}
+    srcs = ip.get("sources") or {}
+    assert set(srcs) == {"reference", "selfhost"}, srcs
+    tot_l = tot_b = 0
+    for name, s in srcs.items():
+        data = lvm_seal.INTERPRETER_SOURCES[name].read_bytes()
+        assert s["bytes"] == len(data), name
+        assert s["lines"] == data.count(b"\n"), name
+        assert s["sha256"] == lvm_seal.sha256_hex(data), name
+        tot_l += s["lines"]
+        tot_b += s["bytes"]
+    assert ip.get("total") == {"lines": tot_l, "bytes": tot_b}, ip.get("total")
+    budget = ip.get("budget") or {}
+    assert tot_l <= budget.get("lines", -1) and tot_b <= budget.get("bytes", -1), (
+        f"解释器超出预算：{tot_l} 行 / {tot_b} 字节 vs {budget}")
+    got = lvm_seal.verify(ir, seal)
+    assert got["ok"], got["reasons"]
+    print(f"      解释器 {tot_l} 行 / {tot_b} 字节，预算 {budget['lines']} 行 / "
+          f"{budget['bytes']} 字节")
+
+
+def test_interpreter_budget_is_enforced() -> None:
+    """判 I（B8 的另一半）：越过预算要红；封印里的总数与来源对不上也要红。"""
+    ir = _ir()
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        big = tdp / "big.lomt"
+        big.write_bytes(b"#" * (lvm_seal.INTERPRETER_BUDGET["bytes"] + 1))
+        small = tdp / "small.py"
+        small.write_bytes(b"x\n")
+        seal = lvm_seal.build_seal(
+            ir, "sw_cap",
+            interpreter_sources={"reference": small, "selfhost": big})
+        got = lvm_seal.verify(ir, seal)
+        assert not got["ok"] and any("budget" in r for r in got["reasons"]), got
+
+    seal = lvm_seal.build_seal(ir, "sw_cap")
+    seal["interpreter"]["total"]["lines"] += 1
+    seal["sum"] = lvm_seal.sum_of(seal)
+    got = lvm_seal.verify(ir, seal)
+    assert not got["ok"] and any("total" in r for r in got["reasons"]), got
+    print("      越预算 / 总数与来源不符：两种都红")
 
 
 def test_scan_is_complete_over_the_artifact() -> None:

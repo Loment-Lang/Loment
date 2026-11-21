@@ -28,7 +28,8 @@ import re
 import sys
 from pathlib import Path
 
-SCHEMA = 1
+#: 2 = 1 + 解释器标价（`docs/360` §7 B8，`docs/363` §6）：字段变了就升版，旧封印拒收。
+SCHEMA = 2
 MODE_SAME_ARTIFACT = "same_artifact"
 
 #: 四个基质档（`docs/360` §3.3）。`guarantees` 是这一档**真的兑现**的原语；
@@ -67,6 +68,15 @@ MEMORY_KINDS = ("load", "store", "getelementptr", "atomicrmw")
 UNSAFE_KINDS = ("syscall", "foreign")
 
 MAX_VERIFIER_BYTES = 128 * 1024
+
+#: **解释器标价**（`docs/360` §7 B8）：时间桥梁把信任从硅片移到解释器，解释器就必须
+#: **小到能审**。预算是**决定**，不是测出来的数 —— 越过它，这座桥只是把信任搬进一个
+#: 更大的东西。两份实现各自记，总数也记；封印里同时带价与预算（`docs/363` §6）。
+INTERPRETER_BUDGET = {"lines": 8000, "bytes": 320 * 1024}
+INTERPRETER_SOURCES = {
+    "reference": Path(__file__).resolve().parent / "lvm.py",
+    "selfhost": Path(__file__).resolve().parent.parent / "loment" / "tools" / "lvm.lomt",
+}
 
 
 # ---------------------------------------------------------------- 规范化与哈希
@@ -198,9 +208,24 @@ def _verifier_meta(path: Path | None = None) -> dict:
     }
 
 
+def _interpreter_meta(sources: dict[str, Path] | None = None) -> dict:
+    srcs = sources or INTERPRETER_SOURCES
+    per: dict[str, dict] = {}
+    tot_l = tot_b = 0
+    for name, p in srcs.items():
+        data = Path(p).read_bytes()
+        lines = data.count(b"\n")
+        per[name] = {"lines": lines, "bytes": len(data), "sha256": sha256_hex(data)}
+        tot_l += lines
+        tot_b += len(data)
+    return {"sources": per, "total": {"lines": tot_l, "bytes": tot_b},
+            "budget": dict(INTERPRETER_BUDGET)}
+
+
 def build_seal(ir_text: str, profile: str, host=DEFAULT_HOST,
                genesis: dict | None = None, floor: dict | None = None,
-               verifier_path: Path | None = None) -> dict:
+               verifier_path: Path | None = None,
+               interpreter_sources: dict[str, Path] | None = None) -> dict:
     if profile not in SUBSTRATES:
         raise ValueError(f"没有这一档基质: {profile!r}")
     spec = SUBSTRATES[profile]
@@ -231,6 +256,7 @@ def build_seal(ir_text: str, profile: str, host=DEFAULT_HOST,
             "assumptions": sorted(set(assumptions)),
         },
         "verifier": _verifier_meta(verifier_path),
+        "interpreter": _interpreter_meta(interpreter_sources),
         "genesis": genesis,
         "floor": dict(floor or {"seed_sha256": None}),
     }
@@ -317,6 +343,35 @@ def verify(ir_text: str, seal: dict, host=DEFAULT_HOST,
             checked.append("verifier")
     if vm.get("bytes", 0) > vm.get("max_bytes", MAX_VERIFIER_BYTES):
         reasons.append("verifier exceeds its declared byte budget")
+
+    # B8（`docs/360` §7）：解释器标价 —— 两条实现各自的价、总数、以及预算。
+    # 验证器不读解释器源码（那是构建侧的事），它判**封印自己**：来源与总数对得上、
+    # 总数不越预算；`lvm_seal_test` 的判 H 再把封印里的哈希与盘上文件对一次。
+    ip = seal.get("interpreter")
+    srcs = (ip or {}).get("sources") or {}
+    tot = (ip or {}).get("total") or {}
+    bud = (ip or {}).get("budget") or {}
+    if not isinstance(ip, dict) or not srcs:
+        reasons.append("interpreter price is missing from the seal")
+    elif not all(isinstance(s, dict) and isinstance(s.get("lines"), int)
+                 and isinstance(s.get("bytes"), int)
+                 and s["lines"] >= 0 and s["bytes"] >= 0
+                 for s in srcs.values()):
+        reasons.append("interpreter sources must carry non-negative lines/bytes")
+    else:
+        want_l = sum(s["lines"] for s in srcs.values())
+        want_b = sum(s["bytes"] for s in srcs.values())
+        if tot.get("lines") != want_l or tot.get("bytes") != want_b:
+            reasons.append("interpreter total does not match its sources")
+        elif not (isinstance(bud.get("lines"), int) and isinstance(bud.get("bytes"), int)
+                  and bud["lines"] > 0 and bud["bytes"] > 0):
+            reasons.append("interpreter budget must be positive integers")
+        elif want_l > bud["lines"] or want_b > bud["bytes"]:
+            reasons.append(
+                f"interpreter exceeds its declared budget ({want_l} lines / "
+                f"{want_b} bytes > {bud['lines']} / {bud['bytes']})")
+        else:
+            checked.append("interpreter price")
 
     return {"ok": not reasons, "reasons": reasons, "checked": checked}
 

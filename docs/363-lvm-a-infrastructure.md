@@ -81,6 +81,7 @@ struct Seal {
   laws: [Law],                         // id / verdict / needs / exclusions
   substrate { profile, guarantees, assumptions },
   verifier { id, version, bytes, sha256, lines, max_bytes },
+  interpreter { sources { lines, bytes, sha256 }, total, budget },   // schema 2（B8）
   genesis { mode, max_depth, max_children, max_total },
   floor { seed_sha256 },               // 本笔留空；可填
   sum,                                 // 对除 sum 外全部字段的规范序列化取 sha256
@@ -95,15 +96,20 @@ struct Seal {
    「**产物里的每条访存**」这一句可核的话（`docs/358` §1A）。
 2. **规律不是自由标签**。`no_segv` 要求 `P2.bounds + P4.fault`，`no_dangling` 要求 `P3.gen`，
    `site_stable` 要求 `P1.site`；缺一条就只能是 `floored`，说成 `checked` 验证器就红。
-3. **验证器被标价**。文件字节 / 行数 / sha256 / `max_bytes` 都进封印；超预算就红（B8）。
-   今天的数：**464 行 / 17,832 字节 / 预算 128 KiB**。
+3. **验证器被标价**。文件字节 / 行数 / sha256 / `max_bytes` 都进封印；超预算就红。
+   今天的数：**519 行 / 20,885 字节 / 预算 128 KiB**。
+4. **解释器也标价（B8，`docs/360` §7）**。两份实现（`tools/lvm.py` / `loment/tools/lvm.lomt`）
+   的字节、行数、sha256 与**总数**进封印，**预算**也进去：**8000 行 / 320 KiB**。
+   验证器不读解释器源码（那是构建侧的事）—— 它判封印自己：来源与总数对得上、总数不越预算；
+   `lvm_seal_test` 判 H 再把封印里的哈希与盘上的文件对一次。越过预算就是这座桥在变胖，
+   证据留在封印里，不靠谁记得。
 
 ---
 
 ## 3. 独立验证器：只读产物，零 import
 
-`verify(ir_text, seal, host)` 重算八件事：总哈希、产物哈希、基质保证、基质假设、站点台账、
-站点计数/哈希、规律、创世预算、验证器字节。任一不符就红，并给出**可读的拒绝理由**。
+`verify(ir_text, seal, host)` 重算九件事：总哈希、产物哈希、基质保证、基质假设、站点台账、
+站点计数/哈希、规律、创世预算、验证器字节、解释器标价。任一不符就红，并给出**可读的拒绝理由**。
 
 判据 F 是机械的：在子进程里用 `sys.meta_path` **挡住** `lomentc` / `lomelf` / `lvm` / `lspe`，
 验证器照样 PASS。它证明的是「删掉编译器还能验」，不是「编译器没漏站点」——
@@ -183,7 +189,7 @@ struct Seal {
 | 套件 | 条数 | 钉什么 |
 |---|---|---|
 | `lvm_cp_test` | 7 | 两引擎同答 / 任意边界存取 / 调用栈进快照 / 链式 / 确定与绑定 / 只走 T0 |
-| `lvm_seal_test` | 9 | 往返 / 三种篡改 / 硬件降级与伪造 / B5 同字节码 / 创世四条拒绝面 / 零 import / 验证器标价 / 站点完备 |
+| `lvm_seal_test` | 11 | 往返 / 三种篡改 / 硬件降级与伪造 / B5 同字节码 / 创世四条拒绝面 / 零 import / 验证器标价 / 站点完备 / **解释器标价与预算（B8）** |
 | `lvm_twin_test::test_cap_*` | 2 | 三条故障同 code+site / 合法语料同答 |
 
 ---

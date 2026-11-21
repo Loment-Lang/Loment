@@ -485,6 +485,56 @@ class LNotaryTest(unittest.TestCase):
         self.assertTrue(any(e.code == "LNT-SITES" for e in errs), errs)
 
 
+    def _r23_table(self) -> dict:
+        src = self.tmp / "r23.lomt"
+        src.write_text(
+            "module r23\nchoose vm\n\n"
+            "fn _start() {\n"
+            "    let a: [u32; 4] = [1, 2, 3, 4];\n"
+            "    let s: u32 = 0;\n"
+            "    for i in 0..4 {\n"
+            "        s = s + a[i];\n"
+            "    }\n"
+            "    let j: u32 = 2;\n"
+            "    if j < 4 {\n"
+            "        s = s + a[j];\n"
+            "    }\n"
+            "    syscall4(60, 0, 0, 0);\n"
+            "}\n", encoding="utf-8")
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "lomentc.py"),
+             str(src), "--print", "llvm"],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ir = self.tmp / "r23.ll"
+        ir.write_text(r.stdout, encoding="utf-8")
+        out = self.tmp / "r23.sites.json"
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "lms_sites.py"),
+             str(ir), "--out", str(out)],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(out.read_text(encoding="utf-8"))
+
+    # AF · R2：规范循环（`for i in 0..N { a[i] }`）
+    def test_r2_canonical_loop(self) -> None:
+        from lnotary import sites
+
+        table = self._r23_table()
+        rules = {s.get("rule") for s in table["sites"]}
+        self.assertIn("R2", rules, table["sites"])
+        self.assertEqual(sites.verify_sites(table), [])
+
+    # AG · R3：支配分支（`if j < N { a[j] }`）
+    def test_r3_dominating_branch(self) -> None:
+        from lnotary import sites
+
+        table = self._r23_table()
+        rules = {s.get("rule") for s in table["sites"]}
+        self.assertIn("R3", rules, table["sites"])
+        self.assertEqual(sites.verify_sites(table), [])
+
+
 #: `loment_tools_test::test_every_criterion_is_registered` 要看见它们；
 #: `unittest` 的 loader 不经过 `TESTS`，所以两条路各留一份名字。
 TESTS = [(n, getattr(LNotaryTest, n)) for n in dir(LNotaryTest)

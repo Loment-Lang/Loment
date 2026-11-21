@@ -171,7 +171,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 
 ---
 
-## 5. 判据（三十二条，`tools/lnotary_test.py`）
+## 5. 判据（三十四条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -207,9 +207,11 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | AC | R1：常量下标 + 常量长度 ⇒ `proven`，`rule: "R1"` | 站点表不存在 ⇒ 红 |
 | AD | `proven` 的 `rule` 改成 `R9` ⇒ `LNT-SITES` | 同上 |
 | AE | `proven` 少了 `rule` ⇒ `LNT-SITES` | 同上 |
+| AF | R2：规范循环（`for i in 0..N { a[i] }`） | 同上 |
+| AG | R3：支配分支（`if j < N { a[j] }`） | 同上 |
 
-三十二条在本机全绿（`python tools/lnotary_test.py`，32/32，约 11.1s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 32`。
+三十四条在本机全绿（`python tools/lnotary_test.py`，34/34，约 14.7s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 34`。
 
 ---
 
@@ -250,17 +252,21 @@ V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不�
 ## 6.6 站点证明（V4）
 
 站点表的第三个等级 `proven` 不认自由标签：每条 `proven` 必须引用规则表里的一条
-（`R1`–`R4`，`docs/356` §6.2）。V4 先落 **R1**：
+（`R1`–`R4`，`docs/356` §6.2）。V4 落 **R1–R3**：
 
-> 常量下标 + 常量长度，且字节偏移 + 宽度 ≤ 对象大小。
+* **R1**：常量下标 + 常量长度，且字节偏移 + 宽度 ≤ 对象大小；
+* **R2**：规范循环 —— 条件块 `icmp ult 槽, N`，GEP 在它的**唯一**真后继块里、
+  用同一个槽；真后继块末尾 `+1` 写回同一个槽并跳回条件块，数组长度 == N；
+* **R3**：支配分支 —— 条件块的真后继是 GEP 块（唯一前驱），条件与 GEP 用同一个
+  槽/值，数组长度 == N。
 
-普查器（`tools/lms_sites.py`）在函数内跟踪 `alloca` 的对象大小与常量 `getelementptr`
-的字节偏移；`load`/`store` 的指针落在已知对象里且界内，就标 `proven` + `rule: "R1"`。
-LNotary 的 `sites.verify_sites` 只核**引用是否可复查**：规则名不在表里、或者 `proven`
-没有规则，都是 `LNT-SITES`。它不重算偏移（零工具链 import）。
+普查器（`tools/lms_sites.py`）跟踪 `alloca` 大小、常量 GEP 偏移、槽的 load/store 与
+条件分支；命中就标 `proven` + `rule`。LNotary 的 `sites.verify_sites` 只核**引用是否
+可复查**：规则名不在表里、或者 `proven` 没有规则，都是 `LNT-SITES`。它不重算（零工具链
+import）。
 
-R2（规范循环）/ R3（支配分支）/ R4（生命周期）是下一档；V4 只做 R1，因为它是
-**纯局部**的，不需要解释器。
+**R4（生命周期）要另一份产物**：它必须与 `gc_ladder` 交叉（块在 L1/L2、没有跨过 `free`），
+而站点表只读 IR。这是下一档，不在 V4。
 
 ---
 
@@ -277,8 +283,8 @@ R2（规范循环）/ R3（支配分支）/ R4（生命周期）是下一档；V
 6. **不主张派生链证明可达性。** V5 证明"子能碰的东西不多于父"（静态）；哪些 `unsafe`
    站点在子权能下真的到得了，是另一条分析，不在定理里（`docs/363` §7）。
 7. **不主张 `choose lvm` 是运行证明。** 它是声明；真正的运行证明要等 LVM 侧交出运行记录（§2.5）。
-8. **不主张 V4 的证明覆盖 R2–R4。** 只落了 R1（常量下标 + 常量长度）；其余三条规则要循环/分支/
-   生命周期的形状，是下一档（§6.6）。
+8. **不主张 V4 的证明覆盖 R4。** 落了 R1–R3；R4（生命周期 + `gc_ladder` 交叉）要另一份产物，
+   是下一档（§6.6）。
 
 ---
 

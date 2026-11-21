@@ -7,12 +7,17 @@
 
 等级三种：
 
-* `proven`：**常量下标 + 常量长度**，而且字节偏移 + 宽度 ≤ 对象大小（规则 **R1**）。
-  证明写在站点上（`rule: "R1"`），LNotary 复查引用是不是规则表里的；
+* `proven`：证明落在站点上（`rule`）。今天落三条：
+  * **R1**：常量下标 + 常量长度，字节偏移 + 宽度 ≤ 对象大小；
+  * **R2**：规范循环 —— 真后继块里有 `icmp ult 槽, N`、GEP 用同一个槽、
+    块末尾 `+1` 写回同一个槽并跳回条件块，且数组长度 == N；
+  * **R3**：支配分支 —— GEP 在条件块的**唯一**真后继里，条件 `icmp ult 槽, N`、
+    GEP 用同一个槽，且数组长度 == N；
 * `checked`：同函数里有 g1 形状的检查（`br i1 …, label %*lmsok, label %*lmsbad`），
-  且这条访存在 `*lmsok` 块里 —— 原生侧真的会拦它；
-* `unsafe`：其余。LVM 的 `sw_cap` 会检查全部访存，但那是**基质**的账，
-  不是这张表要冒充的。
+  且这条访存在 `*lmsok` 块里；
+* `unsafe`：其余。
+
+R4（生命周期 + `gc_ladder` 交叉）要另一份产物，尚未落（`docs/361` §7 第 8 条）。
 
 用法: python tools/lms_sites.py IN.ll [--out PATH]
 """
@@ -32,7 +37,9 @@ import lomelf  # noqa: E402
 SCHEMA = 1
 INTERNAL = "__loment_"
 _BR_OK_BAD = re.compile(r"br i1 .*label %([-\w.$]+), label %([-\w.$]+)")
-_RULES = ("R1", "R2", "R3", "R4")
+_BR_COND = re.compile(r"br i1 (%[-\w.$]+), label %([-\w.$]+), label %([-\w.$]+)")
+_BR_ONE = re.compile(r"br label %([-\w.$]+)")
+_ICMP_ULT = re.compile(r"icmp ult i32 (%[-\w.$]+), (\d+)$")
 
 
 def canonical_bytes(obj: object) -> bytes:
@@ -45,7 +52,6 @@ def sha256_hex(data: bytes) -> str:
 
 
 def _checked_blocks(fn) -> set[str]:
-    """`br i1 …, label %*lmsok, label %*lmsbad` 里的 ok 块。"""
     out: set[str] = set()
     for blk in fn.blocks:
         for ins in blk.instrs:
@@ -56,7 +62,6 @@ def _checked_blocks(fn) -> set[str]:
 
 
 def _checked_sites(fn) -> set[tuple[str, int]]:
-    """每个 `*lmsok` 块里**第一条**访存才是被检查的那一条。"""
     ok = _checked_blocks(fn)
     out: set[tuple[str, int]] = set()
     for blk in fn.blocks:
@@ -83,8 +88,7 @@ def _ptr_name(op: str) -> str | None:
     return s if s.startswith("%") else None
 
 
-def _gep_info(text: str, offsets: dict[str, tuple[str, int]]) -> tuple[str, int] | None:
-    """常量 GEP 的 `(基对象, 字节偏移)`；有一个下标不是常量就返回 `None`。"""
+def _gep_parts(text: str) -> tuple[str, str | None, list[object]] | None:
     body = text[len("getelementptr"):].strip()
     if body.startswith("inbounds"):
         body = body[len("inbounds"):].strip()
@@ -93,18 +97,26 @@ def _gep_info(text: str, offsets: dict[str, tuple[str, int]]) -> tuple[str, int]
     if not ops:
         return None
     base = _ptr_name(ops[0])
-    if base is None or base not in offsets:
-        return None
-    root, boff = offsets[base]
-    idxs: list[int] = []
+    vals: list[object] = []
     for op in ops[1:]:
         _t, j = lomelf.parse_type(op)
-        v = _const_int(op[j:].strip())
-        if v is None:
-            return None
-        idxs.append(v)
-    if not idxs:
+        s = op[j:].strip()
+        v = _const_int(s)
+        vals.append(v if v is not None else s)
+    return ty, base, vals
+
+
+def _gep_info(text: str, offsets: dict[str, tuple[str, int]]) -> tuple[str, int] | None:
+    parts = _gep_parts(text)
+    if parts is None:
         return None
+    ty, base, vals = parts
+    if base is None or base not in offsets or not vals:
+        return None
+    if any(not isinstance(v, int) for v in vals):
+        return None
+    root, boff = offsets[base]
+    idxs = [int(v) for v in vals]
     if ty.startswith("["):
         n, elem = lomelf.array_parts(ty)
         esz = lomelf.size_of(elem)
@@ -119,8 +131,7 @@ def _gep_info(text: str, offsets: dict[str, tuple[str, int]]) -> tuple[str, int]
     return root, boff + idxs[0] * lomelf.size_of(ty)
 
 
-def _access_ptr(text: str, op: str, ty: str | None) -> str | None:
-    """从 load/store 文本里取指针操作数。"""
+def _access_ptr(text: str, op: str) -> str | None:
     if op == "load":
         rest = text[len("load "):].lstrip()
         _t, j = lomelf.parse_type(rest)
@@ -131,8 +142,94 @@ def _access_ptr(text: str, op: str, ty: str | None) -> str | None:
         for part in reversed(lomelf.split_top(rest[j:].lstrip(", ").strip())):
             if part.strip().startswith("ptr "):
                 return part.strip()
-        return None
     return None
+
+
+def _facts(fn):
+    """`loads`、`cmp`、`brs`、`preds` —— 一次扫，后面按块查。"""
+    loads: dict[str, str] = {}
+    cmp: dict[str, tuple[str, int]] = {}
+    brs: dict[str, tuple[str, str, str]] = {}
+    preds: dict[str, list[str]] = {b.label: [] for b in fn.blocks}
+    for blk in fn.blocks:
+        for ins in blk.instrs:
+            t = ins.text
+            if t.startswith("load ") and ins.dest:
+                p = _access_ptr(t, "load")
+                name = _ptr_name(p) if p else None
+                if name is not None:
+                    loads[ins.dest] = name
+            if ins.dest:
+                m = _ICMP_ULT.match(t)
+                if m:
+                    cmp[ins.dest] = (m.group(1), int(m.group(2)))
+            m = _BR_COND.match(t)
+            if m:
+                brs[blk.label] = (m.group(1), m.group(2), m.group(3))
+                preds[m.group(2)].append(blk.label)
+                preds[m.group(3)].append(blk.label)
+                continue
+            m = _BR_ONE.match(t)
+            if m:
+                preds[m.group(1)].append(blk.label)
+    return loads, cmp, brs, preds
+
+
+def _origin(v: object, loads: dict[str, str]) -> tuple[str, str]:
+    s = str(v)
+    if s in loads:
+        return "slot", loads[s]
+    return "ssa", s
+
+
+def _store_before(blk, slot: str, upto: int) -> bool:
+    for ins in blk.instrs[:upto]:
+        if ins.text.startswith("store ") and f"ptr {slot}" in ins.text:
+            return True
+    return False
+
+
+def _has_incr(blk, slot: str, loads: dict[str, str]) -> bool:
+    for ins in blk.instrs:
+        if ins.text.startswith("add i32 ") and ins.text.endswith(", 1"):
+            lhs = lomelf.split_top(ins.text[len("add i32 "):])[0].strip()
+            if loads.get(lhs) == slot:
+                return True
+    return False
+
+
+def _dyn_gep_rule(blk, idx: int, ty: str, base: str | None, vals: list[object],
+                  loads, cmp, brs, preds) -> str | None:
+    """R2 / R3：GEP 的动态下标有支配它的 `icmp ult`。"""
+    if not ty.startswith("[") or base is None:
+        return None
+    dyn = [v for v in vals if not isinstance(v, int)]
+    if len(dyn) != 1:
+        return None
+    n, _elem = lomelf.array_parts(ty)
+    mypred = preds.get(blk.label, [])
+    if len(mypred) != 1:
+        return None
+    p = mypred[0]
+    br = brs.get(p)
+    if br is None or br[1] != blk.label:
+        return None
+    cname = br[0]
+    if cname not in cmp:
+        return None
+    lhs, k = cmp[cname]
+    if k != n:
+        return None
+    if _origin(dyn[0], loads) != _origin(lhs, loads):
+        return None
+    kind, name = _origin(dyn[0], loads)
+    if kind == "slot" and _store_before(blk, name, idx):
+        return None
+    # R2：块末尾跳回条件块，且同一个槽 +1 写回。
+    term = blk.instrs[-1].text if blk.instrs else ""
+    if term == f"br label %{p}" and kind == "slot" and _has_incr(blk, name, loads):
+        return "R2"
+    return "R3"
 
 
 def census(ir_text: str) -> dict:
@@ -142,8 +239,10 @@ def census(ir_text: str) -> dict:
         if fn.name.startswith(INTERNAL):
             continue
         checked_set = _checked_sites(fn)
+        loads, cmp, brs, preds = _facts(fn)
         sizes: dict[str, int] = {}
         offsets: dict[str, tuple[str, int]] = {}
+        gep_rule: dict[str, str] = {}
         for blk in fn.blocks:
             for idx, ins in enumerate(blk.instrs):
                 text = ins.text
@@ -156,6 +255,14 @@ def census(ir_text: str) -> dict:
                     info = _gep_info(text, offsets)
                     if info is not None:
                         offsets[ins.dest] = info
+                    else:
+                        parts = _gep_parts(text)
+                        if parts is not None:
+                            ty, base, vals = parts
+                            rule = _dyn_gep_rule(blk, idx, ty, base, vals,
+                                                 loads, cmp, brs, preds)
+                            if rule is not None:
+                                gep_rule[ins.dest] = rule
                     continue
                 op = ty = None
                 if text.startswith("load "):
@@ -168,24 +275,28 @@ def census(ir_text: str) -> dict:
                     op = "atomicrmw"
                 if op is None:
                     continue
-                proven = False
-                ptr_text = _access_ptr(text, op, ty)
-                if ptr_text is not None and ty is not None:
+                proven_rule = None
+                ptr_text = _access_ptr(text, op)
+                if ptr_text is not None:
+                    pname = _ptr_name(ptr_text)
+                    if pname in gep_rule:
+                        proven_rule = gep_rule[pname]
+                if proven_rule is None and ptr_text is not None and ty is not None:
                     pname = _ptr_name(ptr_text)
                     if pname is not None and pname in offsets:
                         root, off = offsets[pname]
                         width = lomelf.size_of(ty)
                         if root in sizes and off + width <= sizes[root]:
-                            proven = True
+                            proven_rule = "R1"
                 checked = (blk.label, idx) in checked_set
                 site = {
                     "fn": fn.name, "blk": blk.label, "idx": idx,
                     "op": op, "ty": ty,
-                    "grade": ("proven" if proven
+                    "grade": ("proven" if proven_rule
                               else "checked" if checked else "unsafe"),
                 }
-                if proven:
-                    site["rule"] = "R1"
+                if proven_rule:
+                    site["rule"] = proven_rule
                 elif checked:
                     site["fault"] = "F01"
                 sites.append(site)

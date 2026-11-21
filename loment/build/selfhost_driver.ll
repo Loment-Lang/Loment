@@ -14802,6 +14802,7 @@ entry:
   %fk.addr = alloca i32
   %nm.addr = alloca i32
   %n.addr = alloca i32
+  %npar.addr = alloca i32
   %q.addr = alloca i32
   store ptr %s, ptr %s.addr
   store ptr %src, ptr %src.addr
@@ -14960,56 +14961,64 @@ L27_end:
   %t100 = add i32 %t99, 4
   %t101 = load i32, ptr %child.addr
   call void @store32(ptr %t97, i32 %t100, i32 %t101)
+  %t102 = load ptr, ptr %s.addr
+  %t103 = load i32, ptr %j.addr
+  %t104 = mul i32 %t103, 12
+  %t105 = add i32 12288, %t104
+  %t106 = add i32 %t105, 8
+  %t107 = call i32 @load32(ptr %t102, i32 %t106)
+  store i32 %t107, ptr %npar.addr
   store i32 0, ptr %q.addr
   br label %L28_wcond
 L28_wcond:
-  %t102 = load i32, ptr %q.addr
-  %t103 = icmp ult i32 %t102, 20
-  br i1 %t103, label %L29_wbody, label %L30_wend
-L29_wbody:
-  %t104 = load ptr, ptr %s.addr
-  %t105 = load i32, ptr %n.addr
-  %t106 = mul i32 %t105, 160
-  %t107 = add i32 135168, %t106
   %t108 = load i32, ptr %q.addr
-  %t109 = mul i32 %t108, 8
-  %t110 = add i32 %t107, %t109
+  %t109 = load i32, ptr %npar.addr
+  %t110 = icmp ult i32 %t108, %t109
+  br i1 %t110, label %L29_wbody, label %L30_wend
+L29_wbody:
   %t111 = load ptr, ptr %s.addr
-  %t112 = load i32, ptr %j.addr
+  %t112 = load i32, ptr %n.addr
   %t113 = mul i32 %t112, 160
   %t114 = add i32 135168, %t113
   %t115 = load i32, ptr %q.addr
   %t116 = mul i32 %t115, 8
   %t117 = add i32 %t114, %t116
-  %t118 = call i32 @load32(ptr %t111, i32 %t117)
-  call void @store32(ptr %t104, i32 %t110, i32 %t118)
-  %t119 = load ptr, ptr %s.addr
-  %t120 = load i32, ptr %n.addr
-  %t121 = mul i32 %t120, 160
-  %t122 = add i32 135168, %t121
-  %t123 = load i32, ptr %q.addr
-  %t124 = mul i32 %t123, 8
-  %t125 = add i32 %t122, %t124
-  %t126 = add i32 %t125, 4
-  %t127 = load ptr, ptr %s.addr
-  %t128 = load i32, ptr %j.addr
-  %t129 = mul i32 %t128, 160
-  %t130 = add i32 135168, %t129
-  %t131 = load i32, ptr %q.addr
-  %t132 = mul i32 %t131, 8
-  %t133 = add i32 %t130, %t132
-  %t134 = add i32 %t133, 4
-  %t135 = call i32 @load32(ptr %t127, i32 %t134)
-  call void @store32(ptr %t119, i32 %t126, i32 %t135)
-  %t136 = load i32, ptr %q.addr
-  %t137 = add i32 %t136, 1
-  store i32 %t137, ptr %q.addr
+  %t118 = load ptr, ptr %s.addr
+  %t119 = load i32, ptr %j.addr
+  %t120 = mul i32 %t119, 160
+  %t121 = add i32 135168, %t120
+  %t122 = load i32, ptr %q.addr
+  %t123 = mul i32 %t122, 8
+  %t124 = add i32 %t121, %t123
+  %t125 = call i32 @load32(ptr %t118, i32 %t124)
+  call void @store32(ptr %t111, i32 %t117, i32 %t125)
+  %t126 = load ptr, ptr %s.addr
+  %t127 = load i32, ptr %n.addr
+  %t128 = mul i32 %t127, 160
+  %t129 = add i32 135168, %t128
+  %t130 = load i32, ptr %q.addr
+  %t131 = mul i32 %t130, 8
+  %t132 = add i32 %t129, %t131
+  %t133 = add i32 %t132, 4
+  %t134 = load ptr, ptr %s.addr
+  %t135 = load i32, ptr %j.addr
+  %t136 = mul i32 %t135, 160
+  %t137 = add i32 135168, %t136
+  %t138 = load i32, ptr %q.addr
+  %t139 = mul i32 %t138, 8
+  %t140 = add i32 %t137, %t139
+  %t141 = add i32 %t140, 4
+  %t142 = call i32 @load32(ptr %t134, i32 %t141)
+  call void @store32(ptr %t126, i32 %t133, i32 %t142)
+  %t143 = load i32, ptr %q.addr
+  %t144 = add i32 %t143, 1
+  store i32 %t144, ptr %q.addr
   br label %L28_wcond
 L30_wend:
-  %t138 = load ptr, ptr %s.addr
-  %t139 = load i32, ptr %n.addr
-  %t140 = add i32 %t139, 1
-  call void @store32(ptr %t138, i32 640, i32 %t140)
+  %t145 = load ptr, ptr %s.addr
+  %t146 = load i32, ptr %n.addr
+  %t147 = add i32 %t146, 1
+  call void @store32(ptr %t145, i32 640, i32 %t147)
   br label %L24_end
 L23_else:
   br label %L24_end
@@ -15018,23 +15027,23 @@ L24_end:
 L20_else:
   br label %L21_end
 L21_end:
-  %t141 = load i32, ptr %j.addr
-  %t142 = add i32 %t141, 1
-  store i32 %t142, ptr %j.addr
+  %t148 = load i32, ptr %j.addr
+  %t149 = add i32 %t148, 1
+  store i32 %t149, ptr %j.addr
   br label %L10_wcond
 L12_wend:
   br label %L9_end
 L8_else:
   br label %L9_end
 L9_end:
-  %t143 = load i32, ptr %si.addr
-  %t144 = add i32 %t143, 1
-  store i32 %t144, ptr %si.addr
+  %t150 = load i32, ptr %si.addr
+  %t151 = add i32 %t150, 1
+  store i32 %t151, ptr %si.addr
   br label %L1_wcond
 L3_wend:
-  %t145 = load ptr, ptr %s.addr
-  %t146 = call i32 @load32(ptr %t145, i32 640)
-  ret i32 %t146
+  %t152 = load ptr, ptr %s.addr
+  %t153 = call i32 @load32(ptr %t152, i32 640)
+  ret i32 %t153
 }
 ; emit_method_name -> u32
 define i32 @emit_method_name(ptr %s, ptr %out, ptr %src, ptr %toks, i32 %fi) {

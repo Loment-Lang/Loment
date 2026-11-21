@@ -77,7 +77,8 @@ fault（101）。这是刻意的：时间桥梁要的是"同一个语言事件"�
 时间桥梁的两侧必须在同一个基质剖面下比较。
 
 第二条是在 LVM 线的 `feat/lvm-substrate` 工作树上跑的（本分支的 `tools/lvm.py`
-还没有 `--substrate`；判据 B 因此 SKIP，等它合进来自动激活）。
+还没有 `--substrate`；它因此是**手动探针** `--probe-lvm`，不登记成判据 ——
+`ci.py --budget-vs` 不许"生来就跳过"的新判据进预算。基质合进来时改回 `test_`）。
 
 **一个先后问题要写下来**：如果 g1 和 `sw_cap` 同时开，而 LVM 那条线的编译器还是旧的，
 g1 会先 `abort`（132），`sw_cap` 轮不到。两份探针因此各关一侧：
@@ -148,12 +149,12 @@ LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重�
 
 | # | 判据 | 现状 |
 |---|---|---|
-| **A** | 原生 `lms_pangu_true` 的 F01 退出 **101**（WSL 跑 ELF） | 绿 |
-| **B** | LVM `--substrate sw_cap` 的 F01 退出 **101** + 站点 | **SKIP**（本分支还没合 `--substrate`）；对 `feat/lvm-substrate` 手动实测绿 |
+| **A** | 原生 `lms_pangu_true` 的 F01 退出 **101**（Linux 直接跑；Windows 经 WSL） | 绿 |
+| **B** | LVM `--substrate sw_cap` 的 F01 退出 **101** + 站点 | **不进地板**（本树没有 `--substrate`；"生来就跳过"的判据不许登记）。手动探针 `--probe-lvm`，对 `feat/lvm-substrate` 实测绿；基质合进来后改回 `test_` |
 | **C** | 默认档 IR 里**没有** `__loment_fault` | 绿 |
 | **D** | 改一行用户开关 ⇒ IR 缓存键变 | 绿 |
 
-外加 `lnotary_test` 的 21 条（含站点表 5 条）：
+外加 `lnotary_test` 的 34 条（含站点表 5 条、V4 的 R1–R3、V5 的派生链）：
 
 * 真站点表接受；
 * 改等级 ⇒ `LNT-SITES`；
@@ -162,7 +163,7 @@ LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重�
 * 站点表自己的封印被改 ⇒ `LNT-SEAL`。
 
 登记：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt`
-（`lnotary_test 21`、`lms_bridge_test 4`）。
+（`lnotary_test 34`、`lms_bridge_test 4`）。
 
 ---
 

@@ -103,7 +103,13 @@ class LmsBridgeTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return elf
 
-    def _run_wsl(self, elf: Path) -> int | None:
+    def _run_elf(self, elf: Path) -> int | None:
+        """Linux 上**直接跑**（CI 就是 Linux，`#382`）；Windows 上经 WSL 跑。"""
+        if sys.platform.startswith("linux"):
+            elf.chmod(0o755)
+            r = subprocess.run([str(elf)], capture_output=True, text=True,
+                               encoding="utf-8", timeout=60)
+            return r.returncode
         script = self.tmp / "run.sh"
         script.write_text(
             "#!/bin/bash\n"
@@ -127,15 +133,23 @@ class LmsBridgeTest(unittest.TestCase):
         ir = self._compile("pangu")
         self.assertIn("call void @__loment_fault(i32 1)", ir)
         elf = self._link("pangu")
-        rc = self._run_wsl(elf)
+        rc = self._run_elf(elf)
         if rc is None:
             self.skipTest("wsl_unavailable: 本机跑不了 ELF")
         self.assertEqual(rc, 101, f"原生 F01 应退出 101，得到 {rc}")
 
-    # B · LVM sw_cap：F01 = 101 + 站点
-    def test_lvm_sw_cap_exits_101_with_site(self) -> None:
+    # B · LVM sw_cap：F01 = 101 + 站点 —— **不进地板**（今天跑不了，见 `main`）
+    def probe_lvm_sw_cap(self) -> None:
+        """`--substrate` 在 `docs/362` 那条线上；本树还没有它。
+
+        `ci.py --budget-vs` 明令「新判据生来就跳过」不算数（跳过表只许变短），所以
+        这一条**不登记**成 `test_`。基质合进来之后把它改回 `test_lvm_sw_cap_exits_101_with_site`
+        并登记地板/跳过账 —— 在那之前它是手动探针：
+
+            LOMENT_LVM=<那棵树>/tools/lvm.py python tools/lms_bridge_test.py --probe-lvm
+        """
         if "--substrate" not in LVM.read_text(encoding="utf-8"):
-            self.skipTest("substrate_not_merged: tools/lvm.py 还没有 --substrate")
+            raise AssertionError("substrate_not_merged: tools/lvm.py 还没有 --substrate")
         r = subprocess.run([sys.executable, str(LVM), str(self.tmp / "lvm.lomt"),
                             "--substrate", "sw_cap"],
                            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
@@ -190,6 +204,19 @@ TESTS = [(n, getattr(LmsBridgeTest, n)) for n in dir(LmsBridgeTest)
 
 
 def main() -> int:
+    if "--probe-lvm" in sys.argv:
+        case = LmsBridgeTest("probe_lvm_sw_cap")
+        try:
+            LmsBridgeTest.setUpClass()
+            try:
+                case.probe_lvm_sw_cap()
+            finally:
+                LmsBridgeTest.tearDownClass()
+        except Exception as e:  # noqa: BLE001 —— 探针也要给一行可读的红
+            print(f"  FAIL  probe_lvm_sw_cap: {type(e).__name__}: {e}")
+            return 1
+        print("  PASS  probe_lvm_sw_cap")
+        return 0
     return loment_suite.run_unittest(LmsBridgeTest, "lms_bridge_test")
 
 

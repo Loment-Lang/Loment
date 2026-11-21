@@ -55,7 +55,7 @@ def _parse(text: str):
     import potato_from as _pf
     _g, _gerr, _decl = _pf.read_grammar_decl(text)
     _prof = _g if (not _gerr and _g in _pf.TUR_EDITIONS) else _pf.DEFAULT_EDITION
-    if _prof == "tur2026.3":
+    if _prof in lomentc.TUR3_PLUS:
         import loment_fstr
         text, _cmap = loment_fstr.rewrite(text)
     tbl = lomentc.SwitchTable()

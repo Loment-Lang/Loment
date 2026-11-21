@@ -944,7 +944,25 @@ pub fn format_src(src: ptr, t: ptr, n: u32, mem: ptr) -> u32 {
     store32(mem, S_LLINE, 0);
     store32(mem, S_LCMT, 0);
     scan_comments(src, mem);
+    // **版次声明行原样保留**（`docs/353`）：`tur2027.1Alpha` 会被拆成
+    // `tur2027` `.` `1` `Alpha`，重排成 `tur2027.1 Alpha` 就不是那个版次了。
     let i: u32 = 0;
+    if n > 3 && tk_is(src, t, 0, "choose") == true
+            && tk_is(src, t, 1, "write") == true
+            && tk_is(src, t, 2, "grammar") == true {
+        let j: u32 = 0;
+        while j < n && tk_line(t, j) == 1 {
+            j = j + 1;
+        }
+        let end: u32 = tk_start(t, j - 1) + tk_len(t, j - 1);
+        while load8(src, end) != 10 && load8(src, end) != 0 {
+            end = end + 1;
+        }
+        out_push(mem, src, end);
+        out_push_byte(mem, 10);
+        out_push_byte(mem, 10);     // 与 Python 版一样：声明行后留一个空行
+        i = j;
+    }
     let pp: u32 = 0;
     let prev: u32 = 0;
     while i < n && tk_kind(t, i) != 4 {
@@ -1177,6 +1195,14 @@ fn foreign_grammar(src: ptr, t: ptr, n: u32) -> u32 {
             if tk_is(src, t, i + 3, "loment") == true
                     || tk_is(src, t, i + 3, "rust") == true {
                 return 0;                   // 原生写法，照旧放行
+            }
+            // `tur2027.1Alpha`（`docs/353`）：词法器拆成 `tur2027` `.` `1` `Alpha`。
+            if (tk_is(src, t, i + 3, "tur2027") == true
+                    || tk_is(src, t, i + 3, "2027") == true)
+                    && tk_is(src, t, i + 4, ".") == true
+                    && tk_kind(t, i + 5) == 1
+                    && tk_is(src, t, i + 6, "Alpha") == true {
+                return 0;
             }
             return 1;
         }

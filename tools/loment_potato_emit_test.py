@@ -673,6 +673,33 @@ def test_capacity_bounds_fail_closed_by_name():
     print("      PT_EMAX / PT_GLRMX / PT_FMAX：越界三份都点名拒")
 
 
+@test
+def test_alpha_block_scope_potato_matches_reference():
+    """`docs/353`：alpha 语料的 Potato 与参考逐字节同（含 E12 `ReclaimScoped`）。
+
+    这一条走**整条自举链**：驱动认 `choose write grammar tur2027.1Alpha`、checker 过、
+    codegen 发 IR、`potato.lomt` 的 `pt_reclaim_census` 数站点。参考侧是
+    `lomentc.load_unit` + `emit_potato`。
+    """
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    for rel in ("loment/selfhost/ir_scope.lomt",
+                "loment/selfhost/ir_scope_gc.lomt"):
+        want = _want(rel)
+        r = _run(stage1, rel)
+        assert r.returncode == 0, f"{rel}: stage1 退出码 {r.returncode}，stderr={r.stderr[-400:]}"
+        got = r.stdout
+        if got != want:
+            g, w = got.splitlines(), want.splitlines()
+            i = next((k for k in range(min(len(g), len(w))) if g[k] != w[k]),
+                     min(len(g), len(w)))
+            raise AssertionError(
+                f"{rel}: 第 {i + 1} 行不同\n  盘: {g[i] if i < len(g) else '<eof>'!r}\n"
+                f"  参考: {w[i] if i < len(w) else '<eof>'!r}")
+    print("      alpha 语料：自举 Potato 与参考逐字节一致（含 E12 站点）")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_potato_emit_test")
 

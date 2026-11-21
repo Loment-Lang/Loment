@@ -46,8 +46,8 @@ def test(fn):
 
 
 @test
-def test_registry_has_19_obligations_and_8_evidence_kinds():
-    assert len(lspe.LSPE_OBLIGATIONS) == 19
+def test_registry_has_20_obligations_and_8_evidence_kinds():
+    assert len(lspe.LSPE_OBLIGATIONS) == 20
     assert len(lspe.LSPE_EVIDENCE_KINDS) == 8
     for name, spec in lspe.LSPE_OBLIGATIONS.items():
         assert spec["owner"], name
@@ -1259,7 +1259,7 @@ def test_effect_registry_entries_are_complete():
     obs = {"EffectAllowed", "HandlerExhaustive", "ResumeLinear",
            "EffectBounded", "CaptureReclaim"}
     assert obs <= set(lspe.LSPE_OBLIGATIONS), sorted(lspe.LSPE_OBLIGATIONS)
-    assert len(lspe.LSPE_OBLIGATIONS) == 19
+    assert len(lspe.LSPE_OBLIGATIONS) == 20
     sites = {"effect_decl", "row", "perform", "handle", "resume", "row_call",
              "effect_foreign", "handler_capture"}
     assert sites <= set(lspe.LSPE_SITE_KINDS), sorted(lspe.LSPE_SITE_KINDS)
@@ -1545,7 +1545,7 @@ def test_framework_registry_covers_every_engine_in_fixed_order():
     ids = [c.desc.id for c in host.checker.checkers()]
     need = {"P0Producer", "E1Constant", "E2Typed", "E2bBounds", "E3LocalFlow",
             "E4Interproc", "E5GlobalInvariant", "E6Substitution", "E7Differential",
-            "E8Falsification", "E9Domain", "E10Loans", "E11Effects", "A1Advisory"}
+            "E8Falsification", "E9Domain", "E10Loans", "E11Effects", "E12GC", "A1Advisory"}
     assert set(ids) == need, sorted(ids)
     assert ids == sorted(ids, key=lambda x: next(
         (c.desc.phase, c.desc.id) for c in host.checker.checkers()

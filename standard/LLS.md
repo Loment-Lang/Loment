@@ -1,6 +1,6 @@
 # Loment Language Standard
 
-**LLS** · **0.1.5.1** · Edition 2
+**LLS** · **0.1.6** · Edition 2
 
 > **Status.** This document is **normative**. It is the single definition of the Loment
 > language. Where an implementation, a tool, a test, or a design record disagrees with it,
@@ -380,7 +380,7 @@ A C3 implementation MUST:
 
 A conformance claim MUST be a document, published with the implementation, containing:
 
-1. the **LLS version and edition** the claim is against (`LLS 0.1.5.1, Edition 2`);
+1. the **LLS version and edition** the claim is against (`LLS 0.1.6, Edition 2`);
 2. the **classes** claimed (C1–C4);
 3. the **editions** supported (by canonical name);
 4. the **targets** supported (ELF/PE/aarch64/wasm32, as applicable);
@@ -518,8 +518,7 @@ behaviour and the criteria are unchanged; the prose of diagnostics.
 ### 6.4 Versioning
 
 **The version of this standard is the version of the language surface it defines.** There
-is one number, not two. This edition is **0.1.5.1**, the language version at the time of
-issue.
+is one number, not two. This edition is **0.1.6**, the language version at the time of issue.
 
 A change under §6.2 produces a new version of the standard in the same commit as the
 change. A change to an informative file does not change the version.
@@ -748,7 +747,8 @@ The language defines the following editions:
 |---|---|---|
 | `tur2026.1` | 2026 | **frozen** |
 | `tur2026.2` | 2026 | **frozen** |
-| `tur2026.3` | 2026 | **open** |
+| `tur2026.3` | 2026 | **open** (default) |
+| `tur2027.1Alpha` | 2027 | **open, alpha** — explicit use only |
 | `tur2027.1` and later | future | not defined by this edition |
 
 **Resolution.** A unit with no declaration, or with `choose write grammar loment`, is read
@@ -758,7 +758,9 @@ explicit historical spellings of Tur 1; they do not follow the default.
 
 The default is a property of the **standard**, not of a release: when this document
 defines a newer edition, the default moves with it, and the collision rule of §8.7 keeps
-that move from silently reinterpreting old code.
+that move from silently reinterpreting old code. **Alpha editions are the exception**:
+`tur2027.1Alpha` is a preview and is read only when a unit names it explicitly; the
+default stays at the newest non-alpha edition (`tur2026.3`).
 
 **Root rule.** The edition is a whole-program property. Only the root unit's declaration
 is authoritative; a declaration in a dependency is stripped and does not change the
@@ -792,7 +794,9 @@ edition, because no conforming program contained it. A change that would give a 
 meaning to a program that already conformed is forbidden.
 
 The frozen editions of this issue are `tur2026.1` and `tur2026.2`. `tur2026.3` is open: new
-constructs land there until it is frozen by the procedure of §6.2.
+constructs land there until it is frozen by the procedure of §6.2. `tur2027.1Alpha` is an
+**alpha** edition: preview constructs land there, and it is read only when a unit names it
+explicitly (§8.4); it does not become the default.
 
 ### 8.7 The collision rule (normative)
 
@@ -1084,10 +1088,27 @@ memory safety (§23); the three are orthogonal.
 
 ### 11.1 Blocks and scope
 
-A block is `{ statement* }`. **Blocks do not introduce a `let` scope** in the current
-language: a `let` inside an `if` branch is visible after the branch. An implementation
-MUST implement the language as it is, and a program MUST NOT rely on block scoping for
-correctness. (This is a known limitation, recorded in §39.)
+A block is `{ statement* }`.
+
+**From edition `tur2027.1Alpha` onward**, every block introduces a lexical scope:
+
+* the function body, each `if` / `else` branch, each `while` body, each `for` body, each
+  `match` arm, each `domain` block, each `catch` block, each `lspe pass` block, each
+  `lgc` window block, and each standalone `{ … }` statement are separate scopes;
+* a `let` is visible from the point of its declaration to the end of its innermost
+  enclosing block; references in its initialiser resolve in the enclosing scopes;
+* a nested block MAY shadow an enclosing name; the inner declaration is a distinct
+  variable with its own storage;
+* a second `let` of the same name **in the same block** is E0241 (the fine code of the duplicate-name family E013);
+  parameters belong to the function's outermost scope, so the body may shadow a
+  parameter with a `let`;
+* a `for` variable is visible only in its loop body, a `match` binding only in its arm,
+  and an `if let` binding only in its then-branch;
+* a standalone `{ … }` block is a statement. It has no value.
+
+**In editions `tur2026.1`, `tur2026.2` and `tur2026.3`**, blocks do not introduce a
+`let` scope: a `let` inside an `if` branch is visible after the branch, and a standalone
+`{ … }` is a syntax error (E019). Those editions are frozen in that behaviour (§26.1).
 
 ### 11.2 Statement forms
 
@@ -1105,7 +1126,7 @@ correctness. (This is a known limitation, recorded in §39.)
 | match | `match EXPR { ARM* }` | §13 |
 | return | `return EXPR;` or bare `return;` | the value is required unless the function is unit and the edition is 2026.2+ |
 | break / continue | `break;` / `continue;` | 2026.2+; innermost loop; outside a loop is E019 |
-| block | `BLOCK` | |
+| block | `BLOCK` | `tur2027.1Alpha`+ only; earlier editions are E019 (§11.1) |
 | audit bypass | `lspe pass "REASON" { BLOCK }` | §24.7; the reason is mandatory (E038) |
 | defer | `defer CALL;` | 2026.2+; §8.9 |
 | lgc | `lgc end;` / `lgc start;` / `lgc start(DURATION)? BLOCK` | 2026.3; §22.7 |
@@ -1122,8 +1143,11 @@ correctness. (This is a known limitation, recorded in §39.)
 
 The type annotation is required. `let x = 1;` is a **parse error** (E019, "expected `:`,
 got `=`"), not a type error. A name MUST be declared before use; use before `let` is E002.
-Re-declaring the same name in the same function is allowed by the reference implementation
-and shadowing behaviour differs in one known case (§39).
+
+Under `tur2027.1Alpha` and later alpha editions, declaring the same name twice in the
+same block is E0241 (family E013); a nested block may shadow an enclosing name (§11.1). Under the
+earlier editions, re-declaring the same name in the same function is allowed and the
+earlier behaviour of §39 applies.
 
 ### 11.4 Assignment
 
@@ -1720,10 +1744,18 @@ type name in source; it is implied by the absence of `-> T`.
 
 ### 19.4 Names and scopes
 
-The unit's top-level namespace is flat. Within a function, parameters and locals share one
-scope; a nested block does **not** introduce a new binding scope (§11.1). A local
-declaration may shadow an earlier local; the reference implementation and the self-hosted
-one have a recorded divergence for the same-name double-`alloca` case (§39).
+The unit's top-level namespace is flat.
+
+Under `tur2027.1Alpha` and later alpha editions, parameters occupy the function's
+outermost scope and every block introduces a nested binding scope (§11.1). A local
+MAY shadow an enclosing binding; the shadowing declaration is a distinct variable.
+A second declaration of the same name in one block is E013.
+
+Under the earlier editions, parameters and locals share one function-wide scope; a
+nested block does **not** introduce a binding scope, and a local declaration may shadow
+an earlier local. The reference implementation and the self-hosted one had a recorded
+divergence for the same-name double-`alloca` case (§39); that divergence is confined to
+those editions.
 
 Module-level constants are visible in bodies. Module-level functions are visible after
 their declaration. Imported symbols join the unit's flat namespace; a collision is E013.
@@ -2332,24 +2364,26 @@ An implementation that supports several editions MUST keep their surfaces separa
 
 ### 26.3 The feature matrix
 
-| Feature | 2026.1 | 2026.2 | 2026.3 |
-|---|---|---|---|
-| Base Tur syntax | yes | yes | yes |
-| `def`, `elif`, `and`, `or`, `not` | — | yes | yes |
-| `for x in xs`, `break`, `continue` | — | yes | yes |
-| `for i, x in xs` | — | — | yes |
-| `for x in <call>` (array/slice return) | — | — | yes |
-| `if` expression (let initialiser) | — | — | yes |
-| `match` expression (let initialiser) | — | — | yes |
-| bare `return;` in unit functions | — | yes | yes |
-| `orelse`, `catch` | — | yes | yes |
-| `print_num` | — | yes | yes |
-| `defer` | — | yes | yes |
-| `lgc` | — | — | yes |
-| `lifetime` dimension | — | — | yes (default `lifetime_auto`) |
-| `&T` in type position | — | — | yes |
-| struct literal shorthand `S { a }` | — | — | yes |
-| domain blocks, laws, loops | additive | additive | additive |
+| Feature | 2026.1 | 2026.2 | 2026.3 | 2027.1Alpha |
+|---|---|---|---|---|
+| Base Tur syntax | yes | yes | yes | — |
+| `def`, `elif`, `and`, `or`, `not` | — | yes | yes | — |
+| `for x in xs`, `break`, `continue` | — | yes | yes | — |
+| `for i, x in xs` | — | — | yes | — |
+| `for x in <call>` (array/slice return) | — | — | yes | — |
+| `if` expression (let initialiser) | — | — | yes | — |
+| `match` expression (let initialiser) | — | — | yes | — |
+| bare `return;` in unit functions | — | yes | yes | — |
+| `orelse`, `catch` | — | yes | yes | — |
+| `print_num` | — | yes | yes | — |
+| `defer` | — | yes | yes | — |
+| `lgc` | — | — | yes | — |
+| `lifetime` dimension | — | — | yes (default `lifetime_auto`) | — |
+| `&T` in type position | — | — | yes | — |
+| struct literal shorthand `S { a }` | — | — | yes | — |
+| domain blocks, laws, loops | additive | additive | additive | — |
+| block scope for `let` | — | — | — | yes |
+| standalone `{ … }` statement | — | — | — | yes |
 
 "Additive" means the construct was previously a syntax error and becomes accepted without
 changing a conforming program. An implementation MAY accept it in an older edition only if
@@ -2360,7 +2394,8 @@ still hold.
 
 The canonical edition list, the frozen set, and the collision table are part of this
 document (Appendix D). An implementation MUST NOT invent an edition name. A new edition is
-opened by the procedure of §6.2, and the default moves to it.
+opened by the procedure of §6.2, and the default moves to it — except an **alpha** edition,
+which is explicit-use only and does not move the default (§8.4).
 
 ---
 
@@ -2656,7 +2691,7 @@ requires the flag. With the door open, the linker may supply `memcpy`, `memset`,
 
 ### 32.3 Size cap
 
-The linker's input and output text are capped at 4 MiB each. The IR plus the linked
+The linker's input and output text are capped at 8 MiB each. The IR plus the linked
 sections of every `--link` object must fit. Over the cap is an error, never a truncated
 build.
 
@@ -3043,7 +3078,7 @@ is the standard's summary and the record is the evidence — the discrepancy is 
 | # | Deviation | Effect |
 |---|---|---|
 | 7 | `aarch64` is emitted but not executed | "emits" is not "runs" |
-| 8 | The FFI input/output text is capped at 4 MiB on the self-hosted linker | a larger object is refused, not truncated |
+| 8 | The FFI input/output text is capped at 8 MiB on the self-hosted linker | a larger object is refused, not truncated |
 | 9 | One relocation form (`R_X86_64_PC64`) is sign-extended in the reference and zero-extended in the self-hosted linker | measured unreachable today; recorded so the equivalence claim has no unrecorded exception |
 | 10 | `choose vm` does not change the artifact | the interpreter is a separate tool |
 
@@ -3056,7 +3091,7 @@ is the standard's summary and the record is the evidence — the discrepancy is 
 | 13 | The compact form and T2 have no self-hosted mirror | the twin criterion does not apply to them |
 | 14 | No external human or organizational verification of the frozen surface | the suite is self-certified |
 | 15 | DWARF carries statement lines, not variable locations | a debugger can break on a line, not inspect a variable |
-| 16 | Block scope for `let` does not exist | a branch-local binding is visible after the branch |
+| 16 | Block scope for `let` exists only under `tur2027.1Alpha` | earlier editions keep function scope: a branch-local binding is visible after the branch |
 
 ### 39.4 Planned, not deviations
 
@@ -3382,7 +3417,7 @@ Informative: the files named in §2.2, the implementations under `tools/` and
 
 ---
 
-*End of LLS 0.1.5.1, Edition 2.*
+*End of LLS 0.1.6, Edition 2.*
 
 
 

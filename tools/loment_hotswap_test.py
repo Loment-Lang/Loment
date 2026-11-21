@@ -110,6 +110,16 @@ def _call_va(fn: dict, cont_off: int) -> int:
     return BASE + fn["entry"] + cont_off - 5
 
 
+#: 默认档的**有意**字节变化。GEP 首下标修复（`#1830`）改变了 `[N x i8], i64 0, i64 0`
+#: 这一格的产物 —— 那是修复本身，不是热更新档带来的漂移。除了登记在这里的一对
+#: (origin/main 的产物, 本树的产物)，任何差异仍然红。
+_KNOWN_DEFAULT_DELTAS = {
+    ("3768ed3e6970f447593a4037a7577568cac364a45055b44a89a122b5c736311a",
+     "9fbf022eae62fd70b2357f3b00b704215d66959a7fad425497b96908ed84d339"):
+        "#1830：GEP 首下标按 pointee 整块步进",
+}
+
+
 @test
 def test_default_profile_matches_origin_main() -> None:
     r = subprocess.run(
@@ -135,7 +145,12 @@ def test_default_profile_matches_origin_main() -> None:
         p = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
         assert p.returncode == 0, p.stderr
     ours = hashlib.sha256(lomelf.compile_ll(_ir(PROBE))[0]).hexdigest()
-    assert p.stdout.strip() == ours, (p.stdout.strip(), ours)
+    theirs = p.stdout.strip()
+    if theirs != ours:
+        key = (theirs, ours)
+        assert key in _KNOWN_DEFAULT_DELTAS, (theirs, ours)
+        print(f"      default 档有意变化：{_KNOWN_DEFAULT_DELTAS[key]}")
+        return
     print("      default 档与 origin/main 逐字节相同")
 
 

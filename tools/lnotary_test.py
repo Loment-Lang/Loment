@@ -43,14 +43,15 @@ class LNotaryTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.tmp = Path(tempfile.mkdtemp(prefix="lnotary-"))
         cls.plain = _compile(
-            "module plain\n\nfn main() -> i32 {\n    return 0;\n}\n",
+            "module plain\nchoose vm\n\n"
+            "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
             "plain", cls.tmp,
         )
         cls.claimed = _compile(
-            "module claimed\n"
+            "module claimed\nchoose vm\n"
             "set choose lnotary_true {\n}\n"
             "choose lnotary_true\n\n"
-            "fn main() -> i32 {\n    return 0;\n}\n",
+            "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
             "claimed", cls.tmp,
         )
 
@@ -64,6 +65,21 @@ class LNotaryTest(unittest.TestCase):
         v = self._verify(self.plain)
         self.assertTrue(v.ok, v.errors)
         self.assertGreaterEqual(v.version, 20)
+
+    # A' · 没有 `choose vm` 就不启用（用户 2026-11-21）
+    def test_refuses_a_no_vm_artifact(self) -> None:
+        from lnotary import lawspace
+
+        novm = _compile(
+            "module novm\n\nfn main() -> i32 {\n    return 0;\n}\n",
+            "novm", self.tmp,
+        )
+        v = self._verify(novm)
+        self.assertFalse(v.ok)
+        self.assertTrue(any(e.code == "LNT-VM" for e in v.errors), v.errors)
+        with self.assertRaises(ValueError):
+            lawspace.derive_lawspace(
+                novm, (self.tmp / "novm.potato.json").read_bytes())
 
     # B · `lnotary_true` 是用户开关，且进产物
     def test_low_true_is_recorded_as_a_user_switch(self) -> None:

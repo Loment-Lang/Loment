@@ -79,6 +79,28 @@ choose lnotary_true
 
 ---
 
+## 2.5 启用条件：`choose vm`
+
+**LNotary 只在 `choose vm` 的产物上启用**（用户 2026-11-21 定）。
+
+理由不是审美：公证人的强声明本来就用 LVM 的词说 —— 站点坐标 `(fn, blk, idx)`、
+fault 码 `F01–F03`、`sw_cap` 基质。没有 `choose vm`，这些词在产物里没有对应的执行面，
+公证会变成"用 LVM 的术语给另一件更弱的事盖章"。时间桥梁也需要两个基质可比；
+产物不声明 `vm`，桥的一端是空的。
+
+落点两处，所有入口共享同一条规则：
+
+* `verify_potato` —— `vm != "vm"` ⇒ **`LNT-VM`**；
+* `derive_lawspace` —— 同一个条件直接抛 `ValueError`（防直接调用绕过）。
+
+两个边界要写明：
+
+1. `docs/231` 的**发行版驱动器拒 `choose vm`**，所以这等于把 LNotary 定位成 **dev 工具链**的能力；
+2. `choose vm` 是**声明**，不是"真的在 LVM 里跑过"的证明。运行证明要等 LVM 侧交出
+   运行记录，那是下一档（不属于 V0–V5）。
+
+---
+
 ## 3. 零 import 是一条判据
 
 `tools/lnotary_test.py::test_verifier_imports_nothing_from_the_toolchain` 在子进程里
@@ -110,6 +132,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 - 拒绝 ⇒ 退出码 1，逐条打印 `LNT-*` 与可读理由；
 - 读不了 / 不是 JSON ⇒ 退出码 2。
 - 产物声明了 `lnotary_true` 却没给 `--seal` ⇒ `LNT-CLAIM`。
+- 产物没有 `choose vm` ⇒ `LNT-VM`（§2.5）；`seal` 与 `verify` 都拒。
 - `--sites` 必须与 `--seal` 一起给；旁挂绑了站点表却没给、或给了没绑，都是 `LNT-LS`。
 - `seal` 先跑 V0 与站点表自检；不通过就不出旁挂。旁挂是内容寻址的，
   同一份产物派生两次逐字节相同。
@@ -143,11 +166,12 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 
 ---
 
-## 5. 判据（二十八条，`tools/lnotary_test.py`）
+## 5. 判据（二十九条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
-| A | 真实 v23 产物被接受 | 验证器不存在 ⇒ 红 |
+| A | 真实 v23 产物被接受（带 `choose vm`） | 验证器不存在 ⇒ 红 |
+| A′ | `no_vm` 产物 ⇒ `LNT-VM`；`derive_lawspace` 抛 `ValueError` | 同上 |
 | B | `lnotary_true` 是用户开关且进产物 | 同上 |
 | C | 改 `systems.lms.cost.levels` ⇒ `LNT-SYS` | 同上 |
 | D | 改 `gc_ladder.total_sites` ⇒ `LNT-GC` | 同上 |
@@ -176,8 +200,8 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | AA | 旁挂 `genesis` 缺省与 mode 校验 | 同上 |
 | AB | CLI `seal` → `derive` 根 → `derive` 子 → `verify --universes` 往返 | 同上 |
 
-二十八条在本机全绿（`python tools/lnotary_test.py`，28/28，约 8.1s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 28`。
+二十九条在本机全绿（`python tools/lnotary_test.py`，29/29，约 8.7s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 29`。
 
 ---
 
@@ -227,6 +251,8 @@ V2 刻意停在这里：**站点表只枚举 IR 里已经存在的访存，不�
 5. **不主张现在扩到源码级完备。** 那要站点表与 IR 解码（`docs/358` §1A）。
 6. **不主张派生链证明可达性。** V5 证明"子能碰的东西不多于父"（静态）；哪些 `unsafe`
    站点在子权能下真的到得了，是另一条分析，不在定理里（`docs/363` §7）。
+7. **不主张 LNotary 今天能用于发行版产物。** 发行版驱动器拒 `choose vm`（`docs/231`），
+   所以它是 **dev 工具链**的能力；另外 `choose vm` 是声明，不是运行证明（§2.5）。
 
 ---
 

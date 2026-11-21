@@ -34,6 +34,7 @@ LOMELF = ROOT / "tools" / "lomelf.py"
 LVM = Path(os.environ.get("LOMENT_LVM", str(ROOT / "tools" / "lvm.py")))
 
 _SRC = """module {name}
+choose vm
 choose runtime
 {switches}
 fn _start() {{

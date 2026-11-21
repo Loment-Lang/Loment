@@ -230,6 +230,11 @@ def verify_potato(doc: object) -> Verdict:
     n = _parse_version(v, doc)
     if n is None:
         return v
+    #: **启用条件**（用户 2026-11-21）：LNotary 只在 `choose vm` 的产物上启用。
+    #: 没有 LVM 就没有 `sw_cap` 基质，公证人的站点/fault 声明会变成另一件更弱的事。
+    if doc.get("vm") != "vm":
+        _err(v, "LNT-VM",
+             f"LNotary 只在 choose vm 的产物上启用；这份是 {doc.get('vm')!r}")
     if n >= 20:
         _check_systems(v, doc)
     if n >= 10:

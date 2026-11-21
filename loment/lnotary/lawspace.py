@@ -82,6 +82,9 @@ def derive_lawspace(doc: dict, artifact_bytes: bytes,
     绑进旁挂（`docs/363`）。`genesis` 是创世预算（`docs/361` V5），缺省用
     `GENESIS_DEFAULTS`。不修改 `doc`；输出不含时间戳、路径等不稳定字段。
     """
+    if doc.get("vm") != "vm":
+        raise ValueError("LNT-VM: LNotary 只在 choose vm 的产物上启用"
+                         f"（这份是 {doc.get('vm')!r}）")
     dims = dims_of(doc)
     g = dict(GENESIS_DEFAULTS)
     if genesis:
@@ -126,6 +129,9 @@ def verify_lawspace(doc: dict, side: object,
     if side.get("potato") != doc.get("potato"):
         _err(out, "LNT-LS",
              f"旁挂的 potato 是 {side.get('potato')!r}，产物是 {doc.get('potato')!r}")
+    if doc.get("vm") != "vm":
+        _err(out, "LNT-VM",
+             f"LNotary 只在 choose vm 的产物上启用；这份是 {doc.get('vm')!r}")
 
     g = side.get("genesis")
     if not isinstance(g, dict):

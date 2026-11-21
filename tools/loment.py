@@ -146,7 +146,8 @@ def cmd_ir(a) -> int:
     _sp = getattr(mod, "spelling", "") or "default"
     _prof = getattr(mod, "profile", potato_from.DEFAULT_EDITION)
     # 标签与自举驱动的措辞对齐（2026.3 说全名：`Tur 3` 会被读成另一个版次）。
-    _label = {"tur2026.1": "1", "tur2026.2": "2", "tur2026.3": "2026.3"}.get(
+    _label = {"tur2026.1": "1", "tur2026.2": "2", "tur2026.3": "2026.3",
+              "tur2027.1Alpha": "2027.1Alpha"}.get(
         _prof, _prof.rsplit(".", 1)[-1])
     print(f"loment: grammar {_sp} -> {_prof} (Tur {_label})", file=sys.stderr)
     text = lomentc.emit_llvm(mod, ROOT, deps)

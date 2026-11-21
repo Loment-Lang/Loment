@@ -584,7 +584,8 @@ pub fn apply_switches(unit: ptr, toks: ptr, nt: u32, sw: ptr) -> u32 {
 ///
 /// `[a, b)` 是本次扫描的范围；递归进去的是块体，因此嵌套的旁路块也照样拆平。
 /// `out` 可以与 `toks` 同一块（目的下标永远 ≤ 源下标，向前搬不会踩到未读的 token）。
-pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32) -> u32 {
+pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32,
+                         prof: u32) -> u32 {
     let j: u32 = a;
     while j < b {
         let hit: u32 = 0;
@@ -632,7 +633,26 @@ pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32)
         }
         if hit == 1 {
             let e: u32 = block_end(unit, toks, j + 3, b);
-            o = desugar_lspe_pass(unit, toks, j + 4, e, out, o);
+            // **块作用域版次**（`tur2027.1Alpha`，`docs/353` §4）：`lspe pass` 的体
+            // 在参考实现里是一个 `Block` —— 头可以删，`{` / `}` 不能删，否则体里的
+            // `let` 会漏进外层（同块重名、遮蔽都判错）。
+            if prof >= 3 {
+                let q0: u32 = 0;
+                while q0 < 5 {
+                    store32(out, o * 20 + q0 * 4, load32(toks, (j + 3) * 20 + q0 * 4));
+                    q0 = q0 + 1;
+                }
+                o = o + 1;
+            }
+            o = desugar_lspe_pass(unit, toks, j + 4, e, out, o, prof);
+            if prof >= 3 {
+                let q1: u32 = 0;
+                while q1 < 5 {
+                    store32(out, o * 20 + q1 * 4, load32(toks, e * 20 + q1 * 4));
+                    q1 = q1 + 1;
+                }
+                o = o + 1;
+            }
             j = e + 1;
         } else {
             let q: u32 = 0;

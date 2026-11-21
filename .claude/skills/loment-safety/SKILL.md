@@ -294,7 +294,7 @@ What is **actually implemented today** (0.1.5, `loment/lspe/`):
 - `lspe_close_admin` zeroes the counts but still records `state` and `set_by`.
 
 So the honest summary is: **the ledger exists and is checkable; the full proof search is the
-0.1.5.2+ work.** Do not read `"proved"` as "the compiler proved my program safe" - read it as
+0.1.6+ work.** Do not read `"proved"` as "the compiler proved my program safe" - read it as
 "this many sites had at least one accepted evidence item at this level".
 
 #### 5.1.5 `lspe pass "reason" { … }`
@@ -329,7 +329,7 @@ fn f(a: [u32; 4], i: u32) -> u32 {
 | Surface | Today |
 |---|---|
 | `loment lspe state FILE [--lspe-level 0..4]` | **works** (checkout launcher): prints the ledger of one unit |
-| `loment lspe why SITE` | prints "lands in 0.1.5.2" - derivation trees are not shipped |
+| `loment lspe why SITE` | prints "lands in 0.1.6" - derivation trees are not shipped |
 | `loment lspe verify ARTIFACT [SIDECAR]` | same - proof hashes and the `.lspe` sidecar are not shipped |
 | `--lspe-mode=full\|quiet\|strict` | designed as a build knob; the driver has the parameter, **the CLI does not expose it yet**, so E034 (undecided under strict) is not reachable from the command line |
 | `--lspc=full\|quiet\|strict\|off` | **designed, not implemented**; the LSPC pre-flight sheet does not exist yet |

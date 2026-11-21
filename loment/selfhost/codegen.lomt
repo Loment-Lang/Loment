@@ -158,7 +158,12 @@ const CG_LAMSL: u32 = 930784;         // 930784 + 64*192 = 943072
 const CG_LAMID: u32 = 788;
 //: **正在发体内**的那个闭包（渲染嵌套名字要用）：父闭包的条目号，`NO` = 真函数。
 const CG_CURLAM: u32 = 792;
-const CG_BYTES: u32 = 943072;         // = CG_LAMSL + 64*192
+//: **块作用域**（`tur2027.1Alpha`）的每声明三张表：序号 / 作用域起点 / 作用域终点。
+//: 条目数与 `CG_LOCAL` 相同（512）。旧版次不写也不读它们。
+const CG_DORD: u32 = 943072;      // 512 x u32: 同名声明序号（0,1,2…）
+const CG_SSTART: u32 = 945120;    // 512 x u32: 可见起点（0 = 无 / 合成名）
+const CG_SEND: u32 = 947168;      // 512 x u32: 可见终点（0 = 函数末 / let）
+const CG_BYTES: u32 = 949216;     // = CG_SEND + 512*4
 //: **分配站点的 spill 槽**（`#1465`）：根表只登记具名槽，表达式里的 SSA 临时值不是根。
 //: 每个站点一格 `%gc.sp.k`（k 按**源码序**），分配完立刻写进去、**语句边界清零**。
 //:   `CG_GCDIRTY` = 本语句写过的最大的站点号 + 1（0 = 本语句没分配过）
@@ -1620,11 +1625,48 @@ fn emit_syn(s: ptr, out: ptr, k: u32, line: u32) -> u32 {
 }
 
 /// 发射局部名: 合成名走 emit_syn, 真实 token 走 emit_name_tok。
+/// **块作用域版次**：先把引用解析到当前可见的**声明**，再按声明序号补 `.N`。
 fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
     if nm >= 2147483648 {
         return emit_syn(s, out, (nm - 2147483648) / 16777216, nm % 16777216);
     }
+    if load32(s, CG_PROF) >= 3 {
+        let di: u32 = resolve_decl(s, src, toks, nm);
+        if di != 4294967295 {
+            let nt: u32 = load32(s, CG_LOCAL + di * 8);
+            let ord: u32 = load32(s, CG_DORD + di * 4);
+            let o: u32 = emit_name_tok(s, out, src, toks, nt);
+            if ord > 0 {
+                o = emit_str(s, out, ".");
+                return emit_dec(s, out, ord);
+            }
+            return o;
+        }
+    }
     return emit_name_tok(s, out, src, toks, nm);
+}
+
+/// 发射**声明自己的**槽名（不解析）：prologue / 绑定 store 用。
+fn emit_decl_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if nm >= 2147483648 {
+        return emit_syn(s, out, (nm - 2147483648) / 16777216, nm % 16777216);
+    }
+    let ord: u32 = 0;
+    if load32(s, CG_PROF) >= 3 {
+        let k: u32 = 0;
+        while k < load32(s, 484) {
+            if load32(s, CG_LOCAL + k * 8) == nm {
+                ord = load32(s, CG_DORD + k * 4);
+            }
+            k = k + 1;
+        }
+    }
+    let o: u32 = emit_name_tok(s, out, src, toks, nm);
+    if ord > 0 {
+        o = emit_str(s, out, ".");
+        return emit_dec(s, out, ord);
+    }
+    return o;
 }
 
 // ---------------------------------------------------------------- L0 静态提升 (docs/210 §2)
@@ -2944,6 +2986,11 @@ fn emit_str_lit_bytes(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
 /// 两个当前版次的规范名都是 9 字节，所以整条恒为 21 字节（11 字节标记 + 9 + NUL）；
 /// 将来若出现 10 字节版次，这里要跟 `tur_edition()` 的 len 一起改。
 fn emit_tur_meta(s: ptr, out: ptr, prof: u32) -> u32 {
+    if prof == 3 {
+        // `tur2027.1Alpha` 是 **14 字节**（比 2026.x 长 5），数组 26 = 11 + 14 + NUL。
+        emit_str(s, out, "@loment.tur.edition = global [26 x i8] c\"\\4C\\4F\\4D\\45\\4E\\54\\2D\\54\\55\\52\\3A");
+        return emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\37\\2E\\31\\41\\6C\\70\\68\\61\\00\"\n");
+    }
     emit_str(s, out, "@loment.tur.edition = global [21 x i8] c\"\\4C\\4F\\4D\\45\\4E\\54\\2D\\54\\55\\52\\3A");
     if prof == 1 {
         emit_str(s, out, "\\74\\75\\72\\32\\30\\32\\36\\2E\\32");
@@ -4909,7 +4956,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         if tok_is(src, toks, j, "tur_edition") {   // 0 实参; 值来自模块级元数据全局
             emit_str(s, out, "  ");
             let gp: u32 = new_temp(s, out);
-            emit_str(s, out, " = getelementptr inbounds [21 x i8], ptr @loment.tur.edition, i64 0, i64 11\n  ");
+            if load32(s, CG_PROF) == 3 {
+                emit_str(s, out, " = getelementptr inbounds [26 x i8], ptr @loment.tur.edition, i64 0, i64 11\n  ");
+            } else {
+                emit_str(s, out, " = getelementptr inbounds [21 x i8], ptr @loment.tur.edition, i64 0, i64 11\n  ");
+            }
             let vv: u32 = new_temp(s, out);
             emit_str(s, out, " = insertvalue { ptr, i64 } undef, ptr %t");
             emit_dec(s, out, gp);
@@ -4917,7 +4968,11 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             let v2: u32 = new_temp(s, out);
             emit_str(s, out, " = insertvalue { ptr, i64 } %t");
             emit_dec(s, out, vv);
-            emit_str(s, out, ", i64 9, 1\n");
+            if load32(s, CG_PROF) == 3 {
+                emit_str(s, out, ", i64 14, 1\n");
+            } else {
+                emit_str(s, out, ", i64 9, 1\n");
+            }
             set_temp_val(s, lvl, v2);
             return j + 3;
         }
@@ -5778,7 +5833,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, ", ptr ");
         if aref == 4294967295 {
             emit_str(s, out, "%");
-            emit_name_tok(s, out, src, toks, j);
+            emit_local_name(s, out, src, toks, j);
             emit_str(s, out, ".addr");
         } else {
             emit_str(s, out, "%t");
@@ -5872,7 +5927,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_str(s, out, "  ");
             let bp: u32 = new_temp(s, out);
             emit_str(s, out, " = load ptr, ptr %");
-            emit_name_tok(s, out, src, toks, j);
+            emit_local_name(s, out, src, toks, j);
             emit_str(s, out, ".addr\n");
             bref = bp;
         }
@@ -5883,7 +5938,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
         emit_str(s, out, ", ptr ");
         if bref == 4294967295 {
             emit_str(s, out, "%");
-            emit_name_tok(s, out, src, toks, j);
+            emit_local_name(s, out, src, toks, j);
             emit_str(s, out, ".addr");
         } else {
             emit_str(s, out, "%t");
@@ -5911,7 +5966,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
     emit_str(s, out, " = load ");
     emit_ty(s, out, src, toks, ty);
     emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, j);
+    emit_local_name(s, out, src, toks, j);
     emit_str(s, out, ".addr\n");
     set_temp_val(s, lvl, n2);
     let e9: u32 = j + 1;
@@ -6423,7 +6478,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
         let bi: u32 = 0;
         while bi < nl {
             emit_str(s, out, "  %");
-            emit_local_name(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
+            emit_decl_name(s, out, src, toks, load32(s, CG_LOCAL + bi * 8));
             emit_str(s, out, ".addr = alloca ");
             if load32(s, CG_LOCAL + bi * 8 + 4) == SYN_U32 {
                 emit_str(s, out, "i32");
@@ -6530,7 +6585,7 @@ fn emit_fn(s: ptr, out: ptr, src: ptr, toks: ptr, base: u32) -> u32 {
     let bl: u32 = 0;   // 局部变量 alloca (紧随参数之后)
     while bl < nl {
         emit_str(s, out, "  %");
-        emit_local_name(s, out, src, toks, load32(s, CG_LOCAL + bl * 8));
+        emit_decl_name(s, out, src, toks, load32(s, CG_LOCAL + bl * 8));
         emit_str(s, out, ".addr = alloca ");
         if load32(s, CG_LOCAL + bl * 8 + 4) == SYN_U32 {
             emit_str(s, out, "i32");
@@ -7079,6 +7134,13 @@ fn jump(s: ptr, out: ptr, n: u32, tag: str) -> u32 {
 
 /// 变量类型: 参数 -> 局部; 0 = 未知。
 fn var_type(s: ptr, src: ptr, toks: ptr, name_tok: u32) -> u32 {
+    if load32(s, CG_PROF) >= 3 {
+        let di: u32 = resolve_decl(s, src, toks, name_tok);
+        if di != 4294967295 {
+            return subst_tok(s, src, toks, load32(s, CG_LOCAL + di * 8 + 4));
+        }
+        return param_type(s, src, toks, name_tok);
+    }
     let t: u32 = param_type(s, src, toks, name_tok);
     if t != 0 {
         return t;
@@ -7114,7 +7176,7 @@ fn load_var(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, lvl: u32) -> u
     emit_str(s, out, " = load ");
     emit_ty(s, out, src, toks, ty);
     emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, name_tok);
+    emit_local_name(s, out, src, toks, name_tok);
     emit_str(s, out, ".addr\n");
     set_temp_val(s, lvl, n);
     return n;
@@ -7723,7 +7785,7 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
         emit_str(s, out, " %t");
         emit_dec(s, out, rr0);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, name_tok);
+        emit_local_name(s, out, src, toks, name_tok);
         emit_str(s, out, ".addr\n");
         return fb_at + 3;
     }
@@ -7742,7 +7804,7 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
             emit_str(s, out, "  store i64 %t");
             emit_dec(s, out, eraw2);
             emit_str(s, out, ", ptr %");
-            emit_name_tok(s, out, src, toks, fb_at + 2);
+            emit_decl_name(s, out, src, toks, fb_at + 2);
             emit_str(s, out, ".addr\n");
         } else {
             let ecv2: u32 = alloc_temp(s);
@@ -7782,7 +7844,7 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
         emit_str(s, out, " %t");
         emit_dec(s, out, r2);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, name_tok);
+        emit_local_name(s, out, src, toks, name_tok);
         emit_str(s, out, ".addr\n");
         return bend2 + 1;
     }
@@ -7808,7 +7870,7 @@ fn emit_fallback(s: ptr, out: ptr, src: ptr, toks: ptr, name_tok: u32, val_at: u
     emit_str(s, out, " %t");
     emit_dec(s, out, r);
     emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, name_tok);
+    emit_local_name(s, out, src, toks, name_tok);
     emit_str(s, out, ".addr\n");
     return semi + 1;
 }
@@ -7903,7 +7965,7 @@ fn emit_try_let(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, eq: u
     emit_str(s, out, " %t");
     emit_dec(s, out, lv);
     emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, name);
+    emit_decl_name(s, out, src, toks, name);
     emit_str(s, out, ".addr\n");
     jump(s, out, mend, "mend");
     // Err 臂: 绑定载荷到 __e{line}, 臂体是 `return Err(__e{line})`
@@ -8062,7 +8124,7 @@ fn let_ifexpr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, name: u32,
     emit_str(s, out, " ");
     emit_val(s, out, 0);
     emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, name);
+    emit_decl_name(s, out, src, toks, name);
     emit_str(s, out, ".addr\n");
     jump(s, out, base_l + 2, "end");
     lab_def(s, out, base_l + 1, "else");
@@ -8073,7 +8135,7 @@ fn let_ifexpr(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, name: u32,
     emit_str(s, out, " ");
     emit_val(s, out, 0);
     emit_str(s, out, ", ptr %");
-    emit_name_tok(s, out, src, toks, name);
+    emit_decl_name(s, out, src, toks, name);
     emit_str(s, out, ".addr\n");
     jump(s, out, base_l + 2, "end");
     lab_def(s, out, base_l + 2, "end");
@@ -9249,7 +9311,7 @@ fn emit_match_at(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32,
                     emit_str(s, out, "  store i64 %t");
                     emit_dec(s, out, raw);
                     emit_str(s, out, ", ptr %");
-                    emit_name_tok(s, out, src, toks, k3 + 5);
+                    emit_decl_name(s, out, src, toks, k3 + 5);
                     emit_str(s, out, ".addr\n");
                 } else {
                     let cv: u32 = alloc_temp(s);
@@ -9264,7 +9326,7 @@ fn emit_match_at(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32,
                     emit_str(s, out, " %t");
                     emit_dec(s, out, cv);
                     emit_str(s, out, ", ptr %");
-                    emit_name_tok(s, out, src, toks, k3 + 5);
+                    emit_decl_name(s, out, src, toks, k3 + 5);
                     emit_str(s, out, ".addr\n");
                 }
                 pop_subst(s, pstub);
@@ -9301,13 +9363,29 @@ fn emit_match_at(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32,
     return stop;
 }
 
+/// **独立块**（`tur2027.1Alpha`）：`{ … }` 是一层语句表，`defer` 帧与参考的
+/// `_Ir.block` 同进同出。返回 `}` 之后的下标。
+fn emit_block(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    let close: u32 = skip_block(src, toks, j) - 1;
+    let dfr: u32 = dfr_push(s);
+    let m: u32 = j + 1;
+    while m < close && tok_kind(toks, m) != 4 {
+        m = stmt(s, out, src, toks, m, ret);
+    }
+    let _e: u32 = dfr_end(s, out, src, toks, dfr, ret);
+    return close + 1;
+}
+
 fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
+    if load32(s, CG_PROF) >= 3 && tok_is(src, toks, j, "{") {
+        return emit_block(s, out, src, toks, j, ret);
+    }
     // **语句边界清 spill 槽**（`#1465`）：分配结果只活到本条语句结束，不活到帧尾。
     if load32(s, 476) == 0 && gc_hook(s) == 1 {
         gc_flush(s, out);
     }
-    if load32(s, CG_PROF) == 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
-        // `lgc` 的时间控制（`docs/309`）：只在 Tur 2026.3 是关键字。
+    if load32(s, CG_PROF) >= 2 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "lgc") {
+        // `lgc` 的时间控制（`docs/309`）：Tur 2026.3 起是关键字（含 alpha）。
         return lgc_stmt(s, out, src, toks, j, ret);
     }
     if load32(s, CG_PROF) != 0 && tok_kind(toks, j) == 0 && tok_is(src, toks, j, "defer") {
@@ -9462,7 +9540,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " ");
         emit_val(s, out, 0);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, name);
+        emit_decl_name(s, out, src, toks, name);
         emit_str(s, out, ".addr\n");
         // **块内精确**（`docs/210` §2.9）：命中掩码的站点，把块头的借出标记从 `-1`
         // 改写成 `-(mask + 2)` —— 收集器于是只扫掩码里置了位的那些字（`-1` = 保守）。
@@ -9574,7 +9652,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 emit_str(s, out, "  store i64 %t");
                 emit_dec(s, out, raw);
                 emit_str(s, out, ", ptr %");
-                emit_name_tok(s, out, src, toks, ib);
+                emit_decl_name(s, out, src, toks, ib);
                 emit_str(s, out, ".addr\n");
             } else {
                 let cv: u32 = alloc_temp(s);
@@ -9589,7 +9667,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
                 emit_str(s, out, " %t");
                 emit_dec(s, out, cv);
                 emit_str(s, out, ", ptr %");
-                emit_name_tok(s, out, src, toks, ib);
+                emit_decl_name(s, out, src, toks, ib);
                 emit_str(s, out, ".addr\n");
             }
             pop_subst(s, pstub);
@@ -9744,7 +9822,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, ".addr\n  store i32 %t");
             emit_dec(s, out, itv);
             emit_str(s, out, ", ptr %");
-            emit_name_tok(s, out, src, toks, j + 1);
+            emit_decl_name(s, out, src, toks, j + 1);
             emit_str(s, out, ".addr\n");
         }
         // `let x = xs[idx];`
@@ -10377,7 +10455,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, " = getelementptr inbounds ");
             emit_ty(s, out, src, toks, sty);
             emit_str(s, out, ", ptr %");
-            emit_name_tok(s, out, src, toks, j);
+            emit_local_name(s, out, src, toks, j);
             emit_str(s, out, ".addr, i32 0, ");
             emit_ty(s, out, src, toks, aitx);
             emit_str(s, out, " ");
@@ -10408,7 +10486,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
             emit_str(s, out, "  ");
             let fp0: u32 = new_temp(s, out);
             emit_str(s, out, " = load ptr, ptr %");
-            emit_name_tok(s, out, src, toks, j);
+            emit_local_name(s, out, src, toks, j);
             emit_str(s, out, ".addr\n");
             fref = fp0;
         }
@@ -10446,7 +10524,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, "  ");
         let pv: u32 = new_temp(s, out);
         emit_str(s, out, " = load ptr, ptr %");
-        emit_name_tok(s, out, src, toks, j + 1);
+        emit_local_name(s, out, src, toks, j + 1);
         emit_str(s, out, ".addr\n");
         let de5: u32 = expr_bin(s, out, src, toks, j + 3, 1, 0, ety2);
         emit_str(s, out, "  store ");
@@ -10474,7 +10552,7 @@ fn stmt(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, ret: u32) -> u32 {
         emit_str(s, out, " ");
         emit_val(s, out, 0);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, j);
+        emit_local_name(s, out, src, toks, j);
         emit_str(s, out, ".addr\n");
         return e5 + 1;
     }
@@ -10493,7 +10571,7 @@ fn let_array_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: u
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, name);
+        emit_decl_name(s, out, src, toks, name);
         emit_str(s, out, ".addr, i32 0, i32 ");
         emit_dec(s, out, idx);
         emit_str(s, out, "\n");
@@ -10594,7 +10672,7 @@ fn let_struct_lit(s: ptr, out: ptr, src: ptr, toks: ptr, name: u32, ty: u32, i: 
         emit_str(s, out, " = getelementptr inbounds ");
         emit_ty(s, out, src, toks, ty);
         emit_str(s, out, ", ptr %");
-        emit_name_tok(s, out, src, toks, name);
+        emit_decl_name(s, out, src, toks, name);
         emit_str(s, out, ".addr, i32 0, i32 ");
         emit_dec(s, out, k);
         emit_str(s, out, "\n");
@@ -10652,36 +10730,112 @@ fn find_try_q(src: ptr, toks: ptr, i: u32) -> u32 {
 /// 追加一个局部 (按名字去重), 返回新的局部数。
 /// 名字槽是"token 下标 / 合成名"两种编码共用的 (见 syn_name), 文本比对只在两者
 /// 都是真实 token 时才有意义 —— 否则会按合成值当下标去读 token 缓冲 (越界)。
+/// 声明的可见起点：`let` = 初值之后第一个深度 0 的 `;` 之后；
+/// 其余（for 变量 / 模式绑定 / catch 绑定）= 体 `{`。合成名 / 找不到 = 0。
+fn decl_scope_start(src: ptr, toks: ptr, name: u32) -> u32 {
+    if name >= 2147483648 {
+        return 0;
+    }
+    if name > 0 && tok_is(src, toks, name - 1, "let") {
+        let d: u32 = 0;
+        let q: u32 = name + 1;
+        while tok_kind(toks, q) != 4 {
+            if tok_is(src, toks, q, "(") || tok_is(src, toks, q, "[")
+                    || tok_is(src, toks, q, "{") {
+                d = d + 1;
+            } else if tok_is(src, toks, q, ")") || tok_is(src, toks, q, "]")
+                    || tok_is(src, toks, q, "}") {
+                if d > 0 { d = d - 1; }
+            } else if d == 0 && tok_is(src, toks, q, ";") {
+                return q + 1;
+            }
+            q = q + 1;
+        }
+        return 0;
+    }
+    let q: u32 = name + 1;
+    while tok_kind(toks, q) != 4 {
+        if tok_is(src, toks, q, "{") { return q; }
+        q = q + 1;
+    }
+    return 0;
+}
+
+fn decl_scope_end(src: ptr, toks: ptr, name: u32) -> u32 {
+    if name >= 2147483648 {
+        return 0;
+    }
+    if name > 0 && tok_is(src, toks, name - 1, "let") {
+        return 0;                    // let 的块边界由反向扫描判
+    }
+    let st: u32 = decl_scope_start(src, toks, name);
+    if st == 0 { return 0; }
+    return skip_block(src, toks, st);
+}
+
+/// 声明 `d` 在 token `nm` 处可见吗（**反向**扫括号：只在当前块 / 外层块里找）。
+fn visible_at(src: ptr, toks: ptr, d: u32, nm: u32) -> u32 {
+    let dep: u32 = 0;
+    let q: u32 = nm;
+    while q > d {
+        q = q - 1;
+        if tok_is(src, toks, q, "}") {
+            dep = dep + 1;
+        } else if tok_is(src, toks, q, "{") {
+            if dep > 0 { dep = dep - 1; }
+        }
+    }
+    if dep == 0 { return 1; }
+    return 0;
+}
+
+/// 引用 `nm` 解析到哪一条**声明**（局部表下标；4294967295 = 没有）。
+fn resolve_decl(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    let i: u32 = load32(s, 484);
+    while i > 0 {
+        i = i - 1;
+        let nt: u32 = load32(s, CG_LOCAL + i * 8);
+        if nt >= 2147483648 {
+            if nt == nm { return i; }
+        } else if nt < nm && same_tok_ptr(src, toks, nt, nm) == 1 {
+            let st: u32 = load32(s, CG_SSTART + i * 4);
+            let en: u32 = load32(s, CG_SEND + i * 4);
+            if en != 0 {
+                if nm >= st && nm < en { return i; }
+            } else if nm >= st && visible_at(src, toks, nt, nm) == 1 {
+                return i;
+            }
+        }
+    }
+    return 4294967295;
+}
+
 fn add_local(s: ptr, src: ptr, toks: ptr, n: u32, name: u32, ty: u32) -> u32 {
-    let dup: u32 = 0;
+    let alpha: u32 = 0;
+    if load32(s, CG_PROF) >= 3 { alpha = 1; }
+    if n >= 512 { return n; }        // 表满：不写穿（CG_LOCAL 的容量）
+    let same: u32 = 0;
     let k: u32 = 0;
     while k < n {
         let ex: u32 = load32(s, CG_LOCAL + k * 8);
         if ex == name {
-            dup = 1;
-        }
-        if ex < 2147483648 && name < 2147483648
-                && load32(toks, ex * 20 + 8) == load32(toks, name * 20 + 8) {
-            let q: u32 = 0;
-            let ok: u32 = 1;
-            while q < load32(toks, name * 20 + 8) {
-                if load8(src, load32(toks, ex * 20 + 4) + q)
-                        != load8(src, load32(toks, name * 20 + 4) + q) {
-                    ok = 0;
-                }
-                q = q + 1;
-            }
-            if ok == 1 {
-                dup = 1;
-            }
+            same = same + 1;
+        } else if ex < 2147483648 && name < 2147483648
+                && same_tok_ptr(src, toks, ex, name) == 1 {
+            same = same + 1;
         }
         k = k + 1;
     }
-    if dup == 1 {
-        return n;
+    if alpha == 0 && same > 0 {
+        return n;                    // 旧版次：同名去重（今天的形状）
     }
     store32(s, CG_LOCAL + n * 8, name);
     store32(s, CG_LOCAL + n * 8 + 4, ty);
+    if alpha == 1 {
+        store32(s, CG_DORD + n * 4, same);
+        store32(s, CG_SSTART + n * 4, decl_scope_start(src, toks, name));
+        store32(s, CG_SEND + n * 4, decl_scope_end(src, toks, name));
+    }
     return n + 1;
 }
 
@@ -12982,7 +13136,7 @@ fn emit_root_slot(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     if param == 1 {
         emit_name_tok(s, out, src, toks, nm);
     } else {
-        emit_local_name(s, out, src, toks, nm);
+        emit_decl_name(s, out, src, toks, nm);
     }
     emit_str(s, out, ".addr to i64\n  store i64 ");
     emit_temp_ref(s, out, v);
@@ -13067,7 +13221,7 @@ fn emit_region(s: ptr, out: ptr, src: ptr, toks: ptr, g0: u32, c: u32,
     emit_str(s, out, " = getelementptr [");
     emit_dec(s, out, kw);
     emit_str(s, out, " x i64], ptr %");
-    emit_local_name(s, out, src, toks, nm);
+    emit_decl_name(s, out, src, toks, nm);
     emit_str(s, out, ".buf, i32 0, i32 0\n");
     let v: u32 = alloc_temp(s);
     emit_str(s, out, "  ");
@@ -14286,13 +14440,13 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
     return 0;
 }
 
-/// 本单元出现过 `lgc` 吗（`docs/309`，Tur 2026.3）。`prof` 必须是 2 —— 旧版次里
+/// 本单元出现过 `lgc` 吗（`docs/309`，Tur 2026.3 起）。`prof >= 2` —— 旧版次里
 /// `lgc` 是**普通标识符**（`lgc end;` 在老版次里只是一个未声明的名字），不拖任何运行期。
 ///
 /// 认法与参考实现的 `_lgc_sites` 同义：**一条 `lgc start` / `lgc end` 语句**。
 /// 只看 token 形状（ident `lgc` + ident `start`/`end`），不依赖 AST。
 fn has_lgc(src: ptr, toks: ptr, prof: u32) -> u32 {
-    if prof != 2 {
+    if prof < 2 {
         return 0;
     }
     let i: u32 = 0;

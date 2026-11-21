@@ -55,12 +55,23 @@ def _corpus() -> list[Path]:
     return out
 
 
+def _analyzed(p: Path):
+    """装载 + （alpha 档才）跑分层分析 —— **带依赖**，与编译器同一条（`#1451`）。
+
+    `sites()` 现在是纯读（`#1451`：它不许改写调用方的表），所以分析由调用方显式跑。
+    """
+    m, deps = lomentc.load_unit(p, ROOT)
+    if W.tier_of(m) == W.ALPHA:
+        lomentc._gc_alpha_pass(m, deps)
+    return m
+
+
 @test
 def test_report_agrees_with_the_compiler():
     """判据 A：**对账**。报告的分层直方图 == `_count_gc_ladder` 的同一批数。"""
     n = 0
     for p in _corpus():
-        m = lomentc.load(p)
+        m = _analyzed(p)
         got = W.histogram(W.sites(m))
         want = lomentc._count_gc_ladder(m)
         got = {k: got[k] for k in ("l0", "l0_5", "l1", "l2", "l3", "total_sites")}
@@ -100,7 +111,7 @@ def test_a_pair_of_programs_changes_the_reason():
         return p
 
     def row_of(p: Path) -> dict:
-        rs = [r for r in W.sites(lomentc.load(p)) if r["name"] == "p"]
+        rs = [r for r in W.sites(_analyzed(p)) if r["name"] == "p"]
         assert len(rs) == 1, rs
         return rs[0]
 
@@ -134,12 +145,85 @@ def test_all_four_rungs_actually_occur():
     """判据 D：**非空转** —— 语料上四层都得出现过非零。"""
     seen = {"l0": 0, "l1": 0, "l2": 0, "l3": 0}
     for p in _corpus():
-        h = W.histogram(W.sites(lomentc.load(p)))
+        h = W.histogram(W.sites(_analyzed(p)))
         for k in seen:
             seen[k] += h[k]
     missing = [k for k, v in seen.items() if v == 0]
     assert not missing, f"这几层在语料上一次都没出现 —— 判据在空转: {missing}"
     print(f"      语料合计：{seen}")
+
+
+@test
+def test_shadowed_names_are_multi_decl_not_escape():
+    """`#1460`：同名遮蔽的两个站点都该说 `multi-decl`（原先是 `escape`）。
+
+    根因有两条：`multi-decl` 那条分支在 `_ptr_only_uses` 之后、永远走不到；`_decl_tok`
+    一律读**第一条**声明，于是第二个站点的"尺寸是不是字面量"拿第一个 `let` 回答。
+    """
+    NL = chr(10)
+    src = ("module m" + NL + "choose runtime" + NL + "choose gc_auto_alpha" + NL + NL
+           + "fn f() -> u32 {" + NL
+           + "    let p: ptr = alloc(1);" + NL + "    store8(p, 0, 1);" + NL
+           + "    let p: ptr = alloc(2);" + NL + "    store8(p, 0, 2);" + NL
+           + "    return 0;" + NL + "}" + NL)
+    with tempfile.TemporaryDirectory() as tds:
+        p = Path(tds) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline=NL)
+        rows = [r for r in W.sites(_analyzed(p)) if r["name"] == "p"]
+    assert len(rows) == 2, rows
+    assert all(r["reason"] == "multi-decl" for r in rows), rows
+    print("      遮蔽的两处都报 multi-decl（改名，而不是'把名字挪开'）")
+
+
+@test
+def test_sites_is_a_pure_read():
+    """`#1451`：`sites()` **不许**改写调用方的分层表。
+
+    原先它无条件跑 `_gc_alpha_pass(mod, [])`：既把单元自己写的档顶掉，又把调用方跑过的
+    **带依赖**的表换成**不带依赖**的一份 —— 之后 `emit_*` 产出的是另一个程序，且没有诊断。
+    """
+    p = ROOT / "loment" / "examples" / "gc_ladder" / "main.lomt"
+    m = _analyzed(p)
+
+    def snap():
+        out = []
+        for f in m.funcs:
+            out.append((f.name, repr(f.l0), repr(f.l1),
+                        repr(getattr(f, "l05_static", None)), repr(getattr(f, "slots", None))))
+        return out
+
+    before = snap()
+    W.sites(m)
+    assert snap() == before, "sites() 改写了调用方的 L0/L1/槽位表"
+    print("      sites() 前后，函数的分层表逐格不变")
+
+
+@test
+def test_non_alpha_units_say_there_is_no_ladder():
+    """`#1485`：非 alpha 档的站点只说"这一档没有分层"，不给 alpha 档的理由。"""
+    src = ("module m" + chr(10) + "choose gc_manual" + chr(10)
+           + "fn f(n: u32) -> u32 {" + chr(10)
+           + "    let p: ptr = alloc(n);" + chr(10)
+           + "    store8(p, 0, 1);" + chr(10)
+           + "    return load8(p, 0);" + chr(10) + "}" + chr(10))
+    with tempfile.TemporaryDirectory() as tds:
+        p = Path(tds) / "m.lomt"
+        p.write_text(src, encoding="utf-8", newline=chr(10))
+        m, _deps = lomentc.load_unit(p, ROOT)
+        rows = W.sites(m)
+        h = W.histogram(rows)
+    assert rows, "一个站点都没看到"
+    assert all(r["rung"] == "L3" and r["reason"] == "tier" for r in rows), rows
+    assert h["l3"] == h["total_sites"], h
+    print("      gc_manual：每处都是 L3，理由就是「这一档没有分层」")
+
+
+@test
+def test_bad_inputs_are_diagnostics_not_tracebacks():
+    """`#1463`：路径写错 / 给了目录 —— 报一句、退 2，不冒 Python 栈。"""
+    assert W.main([str(ROOT / "no-such-file-at-all.lomt")]) == 2
+    assert W.main([str(ROOT / "loment")]) == 2
+    print("      缺文件与目录都退 2（诊断走 stderr）")
 
 
 def main() -> int:

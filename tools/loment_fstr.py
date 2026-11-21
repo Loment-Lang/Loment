@@ -462,7 +462,14 @@ def rewrite(src: str) -> tuple[str, ColMap]:
     """把源里的插值字符串改写成 `str_concat` / `str_show` 链。
 
     返回 `(新源码, 列号映射)`。没有插值字符串时原样返回、映射为空。
+
+    **恒等快路径**：没有 `f"`（`rf"` 也含这几个字节）、没有 `command` / `foruse`
+    声明、也没有块注释时，这一趟只会把源码原样抄一遍 —— 直接返回。块注释留着是因为
+    未闭合的那一种**由这一趟报错**（词法器不管它）；少一个触发词就少一种报错。
     """
+    if ("f\"" not in src and "command" not in src
+            and "foruse" not in src and "/*" not in src):
+        return src, None
     sc = _Scanner(src)
     out = sc.run()
     return out, sc.colmap

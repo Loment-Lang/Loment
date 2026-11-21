@@ -6584,12 +6584,45 @@ def _needs_full_prepare(allmods: list[Module]) -> bool:
     return any(f.tparams for m in allmods for f in m.funcs)
 
 
+def _strip_unused_generic_decls(mod: Module, deps: list[Module]) -> tuple[Module, list[Module]]:
+    """去掉**没有使用**的泛型声明（预置的 `Option<T>` / `Result<T,E>` 那一类）。
+
+    只在 `choose flomtc_true` 且 `_needs_full_prepare` 为假时走：没有泛型使用就没有
+    实例要造，过滤声明与慢路径的产物相同 —— 省掉的是整模块 `deepcopy`。
+    **浅拷贝**：调用者手里的模块（`emit_potato` 在 `emit_llvm` 之前跑）不能被动到。
+    """
+    import copy as _c
+    mod = _c.copy(mod)
+    mod.structs = [s for s in mod.structs if not s.tparams]
+    mod.enums = [e for e in mod.enums if not e.tparams]
+    deps = [_c.copy(m) for m in deps]
+    for m in deps:
+        m.structs = [s for s in m.structs if not s.tparams]
+        m.enums = [e for e in m.enums if not e.tparams]
+    return mod, deps
+
+
 def prepare(mod: Module, deps: list[Module] | None = None) -> tuple[Module, list[Module]]:
     """M6/M7: 单态化 —— 泛型函数与泛型类型展开为具体副本 (幂等)。"""
     import copy as _c
 
     deps = list(deps or [])
     allmods = deps + [mod]
+    # `flomtc_true` 的快路径（`docs/350` §12.5）：只有泛型**声明**、没有使用时，
+    # 不深拷贝，过滤声明后直接跑那三道与泛型无关的解析。后续三道对已解析的结点
+    # 是幂等的（`check` / `emit_llvm` / `emit_potato` 会各跑一遍）。
+    if (mod.chooses.get("flomtc", CORE_DEFAULTS["flomtc"]) == "flomtc_true"
+            and not _needs_full_prepare(allmods)):
+        mod, deps = _strip_unused_generic_decls(mod, deps)
+        allmods = deps + [mod]
+        _resolve_solid_aliases(mod)
+        all_caps = [c for m in allmods for c in m.caps]
+        _resolve_guards(allmods, {
+            c.name: (i, c.lo, c.hi, CAP_KIND_ID[c.kind], c.param,
+                     (1 if c.lo_inf else 0) | (2 if c.hi_inf else 0))
+            for i, c in enumerate(all_caps)})
+        _resolve_domains(mod, len(all_caps))
+        return mod, deps
     if not (any(f.tparams for m in allmods for f in m.funcs)
             or any(s.tparams for m in allmods for s in m.structs)
             or any(e.tparams for m in allmods for e in m.enums)
@@ -10388,19 +10421,77 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     return errs
 
 
+#: `dataclasses.fields()` 的**类型级**缓存。通用 AST 遍历在每个结点上都问一次"这个
+#: 类型有哪些字段"，而字段表只随类型变 —— 五趟全树遍历里这一笔占大头（`docs/350` §12.5）。
+#: 输出无关：与逐次 `fields()` 的结果完全相同。
+_AST_FIELDS: dict[type, tuple[str, ...]] = {}
+
+
+def _ast_children(x) -> tuple:
+    """通用 AST 遍历的子结点（跳过 `line` / `col` / `off` / `len` 这类位置字段）。"""
+    import dataclasses as _dc
+    t = type(x)
+    names = _AST_FIELDS.get(t)
+    if names is None:
+        if not _dc.is_dataclass(t):
+            names = ()
+        else:
+            names = tuple(fd.name for fd in _dc.fields(t)
+                          if fd.name not in ("line", "col", "off", "len"))
+        _AST_FIELDS[t] = names
+    return tuple(getattr(x, n) for n in names)
+
+
+def _call_facts(mod) -> tuple[list, list, int, list]:
+    """**一趟**走完整棵树，收齐 `boundary` / `surfaces` / `net_ladder` / `gc_control` /
+    `gc_ladder` 要的五样东西：`(被调用的名字, 机调用站点, alloc 数, lgc 语句)`。
+
+    这五处原先各走一遍（`docs/350` §12.5 把它们并成一遍）；口径与各自的旧遍历
+    逐条相同 —— `print` 的号是 1，`syscall4/6/7` 只在首参是字面量时给号。
+    """
+    names: list[str] = []
+    sites: list[tuple[int, int | None]] = []
+    lgc: list = []
+    allocs = 0
+
+    def walk(x) -> None:
+        nonlocal allocs
+        if isinstance(x, (Call, MethodCall)):
+            names.append(x.name)
+            if x.name == "print":
+                sites.append((getattr(x, "line", 0), 1))
+            elif x.name in SYSCALL_BUILTINS:
+                args = getattr(x, "args", [])
+                first = args[0] if args else None
+                sites.append((getattr(x, "line", 0),
+                              first.value if isinstance(first, IntLit) else None))
+        if isinstance(x, Call) and x.name == "alloc":
+            allocs += 1
+        if isinstance(x, Lgc):
+            lgc.append(x)
+        kids = _ast_children(x)
+        if kids:
+            for y in kids:
+                walk(y)
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                walk(y)
+
+    walk(mod)
+    return names, sites, allocs, lgc
+
+
 def _lgc_sites(x) -> list:
     """这份单元里所有 `lgc` 语句（按源码序）。`no_gc` 拒绝与 Potato 计数共用。"""
-    import dataclasses as _dc
     out: list = []
 
     def reap(v) -> None:
         if isinstance(v, Lgc):
             out.append(v)
-        if _dc.is_dataclass(v) and not isinstance(v, type):
-            for fd in _dc.fields(v):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                reap(getattr(v, fd.name))
+        kids = _ast_children(v)
+        if kids:
+            for y in kids:
+                reap(y)
         elif isinstance(v, (list, tuple)):
             for y in v:
                 reap(y)
@@ -11440,7 +11531,7 @@ def _count_guards(mod: Module) -> int:
     return sum(walk(f.body) for f in mod.funcs)
 
 
-def _count_boundary(mod: Module) -> dict:
+def _count_boundary(mod: Module, names: list[str] | None = None) -> dict:
     """`docs/205` R5: 一份单元里的**边界操作**有几个 —— 形式对象自描述, 不读源码就能答。
 
     数的是"越过语言保证的每一步": 机调用 (`syscall4`/`syscall6`)、裸指针变换
@@ -11457,27 +11548,13 @@ def _count_boundary(mod: Module) -> dict:
     它和 `loment stat` 报的是**同一组数**（`loment_cli_test` 拿 `lomc.lex` 独立对过）,
     所以那份清单 `potato.BOUNDARY_BUILTINS` 是两边的**单一真源**。
     """
-    import dataclasses as _dc
-
     import potato as _potato
 
     #: 走过的每一个"被调用的名字"。用**通用** dataclass 遍历, 而不是手写一张节点表 ——
     #: 手写的那种漏一个节点类型就少算几个, 而要等自举侧逐字节比对才看得出来。
-    names: list[str] = []
-
-    def walk(x) -> None:
-        if isinstance(x, (Call, MethodCall)):
-            names.append(x.name)
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                walk(getattr(x, fd.name))
-        elif isinstance(x, (list, tuple)):
-            for y in x:
-                walk(y)
-
-    walk(mod)
+    #: 快路径会把这趟与另外四趟并成一遍（`_call_facts`），把名单直接递进来。
+    if names is None:
+        names = _call_facts(mod)[0]
     ext = [f.name for f in mod.externs]
     n_extc = sum(names.count(nm) for nm in ext)
     # **按显式的两张表分，不按名字前缀猜**：`print` 是机调用但不以 `syscall` 开头，
@@ -11547,8 +11624,6 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
     三处共用这一遍（`_count_surfaces` 与 `excluded` 的行为轴那一条）—— 走两遍就会漂：
     一处按 `IntLit` 认、另一处顺手也认了常量名，两份口径差一个号，判据各自绿着。
     """
-    import dataclasses as _dc
-
     out: list[tuple[int, int | None]] = []
 
     def walk(x) -> None:
@@ -11560,11 +11635,10 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
             first = args[0] if args else None
             out.append((getattr(x, "line", 0),
                         first.value if isinstance(first, IntLit) else None))
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                walk(getattr(x, fd.name))
+        kids = _ast_children(x)
+        if kids:
+            for y in kids:
+                walk(y)
         elif isinstance(x, (list, tuple)):
             for y in x:
                 walk(y)
@@ -11580,7 +11654,7 @@ def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
 EXCLUDED_NET_SPACES = ("net", "network")
 
 
-def _count_surfaces(mod: Module) -> dict:
+def _count_surfaces(mod: Module, sites: list | None = None) -> dict:
     """`docs/222`：把**机调用站点**按"面"分一分 —— 与 `boundary` / `gc_ladder` 同形的一份自描述。
 
     口径与 `_count_boundary` 一样是**词法的**：只看 `syscall4/6/7` 的**第一个实参**写没写成
@@ -11596,7 +11670,9 @@ def _count_surfaces(mod: Module) -> dict:
     那是词法口径的诚实边界，不是漏数。
     """
     counts: dict = {}
-    for _line, num in _machine_call_sites(mod):
+    if sites is None:
+        sites = _machine_call_sites(mod)
+    for _line, num in sites:
         key = SURFACE_NUMBERS.get(num, SURFACE_OTHER)
         counts[key] = counts.get(key, 0) + 1
     out = {k: counts[k] for k in sorted(counts)}   # 键**按名字排序**：确定性是判据
@@ -11604,7 +11680,7 @@ def _count_surfaces(mod: Module) -> dict:
     return out
 
 
-def _count_net_ladder(mod: Module) -> dict:
+def _count_net_ladder(mod: Module, sites: list | None = None) -> dict:
     """`docs/237`：把**联网站点的宽度组成**写进产物 —— 四档各领走几个站点。
 
     形状照 `gc_ladder`（四个非负整数 + `total_net`，各档之和必须等于总数），**多一条交叉**：
@@ -11619,7 +11695,9 @@ def _count_net_ladder(mod: Module) -> dict:
     **四档恒在**（哪怕为 0），与 `gc_ladder` 同 —— 键的集合固定，校验器与读者都不用猜。
     """
     counts: dict = {}
-    for _line, num in _machine_call_sites(mod):
+    if sites is None:
+        sites = _machine_call_sites(mod)
+    for _line, num in sites:
         rung = NET_WIDTH_RUNGS.get(num)
         if rung is None:
             continue
@@ -11629,7 +11707,7 @@ def _count_net_ladder(mod: Module) -> dict:
     return out
 
 
-def _count_gc_ladder(mod: Module) -> dict:
+def _count_gc_ladder(mod: Module, total: int | None = None) -> dict:
     """`docs/210` §5 第一条：把 **GC 的组成**写进产物 —— 每一层各领走几个 `alloc` 站点。
 
     形状**照 `boundary`**（§5 R5 那条自洽规则的同形）：五个非负整数 + `total_sites`
@@ -11655,28 +11733,11 @@ def _count_gc_ladder(mod: Module) -> dict:
     在 **`raw_mod`（单态化之前）** 上数：自举侧看到的是**源 token**，也只有单态化前的
     那份视图与它对齐（单态化会造出实例的副本，那些副本两边都不数）。
     """
-    import dataclasses as _dc
-
     #: 全部 `alloc` 调用点（**不看形状**）：凡是一个 `alloc` 就是一处站点，形状不合的
-    #: （落不到 `let NAME: ptr = ...` 那种）自然落在 L3。用**通用** dataclass 遍历，
-    #: 不手写节点表 —— 理由同 `_count_boundary`：漏一个节点类型就少算几个，要等自举侧
-    #: 逐字节比对才看得出来。
-    total = 0
-
-    def reap(x) -> None:
-        nonlocal total
-        if isinstance(x, Call) and x.name == "alloc":
-            total += 1
-        if _dc.is_dataclass(x) and not isinstance(x, type):
-            for fd in _dc.fields(x):
-                if fd.name in ("line", "col", "off", "len"):
-                    continue
-                reap(getattr(x, fd.name))
-        elif isinstance(x, (list, tuple)):
-            for y in x:
-                reap(y)
-
-    reap(mod)
+    #: （落不到 `let NAME: ptr = ...` 那种）自然落在 L3。快路径由 `_call_facts`
+    #: 一遍走完把数递进来（`total`），别的调用者走同一张通用遍历。
+    if total is None:
+        total = _call_facts(mod)[2]
 
     l0 = l0_5 = l1 = l2 = 0
 
@@ -11733,7 +11794,7 @@ def _count_gc_ladder(mod: Module) -> dict:
             "l3": total - l0 - l0_5 - l1 - l2, "total_sites": total}
 
 
-def _count_gc_control(mod: Module) -> dict:
+def _count_gc_control(mod: Module, lgc: list | None = None) -> dict:
     """`lgc` 的站点统计（`docs/309`，Potato v21）。
 
     只数**根单元**的语句（与 `guards` / `boundary` 同一个视图）。`manual_collector`
@@ -11741,7 +11802,9 @@ def _count_gc_control(mod: Module) -> dict:
     这是 `gc_manual` 的旧承诺之外唯一被允许的例外，必须能不看源码读出来。
     """
     n = {"pauses": 0, "resumes": 0, "windows": 0, "timed_windows": 0}
-    for s in _lgc_sites(mod):
+    if lgc is None:
+        lgc = _lgc_sites(mod)
+    for s in lgc:
         if s.action == "pause":
             n["pauses"] += 1
         elif s.action == "resume":
@@ -11812,21 +11875,13 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                    if f.name.startswith(i.type + "_") else f.name
                                    for f in i.funcs]}
                       for i in mod.impls]
-        _gc_ladder = _count_gc_ladder(mod)
+        _gc_ladder = _count_gc_ladder(mod, total=_call_facts(mod)[2])
         _allmods = list(deps or []) + [mod]
         if _needs_full_prepare(_allmods):
             mod, deps = prepare(mod, deps)  # M6
         else:
             # 只有泛型声明、没有泛型使用：过滤声明即可，不深拷贝整个模块。
-            # emit_potato 在 emit_llvm 之前跑 —— 必须浅拷贝，别动调用者手里的列表。
-            import copy as _c
-            mod = _c.copy(mod)
-            mod.structs = [s for s in mod.structs if not s.tparams]
-            mod.enums = [e for e in mod.enums if not e.tparams]
-            deps = [_c.copy(m) for m in deps or []]
-            for _m in deps:
-                _m.structs = [s for s in _m.structs if not s.tparams]
-                _m.enums = [e for e in _m.enums if not e.tparams]
+            mod, deps = _strip_unused_generic_decls(mod, deps or [])
     else:
         # 默认路径（`flomtc_false`）：与 flomtc 之前逐字节相同。
         import copy as _c
@@ -11846,6 +11901,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                    for f in i.funcs]}
                       for i in raw_mod.impls]
         _gc_ladder = _count_gc_ladder(raw_mod)
+    # 快路径：五处计数并成**一趟**全树遍历（`docs/350` §12.5）；默认路径各自现走。
+    _names = _sites = _lgc = None
+    if _flomtc:
+        _names, _sites, _allocs, _lgc = _call_facts(mod)
     all_caps = [c for m in (deps or []) + [mod] for c in m.caps]
     layouts = []
     for u in mod.uses:
@@ -12121,19 +12180,19 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         "generics": generics,
         "instances": instances,
         "guards": _count_guards(mod),
-        "boundary": _count_boundary(mod),
+        "boundary": _count_boundary(mod, names=_names),
         # **GC 的组成**（`docs/210` §3/§5, v10）—— 在 `raw_mod`（单态化之前）上数，理由
         # 见 `_count_gc_ladder`：自举侧看到的是**源 token**，只有单态化前那份视图与它对齐。
         "gc_ladder": _gc_ladder,
         # **GC 的时间控制**（v21，`docs/309`）：`lgc` 的暂停/恢复/窗口计数，外加
         # `manual_collector` —— 手动档下用了 `lgc` 就会带收集器，这条让例外可判。
-        "gc_control": _count_gc_control(mod),
+        "gc_control": _count_gc_control(mod, lgc=_lgc),
         # **面的组成**（`docs/222`, v11）—— 与 `boundary` **同一个视图**（`mod`），
         # 因为那条交叉不变量（`total_sites == boundary.syscalls`）要求两处数的是同一批站点。
-        "surfaces": _count_surfaces(mod),
+        "surfaces": _count_surfaces(mod, sites=_sites),
         # **联网站点的宽度组成**（`docs/237`, v14）—— 与 `surfaces` 同一个视图、**同一遍
         # 遍历**：那条交叉不变量（`total_net == surfaces.net`）要求两处数的是同一批站点。
-        "net_ladder": _count_net_ladder(mod),
+        "net_ladder": _count_net_ladder(mod, sites=_sites),
         "excluded": list(mod.excluded),
     }
     text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
@@ -12658,12 +12717,15 @@ out:
   ret void
 }
 
-; **小回收**：只动年轻代（地址 ≥ `@__loment_oldtop`）。五步 ——
+; **小回收**：清标记与传播只动年轻代（地址 ≥ `@__loment_oldtop`）；清扫那一趟是整堆。五步 ——
 ;   ① 清**年轻代**的标记位（老年代的标记位不动：它们不参与这次清扫）；
 ;   ② 扫根（与全量同一趟）；
 ;   ③ 扫**脏卡**：老年代里被写过的那 64 B 块，逐个 8 字节窗口找落在堆里的值，标记其所在块；
 ;   ④ **只传播年轻代**（起点 `oldtop`）—— 年轻代内部互相指的那些；老→年轻由③兜住；
-;   ⑤ **只清扫年轻代**（起点 `oldtop`），**不重置空闲链表**（理由见 `__loment_sweep`）。
+;   ⑤ **清扫整堆**（从堆底起走），**不重置空闲链表**（理由见 `__loment_sweep`）。
+;      这一趟**覆盖老年代**，是有意的取舍（`docs/210` §2.7）：重置空闲链表要把整堆走一遍，
+;      省下来的只是①与④那两趟（贵的正是它们）。原先这行注释写的是「只清扫年轻代」——
+;      与下面对 `sweep` 的调用不符（`#1450`）。
 define internal void @__loment_minor() {
 entry:
   %ot = load i32, ptr @__loment_oldtop
@@ -17323,15 +17385,9 @@ def _desugar_matchexpr(mod: Module) -> None:
 #   * 处理器是**词法**的：`perform` 必须被同一个函数里外层的 `handle` 覆盖。
 #
 # 降级就是内联（§7.3 的"零续延对象"）：`perform E.op(a…)` 变成
-# `let p… = a…; <臂体>; let r = <resume 的值>;`，`handle` 变成它的体。降完
+# `let <臂形参> = 实参…; <臂体>`（resume 的值直接落到目标上），`handle` 变成它的体。
+# **不造合成名**（§7.8）：自举侧是 token 驱动的，只能用源里已有的标识符。降完
 # 检查器/发射器/L0/L1/L2 一行都不用认识效应节点 —— 与 `IfExpr` 同一条路数。
-
-_EFF_TMP = [0]
-
-
-def _eff_fresh(prefix: str) -> str:
-    _EFF_TMP[0] += 1
-    return f"__eff_{prefix}{_EFF_TMP[0]}"
 
 
 def _eff_contains_effect(o) -> bool:
@@ -17355,127 +17411,177 @@ def _eff_idents(o, out: set[str] | None = None) -> set[str]:
     return out
 
 
-def _eff_subst(o, mapping: dict[str, str]):
-    """臂内改名：只认**局部绑定与引用**（`Ident` / `Call.name` / `Let.name`）。"""
-    if isinstance(o, list):
-        return [_eff_subst(x, mapping) for x in o]
-    if isinstance(o, tuple):
-        return tuple(_eff_subst(x, mapping) for x in o)
-    if isinstance(o, Ident):
-        if o.name in mapping:
-            o.name = mapping[o.name]
-        return o
-    if isinstance(o, Call):
-        if o.name in mapping:
-            o.name = mapping[o.name]
-        o.args = [_eff_subst(a, mapping) for a in o.args]
-        return o
-    if isinstance(o, Let):
-        if o.name in mapping:
-            o.name = mapping[o.name]
-        if o.expr is not None:
-            o.expr = _eff_subst(o.expr, mapping)
-        return o
-    if isinstance(o, Assign):
-        o.target = _eff_subst(o.target, mapping)
-        o.expr = _eff_subst(o.expr, mapping)
-        return o
-    if is_dataclass(o) and not isinstance(o, type):
-        for fd in fields(o):
-            if fd.name in ("line", "col", "off", "len"):
-                continue
-            setattr(o, fd.name, _eff_subst(getattr(o, fd.name), mapping))
-    return o
-
-
 def _eff_flat_ok(stmts: list) -> bool:
-    return all(isinstance(s, (Let, Assign, ExprStmt)) for s in stmts)
+    return all(isinstance(s, (Let, Assign, ExprStmt, Return)) for s in stmts)
 
 
-def _eff_check_arm(f: Func, arm: HandlerArm, op: EffectOp, consts: set[str],
-                   errs: list[str]) -> None:
+def _eff_arm_free(arm: HandlerArm) -> list[str]:
+    """臂里**要捕获**的名字：不是形参、也不是臂内 `let` 绑定的标识符。排序给确定性。"""
+    local = set(arm.params)
+    for s in arm.body[:-1]:
+        if isinstance(s, Let):
+            local.add(s.name)
+    return sorted(_eff_idents(arm.body) - local)
+
+
+def _eff_declared(stmts, out: set[str] | None = None) -> set[str]:
+    """函数 / handle 体里声明过的局部名（含循环与模式绑定）——新鲜性约束用。"""
+    out = set() if out is None else out
+
+    def walk(o):
+        if isinstance(o, list):
+            for x in o:
+                walk(x)
+        elif is_dataclass(o) and not isinstance(o, type):
+            if isinstance(o, Let):
+                out.add(o.name)
+            elif isinstance(o, For):
+                out.add(o.var)
+            elif isinstance(o, ForEach):
+                out.add(o.var)
+                if o.idx:
+                    out.add(o.idx)
+            b = getattr(o, "bind", None)
+            if isinstance(b, str) and b:
+                out.add(b)
+            for fd in fields(o):
+                if fd.name in ("line", "col", "off", "len", "name", "var", "idx"):
+                    continue
+                if isinstance(o, Handle) and fd.name == "arms":
+                    # 臂的形参 / 局部属于**内联点**，不是外层函数的局部。
+                    continue
+                walk(getattr(o, fd.name))
+
+    walk(list(stmts))
+    return out
+
+
+def _eff_check_arm(arm: HandlerArm, op: EffectOp, errs: list[str],
+                   outer: set[str], body_locals: set[str]) -> str | None:
+    """校验一条臂；返回 `"resume"` / `"abort"`（出错返回 None）。"""
     if not _eff_flat_ok(arm.body):
         errs.append(f"{arm.line}: 效应臂 `{arm.op}` 里只许平铺语句（A3a："
-                    f"`let` / 赋值 / 表达式；不许 if/while/match/return）")
-        return
+                    f"`let` / 赋值 / 表达式；收尾只能是 `resume(e);` 或 `return e;`）")
+        return None
     resumes = [s for s in arm.body
                if isinstance(s, ExprStmt) and isinstance(s.expr, Resume)]
-    if len(resumes) != 1 or resumes[0] is not arm.body[-1]:
+    returns = [s for s in arm.body if isinstance(s, Return)]
+    last = arm.body[-1]
+    if len(resumes) == 1 and resumes[0] is last and not returns:
+        kind = "resume"
+    elif len(returns) == 1 and returns[0] is last and not resumes \
+            and last.expr is not None:
+        kind = "abort"
+    else:
         errs.append(f"{arm.line}: 效应臂 `{arm.op}` 必须以**恰好一次** `resume(e);` "
-                    f"结尾，且中间没有别的 `resume`（A3a 只做尾续）")
-        return
+                    f"或 `return e;` 结尾，且中间没有别的 `resume` / `return`"
+                    f"（A3a/A3b 只做尾续与 abort）")
+        return None
     for s in arm.body[:-1]:
         if _eff_contains_effect(s):
             errs.append(f"{arm.line}: 效应臂 `{arm.op}` 里不许再嵌 `perform` / `handle` / "
                         f"`resume`（A3a）")
-            return
-    allowed = {p for p in arm.params} | consts
-    free = _eff_idents(arm.body) - allowed
-    if free:
-        errs.append(f"{arm.line}: 效应臂 `{arm.op}` 引用了 "
-                    f"{', '.join(sorted(free))} —— A3a 的臂是闭的（只许形参与模块级名字；"
-                    f"捕获处理器外的局部变量留到 A3b）")
+            return None
+    # 捕获是**只读**的（A3b）：臂在进入处理器时按值拷一份，写回原变量没有意义。
+    free = set(_eff_arm_free(arm))
+    for s in arm.body:
+        if isinstance(s, Assign):
+            t = s.target
+            if isinstance(t, Ident) and t.name in free:
+                errs.append(f"{s.line}: 效应臂 `{arm.op}` 给捕获的 `{t.name}` 赋值 —— "
+                            f"捕获只读（A3b）")
+            elif isinstance(t, Index) and isinstance(t.obj, Ident) \
+                    and t.obj.name in free:
+                errs.append(f"{s.line}: 效应臂 `{arm.op}` 写捕获的 `{t.obj.name}[…]` —— "
+                            f"捕获只读（A3b）")
+    # 新鲜性（§7.8）：内联不造合成名，所以臂引入的名字不能与函数里的局部撞，
+    # 臂引用的外层局部也不能被 handle 体里的同名局部遮住。
+    names = list(arm.params)
+    for s in arm.body[:-1]:
+        if isinstance(s, Let):
+            if s.name in names:
+                errs.append(f"{s.line}: 效应臂 `{arm.op}` 的局部 `{s.name}` 重复声明")
+                continue
+            names.append(s.name)
+    for nm in names:
+        if nm in outer:
+            errs.append(f"{s.line}: 效应臂 `{arm.op}` 的形参/局部 `{nm}` 与函数里的"
+                        f"局部同名 —— 降级不造合成名（docs/341 §7.8）")
+    for nm in sorted(free):
+        if nm in body_locals:
+            errs.append(f"{s.line}: 效应臂 `{arm.op}` 引用的 `{nm}` 被 handle 体里"
+                        f"的同名局部遮住 —— 降级不造合成名（docs/341 §7.8）")
+    return kind
 
 
-def _eff_arm_inline(f: Func, p: Perform, op: EffectOp, arm: HandlerArm,
-                    consts: set[str]) -> tuple[list, object]:
-    """把一次 `perform` 内联成语句：`let p… = 实参…; <臂体>; let r = resume 的值;`。"""
-    tag = _EFF_TMP[0] + 1
-    # 臂在**同一个处理器里可能被多个 perform 用**：每处内联都要一份自己的副本，
-    # 否则 `_eff_subst` 会就地改掉上一条内联已经发出去的节点。
+def _eff_arm_inline(p: Perform, op: EffectOp, arm: HandlerArm,
+                    nname: str | None) -> tuple[list, object, str]:
+    """把一次 `perform` 内联成语句：`let <形参> = 实参…; <臂体>`（无合成名，§7.8）。"""
+    # 臂可能被同一个处理器里的多个 perform 用：每处内联一份副本，免得共享节点。
     src_body = copy.deepcopy(arm.body)
-    mapping: dict[str, str] = {}
-    for i, pn in enumerate(arm.params):
-        mapping[pn] = f"__eff_p{tag}_{i}"
-    for k, s in enumerate(src_body[:-1]):
-        if isinstance(s, Let) and s.name not in mapping:
-            mapping[s.name] = f"__eff_l{tag}_{k}"
-    _EFF_TMP[0] = tag
     out: list = []
     for (_opn, pt), apn, arg in zip(op.params, arm.params, p.args):
-        # 实参是**调用方**的表达式：不能过臂的改名表（同名的形参会把它改掉）。
-        out.append(Let(mapping[apn], pt, arg, p.line))
-    body = _eff_subst(src_body[:-1], mapping)
-    out += body
+        out.append(Let(apn, pt, arg, p.line))
+    out += src_body[:-1]
     tail = src_body[-1]
-    assert isinstance(tail, ExprStmt) and isinstance(tail.expr, Resume)
-    value = _eff_subst(tail.expr.arg, mapping)
-    if op.ret == "()":
-        # 单位返回：`resume(())` 求值后丢弃，没有值可交。
-        out.append(ExprStmt(value, p.line))
-        return out, None
-    rname = f"__eff_r{tag}"
-    out.append(Let(rname, op.ret, value, p.line))
-    return out, Ident(rname, p.line)
+    if isinstance(tail, ExprStmt) and isinstance(tail.expr, Resume):
+        value = tail.expr.arg
+        if op.ret == "()":
+            # 单位返回：`resume(())` 求值后丢弃，没有值可交。
+            out.append(ExprStmt(value, p.line))
+            return out, None, "resume"
+        return out, value, "resume"
+    # abort（A3b）：臂给出整个 `handle` 的值，然后跳出包装它的 `while true`。
+    assert isinstance(tail, Return) and tail.expr is not None
+    assert nname is not None
+    out.append(Assign(Ident(nname, p.line), tail.expr, p.line))
+    out.append(Break(p.line))
+    return out, None, "abort"
 
 
-def _eff_lower_handle(f: Func, name: str, ty: str, space: str, h: Handle,
-                      env: dict[str, dict[str, HandlerArm]], decls: dict[str, EffectDecl],
-                      owners: dict[str, list[str]], consts: set[str],
-                      errs: list[str]) -> list:
+def _eff_lower_handle(name: str, ty: str, space: str, h: Handle,
+                      env: dict[str, tuple[dict[str, HandlerArm],
+                                          frozenset[str], str]],
+                      decls: dict[str, EffectDecl],
+                      owners: dict[str, list[str]],
+                      outer: set[str], errs: list[str]) -> list:
     spec = decls.get(h.effect)
     if spec is None:
         errs.append(f"{h.line}: 处理器处理的效应 `{h.effect}` 没有声明")
         return []
     ops = {o.name: o for o in spec.ops}
     arms: dict[str, HandlerArm] = {}
+    abort_ops: set[str] = set()
+    body_locals = _eff_declared(h.body[:-1])
+    bad = 0
     for a in h.arms:
         if a.op in arms:
             errs.append(f"{a.line}: 效应 `{h.effect}` 的 `{a.op}` 有重复的臂")
+            bad = 1
             continue
         op = ops.get(a.op)
         if op is None:
             errs.append(f"{a.line}: 臂 `{a.op}` 不属于效应 `{h.effect}`")
+            bad = 1
             continue
         if len(a.params) != len(op.params):
             errs.append(f"{a.line}: 臂 `{a.op}` 有 {len(a.params)} 个参数，"
                         f"声明是 {len(op.params)} 个")
+            bad = 1
             continue
-        _eff_check_arm(f, a, op, consts, errs)
+        kind = _eff_check_arm(a, op, errs, outer, body_locals)
+        if kind is None:
+            bad = 1
+            continue
+        if kind == "abort":
+            abort_ops.add(a.op)
         arms[a.op] = a
     missing = [o for o in ops if o not in arms]
     if missing:
         errs.append(f"{h.line}: 效应 `{h.effect}` 少臂：{', '.join(missing)}")
+    if bad:
+        # 臂里已经点了名：不要再拿一条半懂的臂去内联。
+        return []
     if not isinstance(h.body[-1], ExprStmt):
         errs.append(f"{h.line}: A3a 要求 `handle` 体以表达式结尾（它是 `let` 的值）")
         return []
@@ -17484,75 +17590,90 @@ def _eff_lower_handle(f: Func, name: str, ty: str, space: str, h: Handle,
         errs.append(f"{h.line}: A3a 不支持把 `perform` 嵌在表达式中 —— "
                     f"把它拆成单独一条语句")
         return []
-    inner = dict(env)
-    inner[h.effect] = arms
     out: list = [Let(name, ty, None, h.line, space)]
-    out += _eff_lower_stmts(f, h.body[:-1], inner, decls, owners, consts, errs)
-    out.append(Assign(Ident(name, h.line), tail.expr, h.line))
+    inner = dict(env)
+    inner[h.effect] = (arms, frozenset(abort_ops), name)
+    body = _eff_lower_stmts(h.body[:-1], inner, decls, owners, outer, errs)
+    if abort_ops:
+        # abort 的非局部退出：整个 handle 体包一层 `while true`，abort 臂
+        # 写完 `n` 就 `break` —— 体里剩下的语句被跳过。体是平铺的（嵌套的
+        # 效应构造已在上面的走查里拒掉），所以这个 `break` 只会命中这层包装。
+        body.append(Assign(Ident(name, h.line), tail.expr, h.line))
+        body.append(Break(h.line))
+        out.append(While(BoolLit(True, h.line), body, h.line))
+    else:
+        out += body
+        out.append(Assign(Ident(name, h.line), tail.expr, h.line))
     return out
 
 
-def _eff_lower_perform(f: Func, p: Perform,
-                       env: dict[str, dict[str, HandlerArm]],
+def _eff_lower_perform(p: Perform,
+                       env: dict[str, tuple[dict[str, HandlerArm],
+                                           frozenset[str], str]],
                        decls: dict[str, EffectDecl], owners: dict[str, list[str]],
-                       consts: set[str], errs: list[str],
-                       line: int) -> tuple[list, object | None]:
+                       errs: list[str],
+                       line: int) -> tuple[list, object | None, str | None]:
     eff = p.effect
     if not eff:
         cand = owners.get(p.op, [])
         if len(cand) != 1:
             errs.append(f"{p.line}: `perform {p.op}` 无法唯一归到某个效应 "
                         f"（候选：{', '.join(cand) or '无'}）")
-            return [], None
+            return [], None, None
         eff = cand[0]
     spec = decls.get(eff)
     if spec is None:
         errs.append(f"{p.line}: `perform {eff}.{p.op}` 的效应没有声明")
-        return [], None
+        return [], None, None
     op = next((o for o in spec.ops if o.name == p.op), None)
     if op is None:
         errs.append(f"{p.line}: 效应 `{eff}` 没有操作 `{p.op}`")
-        return [], None
+        return [], None, None
     if len(p.args) != len(op.params):
         errs.append(f"{p.line}: `perform {eff}.{p.op}` 要 {len(op.params)} 个实参，"
                     f"给了 {len(p.args)} 个")
-        return [], None
+        return [], None, None
     if any(_eff_contains_effect(a) for a in p.args):
         errs.append(f"{p.line}: A3a 不支持把 `perform` 放在实参里 —— 先拆成一条语句")
-        return [], None
-    arm = env.get(eff, {}).get(p.op)
+        return [], None, None
+    entry = env.get(eff)
+    arm = entry[0].get(p.op) if entry is not None else None
     if arm is None:
         errs.append(f"{p.line}: `perform {eff}.{p.op}` 没有被同一函数里词法上的 "
                     f"`handle {eff}` 覆盖（A3a 的处理器是词法的）")
-        return [], None
-    return _eff_arm_inline(f, p, op, arm, consts)
+        return [], None, None
+    return _eff_arm_inline(p, op, arm, entry[2])
 
 
-def _eff_lower_stmts(f: Func, stmts: list,
-                     env: dict[str, dict[str, HandlerArm]],
+def _eff_lower_stmts(stmts: list,
+                     env: dict[str, tuple[dict[str, HandlerArm],
+                                          frozenset[str], str]],
                      decls: dict[str, EffectDecl], owners: dict[str, list[str]],
-                     consts: set[str], errs: list[str]) -> list:
+                     outer: set[str], errs: list[str]) -> list:
     out: list = []
     for s in stmts:
         if isinstance(s, Let) and isinstance(s.expr, Handle):
-            out += _eff_lower_handle(f, s.name, s.type, s.space, s.expr,
-                                     env, decls, owners, consts, errs)
+            out += _eff_lower_handle(s.name, s.type, s.space, s.expr,
+                                     env, decls, owners, outer, errs)
             continue
         if isinstance(s, Let) and isinstance(s.expr, Perform):
             before = len(errs)
-            stmts, value = _eff_lower_perform(f, s.expr, env, decls, owners,
-                                              consts, errs, s.line)
+            stmts, value, kind = _eff_lower_perform(s.expr, env, decls, owners,
+                                                    errs, s.line)
             out.append(Let(s.name, s.type, None, s.line, s.space))
             out += stmts
             if value is not None:
                 out.append(Assign(Ident(s.name, s.line), value, s.line))
-            elif len(errs) == before:
+            elif kind is None and len(errs) == before:
                 errs.append(f"{s.line}: `perform` 的值是 `()`，不能绑给 `{s.name}`")
             continue
         if isinstance(s, ExprStmt) and isinstance(s.expr, Perform):
-            stmts, _value = _eff_lower_perform(f, s.expr, env, decls, owners,
-                                               consts, errs, s.line)
+            stmts, value, _kind = _eff_lower_perform(s.expr, env, decls, owners,
+                                                     errs, s.line)
             out += stmts
+            if value is not None:
+                # 语句位置的 perform：resume 的值要求值后丢弃（可能有副作用）。
+                out.append(ExprStmt(value, s.line))
             continue
         if _eff_contains_effect(s):
             errs.append(f"{getattr(s, 'line', 1)}: A3a 只支持**语句位置**的 "
@@ -17563,7 +17684,7 @@ def _eff_lower_stmts(f: Func, stmts: list,
 
 
 def _lower_effects(mod: Module, deps: list[Module] | None = None) -> list[str]:
-    """A3a：验证 + 降级（`docs/341` §7.3 / §10.7）。返回错误列表；有错时可能已半降。"""
+    """A3a/A3b：验证 + 降级（`docs/341` §7.3 / §10.7）。返回错误列表；有错时可能已半降。"""
     errs: list[str] = []
     mods = [*(deps or []), mod]
     decls: dict[str, EffectDecl] = {}
@@ -17575,9 +17696,9 @@ def _lower_effects(mod: Module, deps: list[Module] | None = None) -> list[str]:
         for op in e.ops:
             owners.setdefault(op.name, []).append(en)
     for m in mods:
-        consts = {c.name for c in getattr(m, "consts", []) or []}
         for f in m.funcs:
-            f.body = _eff_lower_stmts(f, f.body, {}, decls, owners, consts, errs)
+            outer = {p.name for p in f.params} | _eff_declared(f.body)
+            f.body = _eff_lower_stmts(f.body, {}, decls, owners, outer, errs)
         m.effect_runtime = []
     return errs
 

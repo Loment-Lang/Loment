@@ -9,7 +9,8 @@
 #
 #   $LOMENT_HOT_HOME/                 (默认 ~/.loment/hot)
 #     <baseline>/
-#       incoming/<release>/           hotfix.json + 载荷 + SHA256SUMS + SHA256SUMS.asc + 公钥
+#       incoming/<release>/           hotfix.json + 载荷 + SHA256SUMS + SHA256SUMS.asc + .admitted
+#                                     （公钥**不在这里**：信任锚固定在被跑的那棵树里）
 #       rejected/<release>.json        {"release":…, "code":…, "detail":…}
 #       state.json                    已接受过的 release（重放保护，`#1147`）
 #       applied/<release>/            已经交给换的那一份（保留清单，`status` 读它）
@@ -30,6 +31,29 @@ import loment_hotfix as hf      # noqa: E402
 import loment_update as lu      # noqa: E402
 
 DEFAULT_HOME = Path.home() / ".loment" / "hot"
+
+#: 通过准入的记号：**准入发生在进程外**，装载侧只看这一格。没有它（或它与清单对不上）
+#: 的目录一律不认 —— 直接往 `incoming/` 里写一个目录不再等于"已经被检查过"（`#1695`）。
+MARKER = ".admitted"
+
+
+def _manifest_digest(d: Path) -> str:
+    return lu.sha256_file(d / "hotfix.json")
+
+
+def admitted(d: Path) -> bool:
+    mark = d / MARKER
+    if not mark.is_file() or not (d / "hotfix.json").is_file():
+        return False
+    try:
+        got = mark.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return got == _manifest_digest(d)
+
+
+def _admit(d: Path) -> None:
+    (d / MARKER).write_text(_manifest_digest(d) + "\n", encoding="utf-8", newline="\n")
 
 
 def home() -> Path:
@@ -75,9 +99,19 @@ def stage(src: Path, tree: Path, release: str, *, current: str | None = None,
     base = hf.read_release(tree)
     bdir = baseline_dir(base)
     # 幂等：同一个 tag 再来一次就是**同一份**候选 —— 还在等着的、或已经换过的。
+    # 只认**带准入记号**的那一份。没有记号的是旧版本留下的、或别人直接写进来的：
+    # 对前者重走一遍准入（不写 state、不算重放），过了就补上记号 —— 升级不该丢掉
+    # 一个已经躺在 `incoming/` 里的候选；过不了就当它不存在，按 `src` 重走。
     for sub in ("incoming", "applied"):
         seen = bdir / sub / release
+        if admitted(seen):
+            return seen
         if (seen / "hotfix.json").is_file():
+            try:
+                lu.check(seen, tree)
+            except lu.Reject:
+                continue
+            _admit(seen)
             return seen
     try:
         lu.check(src, tree, state=bdir / "state.json",
@@ -95,6 +129,7 @@ def stage(src: Path, tree: Path, release: str, *, current: str | None = None,
         for p in src.iterdir():
             if p.is_file():
                 shutil.copyfile(p, tmp / p.name)
+        _admit(tmp)
         tmp.rename(dest)
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -111,7 +146,7 @@ def poll(baseline: str, root: Path | None = None) -> Path | None:
     inc = bdir / "incoming"
     if not inc.is_dir():
         return None
-    cands = sorted((p for p in inc.iterdir() if p.is_dir() and (p / "hotfix.json").is_file()),
+    cands = sorted((p for p in inc.iterdir() if p.is_dir() and admitted(p)),
                    key=lambda p: _release_key(p.name))
     return cands[-1] if cands else None
 

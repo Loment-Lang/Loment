@@ -664,7 +664,8 @@ fn chk_bad_num_suffix(src: ptr, t: ptr, i: u32) -> bool {
 ///   2 = `runtime`（`runtime` / `no_runtime`）；3 = `port`（`sealed` / `hosted`）；
 ///   4 = `vm`；5 = `lms`；6 = `lspe`；7 = `lifetime`（`docs/299`）；
 ///   8 = `fp`（`docs/348`）；9 = `flomtc`（`docs/350`）；10 = 槽位；
-///   11 = **不是核心模式** —— 那是开关那一套（`docs/182` §1.3），这一层不管。
+///   11 = `class`（`docs/345`）；12 = **不是核心模式** —— 那是开关那一套
+///   （`docs/182` §1.3），这一层不管。
 ///
 /// 与参考实现的 `CORE_DIM_OF` 是同一张表；加一维两边一起动。
 fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
@@ -720,6 +721,11 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "flomtc_false") || chk_tok_is(src, t, k, "flomtc_true") {
         return 9;
     }
+    // 第十一维（`docs/345`）：`class_off` / `class_on`。类语法降级是核心维度。
+    // 插在 flomtc 之后，所以**槽位仍是 10、哨兵挪到 12**。
+    if chk_tok_is(src, t, k, "class_off") || chk_tok_is(src, t, k, "class_on") {
+        return 11;
+    }
     // 维度之后的**第二位置**（`docs/262` §10.7）：`<维>_<槽>_<值>`。
     // 10 = 槽位 —— 它有自己的"每格一次"，**不**算进 `lspe` 那一维的重复计数。
     if chk_tok_is(src, t, k, "lspe_aicheck_true")
@@ -730,7 +736,7 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     }
     // ⚠ **这一格是"不是核心词"的哨兵**。加一维就要把它往后挪一格 ——
     // `loment_rule_parity.py:70-72` 记着上一次忘挪（5→6）的症状。
-    return 11;
+    return 12;
 }
 
 /// `lgc` 的时长单位（`docs/309`）：`ns` / `us` / `ms` / `s` / `m`。与参考实现
@@ -910,6 +916,13 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
         return 1;
     }
     if chk_tok_is(src, t, k, "flomtc_true") {
+        return 2;
+    }
+    // 第十一维（`docs/345`）：`class_off` / `class_on`。
+    if chk_tok_is(src, t, k, "class_off") {
+        return 1;
+    }
+    if chk_tok_is(src, t, k, "class_on") {
         return 2;
     }
     return 0;
@@ -1408,26 +1421,31 @@ fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
     let j: u32 = lb + 1;
     let c: u32 = 0;
     while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
-        if chk_tab_has(src, t, tab, c, j) == 1 {
-            // 参考实现把"字段重复"报在**声明那一行**上（`s.line`），不是重复字段那一行。
-            o = sym_pub(src, t, p, o, 130, name_tok);
-        }
-        store32(tab, c * 4, j);
-        c = c + 1;
-        j = j + 1;
-        if chk_tok_is(src, t, j, ":") {
+        // 类体里可以夹方法；它们不是字段（C4a：非虚方法由 `chk_class_methods` 登记）。
+        if chk_tok_is(src, t, j, "fn") {
+            j = chk_skip_body(src, t, j);
+        } else {
+            if chk_tab_has(src, t, tab, c, j) == 1 {
+                // 参考实现把"字段重复"报在**声明那一行**上（`s.line`），不是重复字段那一行。
+                o = sym_pub(src, t, p, o, 130, name_tok);
+            }
+            store32(tab, c * 4, j);
+            c = c + 1;
             j = j + 1;
-            // 字段类型错误也落在声明行（参考实现的 `未知类型 …（结构体 S.f 的字段类型）`
-            // 用的是 `s.line`）。`check_type` 按类型 token 报，这里把它这一段的 token
-            // 统一改回声明名 —— 码不变，只有落点对齐。
-            let before: u32 = o;
-            let r: u64 = check_type(src, t, s, n, j, p, o, 182);        // 结构体字段
-            o = (r % 4294967296) as u32;
-            j = chk_skip_type(src, t, j);
-            let fix: u32 = before;
-            while fix < o {
-                store32(p, fix + 4, name_tok);
-                fix = fix + 8;
+            if chk_tok_is(src, t, j, ":") {
+                j = j + 1;
+                // 字段类型错误也落在声明行（参考实现的 `未知类型 …（结构体 S.f 的字段类型）`
+                // 用的是 `s.line`）。`check_type` 按类型 token 报，这里把它这一段的 token
+                // 统一改回声明名 —— 码不变，只有落点对齐。
+                let before: u32 = o;
+                let r: u64 = check_type(src, t, s, n, j, p, o, 182);        // 结构体字段
+                o = (r % 4294967296) as u32;
+                j = chk_skip_type(src, t, j);
+                let fix: u32 = before;
+                while fix < o {
+                    store32(p, fix + 4, name_tok);
+                    fix = fix + 8;
+                }
             }
         }
         if chk_tok_is(src, t, j, ",") {
@@ -1438,6 +1456,56 @@ fn chk_struct_body(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
         o = sym_pub(src, t, p, o, 120, name_tok);
     }
     return ((j + 1) as u64) * 4294967296 + (o as u64);
+}
+
+/// 登记类体里的方法（C4a：非虚、静态派发）。身份与 impl 方法同一张 `K_METHOD` 表：
+/// 接收者就是类名 token 的类型编码，名字是方法名 token。
+fn chk_class_methods(src: ptr, t: ptr, s: ptr, n: u32, lb: u32, name_tok: u32,
+                     tyt: ptr) -> u32 {
+    let rty: u32 = chk_ty_of_tok(src, t, s, n, name_tok);
+    let j: u32 = lb + 1;
+    while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
+        if chk_tok_is(src, t, j, "fn") {
+            let mlp: u32 = chk_find_paren(src, t, j + 2);
+            let margc: u32 = chk_count_args(src, t, mlp);
+            let mbrace: u32 = chk_find_brace(src, t, j + 2);
+            let mj: u32 = j + 2;
+            let mrt: u32 = 0;
+            while mj < mbrace && chk_tok_kind(t, mj) != 4 {
+                if chk_tok_is(src, t, mj, "-") {
+                    mrt = mj + 2;
+                }
+                mj = mj + 1;
+            }
+            let mrc: u32 = 0;
+            if mrt != 0 {
+                mrc = chk_ty_range(src, t, s, n, tyt, mrt,
+                                   chk_skip_type(src, t, mrt));
+            }
+            // `self` / `&self` / `&mut self` 是接收者，不计入调用点实参。
+            let has_self: u32 = 0;
+            if chk_tok_is(src, t, mlp + 1, "self") {
+                has_self = 1;
+            } else if chk_tok_is(src, t, mlp + 1, "&") {
+                if chk_tok_is(src, t, mlp + 2, "mut") {
+                    if chk_tok_is(src, t, mlp + 3, "self") {
+                        has_self = 1;
+                    }
+                } else if chk_tok_is(src, t, mlp + 2, "self") {
+                    has_self = 1;
+                }
+            }
+            let mac: u32 = margc;
+            if has_self == 1 && margc > 0 {
+                mac = margc - 1;
+            }
+            n = chk_decl_method(src, t, s, n, j + 1, mac, mrc, rty);
+            j = chk_skip_body(src, t, mbrace);
+        } else {
+            j = j + 1;
+        }
+    }
+    return n;
 }
 
 /// `enum E { ... }` 的变体: 重名 -> E-DUP; 载荷类型未声明 -> E-TYPE; 没有变体 -> E-DEF。
@@ -2107,7 +2175,7 @@ fn scan_params(src: ptr, t: ptr, s: ptr, n: u32, i: u32, p: ptr, o: u32, tab: pt
             if chk_tok_is(src, t, i, ",") {
                 i = i + 1;
             }
-        } else if chk_tok_is(src, t, i, "self") {
+        } else if chk_tok_is(src, t, i, "self") && !chk_tok_is(src, t, i + 1, ":") {
             i = i + 1;
             if chk_tok_is(src, t, i, ",") {
                 i = i + 1;
@@ -3481,12 +3549,12 @@ fn chk_tex_atom_dot(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             return 0;
         }
         let brc: u32 = load32(syms, s0 * 20 + 16);
-        if chk_sfield_exists(src, t, brc, ftok) == 0 {
+        if chk_sfield_slot_exists(src, t, syms, n, s0, ftok) == 0 {
             chk_pub(src, t, oc, p, 138, ftok);       // 结构体 X 无字段 f
             return 0;
         }
         // 字段在, 但类型可能未知 (泛型形参字段) -> 返回 0 而不是报错
-        return chk_sfield_ty(src, t, syms, n, tyt, brc, ftok);
+        return chk_sfield_slot_ty(src, t, syms, n, tyt, s0, ftok);
     }
     return 0;
 }
@@ -3789,7 +3857,7 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         // 但它在每轮末尾按当前 token 重算 —— 轮到逗号那轮会把标志置 1、再下一轮(真正的
         // 字段名)又被置 0, 于是第二个字段永远查不到 (structlit-dup-field 少报就是这么来的)。
         if chk_sfield_head(src, t, j, lo, load32(oc, 8)) == 1 {
-            if chk_sfield_exists(src, t, brc, j) == 0 {
+            if chk_sfield_slot_exists(src, t, syms, n, s0, j) == 0 {
                 chk_pub(src, t, oc, p, 138, j);      // 结构体 X 无字段 f
             } else {
                 // 重复初始化: 前面出现过同名字段（显式或简写都算）。
@@ -3840,7 +3908,10 @@ fn chk_tex_atom_struct(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let fj: u32 = brc + 1;
     let fnames: u32 = 1;
     while chk_tok_kind(t, fj) != 4 && !chk_tok_is(src, t, fj, "}") {
-        if fnames == 1 && chk_tok_kind(t, fj) == 0 {
+        if chk_tok_is(src, t, fj, "fn") {
+            fj = chk_skip_body(src, t, fj) - 1;
+            fnames = 1;
+        } else if fnames == 1 && chk_tok_kind(t, fj) == 0 {
             let hit: u32 = 0;
             let kj: u32 = lo + 2;
             while kj < hi && chk_tok_kind(t, kj) != 4 {
@@ -3938,26 +4009,69 @@ fn chk_sfield_exists(src: ptr, t: ptr, brc: u32, fname: u32) -> u32 {
     let at_name: u32 = 1;
     let d: u32 = 0;
     while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
-        if at_name == 1 && chk_tok_kind(t, j) == 0 {
-            if same(src, t, j, fname) {
-                return 1;
-            }
-            at_name = 0;
-        }
-        if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
-                || chk_tok_is(src, t, j, "(") {
-            d = d + 1;
-        }
-        if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
-                || chk_tok_is(src, t, j, ")") {
-            d = d - 1;
-        }
-        if d == 0 && chk_tok_is(src, t, j, ",") {
+        if chk_tok_is(src, t, j, "fn") {
+            j = chk_skip_body(src, t, j);
             at_name = 1;
+        } else {
+            if at_name == 1 && chk_tok_kind(t, j) == 0 {
+                if same(src, t, j, fname) {
+                    return 1;
+                }
+                at_name = 0;
+            }
+            if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
+                    || chk_tok_is(src, t, j, "(") {
+                d = d + 1;
+            }
+            if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
+                    || chk_tok_is(src, t, j, ")") {
+                d = d - 1;
+            }
+            if d == 0 && chk_tok_is(src, t, j, ",") {
+                at_name = 1;
+            }
+            j = j + 1;
         }
-        j = j + 1;
     }
     return 0;
+}
+
+/// 父类在符号表里的槽位 (0 = 没有/不是类)。`class C extends P` 的 `extends` 就在
+/// 名字与 `{` 之间；不用额外的元数据，扫这一小段 token 就够。
+fn chk_class_parent_slot(src: ptr, t: ptr, s: ptr, n: u32, slot: u32) -> u32 {
+    let nm: u32 = sym_get(t, s, n, slot);
+    // `class C extends P`：`extends` 永远紧跟名字。**只看一格**，不扫类体 ——
+    // 这是每次方法查找都会走的路，扫到 `{` 会把它变成 O(字段数)。
+    if chk_tok_kind(t, nm + 1) != 0 || !chk_tok_is(src, t, nm + 1, "extends") {
+        return 0;
+    }
+    return chk_lookup_slot(src, t, s, n, nm + 2);
+}
+
+/// 字段查找沿继承链向上（C4a 的父类字段前缀）。
+fn chk_sfield_slot_exists(src: ptr, t: ptr, s: ptr, n: u32, slot: u32, fname: u32) -> u32 {
+    let brc: u32 = load32(s, slot * 20 + 16);
+    if chk_sfield_exists(src, t, brc, fname) == 1 {
+        return 1;
+    }
+    let ps: u32 = chk_class_parent_slot(src, t, s, n, slot);
+    if ps == 0 {
+        return 0;
+    }
+    return chk_sfield_slot_exists(src, t, s, n, ps - 1, fname);
+}
+
+fn chk_sfield_slot_ty(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, slot: u32, fname: u32) -> u32 {
+    let brc: u32 = load32(s, slot * 20 + 16);
+    let v: u32 = chk_sfield_ty(src, t, s, n, tyt, brc, fname);
+    if v != 0 || chk_sfield_exists(src, t, brc, fname) == 1 {
+        return v;
+    }
+    let ps: u32 = chk_class_parent_slot(src, t, s, n, slot);
+    if ps == 0 {
+        return 0;
+    }
+    return chk_sfield_slot_ty(src, t, s, n, tyt, ps - 1, fname);
 }
 
 /// 结构体字段类型 (0 = 未知或没有这个字段); brc = 声明体的 '{'。
@@ -3969,24 +4083,30 @@ fn chk_sfield_ty(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, brc: u32, fname: u3
     let at_name: u32 = 1;
     let d: u32 = 0;
     while chk_tok_kind(t, j) != 4 && !chk_tok_is(src, t, j, "}") {
-        if at_name == 1 && chk_tok_kind(t, j) == 0 {
-            if same(src, t, j, fname) {
-                if chk_tok_is(src, t, j + 1, ":") {
-                    let tl: u32 = j + 2;
-                    let te: u32 = chk_skip_type(src, t, tl);
-                    return chk_ty_range(src, t, s, n, tyt, tl, te);
+        if chk_tok_is(src, t, j, "fn") {
+            j = chk_skip_body(src, t, j);
+            at_name = 1;
+        } else {
+            if at_name == 1 && chk_tok_kind(t, j) == 0 {
+                if same(src, t, j, fname) {
+                    if chk_tok_is(src, t, j + 1, ":") {
+                        let tl: u32 = j + 2;
+                        let te: u32 = chk_skip_type(src, t, tl);
+                        return chk_ty_range(src, t, s, n, tyt, tl, te);
+                    }
                 }
+                at_name = 0;
             }
-            at_name = 0;
+            if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
+                    || chk_tok_is(src, t, j, "(") {
+                d = d + 1;
+            }
+            if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
+                    || chk_tok_is(src, t, j, ")") {
+                d = d - 1;
+            }
         }
-        if chk_tok_is(src, t, j, "<") || chk_tok_is(src, t, j, "[")
-                || chk_tok_is(src, t, j, "(") {
-            d = d + 1;
-        }
-        if chk_tok_is(src, t, j, ">") || chk_tok_is(src, t, j, "]")
-                || chk_tok_is(src, t, j, ")") {
-            d = d - 1;
-        }
+
         if d == 0 && chk_tok_is(src, t, j, ",") {
             at_name = 1;
         }
@@ -4072,6 +4192,15 @@ fn chk_lookup_method(src: ptr, t: ptr, s: ptr, n: u32, recv: u32, name_tok: u32)
             return i + 1;
         }
         i = i + 1;
+    }
+    // C4a：子类没写的方法沿父类链找（参考实现按子类名复制了方法体）。
+    if chk_ty_kind(recv) == TY_K_NAMED {
+        let sl: u32 = recv % (1 << TY_KIND_SHIFT);
+        let ps: u32 = chk_class_parent_slot(src, t, s, n, sl);
+        if ps != 0 {
+            return chk_lookup_method(src, t, s, n,
+                                     (TY_K_NAMED << TY_KIND_SHIFT) + (ps - 1), name_tok);
+        }
     }
     return 0;
 }
@@ -4296,7 +4425,7 @@ fn chk_env_params(src: ptr, t: ptr, s: ptr, n: u32, env: ptr, envc: u32,
             if chk_tok_is(src, t, i, ",") {
                 i = i + 1;
             }
-        } else if chk_tok_is(src, t, i, "self") {
+        } else if chk_tok_is(src, t, i, "self") && !chk_tok_is(src, t, i + 1, ":") {
             i = i + 1;
             if chk_tok_is(src, t, i, ",") {
                 i = i + 1;
@@ -6981,6 +7110,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let nch_fp: u32 = 0;
     let ln_fp: u32 = 0;
     let v_fp: u32 = 0;         // 0 = 没写；1 = no_fp, 2 = fp
+    let nch_class: u32 = 0;
+    let ln_class: u32 = 0;
+    let v_class: u32 = 0;      // 0 = 没写；1 = class_off, 2 = class_on
     // 名表清理: 逐声明复用同一块暂存, 每次用都要"清零条数" —— 但 chk_* 系列用
     // 显式计数 (c) 而不是查找长度, 所以只需不读旧值即可, 无需 memclr。
     // ---- 第零遍: 先把**类型名**收齐再查签名。
@@ -6988,7 +7120,8 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     // `Option`/`Result` append 到单元**末尾**, 而 `-> Result<u32, u32>` 在文件开头,
     // 单趟扫描会报一串假 E-TYPE。
     while chk_tok_kind(t, i) != 4 {
-        if chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum") {
+        if chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum")
+                || chk_tok_is(src, t, i, "class") {
             let k0: u32 = K_STRUCT;
             if chk_tok_is(src, t, i, "enum") {
                 k0 = K_ENUM;
@@ -7044,6 +7177,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // 表现是一堆莫名其妙的 E002 (把 `let` 的变量名当成类型)。见 docs/150 的账。
             store32(tyt, 0, 0);
             i = j;
+        } else if chk_tok_is(src, t, i, "class") {
+            // 类名已在第零遍登记成 K_STRUCT；这里解析字段并登记非虚方法。
+            let cname: u32 = i + 1;
+            let clb: u32 = chk_find_brace(src, t, cname);
+            let crb: u64 = chk_struct_body(src, t, syms, n, clb, cname, scr, out, o);
+            o = (crb % 4294967296) as u32;
+            i = (crb / 4294967296) as u32;
+            n = chk_class_methods(src, t, syms, n, clb, cname, tyt);
         } else if chk_tok_is(src, t, i, "struct") || chk_tok_is(src, t, i, "enum") {
             // 名字已在第零遍登记过 (这里不能再 declare, 否则自己跟自己报 E-DUP)。
             // 声明体这一遍**真正解析** (字段/变体重名与类型、空类型), 不再整块跳过。
@@ -7235,6 +7376,14 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     if nch_ai > 1 {
                         o = sym_pub(src, t, out, o, 159, i);
                     }
+                }
+            } else if dim == 11 {
+                // 第十一维（`docs/345`）：`class`。只有重复要判。
+                nch_class = nch_class + 1;
+                v_class = chk_core_val(src, t, i + 1);
+                ln_class = i;
+                if nch_class > 1 {
+                    o = sym_pub(src, t, out, o, 159, i);
                 }
             } else {
                 // 不是核心模式的取值 —— 与改之前那条同形
@@ -7467,6 +7616,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
             // （注释放进条件中间会让两个格式化器对"续行怎么并"给出不同答案。）
             if i > 0 && chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i + 1, "(")
                     && chk_is_kw(src, t, i) == 0
+                    && !chk_tok_is(src, t, i - 1, "fn")
                     && !chk_tok_is(src, t, i - 1, ":")
                     && !chk_tok_is(src, t, i - 1, ".")
                     && !chk_tok_is(src, t, i - 1, "guard")

@@ -1,0 +1,18 @@
+module ir_class_parent
+
+choose class_on
+
+class Base {
+    x: u32,
+}
+
+class Child extends Base {
+    y: u32,
+}
+
+fn _start() -> u32 {
+    let c: Child = Child { x: 3, y: 4 };
+    let v: u32 = c.x + c.y;
+    syscall4(60, v as u64, 0, 0);
+    return 0;
+}

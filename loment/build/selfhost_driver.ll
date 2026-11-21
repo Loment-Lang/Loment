@@ -120271,9 +120271,7 @@ entry:
 ; chk_arena_bytes -> u32
 define i32 @chk_arena_bytes() {
 entry:
-  %t1 = mul i32 8192, 4
-  %t2 = add i32 142688, %t1
-  ret i32 %t2
+  ret i32 175456
 }
 ; chk_err_bytes -> u32
 define i32 @chk_err_bytes() {

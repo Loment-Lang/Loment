@@ -129,6 +129,92 @@ class LNotaryTest(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertTrue(any(e.code == "LNT-VER" for e in v.errors), v.errors)
 
+    # ---- V1 · 法域旁挂与封印（docs/361 §6） --------------------------------
+
+    def _bytes(self, name: str) -> bytes:
+        return (self.tmp / f"{name}.potato.json").read_bytes()
+
+    def _derive(self, doc: dict, name: str) -> dict:
+        from lnotary import lawspace
+
+        return lawspace.derive_lawspace(doc, self._bytes(name))
+
+    # I · 派生是确定的
+    def test_lawspace_seal_is_deterministic(self) -> None:
+        a = self._derive(self.plain, "plain")
+        b = self._derive(self.plain, "plain")
+        self.assertEqual(a, b)
+        self.assertEqual(a["seal"], b["seal"])
+
+    # J · 自产旁挂被接受
+    def test_lawspace_accepts_its_own_artifact(self) -> None:
+        from lnotary import lawspace
+
+        side = self._derive(self.plain, "plain")
+        self.assertEqual(lawspace.verify_lawspace(
+            self.plain, side, self._bytes("plain")), [])
+
+    # K · 改一条规律
+    def test_tampered_law_is_rejected(self) -> None:
+        from lnotary import lawspace
+
+        side = self._derive(self.plain, "plain")
+        side["laws"][0]["declared"] = "runtime"
+        errs = lawspace.verify_lawspace(self.plain, side, self._bytes("plain"))
+        self.assertTrue(any(e.code == "LNT-LAW" for e in errs), errs)
+
+    # L · 改封印
+    def test_tampered_seal_is_rejected(self) -> None:
+        from lnotary import lawspace
+
+        side = self._derive(self.plain, "plain")
+        side["seal"] = "0" * 64
+        errs = lawspace.verify_lawspace(self.plain, side, self._bytes("plain"))
+        self.assertTrue(any(e.code == "LNT-SEAL" for e in errs), errs)
+
+    # M · 旁挂绑的是产物字节
+    def test_artifact_bytes_bind_the_seal(self) -> None:
+        from lnotary import lawspace
+
+        side = self._derive(self.plain, "plain")
+        errs = lawspace.verify_lawspace(self.plain, side, b"not the artifact")
+        self.assertTrue(any(e.code == "LNT-ART" for e in errs), errs)
+
+    # N · 维度表与产物打架
+    def test_dims_mismatch_is_rejected(self) -> None:
+        from lnotary import lawspace
+
+        side = self._derive(self.plain, "plain")
+        side["dims"]["runtime"] = "runtime"
+        errs = lawspace.verify_lawspace(self.plain, side, self._bytes("plain"))
+        self.assertTrue(any(e.code == "LNT-DIMS" for e in errs), errs)
+
+    # O · 声明了公证就必须给旁挂
+    def test_claimed_artifact_requires_a_seal(self) -> None:
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lnotary", "verify", str(self.tmp / "claimed.potato.json")],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("LNT-CLAIM", r.stderr)
+
+    # P · CLI 的 seal -> verify 往返
+    def test_cli_seal_and_verify_round_trip(self) -> None:
+        out = self.tmp / "plain.lawspace.json"
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lnotary", "seal", str(self.tmp / "plain.potato.json"),
+             "--out", str(out)],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        r2 = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "loment.py"),
+             "lnotary", "verify", str(self.tmp / "plain.potato.json"),
+             "--seal", str(out)],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+        self.assertIn("lawspace", r2.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

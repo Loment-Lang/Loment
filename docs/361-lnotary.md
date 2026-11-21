@@ -1,6 +1,6 @@
 # 361 · LNotary：产物公证人
 
-> 状态: **V0 已落地**（2026-11-20，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
+> 状态: **V0–V1 已落地**（2026-11-20，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
 > `docs/357` §4.2 · `docs/262`（LSPE）· `docs/147`（Potato 台阶）· `docs/353`（Dissigsegv）
 > 基准: `origin/main` `a460b90e` + 本分支
 > 一句话: **第三方视角的产物审计器：只读 Potato，零工具链 import，
@@ -45,6 +45,9 @@ LNotary 的位置因此是**公证人**：
 
 **它不核对**：`proven` 站点是否真的被证明、`lspe.sites` 数得对不对、IR 里有没有漏站点。
 那需要看到 IR 或源码，属于下一档（§6）。V0 的价值是：**产物自己跟自己打架时，第三方不读源码就能红。**
+
+V1 加一层**旁挂**：`lawspace`。它把"产物声称了什么、公证人核了什么"写成可哈希的对象，
+不改变上面的检查。形状见 §5.1。
 
 ---
 
@@ -96,19 +99,43 @@ lomentc · potato · potato_from · lspe
 ## 4. CLI
 
 ```
-loment lnotary verify <potato.json> [--json]
+loment lnotary verify <potato.json> [--seal <lawspace.json>] [--json]
+loment lnotary seal   <potato.json> [--out <lawspace.json>]
 ```
 
-- 接受 ⇒ 退出码 0，打印 `[LNOTARY] ok: … (potato v23)`；
+- 接受 ⇒ 退出码 0，打印 `[LNOTARY] ok: … (potato v23[ + lawspace])`；
 - 拒绝 ⇒ 退出码 1，逐条打印 `LNT-*` 与可读理由；
 - 读不了 / 不是 JSON ⇒ 退出码 2。
+- 产物声明了 `lnotary_true` 却没给 `--seal` ⇒ `LNT-CLAIM`。
+- `seal` 先跑 V0；不通过就不出旁挂。旁挂是内容寻址的，同一份产物派生两次逐字节相同。
 
 与 `loment lspe verify <artifact> <sidecar>` 并列。后者 import `lspe`；
 前者**不 import**。两条命令放在一起，就是"被审计"与"审计"的分界。
 
+### 4.1 旁挂的形状
+
+```json
+{
+  "schema": 1,
+  "potato": "v23",
+  "artifact": { "sha256": "…", "bytes": 3157 },
+  "dims": { "runtime": "no_runtime", "lms": "lms_full", "…": "…" },
+  "dims_hash": "…",
+  "laws": [
+    { "id": "no_runtime", "declared": "no_runtime",
+      "checked": true, "evidence": ["runtime", "lms_budgets"] }
+  ],
+  "seal": "…"
+}
+```
+
+`seal` 是对**除它自己以外**全部字段的规范序列化取 SHA-256；`dims_hash` 同理。
+`laws` 只收录产物**真的声称**的三条之一（`no_runtime` / `lms_full` / `lifetime_auto`），
+每条带 `checked` 与它用到的字段。`artifact.sha256` 把旁挂绑到产物字节，改一个字节就红。
+
 ---
 
-## 5. 判据（八条，`tools/lnotary_test.py`）
+## 5. 判据（十六条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -120,30 +147,39 @@ loment lnotary verify <potato.json> [--json]
 | F | 少一个系统 ⇒ `LNT-SYS` | 同上 |
 | G | 零 import（子进程查 `sys.modules`） | 同上 |
 | H | 版本 `v999` ⇒ `LNT-VER` | 同上 |
+| I | 旁挂派生确定（同产物两次 ⇒ 逐字节同） | 旁挂不存在 ⇒ 红 |
+| J | 自产旁挂被接受 | 同上 |
+| K | 改一条 law ⇒ `LNT-LAW` | 同上 |
+| L | 改 `seal` ⇒ `LNT-SEAL` | 同上 |
+| M | 换产物字节 ⇒ `LNT-ART` | 同上 |
+| N | 改 `dims` ⇒ `LNT-DIMS` | 同上 |
+| O | 声明 `lnotary_true` 而不给 `--seal` ⇒ `LNT-CLAIM` | 同上 |
+| P | CLI `seal` → `verify --seal` 往返 | 同上 |
 
-八条在本机全绿（`python tools/lnotary_test.py`，8/8，约 1.4s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 8`。
+十六条在本机全绿（`python tools/lnotary_test.py`，16/16，约 2.7s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 16`。
 
 ---
 
-## 6. 下一档（还没做）
+## 6. 下一档
 
-| 档 | 加什么 | 依赖 |
-|---|---|---|
-| **V1** | `lawspace` 旁挂与**封印哈希**（`docs/358` §4.1） | `docs/357` W1 |
-| **V2** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 |
-| **V3** | `proven` 站点的规则引用必须可复查 | 规则表进产物 |
-| **V4** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 |
+| 档 | 加什么 | 依赖 | 状态 |
+|---|---|---|---|
+| **V1** | `lawspace` 旁挂与**封印哈希**（`docs/358` §4.1） | `docs/357` W1 | **已落地** |
+| **V2** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | 下一档 |
+| **V3** | `proven` 站点的规则引用必须可复查 | 规则表进产物 | 未开始 |
+| **V4** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 | 未开始 |
 
-V0 刻意停在这里：**先把"自洽"做成一条可跑的判据，再往"完备"走。**
+V1 刻意停在这里：**封印只绑产物与旁挂的字节，不假装证明了规律本身。**
 `docs/253` §8.1 的"拒，而不是退化"在公证人这里的读法是：
-**核不了的东西不进 V0，不拿"设计上考虑了"冒充已经核过。**
+**核不了的东西不进这一档，不拿"设计上考虑了"冒充已经核过。**
 
 ---
 
 ## 7. 我不主张
 
-1. **不主张 V0 能证明产物安全。** 它只证明产物内部没有假账。
+1. **不主张 V0/V1 能证明产物安全。** 它只证明产物内部没有假账；
+   封印证明"这份旁挂绑的是这份产物"，不证明规律本身成立。
 2. **不主张零 import 等于零缺陷。** 它证明没有共享代码路径；共享的**规格理解**
    仍然可能两边一起错（`docs/349` 的三方判据是那只补丁）。
 3. **不主张 `lnotary_true` 已经升格为核心槽。** 它今天是用户开关，要两行定义。

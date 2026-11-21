@@ -547,29 +547,80 @@ def cmd_lnotary_verify(a) -> int:
     所以它可以核对 LSPE 自己写下的账而不共享那条代码路径。
     """
     import json
+    import lnotary.lawspace as _lawspace
     import lnotary.verify as _lnotary
     try:
-        doc = json.loads(Path(a.artifact).read_text(encoding="utf-8"))
+        raw = Path(a.artifact).read_bytes()
+        doc = json.loads(raw.decode("utf-8"))
     except OSError as e:
         print(f"[ERR] 读不了：{e}", file=sys.stderr)
         return 2
-    except json.JSONDecodeError as e:
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         print(f"[ERR] 不是 JSON：{e}", file=sys.stderr)
         return 2
     v = _lnotary.verify_potato(doc)
+    errs = list(v.errors)
+    side = None
+    if getattr(a, "seal", None):
+        try:
+            side = json.loads(Path(a.seal).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了旁挂：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 旁挂不是 JSON：{e}", file=sys.stderr)
+            return 2
+        errs += _lawspace.verify_lawspace(doc, side, raw)
+    elif _lnotary.CLAIM_SWITCH in v.claimed_switches:
+        errs.append(_lawspace.Error(
+            "LNT-CLAIM", f"产物声明了 {_lnotary.CLAIM_SWITCH}，但没有给 --seal"))
     if getattr(a, "json", False):
         print(json.dumps({
-            "ok": v.ok,
+            "ok": not errs,
             "version": v.version,
             "claimed_switches": sorted(v.claimed_switches),
-            "errors": [{"code": e.code, "message": e.message} for e in v.errors],
+            "lawspace": bool(side),
+            "errors": [{"code": e.code, "message": e.message} for e in errs],
         }, ensure_ascii=False))
-    elif v.ok:
-        print(f"[LNOTARY] ok: {a.artifact} (potato v{v.version})")
+    elif not errs:
+        extra = " + lawspace" if side else ""
+        print(f"[LNOTARY] ok: {a.artifact} (potato v{v.version}{extra})")
     else:
+        for e in errs:
+            print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
+    return 0 if not errs else 1
+
+
+def cmd_lnotary_seal(a) -> int:
+    """`loment lnotary seal <potato.json> [--out PATH]` —— 派生法域旁挂（`docs/361` V1）。
+
+    先跑 V0；不通过就不出旁挂。`seal` 是内容寻址的，同一份产物派生两次逐字节相同。
+    """
+    import json
+    import lnotary.lawspace as _lawspace
+    import lnotary.verify as _lnotary
+    try:
+        raw = Path(a.artifact).read_bytes()
+        doc = json.loads(raw.decode("utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了：{e}", file=sys.stderr)
+        return 2
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        print(f"[ERR] 不是 JSON：{e}", file=sys.stderr)
+        return 2
+    v = _lnotary.verify_potato(doc)
+    if not v.ok:
         for e in v.errors:
             print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
-    return 0 if v.ok else 1
+        return 1
+    side = _lawspace.derive_lawspace(doc, raw)
+    text = json.dumps(side, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if getattr(a, "out", None):
+        Path(a.out).write_text(text, encoding="utf-8")
+        print(f"[LNOTARY] sealed -> {a.out} (seal {side['seal'][:16]}…)")
+    else:
+        print(text, end="")
+    return 0
 
 
 def _ai_ingest(path_or_obj, sites, unit):
@@ -912,8 +963,14 @@ def main(argv: list[str] | None = None) -> int:
     lnsub = ln.add_subparsers(dest="lnotary_cmd", required=True)
     lnv = lnsub.add_parser("verify")
     lnv.add_argument("artifact")
+    lnv.add_argument("--seal", default=None, metavar="PATH",
+                     help="法域旁挂（不给则只跑 V0；产物声明 lnotary_true 时必须给）")
     lnv.add_argument("--json", action="store_true")
     lnv.set_defaults(fn=cmd_lnotary_verify)
+    lns = lnsub.add_parser("seal")
+    lns.add_argument("artifact")
+    lns.add_argument("--out", default=None, metavar="PATH")
+    lns.set_defaults(fn=cmd_lnotary_seal)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

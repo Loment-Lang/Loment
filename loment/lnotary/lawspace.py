@@ -1,0 +1,158 @@
+"""LNotary · 法域封印（`docs/358` §4.1 / `docs/361` §6 的 V1）。
+
+旁挂的形状：`schema / potato / artifact / dims / dims_hash / laws / seal`。
+`seal` 是对**除它自己以外**全部字段的规范序列化取 SHA-256；`dims_hash` 是
+`dims` 的同一套哈希。两者都是内容寻址，所以同一份 Potato 派生两次逐字节相同。
+
+这一层只记录**产物声称了什么、公证人核了什么**。它不重新证明站点的合法性。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+from .verify import Error, LEVELS
+
+SCHEMA = 1
+
+#: 九个核心维。`lspe` 的取值住在 `lspe.state`，其余是顶层字段。
+DIMS = ("mode", "gc", "runtime", "port", "vm", "lms", "lifetime", "fp")
+
+#: 法域里收录的三条规律（V1）。每条只在产物**真的声称**它时出现。
+LAW_NO_RUNTIME = "no_runtime"
+LAW_LMS_FULL = "lms_full"
+LAW_LIFETIME_AUTO = "lifetime_auto"
+LAWS = (LAW_NO_RUNTIME, LAW_LMS_FULL, LAW_LIFETIME_AUTO)
+
+
+def canonical_bytes(obj: object) -> bytes:
+    """规范序列化：排序键、无空白、UTF-8。哈希只认这一种写法。"""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def dims_of(doc: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k in DIMS:
+        v = doc.get(k)
+        if isinstance(v, str):
+            out[k] = v
+    lspe = doc.get("lspe")
+    if isinstance(lspe, dict) and isinstance(lspe.get("state"), str):
+        out["lspe"] = lspe["state"]
+    return out
+
+
+def _laws_of(doc: dict) -> list[dict]:
+    laws: list[dict] = []
+    if doc.get("runtime") == "no_runtime":
+        budgets = doc.get("lms_budgets")
+        ok = (not isinstance(budgets, dict)
+              or not any(budgets.get(k) == "state" for k in LEVELS))
+        laws.append({"id": LAW_NO_RUNTIME, "declared": "no_runtime",
+                     "checked": ok, "evidence": ["runtime", "lms_budgets"]})
+    if doc.get("lms") == "lms_full":
+        levels = doc.get("lms_levels")
+        ok = (not isinstance(levels, dict)
+              or all(levels.get(k) is True for k in LEVELS))
+        laws.append({"id": LAW_LMS_FULL, "declared": "lms_full",
+                     "checked": ok, "evidence": ["lms", "lms_levels"]})
+    if doc.get("lifetime") == "lifetime_auto":
+        laws.append({"id": LAW_LIFETIME_AUTO, "declared": "lifetime_auto",
+                     "checked": True, "evidence": ["lifetime"]})
+    return laws
+
+
+def derive_lawspace(doc: dict, artifact_bytes: bytes) -> dict:
+    """从一份**已通过 V0** 的 Potato 派生旁挂。调用方负责先跑 V0。
+
+    不修改 `doc`；输出不含时间戳、路径等不稳定字段。
+    """
+    dims = dims_of(doc)
+    body = {
+        "schema": SCHEMA,
+        "potato": doc.get("potato"),
+        "artifact": {"sha256": sha256_hex(artifact_bytes),
+                     "bytes": len(artifact_bytes)},
+        "dims": dims,
+        "dims_hash": sha256_hex(canonical_bytes(dims)),
+        "laws": _laws_of(doc),
+    }
+    body["seal"] = sha256_hex(canonical_bytes(body))
+    return body
+
+
+def _err(out: list[Error], code: str, message: str) -> None:
+    out.append(Error(code, message))
+
+
+def verify_lawspace(doc: dict, side: object,
+                    artifact_bytes: bytes | None = None) -> list[Error]:
+    """核对旁挂与产物。只读；返回错误列表（空 = 接受）。"""
+    out: list[Error] = []
+    if not isinstance(side, dict):
+        _err(out, "LNT-LS", f"旁挂必须是对象，得到 {type(side).__name__}")
+        return out
+    if side.get("schema") != SCHEMA:
+        _err(out, "LNT-LS", f"旁挂 schema 必须是 {SCHEMA}，得到 {side.get('schema')!r}")
+    if side.get("potato") != doc.get("potato"):
+        _err(out, "LNT-LS",
+             f"旁挂的 potato 是 {side.get('potato')!r}，产物是 {doc.get('potato')!r}")
+
+    art = side.get("artifact")
+    if not isinstance(art, dict):
+        _err(out, "LNT-ART", "旁挂缺少 artifact {sha256, bytes}")
+    else:
+        if artifact_bytes is not None:
+            want = sha256_hex(artifact_bytes)
+            if art.get("sha256") != want:
+                _err(out, "LNT-ART",
+                     f"artifact.sha256 是 {art.get('sha256')!r}，实际是 {want!r}")
+            if art.get("bytes") != len(artifact_bytes):
+                _err(out, "LNT-ART",
+                     f"artifact.bytes 是 {art.get('bytes')!r}，实际是 {len(artifact_bytes)}")
+        if not isinstance(art.get("sha256"), str) or not isinstance(art.get("bytes"), int):
+            _err(out, "LNT-ART", "artifact 必须同时有 sha256（字符串）与 bytes（整数）")
+
+    dims = side.get("dims")
+    want_dims = dims_of(doc)
+    if dims != want_dims:
+        _err(out, "LNT-DIMS", f"旁挂的 dims 是 {dims!r}，产物是 {want_dims!r}")
+    elif side.get("dims_hash") != sha256_hex(canonical_bytes(want_dims)):
+        _err(out, "LNT-DIMS", "旁挂的 dims_hash 与 dims 不一致")
+
+    laws = side.get("laws")
+    if not isinstance(laws, list):
+        _err(out, "LNT-LAW", "旁挂的 laws 必须是数组")
+    else:
+        seen: set[str] = set()
+        for law in laws:
+            if not isinstance(law, dict):
+                _err(out, "LNT-LAW", f"law 必须是对象，得到 {law!r}")
+                continue
+            lid = law.get("id")
+            if lid not in LAWS:
+                _err(out, "LNT-LAW", f"不认识的规律 {lid!r}（只有 {LAWS}）")
+                continue
+            if lid in seen:
+                _err(out, "LNT-LAW", f"规律 {lid!r} 出现了两次")
+            seen.add(lid)
+            want = {"no_runtime": "no_runtime", "lms_full": "lms_full",
+                    "lifetime_auto": "lifetime_auto"}[lid]
+            if law.get("declared") != want:
+                _err(out, "LNT-LAW",
+                     f"{lid} 的 declared 是 {law.get('declared')!r}，应为 {want!r}")
+            if law.get("checked") is not True:
+                _err(out, "LNT-LAW", f"{lid} 没有被公证人核过（checked != true）")
+
+    body = {k: v for k, v in side.items() if k != "seal"}
+    want_seal = sha256_hex(canonical_bytes(body))
+    if side.get("seal") != want_seal:
+        _err(out, "LNT-SEAL",
+             f"seal 是 {side.get('seal')!r}，重算是 {want_seal!r}")
+    return out

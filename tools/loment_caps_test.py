@@ -127,26 +127,18 @@ def test(fn):
 #: 2026-11-20（`docs/350` §12.6）：检查器加名字表哈希索引，多一个真上界
 #: `CHK_HASH_SLOTS`（越界由 `declare` 的容量判据在更早处拒）。条数 270 → **271**，
 #: 沉默数不变（这一处有话）。
-#:
-#: 2026-11-21（`docs/362`–`docs/365`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
-#: 续延栈进了口径 —— `MAX_OBJS` / `MAX_RET` / `MAX_FOBJ` / `CONT_REC` / `MAX_CONT` 五处。
-#: 与 main 的 `CHK_HASH_SLOTS` 合并后：条数 271 → **276**、沉默 178 → **179**
-#: 原生段错误 stage 2 又加了五条（`FAULT_*_MAX` 四条 + `FAULT_TEXT_RESERVE`），
-#: 五条都**有话**（越界点名退出），所以沉默数不变：276 → **281**。
-#: dismemory（`docs/368`）的自举侧又加三张定长表（`MAX_DB` / `MAX_DT` / `MAX_DR`），
-#: 三条都有 `fail(`（引擎的定长表，抬上限是链接期的活），条数 281 → **284**、沉默不变。
-#: （新增的那处沉默是归还窗口的**滚动**：满了丢最旧的一条，不是写穿，来路写在
-#: `EXPLAINED`）。
-#: `sw_tag`（`docs/364` §2.3）又加两处：`CAP_SLOTS`（每帧值能力的槽数，**下标由
-#: `MAX_DEPTH * MAX_VALS` 结构保证**）与 `SH_CAP`（影子表环形缓冲，满了**覆盖最旧**
-#: 是设计）；`SH_END` 是 arena 尺寸、有 `fail(`。条数 284 → **287**、沉默 179 → **181**。
-CAPACITY_SITES = 287
-SILENT_SITES = 181
+#: 2026-11-21（`docs/362`–`docs/368`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
+#: 续延栈、段错误详细化的五条、dismemory 的三张定长表、`sw_tag` 的两处（`CAP_SLOTS` /
+#: `SH_CAP`）先后进了口径；本侧从 271 走到 **287**、沉默 179 → **181**。
+#: 同日 main 的原生更新器 `update.lomt` 又加三处（`SCR_CAP` / `NAME_CAP` 两处沉默，
+#: `PAYLOAD_CAP` 有话）—— 合并后条数 **290**、沉默 **183**。
+CAPACITY_SITES = 290
+SILENT_SITES = 183
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
-LITERAL_SITES = 68
-LITERAL_SILENT = 67
+LITERAL_SITES = 69
+LITERAL_SILENT = 68
 ARRAY_SITES = 20
 ARRAY_SILENT = 19
 
@@ -243,6 +235,7 @@ SILENT_NAMES = frozenset((
     "M_CAP",
     "NAMEE",
     "NAMES_CAP",
+    "NAME_CAP",
     "NAME_MAX",
     "NMAX",
     "NODE",
@@ -274,6 +267,7 @@ SILENT_NAMES = frozenset((
     "Q_STRIDE",
     "ROWE",
     "SCALE",
+    "SCR_CAP",
     "SEG_TYPES",
     "SHOWN",
     "SHOW_MAX",
@@ -343,6 +337,7 @@ SILENT_LITERALS = {
     ("loment/tools/lomclicheck.lomt", "literal:400"): 1,
     ("loment/tools/lomrxcheck.lomt", "literal:4000"): 1,
     ("loment/tools/lomdoc.lomt", "literal:4000"): 1,
+    ("loment/tools/update.lomt", "literal:64"): 1,
     ("loment/tools/lomelf.lomt", "literal:16"): 2,
     ("loment/tools/lomelf.lomt", "literal:8"): 2,
     ("loment/tools/lomenterr.lomt", "literal:1024"): 1,

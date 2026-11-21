@@ -448,6 +448,9 @@ tools/loment_projection_test.py
 tools/loment_hotline_test.py
 tools/loment_hotart.py
 tools/loment_hotart_test.py
+tools/loment_hotpack.py
+tools/loment_hotpack_test.py
+loment/hotswap/release-key.ed25519
 tools/loment_hotstress_test.py
 tools/loment_hotupdate.py
 tools/loment_demo_release.py

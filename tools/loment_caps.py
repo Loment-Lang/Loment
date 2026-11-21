@@ -379,6 +379,17 @@ EXPLAINED[("loment/tools/lomrxcheck.lomt", "PAT_CAP")] = (
     "单条正则模式的缓冲；分类规则里最长的一条 < 300 B，判据语料来自同一张表。")
 EXPLAINED[("loment/tools/lomrxcheck.lomt", "TXT_CAP")] = (
     "单条消息的缓冲；判据喂的是编译器诊断模板（上界几 KB）。")
+# 2026-11-21：热更新的原生更新器（`docs/368`）。三处都**不写穿**，只是筛子看不见
+# 失败路径的形状：`cstr` 到界返回 1，调用方各自点名（`open_ro` -> -1、`write_file` -> 1/2/3，
+# 最终 `fail("generation path too long")` 等）；`name_ok` 直接 `n >= NAME_CAP` 拒。
+EXPLAINED[("loment/tools/update.lomt", "SCR_CAP")] = (
+    "路径暂存 4096 B；`cstr` 到界返回 1，`open_ro`/`write_file` 把它翻成 -1 / 1，"
+    "调用方按返回码点名失败。加前缀再拼常量后缀，长度由 `hot_path` 的落点检查兜住。")
+EXPLAINED[("loment/tools/update.lomt", "NAME_CAP")] = (
+    "载荷索引里的文件名格 48 B；`name_ok` 先判 `n >= NAME_CAP` 拒收，打包器在写索引前"
+    "也拒（`loment_hotpack.pack_payload`）。到界即失败，不写穿。")
+EXPLAINED[("loment/tools/update.lomt", "literal:64")] = (
+    "SHA-512 的摘要长度（定长 64 B）：`hex_digest` 的入参永远是 `sha512` 写出的 64 B 缓冲。")
 EXPLAINED[("loment/tools/errdata.lomt", "FIX_STRIDE")] = (
     "修法表的平键步长（每码 8 格），**不是上界**；`loment_diag._validate` 钉着每码 <= 8 条。")
 

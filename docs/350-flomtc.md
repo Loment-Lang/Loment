@@ -362,3 +362,83 @@ Potato 940 → 380 ms（2.5×）**，产物三样（Potato / IR / ELF）SHA-256 
   `_start`（会与驱动单元重名，检查器点名拒）。入口由被导入的驱动单元提供。
 - **还没做**（如实记）：原生 front/check/IR/链接器（V1–V3）、缓存/并行（V4）、
   `flomtc audit` 的两种审计档（§6）、`flomtc` 自己的版本号与命令面。
+
+### 12.5 V1 第一刀：冷路径 2122 → 991 ms
+
+> 2026-11-19。口径修正：§12.3 的"best of 3"里 IR 命中了缓存（第二遍起 ~10 ms），
+> 那不是冷启动。`tools/flomtc.py` 现在默认 `LOMENT_CACHE=off`（`bench --cache` 才量热构建）。
+
+三处改动，全部只由 `choose flomtc_true` 开门：
+
+1. **`prepare` 的快路径**（`tools/lomentc.py`）：只有泛型**声明**、没有使用时，
+   不深拷贝整模块 —— 浅拷贝后过滤声明，再跑与泛型无关的三道解析
+   （`_resolve_solid_aliases` / `_resolve_guards` / `_resolve_domains`）。
+   `check()` 与 `emit_llvm()` 都走 `prepare`，所以 check 344 → 154 ms、IR 411 → 149 ms。
+2. **AST 事实一趟走完**（`emit_potato`）：`boundary` / `surfaces` / `net_ladder` /
+   `gc_control` / `gc_ladder` 原先各走一遍全树（每结点还要 `dataclasses.fields()`）；
+   快路径用 `_call_facts` 并成一遍，字段表按类型缓存。Potato 842 → 143 ms。
+3. **`loment_fstr.rewrite` 的恒等快路径**：没有 `f"` / `command` / `foruse` / `/*`
+   时这一趟只是原样抄一遍源码，直接返回（输出相同；块注释仍走全扫，因为未闭合
+   块注释由它在报错）。front 423 → 444 的噪声内，实测约省 80 ms。
+
+冷启动实测（5045 行 / 360 函数 / best of 3 / Windows 11 / `LOMENT_CACHE=off`）：
+
+| 阶段 | `flomtc_false` | `flomtc_true` |
+|---|---:|---:|
+| front | 423 ms | 444 ms |
+| check | 344 ms | **154 ms** |
+| potato | 842 ms | **143 ms** |
+| IR | 411 ms | **149 ms** |
+| lomelf | 102 ms | 101 ms |
+| **合计** | **2,122 ms** | **991 ms** |
+
+**2.14×**，首次进入 1000 ms 以内。产物（Potato / IR / ELF）SHA-256 相同。
+覆盖判据：`COVERED` 的 **33 份单文件示例**在两种档上的 Potato 与 IR 逐字节相同
+（`loment_potato_emit_test` 新增一条；开关写在 `module` 那一行，避免临时名随行号位移）。
+
+余下的大项：front 444、check 154、IR 149 —— 原生前端（§4.2）与并行（§4.5）仍是下一档。
+
+### 12.6 原生自举编译器的快路径：15.8 s → ~450 ms（默认档）
+
+> 2026-11-20。"理论上能不能更快"的实测回答：991 ms 是 Python 参考实现的成绩；随包那份
+> **原生** `flomtc`（自举实现）在同一语料上原本要 **15.8 s**，定位并修复后是 **~450 ms**
+> （34×）。用户 2026-11-20 追加要求"自举默认进入 2000 ms 内"—— 这几处改动因此落在
+> **默认档**，不再由 `choose flomtc_true` 开门。
+
+**定位**（临时标记点，测量后已撤）：`--print-command`（只词法）86 ms，
+`check_arena` 占其余全部。函数级拆分：`chk_moves` **11.9 s**、`chk_life` 0.45 s、
+`chk_body` 0.08 s。规模扫描 45/90/180/360 → 0.33/1.04/3.59/13.5 s（接近二次方）；
+每函数局部变量从 1 增到 8，时间再涨 12× —— 根因是名字表的线性查找。
+
+**改动**（自举实现，**默认档生效**；参考实现 Python 不受影响，它的快路径仍由
+`choose flomtc_true` 开门）：
+
+1. **名字表哈希索引**（`checker.lomt`）：`chk_lookup_slot` 改为 FNV-1a + 开放寻址，
+   8192 桶 × 4 字节接在类型表之后（arena 142,688 → 175,456 字节）。泛型形参
+   （`decl_tparams`）也进索引 —— 漏掉它 `Option<T>` 的载荷 `T` 就查不到。
+2. **`lms` 档缓存搬到整单元**：`chk_lms_c` 的缓存原先放在 `CHK_FR_ON` 并**每函数清零**，
+   于是每个函数都重扫一遍 token 流（`chk_lms_on`，O(n²)）。缓存改放类型表与
+   `moved` 表之间的空段（`CHK_LMS_ON = 1032`），整单元只算一次。
+3. **move / life 检查的证明性跳过**：用户段没有 `&` / `free` / `struct` / `enum` /
+   `str` / `[` / `fp` / **字符串字面量** / 大写开头的类型名时，这两趟证明不出任何
+   诊断（移动要求非 Copy 类型、悬垂要求 `&`、E029 要求 `free`）—— 整段跳过。
+   预置块（`pub enum Option` 起）不算用户段；触发项保守地多收。
+
+**实测**（5045 行 / 360 函数 / best of 3 / Windows 11 / `LOMENT_CACHE=off`）：
+
+| 实现 | `flomtc_false` | `flomtc_true` |
+|---|---:|---:|
+| 参考实现（进程内） | 2,122 ms | 991 ms |
+| 自举 stage1（随包形态） | **441 ms** | 453 ms |
+
+默认档 **441 ms**，进入 2000 ms 内（用户要求）；对这份语料，自举侧两种档已无差别。
+
+产物：`--emit-potato` 56,347 B，与参考实现逐字节相同（`COVERED` 的 33 份示例默认档
+33/33、开快路径 27/27；`loment_potato_emit_test` 12/12）。默认档的 33/33 是在
+**证明性跳过生效之后**重测的 —— 有聚合 / 借用 / 字符串的示例照旧走完整两趟。
+
+**离理论下限还有多远**（如实记）：30–100 ms 是单趟原生编译器的量级，今天还没到。
+原生侧剩余大项（标记点实测）：词法 ~76 ms、check 前缀 ~98 ms、函数体 80 ms、
+`potato_emit` ~165 ms。下一刀：`compute_safe` 与站点普查能否在"无 alloc / 无 guard"
+的单元里证明性跳过；词法器的逐字节热循环。`chk_moves` 的根因（线性表）已由哈希解决，
+但**有借用/聚合的程序**仍会走完整两趟 —— 那条路径没有变快。

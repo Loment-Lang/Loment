@@ -2691,7 +2691,7 @@ requires the flag. With the door open, the linker may supply `memcpy`, `memset`,
 
 ### 32.3 Size cap
 
-The linker's input and output text are capped at 4 MiB each. The IR plus the linked
+The linker's input and output text are capped at 8 MiB each. The IR plus the linked
 sections of every `--link` object must fit. Over the cap is an error, never a truncated
 build.
 
@@ -3078,7 +3078,7 @@ is the standard's summary and the record is the evidence — the discrepancy is 
 | # | Deviation | Effect |
 |---|---|---|
 | 7 | `aarch64` is emitted but not executed | "emits" is not "runs" |
-| 8 | The FFI input/output text is capped at 4 MiB on the self-hosted linker | a larger object is refused, not truncated |
+| 8 | The FFI input/output text is capped at 8 MiB on the self-hosted linker | a larger object is refused, not truncated |
 | 9 | One relocation form (`R_X86_64_PC64`) is sign-extended in the reference and zero-extended in the self-hosted linker | measured unreachable today; recorded so the equivalence claim has no unrecorded exception |
 | 10 | `choose vm` does not change the artifact | the interpreter is a separate tool |
 

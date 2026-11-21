@@ -3773,7 +3773,7 @@ def test_products_carry_a_section_table_that_names_code_and_data():
         assert byname[".text"]["addr"] == 0x400000, byname[".text"]
         assert byname[".text"]["off"] == 0x1000, byname[".text"]
         assert byname[".text"]["flags"] & 0x4, "`.text` 没有 SHF_EXECINSTR"
-        assert byname[".data"]["addr"] == 0x800000, byname[".data"]
+        assert byname[".data"]["addr"] == 0xC00000, byname[".data"]
 
         # 动态产物：binutils 的重定位视图（`readelf -r`）要有 `.rela.plt`。
         so = ffitest._system_so(td / "libz.so.1", ffitest.LIBZ_SO_CANDIDATES)

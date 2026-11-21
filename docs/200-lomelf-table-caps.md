@@ -292,6 +292,10 @@ loment_release: 260/486 一致
 
 **处置**：数据段改钉在 **`TEXT_VADDR + OUT_CAP`**（`0x800000`）—— 那个间隔**就是代码
 缓冲本身的容量**，不是拍出来的数；文本段的容量因此变成 `OUT_CAP`（4 MiB），比原来宽一倍。
+
+**2026-11-21 再抬一次**：自举侧编出来的 `lomenterr` / 正则驱动器那份代码到了
+4,228,966 B（CI 实测，`静态门禁 5/10`），4 MiB 窗口顶破了。`OUT_CAP` / `TEXT_CAP`
+抬到 **8 MiB**，数据段随之钉到 **`0xC00000`**（仍是 `TEXT_VADDR + OUT_CAP`）。
 两处实现同一个数（`loment/tools/lomelf.lomt` 的 `OUT_CAP` 与 `tools/lomelf.py` 的
 `TEXT_CAP` / `ELF_DATA_VADDR`），产物仍旧逐字节相同（`loment_elf_test` 的镜像那几格钉着）。
 

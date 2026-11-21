@@ -265,12 +265,12 @@ def _loment_elf(src: Path) -> bytes:
     return lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps))[0]
 
 
-def _clang_elf(src: Path, out: Path, cc: str) -> bytes | None:
+def _clang_elf(src: Path, out: Path, cc: str, flags: list[str]) -> bytes | None:
     ll = lomentc.emit_llvm(*_load(src), )
     ir = out.with_suffix(".ll")
     ir.write_text(ll, encoding="utf-8", newline="\n")
     r = subprocess.run(
-        [cc, "--target=x86_64-unknown-linux-gnu", "-O2", "-static",
+        [cc, "--target=x86_64-unknown-linux-gnu", *flags, "-static",
          "-nostdlib", "-ffreestanding", "-o", str(out), str(ir)],
         capture_output=True, text=True, shell=False)
     if r.returncode != 0:
@@ -372,9 +372,11 @@ def main(argv: list[str] | None = None) -> int:
             r_jobs.append((name, f"{name}.rs"))
             names += [f"{name}.elf.bin", f"{name}.c.bin", f"{name}.rs.bin"]
             if cc:
-                blob = _clang_elf(lom, td / f"{name}.clang.bin", cc)
-                if blob is not None:
-                    names.append(f"{name}.clang.bin")
+                for tag, flags in (("clang", ["-O2"]),
+                                   ("clang-native", ["-O3", "-march=native", "-mllvm", "-align-all-functions=6"])):
+                    blob = _clang_elf(lom, td / f"{name}.{tag}.bin", cc, flags)
+                    if blob is not None:
+                        names.append(f"{name}.{tag}.bin")
         _compile_in_wsl(td, c_jobs, "c")
         _compile_in_wsl(td, r_jobs, "rust")
         timed = _time_all(td, [n for n in names if (td / n).exists()], a.runs)
@@ -382,8 +384,9 @@ def main(argv: list[str] | None = None) -> int:
         if not a.keep:
             shutil.rmtree(td, ignore_errors=True)
 
-    cols = ["elf.bin", "clang.bin", "c.bin", "rs.bin"]
-    label = {"elf.bin": "loment", "clang.bin": "loment-opt", "c.bin": "c -O2",
+    cols = ["elf.bin", "clang.bin", "clang-native.bin", "c.bin", "rs.bin"]
+    label = {"elf.bin": "loment", "clang.bin": "opt-O2",
+             "clang-native.bin": "opt-native", "c.bin": "c -O2",
              "rs.bin": "rust -O"}
     rows = []
     bad = []
@@ -406,14 +409,15 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return 0
     print(f"Loment vs C vs Rust  (WSL, min of {a.runs}; ms; lower is better)")
-    head = f"{'kernel':8} {'loment':>9} {'loment-opt':>11} {'c -O2':>7} {'rust -O':>8} {'vs C':>6}"
+    head = (f"{'kernel':8} {'loment':>9} {'opt-O2':>8} {'opt-native':>10} "
+            f"{'c -O2':>7} {'rust -O':>8} {'vs C':>6}")
     print(head)
     for row in rows:
         c = row.get("c -O2")
         rel = f"{row.get('loment', 0) / c:.2f}x" if c else "-"
         print(f"{row['kernel']:8} {row.get('loment', 0):9.1f} "
-              f"{row.get('loment-opt', 0):11.1f} {c or 0:7.1f} "
-              f"{row.get('rust -O', 0):8.1f} {rel:>6}")
+              f"{row.get('opt-O2', 0):8.1f} {row.get('opt-native', 0):10.1f} "
+              f"{c or 0:7.1f} {row.get('rust -O', 0):8.1f} {rel:>6}")
     rcs = {row["kernel"]: row["rc"] for row in rows}
     print(f"checksums: {rcs}")
     if bad:

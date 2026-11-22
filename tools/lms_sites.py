@@ -14,10 +14,14 @@
   * **R3**：支配分支 —— GEP 在条件块的**唯一**真后继里，条件 `icmp ult 槽, N`、
     GEP 用同一个槽，且数组长度 == N；
 * `checked`：同函数里有 g1 形状的检查（`br i1 …, label %*lmsok, label %*lmsbad`），
-  且这条访存在 `*lmsok` 块里；
+  且这条访存在 `*lmsok` 块里。**坏块做了什么要读出来**（`edge`）：
+  * `fault`：`call @__loment_fault(i32 K)`（盘古档；`fault` 记 `F0K`）；
+  * `abort`：`call @__loment_abort()`（SIGILL）；
+  * `skip`：跳回 join —— 拒绝器让这一条访存不发生；
 * `unsafe`：其余。
 
-R4（生命周期 + `gc_ladder` 交叉）要另一份产物，尚未落（`docs/370` §7 第 8 条）。
+⚠ schema 2 起 `checked` 不再假定 `F01`：同一份 g1 形状在默认档是 `skip`、
+关掉拒绝器才是 `abort`。R4（生命周期 + `gc_ladder` 交叉）仍要另一份产物（`docs/370` §7）。
 
 用法: python tools/lms_sites.py IN.ll [--out PATH]
 """
@@ -34,7 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomelf  # noqa: E402
 
-SCHEMA = 1
+SCHEMA = 2
 INTERNAL = "__loment_"
 _BR_OK_BAD = re.compile(r"br i1 .*label %([-\w.$]+), label %([-\w.$]+)")
 _BR_COND = re.compile(r"br i1 (%[-\w.$]+), label %([-\w.$]+), label %([-\w.$]+)")
@@ -51,27 +55,48 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _checked_blocks(fn) -> set[str]:
-    out: set[str] = set()
+def _checked_blocks(fn) -> dict[str, str]:
+    """`lmsok 块 -> lmsbad 块`。坏块才是"越界时发生什么"的答案。"""
+    out: dict[str, str] = {}
     for blk in fn.blocks:
         for ins in blk.instrs:
             m = _BR_OK_BAD.search(ins.text)
             if m and "lmsok" in m.group(1) and "lmsbad" in m.group(2):
-                out.add(m.group(1))
+                out[m.group(1)] = m.group(2)
     return out
 
 
-def _checked_sites(fn) -> set[tuple[str, int]]:
+def _checked_sites(fn) -> dict[tuple[str, int], str]:
     ok = _checked_blocks(fn)
-    out: set[tuple[str, int]] = set()
+    out: dict[tuple[str, int], str] = {}
     for blk in fn.blocks:
         if blk.label not in ok:
             continue
         for idx, ins in enumerate(blk.instrs):
             if ins.text.startswith(("load ", "store ", "atomicrmw ")):
-                out.add((blk.label, idx))
+                out[(blk.label, idx)] = ok[blk.label]
                 break
     return out
+
+
+def _edge_of(fn, bad: str) -> tuple[str, str | None]:
+    """坏块实际的出口：`fault(kind)` / `abort` / 跳回 join（`skip`）。
+
+    ⚠ 这是**读出来的**，不是按档位猜的：同一份 g1 形状，盘古档发 fault、
+    默认档走拒绝器的 join、只关拒绝器时是 `__loment_abort`（132）。
+    """
+    for blk in fn.blocks:
+        if blk.label != bad:
+            continue
+        for ins in blk.instrs:
+            m = re.search(r"call void @__loment_fault\(i32 (\d+)\)", ins.text)
+            if m:
+                k = int(m.group(1))
+                return "fault", (f"F0{k}" if 1 <= k <= 9 else None)
+            if "@__loment_abort" in ins.text:
+                return "abort", None
+        return "skip", None
+    return "missing", None
 
 
 def _const_int(s: str) -> int | None:
@@ -238,7 +263,7 @@ def census(ir_text: str) -> dict:
     for fn in funcs:
         if fn.name.startswith(INTERNAL):
             continue
-        checked_set = _checked_sites(fn)
+        checked_map = _checked_sites(fn)
         loads, cmp, brs, preds = _facts(fn)
         sizes: dict[str, int] = {}
         offsets: dict[str, tuple[str, int]] = {}
@@ -288,17 +313,22 @@ def census(ir_text: str) -> dict:
                         width = lomelf.size_of(ty)
                         if root in sizes and off + width <= sizes[root]:
                             proven_rule = "R1"
-                checked = (blk.label, idx) in checked_set
+                bad = checked_map.get((blk.label, idx))
+                edge = kind = None
+                if bad is not None:
+                    edge, kind = _edge_of(fn, bad)
                 site = {
                     "fn": fn.name, "blk": blk.label, "idx": idx,
                     "op": op, "ty": ty,
                     "grade": ("proven" if proven_rule
-                              else "checked" if checked else "unsafe"),
+                              else "checked" if bad is not None else "unsafe"),
                 }
                 if proven_rule:
                     site["rule"] = proven_rule
-                elif checked:
-                    site["fault"] = "F01"
+                elif bad is not None:
+                    site["edge"] = edge
+                    if kind is not None:
+                        site["fault"] = kind
                 sites.append(site)
     raw = ir_text.encode("utf-8")
     body = {

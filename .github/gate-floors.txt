@@ -19,7 +19,7 @@ loment_ct_test 2
 loment_comefor_test 12
 loment_choose_matrix_test 27
 lmgr_test 8
-lnotary_test 34
+lnotary_test 38
 lms_bridge_test 5
 loment_extblock_test 7
 loment_multilang_test 2

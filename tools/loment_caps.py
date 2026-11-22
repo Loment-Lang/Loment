@@ -404,6 +404,10 @@ EXPLAINED[("loment/tools/update.lomt", "literal:64")] = (
     "SHA-512 的摘要长度（定长 64 B）：`hex_digest` 的入参永远是 `sha512` 写出的 64 B 缓冲。")
 EXPLAINED[("loment/tools/errdata.lomt", "FIX_STRIDE")] = (
     "修法表的平键步长（每码 8 格），**不是上界**；`loment_diag._validate` 钉着每码 <= 8 条。")
+EXPLAINED[("loment/tools/lomlnotary.lomt", "M_CAP")] = (
+    "公证人的整块工作区上限；`sys_alloc(M_CAP)` 失败时 `_start` 打一行 "
+    "`lomlnotary: out of memory` 并以 2 退出 —— 有失败路径，只是 `wstr` 不在 "
+    "`SPEAKS` 认的那几种形状里（同文件 ±8 行筛子的已知局限）。")
 
 #: **编译器前端** —— "用户一份源文件能推动的那些容量"。`#345` 采纳的 (a) 就是先把这一档
 #: 做成 0 静默：它正好是 `#343` 那一类崩溃（嵌套块 / 括号 / 形参表 / 缺逗号）住的地方。

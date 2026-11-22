@@ -8,6 +8,10 @@
 > `lvm_test::test_unknown_syscall_is_enosys` / `test_syscall_report_lists_number_program_site`
 > （P1）· `lvm_test::test_guest_abi_and_host_profiles`（P2 的 L1/L2）·
 > `loment_pe_test::test_pe_runs_the_loment_toolchain_natively` 的 P4 那一段（Windows 上真跑）
+> 判据：`loment_pe_test::test_pe_uname_and_clock_surface`（P0 的四个号：形状 PE 与 ELF 同）·
+> 其余三层见 §5（尚未落地）
+> **2026-11-21 补记**：§1 那张"29 个号"的表已经过时 —— PE 派发面扩到 146 个号，
+> 385 个 Linux 号逐个有处置，见 `docs/378`。
 
 ---
 

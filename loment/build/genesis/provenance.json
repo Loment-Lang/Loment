@@ -8,8 +8,8 @@
   "genesis": {
     "mode": "100755",
     "name": "lomelf-linux-x64.elf",
-    "sha256": "ff54af0df9d2999a4fd1643be1adcd9ff287391bd776092a144f1bddc928c0fd",
-    "size": 312328
+    "sha256": "2a091b8e726bb4ae96af6d815ae6e226f678f8c4fe4f21db4c7316b9a9dae19a",
+    "size": 339176
   },
   "genesis_source_closure": {
     "files": [
@@ -30,32 +30,32 @@
       },
       {
         "path": "loment/tools/lomelf.lomt",
-        "sha256": "d74f347c3bcd4706ac2f68362f39ea0151e33013d78e070b5958c77a856e8133",
-        "size": 408593
+        "sha256": "1af166c16f5178787e1e3c7ff70a4c6aa6784a1fc113a131243a6cb3393b400c",
+        "size": 408619
       },
       {
         "path": "loment/tools/win_shim_data.lomt",
-        "sha256": "a679820e3b821d7d1819bc3c60812f79b928c7652a7f8f0eb0ff72cc07588d62",
-        "size": 46307
+        "sha256": "c263a9e055cb4e532cb7bbc46b2efd06b6d808aeda98d9371d01c9aa8450287f",
+        "size": 73751
       }
     ],
-    "sha256": "397dd302f23911cd815084081b29fbbec3716e5ee8237fbadec5d12f7bc430a9"
+    "sha256": "05f8e8a050913a8e89cf71824a94ed99404da7238b041f943d4c48c2832e6aa9"
   },
   "inputs": {
     "mirror": {
       "path": "loment/tools/lomelf.lomt",
-      "sha256": "d74f347c3bcd4706ac2f68362f39ea0151e33013d78e070b5958c77a856e8133",
-      "size": 408593
+      "sha256": "1af166c16f5178787e1e3c7ff70a4c6aa6784a1fc113a131243a6cb3393b400c",
+      "size": 408619
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "3366472fcf20829f8148c910454fa1335043de4b433ed44301e613747166d198",
-      "size": 7468507
+      "sha256": "b439ec092de8affdfd67a4d6f46793314a483dc74ff013f38d85192291dd5456",
+      "size": 7501283
     }
   },
   "mirror_ir": {
-    "sha256": "17b78d0b7ccfd9ab60e6e04d029079cfbf4ea15e91947cd08847dc8fcca13159",
-    "size": 1679955
+    "sha256": "ee6af249496299fe0f37464f50c7e16534744066eced0b1405ab6ce86d4c298a",
+    "size": 1784844
   },
   "seed_env": {
     "host": "windows",
@@ -86,8 +86,8 @@
       },
       {
         "path": "loment/selfhost/checker.lomt",
-        "sha256": "3873ee79f86d3f62583a56a206568597aa4c6756ccf192e7b239c3e1b19089cc",
-        "size": 372321
+        "sha256": "19d9aa71c51eb6bfe0101b8d544721d5fdce9959a18e2a284dff94f7c49c1950",
+        "size": 372393
       },
       {
         "path": "loment/selfhost/codegen.lomt",
@@ -116,8 +116,8 @@
       },
       {
         "path": "loment/selfhost/potato.lomt",
-        "sha256": "e857fad9b415468a92ea48fb441bff34fb07957b5e1429da100e70a1539ed1da",
-        "size": 296580
+        "sha256": "acde285655961d9ba0d04bb1bc892457e78ebc954603bc1d3114c64613a44f10",
+        "size": 298422
       },
       {
         "path": "loment/selfhost/switches.lomt",
@@ -125,7 +125,7 @@
         "size": 36014
       }
     ],
-    "sha256": "a25c15add8cffdabd6d9ecc06aed42ff4d50448edd273d0c31949ab2db131daf"
+    "sha256": "ccf11ab3d6387630a208a1d0b370450dba4ecf60864a422ec60a1e9d3d6c77ae"
   },
   "toolchain": {
     "clang": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",

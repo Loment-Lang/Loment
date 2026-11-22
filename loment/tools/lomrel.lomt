@@ -283,6 +283,7 @@ tools/lomelf.py
 tools/loment_opt_obj.py
 tools/loment_elf_test.py
 tools/loment_pe_test.py
+tools/win_syscall_table.py
 tools/lvm.py
 tools/lvm_test.py
 tools/lvm_twin_test.py

@@ -115,6 +115,8 @@ REPOS: dict[str, dict] = {
             ".claude/skills/loment-toolchain/",
             # 工具：`tools/lom*` 一次收全（lomelf / lomentc / lomc / lomdoc / lom_audit …）
             "tools/lom*",
+            # PE 垫片的系统调用分类表（`docs/378`）：名字不以 lom 开头，单独点名。
+            "tools/win_syscall_table.py",
             # lmgr 的判据（`docs/303`）。源已搬进 `loment/tools/lmgr.lomt`，由上面
             # 那条 `loment/` 与发布账本的 `loment/tools/*.lomt` 覆盖。
             "tools/lmgr*",

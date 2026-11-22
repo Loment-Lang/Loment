@@ -42,10 +42,10 @@ const PE_DATA_RVA: u32 = 0x2000000;
 const PE_STATE_RVA: u32 = 0x3000000;
 const PE_SEC_ALIGN: u32 = 0x1000;
 const PE_FILE_ALIGN: u32 = 0x200;
-const PE_WS_SIZE: u32 = 1139984;   // 与参考实现的 WS_SIZE 对齐（`poll`/`select` 的
+const PE_WS_SIZE: u32 = 1141400;   // 与参考实现的 WS_SIZE 对齐（`poll`/`select` 的
                                    // fd_set 与影子集 + `sendmsg`/`recvmsg` 的 64 KiB
-                                   // 散列暂存 + `epoll` 的实例表）
-const PE_IMPORT_DESC: u32 = 100;   // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
+                                   // 散列暂存 + `epoll` 的实例表 + `mmap` 的 16 条登记）
+const PE_IMPORT_DESC: u32 = 140;   // 导入描述符表的字节数 = 20 × (DLL 数 + 全零终止项)
                                    // （kernel32 + ws2_32 + pdh + psapi ⇒ 四条描述符；写死旧值会让
                                    //   镜像的 PE 与参考差这一格 —— 判据当场抓）
 const PE_LIT_OFF: u32 = 0x1000;    // "/proc/self/cmdline" 在 .idata 内的偏移
@@ -292,7 +292,7 @@ const A_SIZE: u32 = 12;
 const TB_ARG: u32 = 3932416;       // 调用实参暂存 (每个 24 字节)
 
 const TB_PHI: u32 = 3932800;       // phi 表 stride 16 × 512 (每函数清)
-const TB_IDATA: u32 = 3940992;      // PE: 导入表 blob 的落点（4115 字节，走 hex 搬进来）
+const TB_IDATA: u32 = 3940992;      // PE: 导入表 blob 的落点（4505 字节，走 hex 搬进来）
 const PH_BOFF: u32 = 0;            // 所属基本块名
 const PH_BLEN: u32 = 4;
 const PH_IOFF: u32 = 8;            // phi 指令的起始偏移

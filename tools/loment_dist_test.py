@@ -1479,8 +1479,11 @@ def test_java_dependency_autolinks() -> None:
                 k += 1
             # `#1493`（lmgr）给 Windows 产物加了 PDH / PSAPI（cpu.load / mem.phys 走的
             # 就是它们）。断言跟着链接器的**实际**导入表走，不钉旧的那两个。
-            check("PE 导入表是 kernel32 + ws2_32 + pdh + psapi",
-                  dlls == ["kernel32.dll", "ws2_32.dll", "pdh.dll", "psapi.dll"], str(dlls))
+            # `docs/378`：垫片补全又加了两张 —— advapi32（getrandom 的 RtlGenRandom）
+            # 与 apiset api-ms-win-core-synch-l1-2-0（WaitOnAddress 族，kernel32 不导出）。
+            check("PE 导入表是 kernel32 + ws2_32 + pdh + psapi + advapi32 + synch apiset",
+                  dlls == ["kernel32.dll", "ws2_32.dll", "pdh.dll", "psapi.dll",
+                           "advapi32.dll", "api-ms-win-core-synch-l1-2-0.dll"], str(dlls))
             check("PE 导入表里没有 jvm.dll / java.dll",
                   not ({"jvm.dll", "java.dll"} & set(dlls)), str(dlls))
 

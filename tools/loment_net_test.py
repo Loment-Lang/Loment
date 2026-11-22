@@ -7,7 +7,7 @@
 # 所以这条独立出来跑同一组对账。
 #
 # 三件事:
-#   1. 契约本身的形状（33 个号 / 21 个 net / **0 个点名不做** / 不相交）；
+#   1. 契约本身的形状（146 个号 / 26 个 net / **0 个点名不做** / 不相交）；
 #   2. 四处对账（编译器、链接器、自举 checker、自举 potato）；
 #   3. **这条判据自己会红** —— 四个方向各改一次，看它报不报。
 #
@@ -71,8 +71,8 @@ def test_contract_shape():
     assert not (set(want) & set(nd)), f"同一个号既派发又点名不做: {sorted(set(want) & set(nd))}"
     # 数：与 docs/224 §6 那几行实测对得上（改了这里就该改文档，反之亦然）
     net = [n for n, s in want.items() if s == "net"]
-    assert len(want) == 33, f"派发面是 33 个号，得到 {len(want)}"
-    assert len(net) == 21, f"net 面是 21 个号，得到 {len(net)}"
+    assert len(want) == 146, f"派发面是 146 个号，得到 {len(want)}"
+    assert len(net) == 26, f"net 面是 26 个号，得到 {len(net)}"
     assert len(nd) == 0, f"点名不做**已经清零**（联网面补完），得到 {len(nd)}"
     print(f"      {len(want)} 个号（net {len(net)}）+ {len(nd)} 个点名不做，面 {sorted(names)}")
 

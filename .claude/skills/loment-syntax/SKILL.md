@@ -320,13 +320,11 @@ copy `write_dec` from section 1, or use `fmt` / `numfmt` from the standard libra
 `printf`.
 
 **Syscall numbers**: on the Linux ELF target they are Linux's own (`write`=1, `exit`=60,
-`openat`=257…). **The Windows PE target implements 29 numbers** (`PE_SYSCALLS` in
-`tools/lomelf.py`): the file/process eight - `read`(0), `write`(1), `close`(3), `brk`(12),
-`exit`(60), `getdents64`(217), `openat`(257), `newfstatat`(262) - plus the networking family -
-`poll`(7), `select`(23), `socket`(41), `connect`(42), `accept`(43), `accept4`(288),
-`sendto`(44), `recvfrom`(45), `sendmsg`(46), `recvmsg`(47), `shutdown`(48), `bind`(49),
-`listen`(50), `getsockname`(51), `getpeername`(52), `socketpair`(53), `setsockopt`(54),
-`getsockopt`(55), `epoll_wait`(232), `epoll_ctl`(233), `epoll_create1`(291). **Any other number
+`openat`=257…). **The Windows PE target dispatches 146 of Linux's numbers** - files and directories, memory
+(`mmap`/`mprotect`/`munmap`/`mremap`), time and identity, sockets plus `poll`/`select`/`epoll`,
+`futex`, `getrandom`, and the common aliases (`pread64`/`readv`/`linkat`/...). The authoritative
+list, including the reason each unimplemented Linux number is refused, is
+`tools/win_syscall_table.py` in the source repository. **Any other number
 returns `-ENOSYS` (-38)** - not `-1`, which would mean EPERM. `/proc/self/cmdline` is
 synthesised by the runtime on PE, so reading argv is the same on both.
 

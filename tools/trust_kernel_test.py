@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# trust_kernel_test.py — R0 判据 (docs/377 §6 C1/C2/C3/C4/C5 的玩具形态)
+# trust_kernel_test.py — R0 判据 (docs/378 §6 C1/C2/C3/C4/C5 的玩具形态)
 #
 # 它钉住四件事:
 #   1. 有效推导被接受;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# trust_kernel.py — R0 玩具内核 (docs/377)
+# trust_kernel.py — R0 玩具内核 (docs/378)
 #
 # 它只做一件事: 检查一份 `(artifact, derivation, conclusion)` 是否按 12 条规则成立。
 # **零工具链 import** —— 不 import 编译器、LSPE、LNotary、Potato。它自带：
@@ -768,7 +768,7 @@ def verify(artifact: bytes, derivation: dict, conclusion: dict | None = None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="trust_kernel", description="R0 toy kernel (docs/377)")
+    ap = argparse.ArgumentParser(prog="trust_kernel", description="R0 toy kernel (docs/378)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify")
     v.add_argument("--artifact", required=True)

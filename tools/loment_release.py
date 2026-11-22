@@ -309,6 +309,7 @@ GLOBS = [
     # PE 目标的 shim 机器码（tools/lomelf.py --dump-win-shim 重建；自举镜像照抄这一份）
     "loment/build/win_shim.bin",
     "tools/loment_genesis.py", "tools/loment_genesis_test.py",
+    "tools/loment_trust.py", "tools/loment_trust_test.py",
     "tools/loment_status_test.py", "tools/loment_rel_test.py",
     "tools/loment_pkg_test.py", "tools/loment_lomc_test.py", "loment/lib/*.lomt",
     "loment/lib/jrt/*",
@@ -328,7 +329,8 @@ GLOBS = [
     "tools/loment_src.py",
     # 无 Python 自举 (docs/159): 启动脚本 + 种子 (参考实现发射的驱动 IR) + Loment 版格式化器
     "loment/bootstrap.sh", "scripts/lomc.ps1", "scripts/install-lsp.ps1",
-    "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/tools/*.lomt",
+    "loment/build/selfhost_driver.ll", "loment/build/genesis/*", "loment/build/trust.json",
+    "loment/tools/*.lomt",
     # **LMS 第 6 级**（`docs/253` §5.5 / `docs/270` §4）：用 C 写的重启器。
     # 它随包发 —— 信任地板的实物必须在产物里，不能只在仓库里。
     "restarter/loment-restart.c",

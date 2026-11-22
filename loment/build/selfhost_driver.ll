@@ -32510,19 +32510,20 @@ L265_then:
   %t2431 = insertvalue { ptr, i64 } undef, ptr %t2430, 0
   %t2432 = insertvalue { ptr, i64 } %t2431, i64 6, 1
   %t2433 = call i32 @emit_str(ptr %t2428, ptr %t2429, { ptr, i64 } %t2432)
-  %t2434 = load ptr, ptr %s.addr
-  %t2435 = load ptr, ptr %out.addr
-  %t2436 = call i32 @new_temp(ptr %t2434, ptr %t2435)
-  store i32 %t2436, ptr %rr.addr
-  %t2437 = load ptr, ptr %src.addr
-  %t2438 = load ptr, ptr %toks.addr
-  %t2439 = getelementptr inbounds [18 x i8], ptr @.str.expr_atom.212, i64 0, i64 0
-  %t2440 = insertvalue { ptr, i64 } undef, ptr %t2439, 0
-  %t2441 = insertvalue { ptr, i64 } %t2440, i64 18, 1
-  %t2442 = call i32 @contains_ident(ptr %t2437, ptr %t2438, { ptr, i64 } %t2441)
-  %t2443 = icmp eq i32 %t2442, 1
-  br i1 %t2443, label %L268_then, label %L269_else
+  store i32 0, ptr %rr.addr
+  %t2434 = load ptr, ptr %src.addr
+  %t2435 = load ptr, ptr %toks.addr
+  %t2436 = getelementptr inbounds [18 x i8], ptr @.str.expr_atom.212, i64 0, i64 0
+  %t2437 = insertvalue { ptr, i64 } undef, ptr %t2436, 0
+  %t2438 = insertvalue { ptr, i64 } %t2437, i64 18, 1
+  %t2439 = call i32 @contains_ident(ptr %t2434, ptr %t2435, { ptr, i64 } %t2438)
+  %t2440 = icmp eq i32 %t2439, 1
+  br i1 %t2440, label %L268_then, label %L269_else
 L268_then:
+  %t2441 = load ptr, ptr %s.addr
+  %t2442 = load ptr, ptr %out.addr
+  %t2443 = call i32 @new_temp(ptr %t2441, ptr %t2442)
+  store i32 %t2443, ptr %rr.addr
   %t2444 = load ptr, ptr %s.addr
   %t2445 = load ptr, ptr %out.addr
   %t2446 = getelementptr inbounds [109 x i8], ptr @.str.expr_atom.213, i64 0, i64 0
@@ -32574,7 +32575,7 @@ L269_else:
   %t2489 = load ptr, ptr %s.addr
   %t2490 = load ptr, ptr %out.addr
   %t2491 = call i32 @new_temp(ptr %t2489, ptr %t2490)
-  store i32 %t2491, ptr %rr2.addr
+  store i32 %t2491, ptr %rr.addr
   %t2492 = load ptr, ptr %s.addr
   %t2493 = load ptr, ptr %out.addr
   %t2494 = getelementptr inbounds [109 x i8], ptr @.str.expr_atom.218, i64 0, i64 0

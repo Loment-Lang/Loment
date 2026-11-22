@@ -228,7 +228,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # LVM-A 的底层设施（`docs/363` / `docs/364`）：显式栈引擎 + checkpoint/resume。
                  # 两个引擎同答；任意指令边界存/取；调用栈进快照；链式；`sw_tag` 状态也进快照。
                  "lvm_cp_test",
-                 # **没有地址**的那一档（`docs/368`）：令牌/体/三维排他、K=0/1/7 同答、
+                 # **没有地址**的那一档（`docs/371`）：令牌/体/三维排他、K=0/1/7 同答、
                  # F01–F06 的码与站点、身份预算、原生拒绝、与基质不叠加。
                  "lvm_dismemory_test",
                  # 盘古的三件（`docs/363`）：封印 / 零 import 验证器 / 同产物创世衰减。

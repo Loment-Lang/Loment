@@ -8557,10 +8557,10 @@ fn run(mem: ptr) -> u32 {
 ");
         return die(1);
     }
-    // **dismemory**（`docs/368`）：这份 IR 要 LVM 在没有地址的模型上跑；原生档有地址，
+    // **dismemory**（`docs/371`）：这份 IR 要 LVM 在没有地址的模型上跑；原生档有地址，
     // 链出来只会静默错编。与 `no_std` / `no_gc` 同一条纪律：点名拒。
     if mem_has(inb, n as u32, "; loment-memory: dismemory") == 1 {
-        wstr(2, "loment: 这份 IR 要求 LVM 的 dismemory 档（内存里没有地址，docs/368）；原生档有地址，链不出来 
+        wstr(2, "loment: 这份 IR 要求 LVM 的 dismemory 档（内存里没有地址，docs/371）；原生档有地址，链不出来 
 ");
         return die(1);
     }

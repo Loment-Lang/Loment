@@ -7476,11 +7476,11 @@ def compile_ll(text: str, objects: list | None = None,
     # 这是 `docs/227` 判据 B 的镜像 —— 那边判"声明了 `no_runtime` 却拖进运行期"，
     # 这边判"声明了 `no_gc` 却带着收集器"。检查放在**链接器**而不是编译器，因为
     # 编译器正是那句话的作者；能拿一份不是自己生成的 IR 来核它的，只有这一侧。
-    # **dismemory（docs/368）**：这份 IR 要 LVM 在没有地址的内存模型上跑。原生档有地址，
+    # **dismemory（docs/371）**：这份 IR 要 LVM 在没有地址的内存模型上跑。原生档有地址，
     # 照常链出来只会静默错编 —— 与 no_std / no_gc 同一条纪律：点名拒。
     if "; loment-memory: dismemory" in text:
         raise Unsupported(
-            "这份 IR 要求 LVM 的 dismemory 档（内存里没有地址，docs/368）；"
+            "这份 IR 要求 LVM 的 dismemory 档（内存里没有地址，docs/371）；"
             "原生档有地址，链不出来 —— 用 LVM 跑它")
     if "; loment-gc: no_gc" in text and (
             "@__loment_collect" in text or "@__loment_roots" in text):

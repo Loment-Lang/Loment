@@ -4470,11 +4470,28 @@ fn exec_stack(a: ptr, m: ptr, fresh: u32) {
             let hook: u32 = ctx_get(a, C_BIND_HOOK);
             let a0: u64 = ((ctx_get(a, C_BIND_A0HI) as u64) << 32)
                           | (ctx_get(a, C_BIND_A0LO) as u64);
-            if priv != 0 {
-                ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
+            if d_on(a) == 1 && hook != 0 {
+                // 与递归引擎同一条（`docs/368` §1.5）：分配器是模型原生的 ——
+                // 造一颗体 / 退休一颗体，不进去跑按地址写的运行期代码。
+                let hv: u64 = 0;
+                if hook == 1 {
+                    hv = d_alloc_body(a, DK_HEAP, a0 as u32);
+                } else {
+                    let fxi: u32 = d_find(a, a0);
+                    if fxi != NONE {
+                        d_retire_body(a, rd(a, DT_OFF, fxi * 4 + 2));
+                    }
+                }
+                ctx_set(a, C_DEPTH, d);
+                store_val(a, m, fr, dst, dl2, hv);
+                cont_set(a, d, 6, j + 1);
+            } else {
+                if priv != 0 {
+                    ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
+                }
+                push_cont(a, d + 1, nfi, lo32(b), fr, dst, dl2,
+                          rd(a, F_OFF, nfi * 8 + 6), 0, 0, priv, hook, a0);
             }
-            push_cont(a, d + 1, nfi, lo32(b), fr, dst, dl2,
-                      rd(a, F_OFF, nfi * 8 + 6), 0, 0, priv, hook, a0);
         } else if k == K_ASMCALL {
             let v: u64 = do_asm(a, m, fr, to, tl);
             store_val(a, m, fr, dst, dl2, v);
@@ -4666,7 +4683,11 @@ fn snapshot_write(a: ptr, m: ptr) {
     store8(a, SNAP_HDR + 3, 67);      // C
     store32(a, SNAP_HDR + 4, 1);      // version
     store32(a, SNAP_HDR + 8, ctx_get(a, C_IFHASH));
-    store32(a, SNAP_HDR + 12, ctx_get(a, C_SUB));   // 0 = none / 1 = sw_cap
+    if d_on(a) == 1 {
+        store32(a, SNAP_HDR + 12, 3);               // 3 = dismemory（docs/375 §2.5）
+    } else {
+        store32(a, SNAP_HDR + 12, ctx_get(a, C_SUB));   // 0 = none / 1 = sw_cap / 2 = sw_tag
+    }
     let _a: u64 = write_all(f, ptr_add(a, SNAP_HDR), 16);
     let _b: u64 = write_all(f, ptr_add(a, CTX_OFF), 256);
     // 全局表：名字 + 地址（`+4` 是 place_globals 写的地址）。
@@ -4760,7 +4781,201 @@ fn snapshot_write(a: ptr, m: ptr) {
     } else {
         wu32(f, a, 0);
     }
+
+    if d_on(a) == 1 {
+        // ---- dismemory 段（`docs/375` §2.5）：帧是密排的（同今天那份 4 MiB），
+        // 体内容不在里面 —— 这里补上全局令牌 / 体表 / 格表 / 令牌表 / 帧对象栈 / 序号。
+        let ng2: u32 = ctx_get(a, C_NG);
+        wu32(f, a, ng2);
+        i = 0;
+        while i < ng2 {
+            wu32(f, a, rd(a, GD_OFF, i * 2));
+            wu32(f, a, rd(a, GD_OFF, i * 2 + 1));
+            i = i + 1;
+        }
+        let nb2: u32 = ctx_get(a, C_DNB);
+        wu32(f, a, nb2);
+        i = 0;
+        while i < nb2 {
+            wu32(f, a, d_body(a, i, 0));
+            wu32(f, a, d_body(a, i, 1));
+            wu32(f, a, d_body(a, i, 10));
+            wu32(f, a, d_body(a, i, 9));
+            i = i + 1;
+        }
+        let nc2: u32 = 0;
+        i = 0;
+        while i < MAX_CT {
+            if rd(a, CT_OFF, i * 4 + 3) == 1 {
+                nc2 = nc2 + 1;
+            }
+            i = i + 1;
+        }
+        wu32(f, a, nc2);
+        i = 0;
+        while i < MAX_CT {
+            if rd(a, CT_OFF, i * 4 + 3) == 1 {
+                let cb: u32 = rd(a, CT_OFF, i * 4);
+                let cp: u32 = rd(a, CT_OFF, i * 4 + 1);
+                let sz: u32 = d_body(a, cb, 1);
+                let cl: u32 = cp;
+                if sz > 0 {
+                    let sh: u32 = d_body(a, cb, 10) % sz;
+                    cl = (cp + sz - sh) % sz;
+                }
+                wu32(f, a, cb);
+                wu32(f, a, cl);
+                wu32(f, a, rd(a, CT_OFF, i * 4 + 2));
+            }
+            i = i + 1;
+        }
+        let nt2: u32 = ctx_get(a, C_DNT);
+        wu32(f, a, nt2);
+        i = 0;
+        while i < nt2 {
+            wu32(f, a, rd(a, DT_OFF, i * 4));
+            wu32(f, a, rd(a, DT_OFF, i * 4 + 1));
+            wu32(f, a, rd(a, DT_OFF, i * 4 + 2));
+            wu32(f, a, rd(a, DT_OFF, i * 4 + 3));
+            i = i + 1;
+        }
+        let nr2: u32 = ctx_get(a, C_DNR);
+        wu32(f, a, nr2);
+        i = 0;
+        while i < nr2 {
+            wu32(f, a, rd(a, DR_OFF, i * 4));
+            wu32(f, a, rd(a, DR_OFF, i * 4 + 1));
+            wu32(f, a, rd(a, DR_OFF, i * 4 + 2));
+            wu32(f, a, rd(a, DR_OFF, i * 4 + 3));
+            i = i + 1;
+        }
+        let nfo2: u32 = ctx_get(a, C_NFOBJ);
+        wu32(f, a, nfo2);
+        i = 0;
+        while i < nfo2 {
+            wu32(f, a, rd(a, FOBJ_OFF, i));
+            i = i + 1;
+        }
+        let dep2: u32 = ctx_get(a, C_DEPTH);
+        wu32(f, a, dep2);
+        i = 1;
+        while i <= dep2 {
+            wu32(f, a, rd(a, FBASE_OFF, i * 4));
+            i = i + 1;
+        }
+        wu32(f, a, ctx_get(a, C_DTSLO));
+        wu32(f, a, ctx_get(a, C_DTSHI));
+    }
+    if ctx_get(a, C_SUB) == 2 {
+        // ---- sw_tag（`docs/364`）：对象 4 位标签 / 每帧值能力 / 影子表，三块整段。
+        let _a1: u64 = write_all(f, ptr_add(a, TAG_OFF), (MAX_OBJS * 4) as u64);
+        let _a2: u64 = write_all(f, ptr_add(a, CAP_OFF), (CAP_SLOTS * 8) as u64);
+        let _a3: u64 = write_all(f, ptr_add(a, SH_OFF), (SH_CAP * 12) as u64);
+    }
     let _f: i64 = syscall4(3, f, 0, 0);
+}
+
+fn snap_read_dis(a: ptr, f: u64) {
+    let ng2: u32 = ru32(f, a);
+    if ng2 != ctx_get(a, C_NG) {
+        fail("checkpoint：全局数与快照不符");
+    }
+    let i: u32 = 0;
+    while i < ng2 {
+        wr(a, GD_OFF, i * 2, ru32(f, a));
+        wr(a, GD_OFF, i * 2 + 1, ru32(f, a));
+        i = i + 1;
+    }
+    let nb2: u32 = ru32(f, a);
+    if nb2 > MAX_DB {
+        fail("checkpoint：体表超过镜像上限");
+    }
+    i = 0;
+    while i < nb2 {
+        let kind: u32 = ru32(f, a);
+        let size: u32 = ru32(f, a);
+        let sh: u32 = ru32(f, a);
+        let alive: u32 = ru32(f, a);
+        d_bset(a, i, 0, kind);
+        d_bset(a, i, 1, size);
+        d_bset(a, i, 10, sh);
+        d_bset(a, i, 9, alive);
+        let dd: u32 = 1;
+        while dd * dd * dd < size {
+            dd = dd + 1;
+        }
+        d_bset(a, i, 3, dd);
+        d_bset(a, i, 4, dd);
+        d_bset(a, i, 5, (size + dd * dd - 1) / (dd * dd));
+        d_bset(a, i, 6, 0);
+        d_bset(a, i, 7, 0);
+        d_bset(a, i, 8, 0);
+        d_place(a, i);
+        i = i + 1;
+    }
+    ctx_set(a, C_DNB, nb2);
+    i = 0;
+    while i < MAX_CT {
+        wr(a, CT_OFF, i * 4 + 2, 0);
+        wr(a, CT_OFF, i * 4 + 3, 0);
+        i = i + 1;
+    }
+    let nc2: u32 = ru32(f, a);
+    i = 0;
+    while i < nc2 {
+        let cb: u32 = ru32(f, a);
+        let cl: u32 = ru32(f, a);
+        let bv: u32 = ru32(f, a);
+        d_cput(a, cb, cl, bv);
+        i = i + 1;
+    }
+    let nt2: u32 = ru32(f, a);
+    if nt2 > MAX_DT {
+        fail("checkpoint：令牌表超过镜像上限");
+    }
+    i = 0;
+    while i < nt2 {
+        wr(a, DT_OFF, i * 4, ru32(f, a));
+        wr(a, DT_OFF, i * 4 + 1, ru32(f, a));
+        wr(a, DT_OFF, i * 4 + 2, ru32(f, a));
+        wr(a, DT_OFF, i * 4 + 3, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_DNT, nt2);
+    let nr2: u32 = ru32(f, a);
+    if nr2 > MAX_DR {
+        fail("checkpoint：反向表超过镜像上限");
+    }
+    i = 0;
+    while i < nr2 {
+        wr(a, DR_OFF, i * 4, ru32(f, a));
+        wr(a, DR_OFF, i * 4 + 1, ru32(f, a));
+        wr(a, DR_OFF, i * 4 + 2, ru32(f, a));
+        wr(a, DR_OFF, i * 4 + 3, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_DNR, nr2);
+    let nfo2: u32 = ru32(f, a);
+    if nfo2 > MAX_FOBJ {
+        fail("checkpoint：帧对象栈超过镜像上限");
+    }
+    i = 0;
+    while i < nfo2 {
+        wr(a, FOBJ_OFF, i, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_NFOBJ, nfo2);
+    let dep2: u32 = ru32(f, a);
+    if dep2 > MAX_DEPTH {
+        fail("checkpoint：深度超过镜像上限");
+    }
+    i = 1;
+    while i <= dep2 {
+        wr(a, FBASE_OFF, i * 4, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_DTSLO, ru32(f, a));
+    ctx_set(a, C_DTSHI, ru32(f, a));
 }
 
 fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
@@ -4783,9 +4998,6 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
         fail("checkpoint：IR 与快照不匹配（字节码换了）");
     }
     let flags: u32 = load32(a, SNAP_HDR + 12);
-    if flags == 2 {
-        fail("checkpoint：跨实现恢复不支持 sw_tag（docs/372）");
-    }
     // 自己进程的 cmdline 位置不能被快照里的值覆盖（那是参考侧的数）。
     let my_arg0: u32 = ctx_get(a, C_ARG0);
     let my_arg0n: u32 = ctx_get(a, C_ARG0N);
@@ -4794,7 +5006,10 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
     }
     ctx_set(a, C_ARG0, my_arg0);
     ctx_set(a, C_ARG0N, my_arg0n);
-    ctx_set(a, C_SUB, flags);
+    ctx_set(a, C_SUB, 0);
+    if flags == 1 || flags == 2 {
+        ctx_set(a, C_SUB, flags);
+    }
     ctx_set(a, C_NOBJ, 0);
     ctx_set(a, C_NRET, 0);
     // 全局表：按名字补地址
@@ -4981,8 +5196,24 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             ctx_set(a, C_ARG0N, wt - first);
         }
     }
+    if flags == 3 {
+        snap_read_dis(a, f);
+    } else {
+        if flags == 2 {
+            // sw_tag 的三张表（与写端同一段、同一顺序）。
+            if read_exact(f, ptr_add(a, TAG_OFF), MAX_OBJS * 4) == 0 {
+                fail("checkpoint：标签表读不全");
+            }
+            if read_exact(f, ptr_add(a, CAP_OFF), CAP_SLOTS * 8) == 0 {
+                fail("checkpoint：能力表读不全");
+            }
+            if read_exact(f, ptr_add(a, SH_OFF), SH_CAP * 12) == 0 {
+                fail("checkpoint：影子表读不全");
+            }
+        }
+        frame_obj_rebuild(a);
+    }
     let _c: i64 = syscall4(3, f, 0, 0);
-    frame_obj_rebuild(a);
 }
 
 /// `argv_n` 的那一格若以 `prefix` 开头，返回值的 span；否则 `0`。

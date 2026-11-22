@@ -58,7 +58,7 @@ loment_pe_test 18
 loment_genesis_test 9
 loment_status_test 4
 lvm_test 10
-lvm_twin_test 14
+lvm_twin_test 16
 lvm_mirror_t2_test 6
 loment_net_test 3
 loment_ffi_test 30
@@ -109,7 +109,7 @@ loment_spec_oracle_test 3
 lvm_t3_test 4
 lvm_stability_test 3
 lvm_cap_test 11
-lvm_cp_test 8
+lvm_cp_test 10
 lvm_seal_test 11
 lvm_dismemory_test 16
 lvm_perf_test 3

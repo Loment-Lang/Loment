@@ -264,8 +264,24 @@ const CAP_END: u32 = 15260676;       // CAP_OFF + CAP_SLOTS * 8
 const SH_OFF: u32 = 15260676;        // = CAP_END
 const SH_CAP: u32 = 4096;
 const SH_END: u32 = 15309828;        // SH_OFF + SH_CAP * 12
+//: 格表（`docs/375` §2.3）：dismemory 的体**不再是连续字节数组**，内容在一张
+//: 开放寻址表里。每条 4 个 u32：体号、物理格号、字节、状态（0 空 / 1 用 / 2 墓碑）。
+//: 逻辑格号加每颗体的摆法再取模才是物理格号 —— 换摆法只换桶，不换可观察量。
+const CT_OFF: u32 = 15309828;        // = SH_END
+const MAX_CT: u32 = 262144;          // 256 KiB 的非零字节（写 0 = 墓碑，退休时清扫）
+const CT_END: u32 = 19504132;        // CT_OFF + MAX_CT * 16
+//: 系统调用把格里的字节搬进/搬出时用的宿主暂存（不落在 guest 的地址空间里）。
+const IOS_OFF: u32 = 19504132;       // = CT_END
+const IOS_CAP: u32 = 65536;
+const IOS_END: u32 = 19569668;       // IOS_OFF + IOS_CAP
+//: 活体表（`docs/375` §6）：摆放只跟活体比。否则每次 `alloca` 都要扫一遍
+//: "这辈子造过的所有体"，循环里调函数的程序是 O(n²)（2000 次 store32 要 57s）。
+const LIVE_OFF: u32 = 19569668;      // = IOS_END，MAX_DB 条 u32 体号
+const LIVE_END: u32 = 19586052;      // LIVE_OFF + MAX_DB * 4
 const C_TAGSEQ: u32 = 64;           // 标签轮转序列（1 + seq % 15）
 const C_SHN: u32 = 68;              // 影子表写了几条（环形下标 = 它 % SH_CAP）
+const C_DSH: u32 = 72;              // 表示层摆法（`docs/375` §2.3；0 = 规范）
+const C_DNL: u32 = 76;              // 活体表条数（摆放只看这些）
 
 const OBJ_GLOBAL: u32 = 1;
 const OBJ_BRK: u32 = 2;
@@ -2865,25 +2881,32 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         if x1 != ctx_get(a, C_VFD_OPEN) as u64 {
             fail("系统调用 read：这个 fd 不是 VM 合成的那一个");
         }
-        let rp: u32 = x2 as u32;
         let rw: u32 = x3 as u32;
-        if d_on(a) == 1 {
-            rp = d_addr(a, x2, rw, 0, 0, 0, 0);
-        }
         let ro: u32 = ctx_get(a, C_ARG0);
         let rk: u32 = ctx_get(a, C_VFD_POS);
         let rl: u32 = ctx_get(a, C_ARG0N) - rk;
         if rw < rl {
             rl = rw;
         }
-        if rp + rl > MEM_SIZE {
-            fail("系统调用 read：越界");
-        }
         let ab: ptr = ptr_add(a, ARGV_OFF);
         let ri: u32 = 0;
-        while ri < rl {
-            store8(m, rp + ri, load8(ab, ro + rk + ri) as u8);
-            ri = ri + 1;
+        if d_on(a) == 1 {
+            let rloc: u64 = d_loc(a, x2, rw, 0, 0, 0, 0);
+            let rbi: u32 = hi32(rloc);
+            let roff: u32 = lo32(rloc);
+            while ri < rl {
+                d_cput(a, rbi, roff + ri, load8(ab, ro + rk + ri) as u32);
+                ri = ri + 1;
+            }
+        } else {
+            let rp: u32 = x2 as u32;
+            if rp + rl > MEM_SIZE {
+                fail("系统调用 read：越界");
+            }
+            while ri < rl {
+                store8(m, rp + ri, load8(ab, ro + rk + ri) as u8);
+                ri = ri + 1;
+            }
         }
         ctx_set(a, C_VFD_POS, rk + rl);
         return rl as u64;
@@ -2897,11 +2920,31 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     }
     if nr == 1 {                                         // write(fd, buf, count)
         let fd: u64 = x1;
-        let buf: u32 = x2 as u32;
         let n: u32 = x3 as u32;
         if d_on(a) == 1 {
-            buf = d_addr(a, x2, n, 0, 0, 0, 0);
+            // 体里没有连续字节：按格搬进宿主暂存再交出去（每段 ≤ IOS_CAP）。
+            let wloc: u64 = d_loc(a, x2, n, 0, 0, 0, 0);
+            let wbi: u32 = hi32(wloc);
+            let woff: u32 = lo32(wloc);
+            let done: u32 = 0;
+            while done < n {
+                let chunk: u32 = n - done;
+                if chunk > IOS_CAP {
+                    chunk = IOS_CAP;
+                }
+                let k: u32 = 0;
+                while k < chunk {
+                    store8(ptr_add(a, IOS_OFF), k, d_cget(a, wbi, woff + done + k) as u8);
+                    k = k + 1;
+                }
+                if fd == 1 || fd == 2 {
+                    let _w: u64 = write_all(1, ptr_add(a, IOS_OFF), chunk as u64);
+                }
+                done = done + chunk;
+            }
+            return n as u64;
         }
+        let buf: u32 = x2 as u32;
         if buf + n > MEM_SIZE {
             fail("write 越界");
         }
@@ -2939,10 +2982,19 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     if nr == 63 {                                        // uname(struct utsname *p)
         // ⚠ **合成，不转宿主** —— 它描述的是**目标平台**（`docs/243` §3.4）：
         // 宿主是什么都不影响，这里给的就是 `Linux`，判据 A 才有意义。
-        let up: u32 = x1 as u32;
         if d_on(a) == 1 {
-            up = d_addr(a, x1, 390, 0, 0, 0, 0);
+            let uloc: u64 = d_loc(a, x1, 390, 0, 0, 0, 0);
+            let ubi: u32 = hi32(uloc);
+            let uoff: u32 = lo32(uloc);
+            d_zero(a, uloc, 390);
+            d_cput(a, ubi, uoff, 76);          // L
+            d_cput(a, ubi, uoff + 1, 105);     // i
+            d_cput(a, ubi, uoff + 2, 110);     // n
+            d_cput(a, ubi, uoff + 3, 117);     // u
+            d_cput(a, ubi, uoff + 4, 120);     // x
+            return 0;
         }
+        let up: u32 = x1 as u32;
         if up + 390 > MEM_SIZE {
             fail("uname 越界");
         }
@@ -2966,10 +3018,11 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         // **绝对值**不是判决面（窗口只比先后与差），所以直接用宿主那一只。
         // Linux x86-64 的 `timespec` 是两个 i64（秒、纳秒）—— 按 guest 的字节序写回。
         let tb: ptr = ctx_get(a, C_TSBUF) as ptr;
+        let tsloc: u64 = 0;
         let tsd: u32 = 0;
         let tsgo: u32 = 0;
         if d_on(a) == 1 {
-            tsd = d_addr(a, x2, 16, 0, 0, 0, 0);
+            tsloc = d_loc(a, x2, 16, 0, 0, 0, 0);
             tsgo = 1;
         }
         let sec: u64 = 0;
@@ -2988,8 +3041,8 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
             nsec = mr(tb, 8, 8);
         }
         if tsgo == 1 {
-            mw(m, tsd, 8, sec);
-            mw(m, tsd + 8, 8, nsec);
+            d_write(a, tsloc, 8, sec);
+            d_write(a, tsloc + 8, 8, nsec);
         } else {
             mw(m, x2 as u32, 8, sec);
             mw(m, x2 as u32 + 8, 8, nsec);
@@ -3001,10 +3054,17 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     if nr == 257 {                                       // openat(dirfd, path, flags)
         // **只认识 `/proc/self/cmdline`**，而且给它的是**被解释程序自己的**命令行，
         // 不是解释器的（下面 `run` 里那段）。别的路径**点名拒**（`docs/243` §3.4）。
-        let cpath: u32 = x2 as u32;
         if d_on(a) == 1 {
-            cpath = d_addr(a, x2, 1, 0, 0, 0, 0);
+            let cloc: u64 = d_loc(a, x2, 1, 0, 0, 0, 0);
+            if d_eq_lit(a, cloc, "/proc/self/cmdline") == 1 {
+                ctx_set(a, C_VFD_OPEN, VFD as u32);
+                ctx_set(a, C_VFD_POS, 0);
+                return VFD;
+            }
+            wstr(2, "lvm: openat 只认识 /proc/self/cmdline（被解释程序自己的命令行）\n");
+            return die(2) as u64;
         }
+        let cpath: u32 = x2 as u32;
         if lit_is_cmdline(m, cpath) {
             ctx_set(a, C_VFD_OPEN, VFD as u32);
             ctx_set(a, C_VFD_POS, 0);
@@ -3229,7 +3289,8 @@ fn d_tok_new(a: ptr, bi: u32, off: u32) -> u64 {
                | (rd(a, DR_OFF, lo * 4 + 2) as u64);
     }
     if n >= MAX_DR || ctx_get(a, C_DNT) >= MAX_DT {
-        fail("dismemory：令牌表满了（抬 MAX_DT / MAX_DR）");
+        // 与参考对齐：容量用尽在 guest 看来是 **F06 身份预算**，不是工具崩溃。
+        let _f: u32 = d_fault(a, DF_LIMIT, 0, bi, off, 1, 5, 0, 0, 0, 0);
         return 0;
     }
     let s: u64 = d_ser_next(a);
@@ -3303,7 +3364,7 @@ fn d_find(a: ptr, t: u64) -> u32 {
 fn d_body_new(a: ptr, kind: u32, size: u32, data: u32) -> u32 {
     let n: u32 = ctx_get(a, C_DNB);
     if n >= MAX_DB {
-        fail("dismemory：体表满了（抬 MAX_DB）");
+        let _f: u32 = d_fault(a, DF_LIMIT, 0, n, 0, 0, 4, 0, 0, 0, 0);
         return 0;
     }
     let bi: u32 = n;
@@ -3321,22 +3382,40 @@ fn d_body_new(a: ptr, kind: u32, size: u32, data: u32) -> u32 {
     d_bset(a, bi, 7, 0);
     d_bset(a, bi, 8, 0);
     d_bset(a, bi, 9, 1);
+    let sh: u64 = 0;
+    let dsh: u32 = ctx_get(a, C_DSH);
+    if dsh != 0 {
+        sh = ((dsh as u64) * 2654435761 + (bi as u64) * 40503) & 2147483647;
+    }
+    d_bset(a, bi, 10, sh as u32);
     ctx_set(a, C_DNB, n + 1);
     d_place(a, bi);
+    wr(a, LIVE_OFF, ctx_get(a, C_DNL), bi);
+    ctx_set(a, C_DNL, ctx_get(a, C_DNL) + 1);
+    if data != 0 {
+        // 全局的初值先写在宿主暂存里（`place_globals`），这里按格搬进体。
+        let m: ptr = ptr_add(a, MEM_OFF);
+        let i: u32 = 0;
+        while i < size {
+            d_cput(a, bi, i, load8(m, data + i) as u32);
+            i = i + 1;
+        }
+    }
     return bi;
 }
 
 fn d_overlap(a: ptr, x: u32, y: u32, z: u32, dx: u32, dy: u32, dz: u32, me: u32) -> u32 {
-    let n: u32 = ctx_get(a, C_DNB);
+    let n: u32 = ctx_get(a, C_DNL);
     let i: u32 = 0;
     while i < n {
-        if i != me && d_body(a, i, 9) == 1 {
-            let bx: u32 = d_body(a, i, 6);
-            let by: u32 = d_body(a, i, 7);
-            let bz: u32 = d_body(a, i, 8);
-            if x < bx + d_body(a, i, 3) && bx < x + dx
-                    && y < by + d_body(a, i, 4) && by < y + dy
-                    && z < bz + d_body(a, i, 5) && bz < z + dz {
+        let bi: u32 = rd(a, LIVE_OFF, i);
+        if bi != me {
+            let bx: u32 = d_body(a, bi, 6);
+            let by: u32 = d_body(a, bi, 7);
+            let bz: u32 = d_body(a, bi, 8);
+            if x < bx + d_body(a, bi, 3) && bx < x + dx
+                    && y < by + d_body(a, bi, 4) && by < y + dy
+                    && z < bz + d_body(a, bi, 5) && bz < z + dz {
                 return 1;
             }
         }
@@ -3390,6 +3469,19 @@ fn d_retire_body(a: ptr, bi: u32) {
         return;
     }
     d_bset(a, bi, 9, 0);
+    let lv: u32 = ctx_get(a, C_DNL);
+    let lk: u32 = 0;
+    let lh: u32 = NONE;
+    while lk < lv {
+        if rd(a, LIVE_OFF, lk) == bi && lh == NONE {
+            lh = lk;
+        }
+        lk = lk + 1;
+    }
+    if lh != NONE {
+        ctx_set(a, C_DNL, lv - 1);
+        wr(a, LIVE_OFF, lh, rd(a, LIVE_OFF, lv - 1));
+    }
     // 把这一颗体的令牌从两张有序表里删掉（令牌永不复用，不需要代号）。
     let n: u32 = ctx_get(a, C_DNT);
     let i: u32 = 0;
@@ -3423,10 +3515,18 @@ fn d_retire_body(a: ptr, bi: u32) {
         }
     }
     ctx_set(a, C_DNR, v);
+    let c: u32 = 0;
+    while c < MAX_CT {
+        if rd(a, CT_OFF, c * 4 + 3) == 1 && rd(a, CT_OFF, c * 4) == bi {
+            wr(a, CT_OFF, c * 4 + 3, 2);
+        }
+        c = c + 1;
+    }
 }
 
-/// 令牌 -> 体数据地址。所有失败都按 dismemory 的码报。
-fn d_addr(a: ptr, t: u64, sz: u32, io: u32, il: u32, oo: u32, ol: u32) -> u32 {
+/// 令牌 -> (体号, 偏移) 的**打包值**（高 32 位体号，低 32 位偏移）。
+/// 这一档没有"体数据地址"这种东西：访问一律按格走 `d_cget` / `d_cput`。
+fn d_loc(a: ptr, t: u64, sz: u32, io: u32, il: u32, oo: u32, ol: u32) -> u64 {
     if t == 0 {
         let _f: u32 = d_fault(a, DF_NULL, t, 0, 0, sz, 0, io, il, oo, ol);
         return 0;
@@ -3447,7 +3547,169 @@ fn d_addr(a: ptr, t: u64, sz: u32, io: u32, il: u32, oo: u32, ol: u32) -> u32 {
         let _f: u32 = d_fault(a, DF_BOUNDS, t, bi, off, sz, 0, io, il, oo, ol);
         return 0;
     }
-    return d_body(a, bi, 2) + off;
+    return ((bi as u64) << 32) | (off as u64);
+}
+
+/// 物理格号：逻辑格号加这一颗体的摆法，再对体尺寸取模（`docs/375` §2.3）。
+fn d_cphys(a: ptr, bi: u32, cell: u32) -> u32 {
+    let sz: u32 = d_body(a, bi, 1);
+    if sz == 0 {
+        return 0;
+    }
+    // u64 相加：镜像的体在 4 MiB 内，但这里不依赖那个边界（与参考的 Python 口径同）。
+    let sum: u64 = (cell as u64) + (d_body(a, bi, 10) as u64);
+    return (sum % (sz as u64)) as u32;
+}
+
+fn d_chash(bi: u32, ph: u32) -> u32 {
+    let h: u64 = ((bi as u64) * 2654435761 + (ph as u64) * 2246822519) % (MAX_CT as u64);
+    return h as u32;
+}
+
+/// 读一格。**没写过 = 0**：体是一张稀疏映射，零不落格。
+fn d_cget(a: ptr, bi: u32, cell: u32) -> u32 {
+    let ph: u32 = d_cphys(a, bi, cell);
+    let h: u32 = d_chash(bi, ph);
+    let i: u32 = 0;
+    let out: u32 = 0;
+    let stop: u32 = 0;
+    while i < MAX_CT && stop == 0 {
+        let q: u32 = h + i;
+        if q >= MAX_CT {
+            q = q - MAX_CT;
+        }
+        let st: u32 = rd(a, CT_OFF, q * 4 + 3);
+        if st == 0 {
+            stop = 1;
+        } else if st == 1 {
+            if rd(a, CT_OFF, q * 4) == bi && rd(a, CT_OFF, q * 4 + 1) == ph {
+                out = rd(a, CT_OFF, q * 4 + 2);
+                stop = 1;
+            }
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// 写一格。写 0 = 把这一格删掉（墓碑），表满 → F06。
+fn d_cput(a: ptr, bi: u32, cell: u32, v: u32) {
+    let ph: u32 = d_cphys(a, bi, cell);
+    let h: u32 = d_chash(bi, ph);
+    let i: u32 = 0;
+    let stop: u32 = 0;
+    let empty: u32 = NONE;
+    while i < MAX_CT && stop == 0 {
+        let q: u32 = h + i;
+        if q >= MAX_CT {
+            q = q - MAX_CT;
+        }
+        let st: u32 = rd(a, CT_OFF, q * 4 + 3);
+        if st == 0 {
+            stop = 1;
+            if empty == NONE {
+                empty = q;
+            }
+        } else if st == 2 {
+            if empty == NONE {
+                empty = q;
+            }
+        } else if rd(a, CT_OFF, q * 4) == bi && rd(a, CT_OFF, q * 4 + 1) == ph {
+            wr(a, CT_OFF, q * 4 + 2, v);
+            if v == 0 {
+                wr(a, CT_OFF, q * 4 + 3, 2);
+            } else {
+                wr(a, CT_OFF, q * 4 + 3, 1);
+            }
+            stop = 1;
+        }
+        i = i + 1;
+    }
+    if stop == 0 {
+        let _f: u32 = d_fault(a, DF_LIMIT, 0, bi, ph, 1, 3, 0, 0, 0, 0);
+        return;
+    }
+    if v != 0 && empty != NONE {
+        wr(a, CT_OFF, empty * 4, bi);
+        wr(a, CT_OFF, empty * 4 + 1, ph);
+        wr(a, CT_OFF, empty * 4 + 2, v);
+        wr(a, CT_OFF, empty * 4 + 3, 1);
+    }
+}
+
+/// 按格读一个小端整数（`sz` ≤ 8）。
+fn d_read(a: ptr, loc: u64, sz: u32) -> u64 {
+    let bi: u32 = hi32(loc);
+    let off: u32 = lo32(loc);
+    let v: u64 = 0;
+    let k: u32 = 0;
+    while k < sz {
+        v = v | ((d_cget(a, bi, off + k) as u64) << ((k * 8) as u64));
+        k = k + 1;
+    }
+    return v;
+}
+
+fn d_write(a: ptr, loc: u64, sz: u32, v: u64) {
+    let bi: u32 = hi32(loc);
+    let off: u32 = lo32(loc);
+    let k: u32 = 0;
+    while k < sz {
+        d_cput(a, bi, off + k, ((v >> ((k * 8) as u64)) & 255) as u32);
+        k = k + 1;
+    }
+}
+
+/// 体 -> 宿主（`host` 是 VM 内存里的偏移）。
+fn d_copy_out(a: ptr, loc: u64, host: u32, n: u32) {
+    let m: ptr = ptr_add(a, MEM_OFF);
+    let bi: u32 = hi32(loc);
+    let off: u32 = lo32(loc);
+    let k: u32 = 0;
+    while k < n {
+        store8(m, host + k, d_cget(a, bi, off + k) as u8);
+        k = k + 1;
+    }
+}
+
+/// 宿主 -> 体。
+fn d_copy_in(a: ptr, loc: u64, host: u32, n: u32) {
+    let m: ptr = ptr_add(a, MEM_OFF);
+    let bi: u32 = hi32(loc);
+    let off: u32 = lo32(loc);
+    let k: u32 = 0;
+    while k < n {
+        d_cput(a, bi, off + k, load8(m, host + k) as u32);
+        k = k + 1;
+    }
+}
+
+fn d_zero(a: ptr, loc: u64, n: u32) {
+    let bi: u32 = hi32(loc);
+    let off: u32 = lo32(loc);
+    let k: u32 = 0;
+    while k < n {
+        d_cput(a, bi, off + k, 0);
+        k = k + 1;
+    }
+}
+
+/// 体里从 `loc` 起是不是这个字面量（含结尾 0）。
+fn d_eq_lit(a: ptr, loc: u64, lit: str) -> u32 {
+    let bi: u32 = hi32(loc);
+    let off: u32 = lo32(loc);
+    let n: u32 = str_len(lit);
+    let i: u32 = 0;
+    while i < n {
+        if d_cget(a, bi, off + i) != (str_byte(lit, i) as u32) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    if d_cget(a, bi, off + n) != 0 {
+        return 0;
+    }
+    return 1;
 }
 
 /// 令牌 + 整数：在表里派生一个新令牌（体内偏移）；出体 → F01。
@@ -3472,9 +3734,7 @@ fn d_alloc_body(a: ptr, kind: u32, size: u32) -> u64 {
     if sz == 0 {
         sz = 1;
     }
-    let data: u32 = vm_alloc(a, sz, 8);
-    mz(ptr_add(a, MEM_OFF), data, sz);
-    let bi: u32 = d_body_new(a, kind, sz, data);
+    let bi: u32 = d_body_new(a, kind, sz, 0);
     return d_tok_new(a, bi, 0);
 }
 
@@ -3616,13 +3876,13 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
         let addr: u64 = operand_text(a, m, fr, p, e);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
         if d_on(a) == 1 {
-            let da: u32 = d_addr(a, addr, sz, io, il, p, e - p);
+            let dloc: u64 = d_loc(a, addr, sz, io, il, p, e - p);
             if is_agg(a, hi32(ts), lo32(ts)) {
                 let d2: u32 = fr_agg(a, m, fr, do_, dl, sz);
-                mc(m, d2, da, sz);
+                d_copy_out(a, dloc, d2, sz);
                 return (d2 as u64) | (((sz as u64)) << 32);
             }
-            return mr(m, da, sz);
+            return d_read(a, dloc, sz);
         }
         let lps: u64 = operand_value_span(a, p, e);
         let pc: u64 = operand_cap(a, m, fr, hi32(lps) as u32, lo32(lps) as u32);
@@ -3650,11 +3910,11 @@ fn eval_instr(a: ptr, m: ptr, fr: u32, cfr: u32, io: u32, il: u32, k: u32, sub: 
         let addr: u64 = operand_text(a, m, fr, ps, e);
         let sz: u32 = ty_size(a, hi32(ts), lo32(ts));
         if d_on(a) == 1 {
-            let da2: u32 = d_addr(a, addr, sz, io, il, ps, e - ps);
+            let dloc: u64 = d_loc(a, addr, sz, io, il, ps, e - ps);
             if is_agg(a, hi32(ts), lo32(ts)) {
-                mc(m, da2, val as u32, sz);
+                d_copy_in(a, dloc, val as u32, sz);
             } else {
-                mw(m, da2, sz, val);
+                d_write(a, dloc, sz, val);
             }
             return 0;
         }
@@ -4231,11 +4491,28 @@ fn exec_stack(a: ptr, m: ptr, fresh: u32) {
             let hook: u32 = ctx_get(a, C_BIND_HOOK);
             let a0: u64 = ((ctx_get(a, C_BIND_A0HI) as u64) << 32)
                           | (ctx_get(a, C_BIND_A0LO) as u64);
-            if priv != 0 {
-                ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
+            if d_on(a) == 1 && hook != 0 {
+                // 与递归引擎同一条（`docs/368` §1.5）：分配器是模型原生的 ——
+                // 造一颗体 / 退休一颗体，不进去跑按地址写的运行期代码。
+                let hv: u64 = 0;
+                if hook == 1 {
+                    hv = d_alloc_body(a, DK_HEAP, a0 as u32);
+                } else {
+                    let fxi: u32 = d_find(a, a0);
+                    if fxi != NONE {
+                        d_retire_body(a, rd(a, DT_OFF, fxi * 4 + 2));
+                    }
+                }
+                ctx_set(a, C_DEPTH, d);
+                store_val(a, m, fr, dst, dl2, hv);
+                cont_set(a, d, 6, j + 1);
+            } else {
+                if priv != 0 {
+                    ctx_set(a, C_PRIV, ctx_get(a, C_PRIV) + 1);
+                }
+                push_cont(a, d + 1, nfi, lo32(b), fr, dst, dl2,
+                          rd(a, F_OFF, nfi * 8 + 6), 0, 0, priv, hook, a0);
             }
-            push_cont(a, d + 1, nfi, lo32(b), fr, dst, dl2,
-                      rd(a, F_OFF, nfi * 8 + 6), 0, 0, priv, hook, a0);
         } else if k == K_ASMCALL {
             let v: u64 = do_asm(a, m, fr, to, tl);
             store_val(a, m, fr, dst, dl2, v);
@@ -4427,7 +4704,11 @@ fn snapshot_write(a: ptr, m: ptr) {
     store8(a, SNAP_HDR + 3, 67);      // C
     store32(a, SNAP_HDR + 4, 1);      // version
     store32(a, SNAP_HDR + 8, ctx_get(a, C_IFHASH));
-    store32(a, SNAP_HDR + 12, ctx_get(a, C_SUB));   // 0 = none / 1 = sw_cap
+    if d_on(a) == 1 {
+        store32(a, SNAP_HDR + 12, 3);               // 3 = dismemory（docs/375 §2.5）
+    } else {
+        store32(a, SNAP_HDR + 12, ctx_get(a, C_SUB));   // 0 = none / 1 = sw_cap / 2 = sw_tag
+    }
     let _a: u64 = write_all(f, ptr_add(a, SNAP_HDR), 16);
     let _b: u64 = write_all(f, ptr_add(a, CTX_OFF), 256);
     // 全局表：名字 + 地址（`+4` 是 place_globals 写的地址）。
@@ -4521,7 +4802,206 @@ fn snapshot_write(a: ptr, m: ptr) {
     } else {
         wu32(f, a, 0);
     }
+
+    if d_on(a) == 1 {
+        // ---- dismemory 段（`docs/375` §2.5）：帧是密排的（同今天那份 4 MiB），
+        // 体内容不在里面 —— 这里补上全局令牌 / 体表 / 格表 / 令牌表 / 帧对象栈 / 序号。
+        let ng2: u32 = ctx_get(a, C_NG);
+        wu32(f, a, ng2);
+        i = 0;
+        while i < ng2 {
+            wu32(f, a, rd(a, GD_OFF, i * 2));
+            wu32(f, a, rd(a, GD_OFF, i * 2 + 1));
+            i = i + 1;
+        }
+        let nb2: u32 = ctx_get(a, C_DNB);
+        wu32(f, a, nb2);
+        i = 0;
+        while i < nb2 {
+            wu32(f, a, d_body(a, i, 0));
+            wu32(f, a, d_body(a, i, 1));
+            wu32(f, a, d_body(a, i, 10));
+            wu32(f, a, d_body(a, i, 9));
+            i = i + 1;
+        }
+        let nc2: u32 = 0;
+        i = 0;
+        while i < MAX_CT {
+            if rd(a, CT_OFF, i * 4 + 3) == 1 {
+                nc2 = nc2 + 1;
+            }
+            i = i + 1;
+        }
+        wu32(f, a, nc2);
+        i = 0;
+        while i < MAX_CT {
+            if rd(a, CT_OFF, i * 4 + 3) == 1 {
+                let cb: u32 = rd(a, CT_OFF, i * 4);
+                let cp: u32 = rd(a, CT_OFF, i * 4 + 1);
+                let sz: u32 = d_body(a, cb, 1);
+                let cl: u32 = cp;
+                if sz > 0 {
+                    let sh: u32 = d_body(a, cb, 10) % sz;
+                    cl = (cp + sz - sh) % sz;
+                }
+                wu32(f, a, cb);
+                wu32(f, a, cl);
+                wu32(f, a, rd(a, CT_OFF, i * 4 + 2));
+            }
+            i = i + 1;
+        }
+        let nt2: u32 = ctx_get(a, C_DNT);
+        wu32(f, a, nt2);
+        i = 0;
+        while i < nt2 {
+            wu32(f, a, rd(a, DT_OFF, i * 4));
+            wu32(f, a, rd(a, DT_OFF, i * 4 + 1));
+            wu32(f, a, rd(a, DT_OFF, i * 4 + 2));
+            wu32(f, a, rd(a, DT_OFF, i * 4 + 3));
+            i = i + 1;
+        }
+        let nr2: u32 = ctx_get(a, C_DNR);
+        wu32(f, a, nr2);
+        i = 0;
+        while i < nr2 {
+            wu32(f, a, rd(a, DR_OFF, i * 4));
+            wu32(f, a, rd(a, DR_OFF, i * 4 + 1));
+            wu32(f, a, rd(a, DR_OFF, i * 4 + 2));
+            wu32(f, a, rd(a, DR_OFF, i * 4 + 3));
+            i = i + 1;
+        }
+        let nfo2: u32 = ctx_get(a, C_NFOBJ);
+        wu32(f, a, nfo2);
+        i = 0;
+        while i < nfo2 {
+            wu32(f, a, rd(a, FOBJ_OFF, i));
+            i = i + 1;
+        }
+        let dep2: u32 = ctx_get(a, C_DEPTH);
+        wu32(f, a, dep2);
+        i = 1;
+        while i <= dep2 {
+            wu32(f, a, rd(a, FBASE_OFF, i * 4));
+            i = i + 1;
+        }
+        wu32(f, a, ctx_get(a, C_DTSLO));
+        wu32(f, a, ctx_get(a, C_DTSHI));
+    }
+    if ctx_get(a, C_SUB) == 2 {
+        // ---- sw_tag（`docs/364`）：对象 4 位标签 / 每帧值能力 / 影子表，三块整段。
+        let _a1: u64 = write_all(f, ptr_add(a, TAG_OFF), (MAX_OBJS * 4) as u64);
+        let _a2: u64 = write_all(f, ptr_add(a, CAP_OFF), (CAP_SLOTS * 8) as u64);
+        let _a3: u64 = write_all(f, ptr_add(a, SH_OFF), (SH_CAP * 12) as u64);
+    }
     let _f: i64 = syscall4(3, f, 0, 0);
+}
+
+fn snap_read_dis(a: ptr, f: u64) {
+    let ng2: u32 = ru32(f, a);
+    if ng2 != ctx_get(a, C_NG) {
+        fail("checkpoint：全局数与快照不符");
+    }
+    let i: u32 = 0;
+    while i < ng2 {
+        wr(a, GD_OFF, i * 2, ru32(f, a));
+        wr(a, GD_OFF, i * 2 + 1, ru32(f, a));
+        i = i + 1;
+    }
+    let nb2: u32 = ru32(f, a);
+    if nb2 > MAX_DB {
+        fail("checkpoint：体表超过镜像上限");
+    }
+    ctx_set(a, C_DNL, 0);
+    i = 0;
+    while i < nb2 {
+        let kind: u32 = ru32(f, a);
+        let size: u32 = ru32(f, a);
+        let sh: u32 = ru32(f, a);
+        let alive: u32 = ru32(f, a);
+        d_bset(a, i, 0, kind);
+        d_bset(a, i, 1, size);
+        d_bset(a, i, 10, sh);
+        d_bset(a, i, 9, alive);
+        let dd: u32 = 1;
+        while dd * dd * dd < size {
+            dd = dd + 1;
+        }
+        d_bset(a, i, 3, dd);
+        d_bset(a, i, 4, dd);
+        d_bset(a, i, 5, (size + dd * dd - 1) / (dd * dd));
+        d_bset(a, i, 6, 0);
+        d_bset(a, i, 7, 0);
+        d_bset(a, i, 8, 0);
+        if alive == 1 {
+            wr(a, LIVE_OFF, ctx_get(a, C_DNL), i);
+            ctx_set(a, C_DNL, ctx_get(a, C_DNL) + 1);
+        }
+        d_place(a, i);
+        i = i + 1;
+    }
+    ctx_set(a, C_DNB, nb2);
+    i = 0;
+    while i < MAX_CT {
+        wr(a, CT_OFF, i * 4 + 2, 0);
+        wr(a, CT_OFF, i * 4 + 3, 0);
+        i = i + 1;
+    }
+    let nc2: u32 = ru32(f, a);
+    i = 0;
+    while i < nc2 {
+        let cb: u32 = ru32(f, a);
+        let cl: u32 = ru32(f, a);
+        let bv: u32 = ru32(f, a);
+        d_cput(a, cb, cl, bv);
+        i = i + 1;
+    }
+    let nt2: u32 = ru32(f, a);
+    if nt2 > MAX_DT {
+        fail("checkpoint：令牌表超过镜像上限");
+    }
+    i = 0;
+    while i < nt2 {
+        wr(a, DT_OFF, i * 4, ru32(f, a));
+        wr(a, DT_OFF, i * 4 + 1, ru32(f, a));
+        wr(a, DT_OFF, i * 4 + 2, ru32(f, a));
+        wr(a, DT_OFF, i * 4 + 3, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_DNT, nt2);
+    let nr2: u32 = ru32(f, a);
+    if nr2 > MAX_DR {
+        fail("checkpoint：反向表超过镜像上限");
+    }
+    i = 0;
+    while i < nr2 {
+        wr(a, DR_OFF, i * 4, ru32(f, a));
+        wr(a, DR_OFF, i * 4 + 1, ru32(f, a));
+        wr(a, DR_OFF, i * 4 + 2, ru32(f, a));
+        wr(a, DR_OFF, i * 4 + 3, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_DNR, nr2);
+    let nfo2: u32 = ru32(f, a);
+    if nfo2 > MAX_FOBJ {
+        fail("checkpoint：帧对象栈超过镜像上限");
+    }
+    i = 0;
+    while i < nfo2 {
+        wr(a, FOBJ_OFF, i, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_NFOBJ, nfo2);
+    let dep2: u32 = ru32(f, a);
+    if dep2 > MAX_DEPTH {
+        fail("checkpoint：深度超过镜像上限");
+    }
+    i = 1;
+    while i <= dep2 {
+        wr(a, FBASE_OFF, i * 4, ru32(f, a));
+        i = i + 1;
+    }
+    ctx_set(a, C_DTSLO, ru32(f, a));
+    ctx_set(a, C_DTSHI, ru32(f, a));
 }
 
 fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
@@ -4544,9 +5024,6 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
         fail("checkpoint：IR 与快照不匹配（字节码换了）");
     }
     let flags: u32 = load32(a, SNAP_HDR + 12);
-    if flags == 2 {
-        fail("checkpoint：跨实现恢复不支持 sw_tag（docs/372）");
-    }
     // 自己进程的 cmdline 位置不能被快照里的值覆盖（那是参考侧的数）。
     let my_arg0: u32 = ctx_get(a, C_ARG0);
     let my_arg0n: u32 = ctx_get(a, C_ARG0N);
@@ -4555,7 +5032,10 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
     }
     ctx_set(a, C_ARG0, my_arg0);
     ctx_set(a, C_ARG0N, my_arg0n);
-    ctx_set(a, C_SUB, flags);
+    ctx_set(a, C_SUB, 0);
+    if flags == 1 || flags == 2 {
+        ctx_set(a, C_SUB, flags);
+    }
     ctx_set(a, C_NOBJ, 0);
     ctx_set(a, C_NRET, 0);
     // 全局表：按名字补地址
@@ -4742,8 +5222,24 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             ctx_set(a, C_ARG0N, wt - first);
         }
     }
+    if flags == 3 {
+        snap_read_dis(a, f);
+    } else {
+        if flags == 2 {
+            // sw_tag 的三张表（与写端同一段、同一顺序）。
+            if read_exact(f, ptr_add(a, TAG_OFF), MAX_OBJS * 4) == 0 {
+                fail("checkpoint：标签表读不全");
+            }
+            if read_exact(f, ptr_add(a, CAP_OFF), CAP_SLOTS * 8) == 0 {
+                fail("checkpoint：能力表读不全");
+            }
+            if read_exact(f, ptr_add(a, SH_OFF), SH_CAP * 12) == 0 {
+                fail("checkpoint：影子表读不全");
+            }
+        }
+        frame_obj_rebuild(a);
+    }
     let _c: i64 = syscall4(3, f, 0, 0);
-    frame_obj_rebuild(a);
 }
 
 /// `argv_n` 的那一格若以 `prefix` 开头，返回值的 span；否则 `0`。
@@ -6145,6 +6641,7 @@ fn run(a: ptr) -> u32 {
     ctx_set(a, C_DNR, 0);
     ctx_set(a, C_DROUND, 0);
     ctx_set(a, C_DREL, 0);
+    ctx_set(a, C_DSH, 0);
     if d_marker(a, n as u32) == 1 {
         ctx_set(a, C_DIS, 1);
     }
@@ -6188,6 +6685,10 @@ fn run(a: ptr) -> u32 {
             let dk: u64 = arg_tail(ab, f, "relocate=");
             if lo32(dk) > 0 {
                 ctx_set(a, C_DREL, dec_u64(ab, hi32(dk), hi32(dk) + lo32(dk)) as u32);
+            }
+            let sf: u64 = arg_tail(ab, f, "shuffle=");
+            if lo32(sf) > 0 {
+                ctx_set(a, C_DSH, dec_u64(ab, hi32(sf), hi32(sf) + lo32(sf)) as u32);
             }
             let r: u64 = arg_tail(ab, f, "resume=");
             if lo32(r) > 0 {
@@ -6297,7 +6798,7 @@ fn run(a: ptr) -> u32 {
 
 fn _start() -> u32 {
     // 末尾多留 `sw_tag` 的标签/能力表（`TAG_OFF` / `CAP_OFF`）—— 既有偏移一个都不挪。
-    let a: ptr = sys_alloc(SH_END as u64) as ptr;
+    let a: ptr = sys_alloc(LIVE_END as u64) as ptr;
     if a as u64 == 0 {
         return fail("oom (brk 失败)");
     }

@@ -347,6 +347,8 @@ tools/loment_grammar_test.py
 loment/build/win_shim.bin
 tools/loment_genesis.py
 tools/loment_genesis_test.py
+tools/loment_trust.py
+tools/loment_trust_test.py
 tools/loment_status_test.py
 tools/loment_rel_test.py
 tools/loment_pkg_test.py
@@ -373,6 +375,7 @@ scripts/lomc.ps1
 scripts/install-lsp.ps1
 loment/build/selfhost_driver.ll
 loment/build/genesis/*
+loment/build/trust.json
 loment/tools/*.lomt
 restarter/loment-restart.c
 editors/loment.ico

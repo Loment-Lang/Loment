@@ -944,11 +944,12 @@ class Vm:
     def __init__(self, globals_: list, funcs: list, externs: list, out,
                  profile: Profile | None = None, argv: list[str] | None = None,
                  counters: "Counters | None" = None, sub: "SwCap | None" = None,
-                 dismemory: bool = False, relocate_every: int = 0) -> None:
+                 dismemory: bool = False, relocate_every: int = 0,
+                 shuffle: int = 0) -> None:
         #: `docs/368`：没有地址的那一档。关着时 `mem` 仍是 `Mem`，一个字节都不多走。
         self.dismemory = dismemory
         self.relocate_every = relocate_every
-        self.mem = Dismem() if dismemory else Mem()
+        self.mem = Dismem(shuffle) if dismemory else Mem()
         if dismemory:
             self.mem.site = ("?", "?", 0)
         #: 基质（`docs/362`）。`None` = 今天的 LVM，**一个字节都不写**。
@@ -1089,9 +1090,9 @@ class _DismBody:
     """运行期内部的**体**。编号与坐标**不进 guest 值** —— 只活在令牌表后面。"""
 
     __slots__ = ("id", "kind", "size", "dx", "dy", "dz", "x", "y", "z",
-                 "data", "alive", "tokens")
+                 "cells", "shift", "alive", "tokens")
 
-    def __init__(self, bid: int, kind: str, n: int) -> None:
+    def __init__(self, bid: int, kind: str, n: int, shift: int = 0) -> None:
         self.id, self.kind = bid, kind
         self.size = max(0, int(n))
         d = 1
@@ -1101,7 +1102,11 @@ class _DismBody:
         self.dy = d
         self.dz = max(1, (self.size + d * d - 1) // (d * d))
         self.x = self.y = self.z = 0
-        self.data = bytearray(self.size)
+        #: `docs/375` §2：体**没有连续字节数组** —— 内容是一张稀疏映射（逻辑下标 -> 字节）。
+        #: `shift` 只改物理键的写法（同一个逻辑下标在不同摆法下落到不同的桶），访问路径
+        #: 从不出现"基址 + 字节数"。`--dismemory-shuffle N` 只动它。
+        self.cells: dict[int, int] = {}
+        self.shift = (shift % self.size) if self.size else 0
         self.alive = True
         self.tokens: set[int] = set()
 
@@ -1113,8 +1118,14 @@ class Dismem:
 
     HEAP_VOLUME = STACK_LIMIT - GLOBAL_BASE
 
-    def __init__(self) -> None:
+    def __init__(self, shuffle: int = 0) -> None:
+        #: 表示层摆法（`docs/375` §2.3）：0 = 规范；非 0 给每颗体一个确定性的移位。
+        self.shuffle = int(shuffle)
         self.bodies: dict[int, _DismBody] = {}
+        #: **活体**（退休的不在这里）。摆放只跟活体比 —— 否则每次 `alloca` 都要扫
+        #: 一遍"这辈子造过的所有体"，循环里调函数的程序是 O(n²)（2026-11-22 实测
+        #: 2000 次 store32 要 57s，`docs/375` §6）。
+        self.live: dict[int, _DismBody] = {}
         self.next_bid = 1
         #: 令牌 -> (体编号, 体内偏移)。**永不外露**。
         self.tokens: dict[int, tuple[int, int]] = {}
@@ -1134,8 +1145,8 @@ class Dismem:
 
     # ------------------------------------------------------------ 排版
     def _overlap(self, x, y, z, dx, dy, dz, me=None) -> bool:
-        for b in self.bodies.values():
-            if not b.alive or b is me:
+        for b in self.live.values():
+            if b is me:
                 continue
             if (x < b.x + b.dx and b.x < x + dx
                     and y < b.y + b.dy and b.y < y + dy
@@ -1162,9 +1173,8 @@ class Dismem:
     def relocate(self) -> None:
         """重排全部活体 —— 改的是**运行期坐标**，令牌与 guest 值一个都不动。"""
         self.round += 1
-        for b in sorted(self.bodies.values(), key=lambda q: q.id):
-            if b.alive:
-                self._place(b)
+        for b in sorted(self.live.values(), key=lambda q: q.id):
+            self._place(b)
 
     # ------------------------------------------------------------ 令牌
     def _new_token(self, b: "_DismBody", off: int) -> int:
@@ -1238,9 +1248,13 @@ class Dismem:
                         {"dismem": True, "reason": "size", "width": 0})
         bid = self.next_bid
         self.next_bid += 1
-        b = _DismBody(bid, kind, size)
+        # 摆法（`docs/375` §2.3）：只改物理键的写法，逻辑格号与令牌不动。
+        shift = 0 if self.shuffle == 0 else (
+            (self.shuffle * 2654435761 + bid * 40503) & 0x7FFFFFFF)
+        b = _DismBody(bid, kind, size, shift)
         self.bodies[bid] = b
         self._place(b)
+        self.live[bid] = b
         return self._new_token(b, 0)
 
     def retire(self, h: int) -> None:
@@ -1262,22 +1276,31 @@ class Dismem:
                 self.tomb.pop(t, None)
         b.tokens.clear()
         b.alive = False
-        b.data = bytearray()
+        b.cells.clear()
+        self.live.pop(bid, None)
 
     def put(self, h, data) -> None:
         b, off = self.decode(h, len(data))
-        b.data[off:off + len(data)] = data
+        for k, byte in enumerate(data):
+            key = (off + k + b.shift) % b.size
+            if byte:
+                b.cells[key] = byte
+            else:
+                b.cells.pop(key, None)
 
     def get(self, h, n: int) -> bytes:
         b, off = self.decode(h, n)
-        return bytes(b.data[off:off + n])
+        return bytes(b.cells.get((off + k + b.shift) % b.size, 0) for k in range(n))
 
     def cstr(self, h, limit: int = 4096) -> bytes:
         b, off = self.decode(h, 1)
         out = bytearray()
         i = off
-        while i < b.size and len(out) < limit and b.data[i] != 0:
-            out.append(b.data[i])
+        while i < b.size and len(out) < limit:
+            c = b.cells.get((i + b.shift) % b.size, 0)
+            if c == 0:
+                break
+            out.append(c)
             i += 1
         return bytes(out)
 
@@ -2227,9 +2250,13 @@ class ExplicitExecutor(Executor):
         depth = len(self.stack) + 1
         if depth > MAX_DEPTH:
             raise LvmError(f"栈溢出（调用深度上限 {MAX_DEPTH}）")
-        base = STACK_TOP - depth * FRAME_SIZE
-        if base <= self.mem.heap:
-            raise LvmError("栈溢出")
+        if self.dismemory:
+            # 与递归引擎同一条（`docs/368` §1.5）：帧是一颗体，`base` 是它的令牌。
+            base = self.mem.alloc(FRAME_SIZE, kind="frame")
+        else:
+            base = STACK_TOP - depth * FRAME_SIZE
+            if base <= self.mem.heap:
+                raise LvmError("栈溢出")
         fr = _IterFrame(self.mem, base, fn)
         for k, (pty, pname) in enumerate(fn.params):
             if argvals is not None:
@@ -2266,7 +2293,8 @@ class ExplicitExecutor(Executor):
             ins = block.instrs[fr.idx]
             if fr.idx == 0 and self.profile is not None:
                 self.profile.block(fr.fn.name, fr.label)
-            if self.profile is not None or self.sub is not None:
+            if (self.profile is not None or self.sub is not None
+                    or self.dismemory):
                 self.site = (fr.fn.name, fr.label, fr.idx)
             elif ins.text.startswith("call "):
                 self.site = (fr.fn.name, fr.label, fr.idx)
@@ -2376,6 +2404,20 @@ class ExplicitExecutor(Executor):
         argvals = [self.operand(fr, s) for s in args]
         argcaps = ([self._cap_of(fr, s) for s in args]
                    if self.sub is not None else [None] * len(args))
+        # 与递归引擎同一条（`docs/368` §1.5）：dismemory 的分配器是模型原生的 ——
+        # `__loment_alloc` / `__loment_free` 在这里换成"造一颗体 / 退休一颗体"，
+        # 不进去跑那段按地址写的运行期代码（那段会 ptrtoint → F04）。
+        if self.dismemory and self.sub is None and name in ("__loment_alloc",
+                                                            "__loment_free"):
+            if name == "__loment_alloc":
+                v = self.mem.alloc(max(1, int(argvals[0][1])), kind="heap")
+            else:
+                self.mem.retire(int(argvals[0][1]))
+                v = 0
+            if ins.dest:
+                fr.vals[ins.dest] = v
+            fr.idx += 1
+            return
         fr.wait_dest = ins.dest
         fr.wait_retty = "void" if retty is None else retty
         fr.wait_hook = None
@@ -2390,6 +2432,11 @@ class ExplicitExecutor(Executor):
         if self.sub is not None and not fr.internal:
             for oid in fr.objs:
                 self.sub.retire_oid(oid)
+        if self.dismemory:
+            # 帧返回 = 这一帧的 alloca 与帧体一起退休（旧令牌 → F02）。
+            for h in fr.objs:
+                self.mem.retire(h)
+            self.mem.retire(fr.base)
         if fr.internal:
             self.priv -= 1
         self.stack.pop()
@@ -2444,10 +2491,13 @@ class ExplicitExecutor(Executor):
         return sp
 
     def _prepare_tables(self) -> list:
-        """把每帧的值表与聚合暂存写进 guest 内存；返回待写回的 phi 条目。"""
+        """把每帧的值表与聚合暂存写进 guest 内存；返回待写回的 phi 条目。
+
+        dismemory 下"guest 内存"是**帧体里的格**（`docs/375` §2.5）：值表与聚合都
+        写进那一颗体，偏移口径与平坦帧相同（`FRAME_VALS`）。
+        """
         pending = []
         for d, fr in enumerate(self.stack, 1):
-            base = fr.base
             n = 0
             for name, val in sorted(fr.vals.items()):
                 sp = self.name_spans.get((fr.fn.name, name))
@@ -2455,15 +2505,42 @@ class ExplicitExecutor(Executor):
                     raise LvmError(f"checkpoint：找不到 SSA 名 {name} 的 IR 跨度（{fr.fn.name}）")
                 if n >= 1024:
                     raise LvmError("checkpoint：一帧里的值超过自举镜像的 1024 格")
-                lo, hi = self._place_value(fr, val)
-                struct.pack_into("<IIII", self.mem.buf, base + FRAME_VALS + n * VAL_REC,
-                                 sp[0], sp[1], lo, hi)
+                if self.dismemory:
+                    lo, hi = self._place_value_d(fr, val)
+                    self._frame_put(fr, FRAME_VALS + n * VAL_REC,
+                                    struct.pack("<IIII", sp[0], sp[1], lo, hi))
+                else:
+                    lo, hi = self._place_value(fr, val)
+                    struct.pack_into("<IIII", self.mem.buf,
+                                     fr.base + FRAME_VALS + n * VAL_REC,
+                                     sp[0], sp[1], lo, hi)
                 n += 1
             for name, val, cap in fr.pending:
-                lo, hi = self._place_value(fr, val)
+                lo, hi = (self._place_value_d(fr, val) if self.dismemory
+                          else self._place_value(fr, val))
                 pending.append((d, name, lo, hi, cap))
-            struct.pack_into("<II", self.mem.buf, base, n, fr.next - base)
+            if self.dismemory:
+                self._frame_put(fr, 0, struct.pack("<II", n, fr.next))
+            else:
+                struct.pack_into("<II", self.mem.buf, fr.base, n, fr.next - fr.base)
         return pending
+
+    def _place_value_d(self, fr, val) -> tuple[int, int]:
+        """dismemory 的宿主值 -> `(lo, hi)`；聚合按**帧体内偏移**记成 `(off, size)`。"""
+        if isinstance(val, bytes):
+            fr.next = self._align8(fr.next)
+            off = fr.next
+            self.mem.put(self.mem.add_off(fr.base, off), bytes(val))
+            fr.next = off + len(val)
+            return off, len(val)
+        v = int(val) & 0xFFFFFFFFFFFFFFFF
+        return v & 0xFFFFFFFF, v >> 32
+
+    def _frame_put(self, fr, off: int, data: bytes) -> None:
+        self.mem.put(self.mem.add_off(fr.base, off), data)
+
+    def _frame_get(self, fr, off: int, n: int) -> bytes:
+        return self.mem.get(self.mem.add_off(fr.base, off), n)
 
     def _sub_code(self) -> int:
         if self.sub is None:
@@ -2540,8 +2617,13 @@ class ExplicitExecutor(Executor):
         cset(CTX_CKPT_AT, 0)
         cset(CTX_IFHASH, self.ir_fnv)
 
+        flags = 3 if self.dismemory else self._sub_code()
         out = bytearray(CP_MAGIC + _u32(CP_VERSION) + _u32(self.ir_fnv)
-                        + _u32(self._sub_code()) + ctx)
+                        + _u32(flags) + ctx)
+        if self.dismemory:
+            out += self._snapshot_dis()
+            out += self._extension(pending)
+            return bytes(out)
         out += _u32(len(self.globals))
         for name, g in self.globals.items():
             nb = name.encode("utf-8")
@@ -2586,6 +2668,90 @@ class ExplicitExecutor(Executor):
         out += self._extension(pending)
         return bytes(out)
 
+    def _restore_dis(self, frames, bodies, cells, toks, next_bid, next_serial) -> None:
+        """把 flags=3 的段装回 `Dismem`（`docs/375` §2.5）。"""
+        m = self.mem
+        m.bodies.clear()
+        m.live.clear()
+        m.tokens.clear()
+        m.rev.clear()
+        m.tomb.clear()
+        m.next_bid = 1
+        m.next_serial = 1
+        for bid, kind, size, shift in bodies:
+            b = _DismBody(bid, kind, size, shift)
+            b.alive = True
+            m.bodies[bid] = b
+            m._place(b)
+            m.live[bid] = b
+        for bid, k, v in cells:
+            b = m.bodies.get(bid)
+            if b is not None:
+                b.cells[k] = v
+        for tok, bid, off in toks:
+            m.tokens[tok] = (bid, off)
+            m.rev[(bid, off)] = tok
+            b = m.bodies.get(bid)
+            if b is not None:
+                b.tokens.add(tok)
+        m.next_bid = next_bid
+        m.next_serial = next_serial
+        for tok, (bid, off) in m.tokens.items():
+            if off == 0 and m.bodies.get(bid) is not None and m.bodies[bid].kind == "heapspan":
+                m.heap = tok
+                break
+
+    def _snapshot_dis(self) -> bytes:
+        """`flags = 3` 的段：令牌、帧体、格表、令牌表、体表、计数器（`docs/375` §2.5）。"""
+        out = bytearray()
+        out += _u32(len(self.globals))
+        for name, g in self.globals.items():
+            nb = name.encode("utf-8")
+            out += _u32(len(nb)) + nb + _u64(g.addr)
+        out += _u32(0)                       # 对象表：dismemory 与基质不叠加
+        out += _u32(1) + _u32(0)             # next_oid / tag_seq（占位，同共同布局）
+        cont = bytearray(MAX_CONT * CONT_REC * 4)
+        for d, fr in enumerate(self.stack, 1):
+            fi = self.fn_index[fr.fn.name]
+            bi = self.block_index[fr.fn.name][fr.label]
+            prev = (NONE if fr.prev is None
+                    else self.block_index[fr.fn.name][fr.prev])
+            ro, rl = self._wait_span(self.stack[d - 2]) if d > 1 else (0, 0)
+            do_, dl = self._wait_span(fr)
+            hook = 0
+            a0 = 0
+            if fr.wait_hook is not None:
+                hook = 1 if fr.wait_hook[0] == "alloc" else 2
+                a0 = int(fr.wait_hook[1]) & 0xFFFFFFFFFFFFFFFF
+            rec = [fi, 0, 0, ro, rl, bi, fr.idx, do_, dl,
+                   1 if fr.internal else 0, hook,
+                   a0 & 0xFFFFFFFF, a0 >> 32, prev, fr.steps, 0]
+            for k, v in enumerate(rec):
+                struct.pack_into("<I", cont, (d * CONT_REC + k) * 4, v)
+        out += cont
+        out += _u32(len(self.stack))
+        for fr in self.stack:
+            out += _u64(fr.base) + _u32(fr.next) + _u32(len(fr.objs))
+            for h in fr.objs:
+                out += _u64(h)
+        bodies = sorted((b for b in self.mem.bodies.values() if b.alive),
+                        key=lambda q: q.id)
+        cells = [(b.id, k, v) for b in bodies for k, v in sorted(b.cells.items())]
+        out += _u32(len(cells))
+        for bid, k, v in cells:
+            out += _u32(bid) + _u32(k) + _u32(v)
+        toks = sorted(self.mem.tokens.items())
+        out += _u32(len(toks))
+        for tok, (bid, off) in toks:
+            out += _u64(tok) + _u32(bid) + _u32(off)
+        out += _u32(len(bodies))
+        for b in bodies:
+            nb = b.kind.encode("utf-8")
+            out += (_u32(b.id) + _u32(b.size) + _u32(b.shift)
+                    + _u32(len(nb)) + nb)
+        out += _u32(self.mem.next_bid) + _u32(self.mem.next_serial)
+        return bytes(out)
+
     def restore(self, blob: bytes) -> None:
         r = _Reader(blob)
         if r.take(4) != CP_MAGIC:
@@ -2606,7 +2772,7 @@ class ExplicitExecutor(Executor):
         gaddr = {}
         for _ in range(nglob):
             name = r.take(r.u32()).decode("utf-8", "replace")
-            gaddr[name] = r.u32()
+            gaddr[name] = r.u64() if flags == 3 else r.u32()
         for name, g in self.globals.items():
             if name in gaddr:
                 g.addr = gaddr[name]
@@ -2624,11 +2790,38 @@ class ExplicitExecutor(Executor):
         next_oid = r.u32()
         tag_seq = r.u32()
         cont = r.take(MAX_CONT * CONT_REC * 4)
-        mem = r.take(MEM_SIZE)
-        if len(mem) != MEM_SIZE:
-            raise LvmError("checkpoint：内存长度不对")
-        self.mem.buf = bytearray(mem)
-        if flags == 0:
+        dis_state = None
+        if flags == 3:
+            nfr = r.u32()
+            dis_frames = []
+            for _ in range(nfr):
+                base_tok = r.u64()
+                fr_next = r.u32()
+                na = r.u32()
+                objs_h = [r.u64() for _ in range(na)]
+                dis_frames.append((base_tok, fr_next, objs_h))
+            nc = r.u32()
+            dis_cells = [(r.u32(), r.u32(), r.u32()) for _ in range(nc)]
+            nt = r.u32()
+            dis_toks = [(r.u64(), r.u32(), r.u32()) for _ in range(nt)]
+            nb = r.u32()
+            dis_bodies = []
+            for _ in range(nb):
+                bid = r.u32()
+                size = r.u32()
+                shift = r.u32()
+                kind = r.take(r.u32()).decode("utf-8", "replace")
+                dis_bodies.append((bid, kind, size, shift))
+            dis_next_bid = r.u32()
+            dis_next_serial = r.u32()
+            dis_state = (dis_frames, dis_bodies, dis_cells, dis_toks,
+                         dis_next_bid, dis_next_serial)
+        else:
+            mem = r.take(MEM_SIZE)
+            if len(mem) != MEM_SIZE:
+                raise LvmError("checkpoint：内存长度不对")
+            self.mem.buf = bytearray(mem)
+        if flags == 0 or flags == 3:
             self.sub = None
         else:
             s = SwCap("tag" if flags == 2 else "cap")
@@ -2690,6 +2883,8 @@ class ExplicitExecutor(Executor):
         self.next_vfd = (max(vfds) + 1) if vfds else VFD_BASE
         if argv:
             self.argv = argv
+        if dis_state is not None:
+            self._restore_dis(*dis_state)
         self.stack = []
         for d in range(1, depth + 1):
             rec = struct.unpack_from("<16I", cont, d * CONT_REC * 4)
@@ -2710,28 +2905,53 @@ class ExplicitExecutor(Executor):
                 fn, blk = self.global_blocks[bi]
                 prev_label = (None if prev == NONE
                               else self.global_blocks[prev][1].label)
-            fr = _IterFrame(self.mem, STACK_TOP - d * FRAME_SIZE, fn)
+            if flags == 3:
+                base_tok, fr_next, fr_objs = dis_frames[d - 1]
+                fr = _IterFrame(self.mem, base_tok, fn)
+            else:
+                fr = _IterFrame(self.mem, STACK_TOP - d * FRAME_SIZE, fn)
             fr.label = blk.label
             fr.idx = j
             fr.prev = prev_label
             fr.steps = steps
-            fr.next = fr.base + struct.unpack_from("<I", self.mem.buf, fr.base + 4)[0]
-            n = struct.unpack_from("<I", self.mem.buf, fr.base)[0]
-            if n > 1024:
-                raise LvmError("checkpoint：一帧里的值超过 1024 格")
-            fr.vals = {}
-            for k in range(n):
-                no, nl, lo, hi = struct.unpack_from(
-                    "<IIII", self.mem.buf, fr.base + FRAME_VALS + k * VAL_REC)
-                name = self._span_name(no, nl)
-                ty = self.value_types.get((fn.name, name))
-                if ty is not None and lomelf.is_agg(ty):
-                    fr.vals[name] = bytes(self.mem.buf[lo:lo + hi])
-                else:
-                    fr.vals[name] = lo | (hi << 32)
+            if flags == 3:
+                headers = self.mem.get(self.mem.add_off(fr.base, 0), 8)
+                n, fr.next = struct.unpack("<II", headers)
+                if n > 1024:
+                    raise LvmError("checkpoint：一帧里的值超过 1024 格")
+                fr.vals = {}
+                for k in range(n):
+                    blob16 = self.mem.get(self.mem.add_off(
+                        fr.base, FRAME_VALS + k * VAL_REC), VAL_REC)
+                    no, nl, lo, hi = struct.unpack("<IIII", blob16)
+                    name = self._span_name(no, nl)
+                    ty = self.value_types.get((fn.name, name))
+                    if ty is not None and lomelf.is_agg(ty):
+                        fr.vals[name] = self.mem.get(
+                            self.mem.add_off(fr.base, lo), hi)
+                    else:
+                        fr.vals[name] = lo | (hi << 32)
+            else:
+                fr.next = fr.base + struct.unpack_from("<I", self.mem.buf, fr.base + 4)[0]
+                n = struct.unpack_from("<I", self.mem.buf, fr.base)[0]
+                if n > 1024:
+                    raise LvmError("checkpoint：一帧里的值超过 1024 格")
+                fr.vals = {}
+                for k in range(n):
+                    no, nl, lo, hi = struct.unpack_from(
+                        "<IIII", self.mem.buf, fr.base + FRAME_VALS + k * VAL_REC)
+                    name = self._span_name(no, nl)
+                    ty = self.value_types.get((fn.name, name))
+                    if ty is not None and lomelf.is_agg(ty):
+                        fr.vals[name] = bytes(self.mem.buf[lo:lo + hi])
+                    else:
+                        fr.vals[name] = lo | (hi << 32)
             fr.caps = dict(caps.get(d, {}))
-            fr.objs = [o.oid for o in (self.sub.objs.values() if self.sub else [])
-                       if o.kind == "alloca" and fr.base <= o.base < fr.base + FRAME_SIZE]
+            if flags == 3:
+                fr.objs = list(fr_objs)
+            else:
+                fr.objs = [o.oid for o in (self.sub.objs.values() if self.sub else [])
+                           if o.kind == "alloca" and fr.base <= o.base < fr.base + FRAME_SIZE]
             fr.wait_dest = self._span_name(do_, dl) if dl else None
             fr.wait_retty = "void"
             if j > 0 and j <= len(blk.instrs):
@@ -2749,7 +2969,8 @@ class ExplicitExecutor(Executor):
                     continue
                 ty = self.value_types.get((fn.name, name))
                 if ty is not None and lomelf.is_agg(ty):
-                    val = bytes(self.mem.buf[lo:lo + hi])
+                    val = (self.mem.get(self.mem.add_off(fr.base, lo), hi)
+                           if flags == 3 else bytes(self.mem.buf[lo:lo + hi]))
                 else:
                     val = lo | (hi << 32)
                 fr.pending.append((name, val, cap))
@@ -2769,8 +2990,9 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     """
     if substrate not in ("none", "sw_cap", "sw_tag"):
         raise LvmError(f"没有这一档基质: {substrate!r}（只有 none / sw_cap / sw_tag）")
-    if "; loment-memory: dismemory" in text:
-        raise LvmError("dismemory 暂时没有快照/恢复（docs/368 §6）—— 去掉 --checkpoint-at / --resume")
+    dis = "; loment-memory: dismemory" in text
+    if dis and substrate != "none":
+        raise LvmError("dismemory 与基质不叠加（docs/368 §1.6）")
     shape = entry_kind(text)
     if shape is None:
         raise LvmError(NO_ENTRY)
@@ -2780,7 +3002,8 @@ def run_checkpointed(text: str, out, substrate: str = "none",
     globals_, funcs, externs = lomelf.parse_ll(text)
     sub = (SwCap("cap") if substrate == "sw_cap"
            else SwCap("tag") if substrate == "sw_tag" else None)
-    vm = ExplicitExecutor(globals_, funcs, externs, out, None, argv, None, sub)
+    vm = ExplicitExecutor(globals_, funcs, externs, out, None, argv, None, sub,
+                          dismemory=dis)
     vm.ir_text = text
     vm.ir_bytes = text.encode("utf-8")
     vm.ir_fnv = fnv32(vm.ir_bytes)
@@ -2832,7 +3055,8 @@ def run_checkpointed(text: str, out, substrate: str = "none",
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
            values=None, deopts=None, counters: "Counters | None" = None,
-           substrate: str = "none", relocate_every: int = 0) -> int:
+           substrate: str = "none", relocate_every: int = 0,
+           shuffle: int = 0) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -2880,7 +3104,7 @@ def run_ir(text: str, out, profile: Profile | None = None,
            else SwCap("tag") if substrate == "sw_tag" else None)
     vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub,
                   dismemory=dismemory,
-                  relocate_every=relocate_every)
+                  relocate_every=relocate_every, shuffle=shuffle)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
         raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
@@ -2904,13 +3128,14 @@ def run_ir(text: str, out, profile: Profile | None = None,
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
                values=None, deopts=None, counters: "Counters | None" = None,
-               substrate: str = "none", relocate_every: int = 0) -> int:
+               substrate: str = "none", relocate_every: int = 0,
+               shuffle: int = 0) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts, counters, substrate, relocate_every)
+                  values, deopts, counters, substrate, relocate_every, shuffle)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -2958,6 +3183,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
                     help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
                          "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
+    ap.add_argument("--dismemory-shuffle", type=int, default=0, metavar="N",
+                    help="dismemory（docs/375 §2.3）：表示层摆法。0 = 规范；非 0 给每颗体"
+                         "一个确定性的移位，逻辑下标不变、物理桶不同 —— stdout/stderr 必须一样")
     ap.add_argument("--dismemory-relocate-every", type=int, default=0, metavar="K",
                     help="dismemory（docs/368）：每 K 条指令把全部活体重排一次（0 = 关；"
                          "句柄不变，所以两次的 stdout/rc 必须一样）")
@@ -3099,7 +3327,8 @@ def main(argv: list[str] | None = None) -> int:
                                       fusion, hot, counters=counters)
             else:
                 rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters,
-                            a.substrate, a.dismemory_relocate_every)
+                            a.substrate, a.dismemory_relocate_every,
+                            a.dismemory_shuffle)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
@@ -3110,7 +3339,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
                                 a.tier, values, deopts, counters, a.substrate,
-                                a.dismemory_relocate_every)
+                                a.dismemory_relocate_every, a.dismemory_shuffle)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())

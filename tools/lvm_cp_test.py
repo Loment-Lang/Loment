@@ -23,6 +23,9 @@
 * **G** `sw_tag` 的对象表与 4 位标签一起进快照（`docs/364`）。
 * **H** 合成文件（guest 自己的 `/proc/self/cmdline`）的**读游标**进快照：
   停在 read 中间，恢复后从同一位置接着读（W5，`docs/360` §4）。
+* **I** dismemory 也能存/取：帧是体、值是格（`flags = 3`，`docs/375` §2.5）。
+  显式栈引擎与递归引擎在合法程序上同答；停在任何采样点恢复后 rc/stdout 不变；
+  恢复后撞上的故障（退休令牌）码 + 站点也同。
 
 用法: python tools/lvm_cp_test.py
 """
@@ -115,6 +118,61 @@ fn _start() {
 """
 
 
+#: dismemory 的存/取夹具：数组 + 嵌套调用 + alloc/free + 输出。
+_DIS_CP = """module cp_dis
+choose lvm_dismemory_true
+choose runtime
+use bytes
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn bump(p: ptr, k: u32) {
+    let v: u32 = load32(p, 0);
+    store32(p, 0, add(v, k));
+}
+
+fn _start() {
+    let xs: [u32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        s = add(s, xs[i]);
+        i = i + 1;
+    }
+    let p: ptr = alloc(16);
+    store32(p, 0, s);
+    bump(p, 1);
+    let v: u32 = load32(p, 0);
+    free(p);
+    print("sum=");
+    print("ok");
+    print("\\n");
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+#: 恢复后必须撞上**同一个故障**：被调者返回后，它的 `alloca` 令牌已退休。
+#: 这种形状在 Loment 源里被静态检查器拒（`变量 p ... 已经被 free`），所以用手写 IR
+#: —— 与 `lvm_dismemory_test` 的悬垂夹具同一条理由。
+_DIS_UAF = """; loment-memory: dismemory
+
+define ptr @mk() {
+entry:
+  %p = alloca [4 x i8]
+  ret ptr %p
+}
+
+define void @_start() {
+entry:
+  %p = call ptr @mk()
+  %v = load i8, ptr %p
+  ret void
+}
+"""
+
+
 def _compile(text: str, name: str) -> str:
     with tempfile.TemporaryDirectory() as td:
         src = Path(td) / f"{name}.lomt"
@@ -135,6 +193,50 @@ def _run(ir: str, at=None, resume=None, substrate="none", argv=None):
 
 def _stack_depth(blob: bytes) -> int:
     return lvm.cp_frame_count(blob)
+
+
+def test_dismemory_snapshot_roundtrip() -> None:
+    """判 I（`docs/375` §2.5）：没有地址那一档也能存/取。
+
+    两件事一起钉：**显式栈引擎在 dismemory 下与递归引擎同答**（它是快照那一档的
+    运行器），以及停在任何采样点恢复后的 `rc + stdout` 与一口气跑完相同。
+    """
+    ir = _compile(_DIS_CP, "cp_dis")
+    out = io.BytesIO()
+    base = (lvm.run_ir(ir, out), out.getvalue())
+    out = io.BytesIO()
+    got = _run(ir)
+    assert (got[0], got[1]) == base, ("显式栈引擎与递归引擎在 dismemory 下不同答",
+                                      got[:2], base)
+    for at in (0, 5, 17, 60):
+        rc1, out1, blob = _run(ir, at=at)
+        assert blob, (at, "没有快照")
+        rc2, out2, _ = _run(ir, resume=blob)
+        assert (rc2, out1 + out2) == base, (at, rc2, (out1 + out2)[:40], base[1][:40])
+    print(f"      dismemory：递归/显式同答 {base[0]}；at=0/5/17/60 恢复后 rc/stdout 同")
+
+
+def test_dismemory_snapshot_keeps_the_fault() -> None:
+    """判 I（故障面）：恢复后的执行撞上**同一处**退休令牌（F02），码与站点同。"""
+    ir = _DIS_UAF
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        out = io.BytesIO()
+        rc = lvm.run_ir(ir, out)
+    one = (rc, _first_line(err.getvalue()))
+    err2 = io.StringIO()
+    with contextlib.redirect_stderr(err2):
+        rc1, _o1, blob = _run(ir, at=1)
+    err3 = io.StringIO()
+    with contextlib.redirect_stderr(err3):
+        rc2, _o2, _b2 = _run(ir, resume=blob)
+    resumed = (rc2, _first_line(err3.getvalue()))
+    assert one == resumed, (one, resumed, err2.getvalue()[-200:])
+    print("      恢复后仍是同一处 F02：码 + 站点逐字同")
+
+
+def _first_line(text: str) -> str:
+    return text.splitlines()[0] if text.splitlines() else ""
 
 
 def test_engines_agree_on_corpus() -> None:

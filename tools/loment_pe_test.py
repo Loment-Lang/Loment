@@ -1131,6 +1131,56 @@ def test_pe_image_is_structurally_sane():
     print("      PE 头部/节表自洽: 对齐、不重叠、入口可执行、文件盖得住节数据")
 
 
+#: **LGC alpha 的栈区探针**（`#1655`）：一块提升缓冲 + 只被它指着的目标，4000 次分配
+#: 逼出回收，末尾的探测块（40 B，全程序只有目标用这个尺寸）会盖掉真被收掉的目标。
+#: 退出码 7 = 目标活下来，3 = 被收了。PE 与 ELF 必须给出同一个数 —— GC 只用
+#: `exit(60)` 一个系统调用，其余全在产物自己的铺排里，所以两边本来就该一致；
+#: 这一格钉的是"PE 那条链接路真的把运行期文本、栈区表与根表都摆对了"。
+_GC_ALPHA_PROBE = """module gc_alpha_probe
+%(choose)s
+choose runtime
+
+fn junk() -> u64 {
+    let p: u64 = alloc(16) as u64;
+    store8(p as ptr, 0, 200);
+    return p;
+}
+
+fn wr64(p: ptr, o: u32, v: u64) -> u32 {
+    store8(p, o, (v & 255) as u8);
+    store8(p, o + 1, ((v >> 8) & 255) as u8);
+    store8(p, o + 2, ((v >> 16) & 255) as u8);
+    store8(p, o + 3, ((v >> 24) & 255) as u8);
+    store8(p, o + 4, ((v >> 32) & 255) as u8);
+    store8(p, o + 5, ((v >> 40) & 255) as u8);
+    store8(p, o + 6, ((v >> 48) & 255) as u8);
+    store8(p, o + 7, ((v >> 56) & 255) as u8);
+    return 0;
+}
+
+fn _start() {
+    let keep: ptr = alloc(%(size)d);
+    let t: u64 = alloc(32) as u64;
+    store8(t as ptr, 0, 7);
+    %(write)s
+    let i: u32 = 0;
+    while i < 4000 { let x: u64 = junk(); i = i + 1; }
+    let probe: u64 = alloc(32) as u64;
+    store8(probe as ptr, 0, 200);
+    if load8(t as ptr, 0) == 7 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+"""
+
+#: (标签, choose 行, 缓冲字节数, 写不写目标指针, 期望退出码)。
+_GC_ALPHA_CASES = (
+    ("alpha8k", "choose gc_auto_alpha", 8192, "wr64(keep, 0, t);", 7),
+    ("alpha8k_nowrite", "choose gc_auto_alpha", 8192, "", 3),
+    ("alpha16k", "choose gc_auto_alpha", 16384, "wr64(keep, 0, t);", 7),
+    ("auto8k", "choose gc_auto", 8192, "wr64(keep, 0, t);", 7),
+)
+
+
 @test
 def test_pe_runs_natively_matches_linux_behavior():
     """同一份 IR: PE 产物(本机原生) 与 clang/Linux 产物(WSL) 的 stdout 字节 + 退出码一致。"""
@@ -1190,8 +1240,58 @@ def test_pe_runs_natively_matches_linux_behavior():
         assert "rc=0" in w.stdout, f"openat Linux 对拍失败：{w.stdout[-300:]}"
         assert "probe=abcd" in w.stdout and "keep=KEEP" in w.stdout
         assert "append=0123456789abcd" in w.stdout
+
+        # ---- `--opt`（docs/366）：同一份 IR，clang -O2 的用户代码 + lomelf 的运行期。
+        # 挂在**这一条**而不是新起判据：跳过表只许变短（`ci.py --budget-vs`），而 Windows
+        # 之外的机器跑不了 PE —— 新判据生来就跳过，正是那道棘轮要堵的形状。
+        src = td / "peopt_probe.lomt"
+        src.write_text(_OPT_PROBE, encoding="utf-8", newline="\n")
+        text = _ir(src, td).read_text(encoding="utf-8")
+        d = td / "probe-def.exe"
+        d.write_bytes(lomelf.compile_pe(text)[0])
+        o = td / "probe-opt.exe"
+        o.write_bytes(lomelf.compile_pe_opt(text, clang)[0])
+        rd, od = _run_native(d)
+        ro, oo = _run_native(o)
+        assert (rd, od) == (ro, oo), (
+            f"--opt 与默认档行为不一致: rc {rd}/{ro}\n"
+            f"  default: {od[:200]!r}\n  opt:     {oo[:200]!r}")
+        assert od == b"sum=31\ntwo=2\nfib=144\n", f"默认档自己的输出就不对: {od!r}"
+
+        # 三个 libcall（含重叠 memmove 的反向路径）：机器码版，Win64 ABI。
+        src = td / "peopt_libc.lomt"
+        src.write_text(_OPT_LIBC_PROBE, encoding="utf-8", newline="\n")
+        lo = td / "libc-opt.exe"
+        lo.write_bytes(lomelf.compile_pe_opt(
+            _ir(src, td).read_text(encoding="utf-8"), clang)[0])
+        lrc, lout = _run_native(lo)
+        assert lrc == 0, f"--opt PE 里三个 libcall 探针 rc={lrc}"
+        assert lout == b"65,65,65,65,65,88,89,88,89,90,\n", lout
+        # ---- LGC alpha 的**栈区**（`#1655`）：PE 与 ELF 必须给出同一组退出码。
+        # 运行期文本、栈区表与根表都在 IR 里，这一格查的是 PE 那条链接路把它们摆对了。
+        gc_ok = 0
+        for label, choose, size, write, want_rc in _GC_ALPHA_CASES:
+            src = td / f"gc_{label}.lomt"
+            src.write_text(_GC_ALPHA_PROBE % {"choose": choose, "size": size, "write": write},
+                           encoding="utf-8", newline="\n")
+            ll = _ir(src, td)
+            text = ll.read_text(encoding="utf-8")
+            exe = td / f"gc_{label}.exe"
+            exe.write_bytes(lomelf.compile_pe(text)[0])
+            elf = td / f"gc_{label}.elf"
+            elf.write_bytes(lomelf.compile_ll(text)[0])
+            got = _run_native(exe, timeout=60)
+            want = _run_in_wsl(elf, f"gc_{label}", td)
+            assert got == want, (
+                f"[gc {label}] PE 与 ELF 不一致: pe rc={got[0]} out={got[1]!r} / "
+                f"elf rc={want[0]} out={want[1]!r}")
+            assert got[0] == want_rc, (
+                f"[gc {label}] 退出码 {got[0]}，期望 {want_rc} —— "
+                f"7 = 目标活下来，3 = 被收了")
+            gc_ok += 1
     print(f"      {ok} 个程序的 PE 产物与 clang/Linux 产物 stdout 字节 + 退出码一致；"
-          f"openat 三格与 Linux 语义一致")
+          f"openat 三格与 Linux 语义一致；--opt 两档逐字节一致、三个 libcall 对；"
+          f"LGC 栈区 {gc_ok} 格 PE==ELF（含 8 KiB/16 KiB 提升缓冲）")
 
 
 #: `docs/311` P0 的探针：`getpid`(39) / `uname`(63) / `time`(201) / `clock_gettime`(228)。
@@ -1510,7 +1610,25 @@ def test_pe_selfhost_mirror_matches_reference():
             blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
             assert got.read_bytes() == blob, f"[{src.stem}] 镜像的 PE 与参考不一致"
             ok += 1
-    print(f"      {ok} 个语料: 自举镜像产出的 PE 与参考逐字节相同（去 WSL 的最后一道坎）")
+        # **GC / 栈区**的产物也走同一条对拍（`#1655`）：收集器文本、栈区表与根表
+        # 都在 IR 里，PE 镜像要么全摆对，要么逐字节看得见。
+        gsrc = td / "gc_alpha_twin.lomt"
+        gsrc.write_text(_GC_ALPHA_PROBE % {"choose": "choose gc_auto_alpha",
+                                           "size": 8192,
+                                           "write": "wr64(keep, 0, t);"},
+                        encoding="utf-8", newline="\n")
+        gll = _ir(gsrc, td)
+        ggot = td / "gc_alpha.mir.exe"
+        script = (f"cd {_wsl_path(ROOT)} && {_wsl_path(mir)} "
+                  f"{_wsl_path(gll)} {_wsl_path(ggot)}")
+        r4 = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                            capture_output=True, timeout=300, shell=False)
+        assert r4.returncode == 0, f"镜像出 GC 的 PE 失败: {r4.stderr[-300:]!r}"
+        gblob, _ginfo = lomelf.compile_pe(gll.read_text(encoding="utf-8"))
+        assert ggot.read_bytes() == gblob, "[gc_alpha] 镜像的 PE 与参考不一致"
+        ok += 1
+    print(f"      {ok} 个语料: 自举镜像产出的 PE 与参考逐字节相同（去 WSL 的最后一道坎；"
+          f"含一份 GC/栈区产物）")
 
 
 @test
@@ -3402,6 +3520,81 @@ def _check_openat(d: Path) -> None:
     assert (d / "probe.txt").read_bytes() == b"abcd"
     assert (d / "append.txt").read_bytes() == b"0123456789abcd"
     assert (d / "keep.txt").read_bytes() == b"KEEP"
+
+
+#: `--opt` 的等价比对探针：递归 + 数组 + 循环 + 多次打印。
+#: 多次打印是关键 —— 优化档第一版没保住 RDI/RSI，症状只在"连打三个数"上现形。
+_OPT_PROBE = r'''module peopt_probe
+choose runtime
+
+fn fib(n: u32) -> u32 {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn two() -> u32 {
+    return 2;
+}
+
+fn _start() {
+    let a: [u32; 8] = [3, 1, 4, 1, 5, 9, 2, 6];
+    let s: u32 = 0;
+    for i in 0..8 {
+        s = s + a[i];
+    }
+    print("sum=");
+    print_num(s);
+    print("\n");
+    print("two=");
+    print_num(two());
+    print("\n");
+    print("fib=");
+    print_num(fib(12));
+    print("\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+#: 三个 libcall 探针（`extern fn` 直接点名）：clang 合成外的那三个名字由 lomelf 的
+#: 机器码版本提供，重叠 memmove 走的是反向那条路。
+_OPT_LIBC_PROBE = r'''module peopt_libc
+choose runtime
+
+extern fn memset(dst: ptr, v: u32, n: u64) -> ptr;
+extern fn memcpy(dst: ptr, src: ptr, n: u64) -> ptr;
+extern fn memmove(dst: ptr, src: ptr, n: u64) -> ptr;
+
+fn _start() {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    memset(a, 65 as u32, 5 as u64);
+    memcpy(b, a, 5 as u64);
+    memmove(a, b, 5 as u64);
+    let k: u32 = 0;
+    while k < 5 {
+        print_num(load8(a, k) as u32);
+        print(",");
+        k = k + 1;
+    }
+    store8(a, 0, 88 as u8);
+    store8(a, 1, 89 as u8);
+    store8(a, 2, 90 as u8);
+    store8(a, 3, 87 as u8);
+    store8(a, 4, 86 as u8);
+    let d: ptr = ptr_add(a, 2);
+    memmove(d, a, 5 as u64);
+    let m: u32 = 0;
+    while m < 5 {
+        print_num(load8(a, m) as u32);
+        print(",");
+        m = m + 1;
+    }
+    print("\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
 
 
 def main() -> int:

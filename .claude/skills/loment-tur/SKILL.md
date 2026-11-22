@@ -1,6 +1,6 @@
 ---
 name: loment-tur
-description: Full Tur grammar system for Loment - the two-level editions (tur2026.1 / tur2026.2), the grammar declaration and factory lock, lexical rules, items, types, statements, expressions and precedence, patterns, entry points, hard limits, the seven foreign surface grammars (C, C++, Java, C#, Go, Python, natural), Rust as interface-only, and a readable grammar sketch. Read before writing Tur 2 features, choosing an edition, or deciding which surface spelling to use. Part of the LomentSkill suite; section numbers are global.
+description: Full Tur grammar system for Loment - the two-level editions (tur2026.1, tur2026.2, tur2026.3 and the opt-in tur2027.1Alpha), the grammar declaration and factory lock, lexical rules, items, types, statements, expressions and precedence, patterns, entry points, hard limits, the opt-in surfaces (effects, classes, function pointers), the seven foreign surface grammars (C, C++, Java, C#, Go, Python, natural), Rust as interface-only, and a readable grammar sketch. Read before writing Tur 2/2026.3 features, choosing an edition, or deciding which surface spelling to use. Part of the LomentSkill suite; section numbers are global.
 ---
 
 ## 2.0 The Tur grammar system
@@ -18,7 +18,7 @@ actually costs time.
 
 | Layer | How a file is recognised | How it is read | Semantics |
 |---|---|---|---|
-| **Tur** (native) | no declaration (the **newest edition**), or `choose write grammar loment` / `tur` / `tur1` / `tur2` / `tur3` / `tur2026.1` / `tur2026.2` / `tur2026.3` | the native lexer and parser, **no translator** | exactly this guide |
+| **Tur** (native) | no declaration (the **newest edition**), or `choose write grammar loment` / `tur` / `tur1` / `tur2` / `tur3` / `tur2026.1` / `tur2026.2` / `tur2026.3` / `tur2027.1Alpha` | the native lexer and parser, **no translator** | exactly this guide |
 | **Foreign surface grammars** | `.c` `.cpp` `.java` `.cs` `.go` `.py`, or an explicit `choose write grammar <name>` | translated into Tur **in process by the reference compiler**; the installed package refuses them | **identical** - only spelling and shape change |
 | **Rust** | `.rs`, or `choose write grammar rust` | `from_rust`: **interface extraction only** (declarations), no body translation | a complete program is refused |
 
@@ -70,6 +70,8 @@ The complete value domain (`potato_from.GRAMMAR_ALIASES`, `NATIVE_GRAMMARS`):
 | `loment` | `loment` | native (the historical name of Tur) |
 | `tur`, `tur1`, `tur2026.1` | `tur2026.1` | native, **Tur 1** |
 | `tur2`, `tur2026.2` | `tur2026.2` | native, **Tur 2** |
+| `tur3`, `tur2026.3` | `tur2026.3` | native, **Tur 2026.3** (the default) |
+| `tur2027.1Alpha` | `tur2027.1Alpha` | native, **opt-in alpha** (block scope) |
 | `c` | `c` | foreign (`tools/ctrans.py`) |
 | `cpp`, `c++`, `cxx`, `cc` | `cpp` | foreign (`tools/cpptrans.py`) |
 | `java` | `java` | foreign (`tools/jtrans.py`) |
@@ -88,7 +90,8 @@ Editions are **two-level**: `tur<year>.<n>` (`docs/296` §1.1).
 | none / `loment` | **newest edition** (`TUR_EDITIONS[-1]`; today `tur2026.3`) | 2026-11-06: new code gets the newest syntax by default (`docs/312`) |
 | `tur` / `tur1` / `tur2026.1` | **Tur 1** (`tur2026.1`) | **permanently frozen** - no new syntax ever enters it, old files keep every byte of meaning |
 | `tur2` / `tur2026.2` | **Tur 2** (`tur2026.2`) | first batch of absorbed Python/Zig/Go syntax; Tur 1 files compile unchanged. **Closed 2026-11-05** - the set in 2.0.4 is final |
-| `tur3` / `tur2026.3` | **Tur 2026.3** (`tur2026.3`) | inherits 2026.2; **open** - new syntax lands here (first: `lgc`, `docs/309`) |
+| `tur3` / `tur2026.3` | **Tur 2026.3** (`tur2026.3`) | inherits 2026.2; **open** - new syntax lands here (`lgc`, borrows, the 2026.3 constructs in 2.0.5) |
+| `tur2027.1Alpha` | **Tur 2027.1 Alpha** | **opt-in alpha, not the default**: block-scoped `let` (`docs/353`). Its semantics may change with feedback, so a file must ask for it explicitly |
 | future `tur2027.1` … | next edition | same rule, each edition frozen on release |
 
 Rules that make "old syntax keeps compiling" a fact rather than a promise:
@@ -164,7 +167,7 @@ Two properties worth stating because they are checked, not assumed:
   name still compiles; the same file declared `tur2` and using `break;` in a loop body does
   loop control. Both directions have criteria (p8 M91/M94/M95).
 
-### 2.0.5 Tur 2026.3: lifetimes (landed in 0.1.5)
+### 2.0.5 Tur 2026.3: lifetimes (landed in 0.1.5; the default edition since 2026.3)
 
 The dimension is `choose lifetime_no | lifetime_auto | lifetime_manual`; `lifetime_auto` is
 the default from `tur2026.3` on, and older editions keep `lifetime_no` so their artifacts do
@@ -223,6 +226,23 @@ the frozen editions):
   constants and `if`/`match` expressions are refused (E0215/E0216). `:=` must be written
   glued - `let x: = 1` is still a parse error (`docs/347`).
 
+### 2.0.5b The opt-in surfaces (2026-11)
+
+Four language surfaces landed after 2026.3 opened, but **none of them is on by default**.
+Each has its own switch, and each has a different implementation boundary - read the last
+column before promising it.
+
+| Surface | Switch | What the grammar accepts | Status boundary |
+|---|---|---|---|
+| **Algebraic effects** | `choose lspe_effects_true` (slot) | `effect E { fn op(…) -> R; }`, `fn f(…) -> R effects E { … }`, `perform E.op(…)`, `handle E { … } with { op(x) => { … } }`, `resume(v)` (`docs/341`) | **reference only**: tail-resumptive handlers are inlined; the lexical handler must be in the same function; `handle` is only a `let` initialiser; `perform` is only a statement/initialiser; abort is an arm with no `resume`. General/multi-shot handlers and cross-function `perform` are not implemented. The self-hosted compiler refuses with **E0217** |
+| **Classes** | `choose class_on` | `[abstract] class S [extends B] { field: T … [virtual \| override] fn m(self: &S) -> R { … } }`, `super.m(…)`, `S { … }` / `S::new(…)` (`docs/345`) | reference has C1-C3 (layout, non-virtual, vtables/virtual/override/super/abstract, closed-world `fp` targets); **C2 needs `choose runtime`** (the vtable is allocated). The self-hosted side has **C4a only** (non-virtual classes) |
+| **Function values** | `choose fp` | type `(T, …) -> R`; value `f` / `&f`; closure `(x) => expr`; an indirect call looks like a direct call (`docs/348`) | both implementations. Off by default: **E0222**. `extern fn` is not a value (E0223); a capture is one 8-byte slot (E0224); a by-ref capture cannot escape (E0226); a missing param type and no expected type is E0225 |
+| **Block scope** | `choose write grammar tur2027.1Alpha` | every `{ }` is a lexical scope; an inner `let` shadows; same-block duplicate is **E0241**; a standalone `{ }` is a statement (`docs/353`) | **alpha edition only**. The default `tur2026.3` and every older edition keep the function-level `let` leak. GC is conservative: a name declared more than once drops that name's ladder rungs, and its `ReclaimScoped` answer is `Assumed` - not in the accept set, so the site stays undecided |
+
+The four are **not** spellings of one another and do not share a gate. A file can be
+`choose fp` + `choose class_on` + `lspe_effects_true`; each is independent, and each one's
+"off" value preserves the artifact byte for byte.
+
 ### 2.0.6 Lexical grammar
 
 | Element | Rule |
@@ -244,17 +264,18 @@ the frozen editions):
 |---|---|---|
 | Module | `module <name>` | first non-declaration line; a file without it is E19 ("expected module") |
 | Grammar declaration | `choose write grammar <name>` | before `module`, section 2.0.2 |
-| Project dimension | `choose <value>` | seven dimensions, section 2.1 |
+| Project dimension | `choose <value>` | 11 dimensions + 2 slots, `loment-syntax` 2.1 |
 | Switch definition | `set choose <name> { … }` | section 2.2 |
 | Switch setting unit | `addin <name>` | entry unit only, section 2.2 |
 | Import | `use <name>` / `use "<path>"` | layers, section 2; 300 lines max; several name-form imports allowed in 0.1.5 |
-| Constant | `const NAME: <type> = <literal>` | the initialiser must be **one integer literal** (decimal or hex, optional `-`); expressions and string constants are parse errors - see 6.1.8 |
+| Constant | `const NAME: <type> = <literal>` | one **integer** literal (decimal or hex, optional `-`), or from 2026.3 one **string** literal (`const GREETING: str = "hi";`). An expression is a parse error - see 6.1.8 |
 | Function | `fn f(a: u32, b: str) -> u32 { … }` | every parameter typed; no return type = unit; **≤ 10 parameters** |
 | Generic function | `fn f<T>(a: T) -> T { … }` | monomorphised at compile time |
 | Struct | `struct S { a: u32, b: bool }` | fields are **integer / `bool` scalars only** - no `str`, no `ptr`, no nested struct/array, no reference field (`docs/299` §1). A `str`/`ptr` field passes `check` but is refused **at build** when the struct is lowered ("field type … supports scalars only") |
 | Enum | `enum E { A, B(u32) }` | a variant carries **at most one** payload, and the payload is an **integer / `bool` scalar** |
 | Trait | `trait M { fn m(self) -> u32; }` | static dispatch only |
 | Impl | `impl M for S { fn m(self) -> u32 { … } }` | method call `obj.m()` |
+| Class | `[abstract] class S [extends B] { … }` | `choose class_on` only; section 2.0.5b |
 | External function | `extern fn c_add(a: i32, b: i32) -> i32;` | scalars and `ptr` only (E21), section 7.3.1 |
 | Capability | `capability name : domain[lo..hi] revocable` | section 5 |
 | Excluded space | `excluded "space"` | a module-level declaration; using that space in a capability or syscall site is E005 |
@@ -281,13 +302,15 @@ the frozen editions):
 | Generic parameter | `T` | monomorphised |
 | Prelude enums | `Option<T>` (`Some` / `None`), `Result<T, E>` (`Ok` / `Err`) | `?` propagates both |
 | Conversion | `x as T` | integer ↔ integer, integer ↔ `ptr`; always explicit |
-| **Not present** | floats, `char`, `&T` in type position, function-pointer types, closures, `impl Trait`, tuples, `String` / `Vec` / `HashMap` | these are library types or Tur 2026.3 |
+| Borrow | `&T`, `&mut T` | from 2026.3 under `lifetime_auto` (the default); `&a T` only in `lifetime_manual`; `lifetime_no` restores the parse error |
+| Function type | `(T, …) -> R` | under `choose fp` only; a param list with types and no names |
+| **Not present** | floats, `char`, tuples, closures as a *type* keyword, `impl Trait`, `dyn`, `String` / `Vec` / `HashMap` | closures are values of a function type under `fp`; the rest are library types or absent |
 
 ### 2.0.9 Statements
 
 | Statement | Form | Notes |
 |---|---|---|
-| Binding | `let x: T = e;` | **the type is required**; no inference. In `grammar tur*`, `let mut x: T` is accepted and the `mut` is stripped; in the default `loment` spelling `mut` is an ordinary identifier (trap 6.1.11) |
+| Binding | `let x: T = e;` | the type is normally required. From 2026.3, `let x := e;` / `let x: auto = e;` infers it, but only when the initialiser **spells a type** (a local/parameter, a field chain, a whole `as T` cast, or `true`/`false`); see E0215/E0216. In `grammar tur*`, `let mut x: T` is accepted and the `mut` is stripped; in the default `loment` spelling `mut` is an ordinary identifier (trap 6.1.11) |
 | Assignment | `x = e;`, `s.f = e;`, `xs[i] = e;` | the target must be an lvalue (E14) |
 | If | `if c { … } else if c { … } else { … }` | `c` must be `bool`; `&&` / `\|\|` short-circuit |
 | If-let | `if let E::B(v) = x { … } else { … }` | one pattern; the else is optional |
@@ -297,16 +320,22 @@ the frozen editions):
 | Match | `match x { E::A => { … } E::B(v) => { … } _ => { … } }` | arm bodies are **blocks**; exhaustive or `_` |
 | Return | `return <expr>;` | the value is required, **except** bare `return;` in a unit function under Tur 2 |
 | Break / continue | `break;` / `continue;` | **Tur 2 only**, innermost loop |
-| Block | `{ … }` | **blocks do not scope `let`** today: a `let` inside an `if` branch is visible after it (measured; `docs/188` §0.1.1). Do not rely on block scope for correctness |
+| Block | `{ … }` | under `tur2027.1Alpha` every block is a lexical scope (inner `let` shadows, same-block duplicate is E0241); in `tur2026.3` and older a `let` inside an `if` branch is still visible after it (function-level leak) |
+| Perform | `perform E.op(args)` | only with `choose lspe_effects_true`; a whole statement or a `let` initialiser |
+| Handler | `let x: T = handle E { BODY } with { op(p) => { … } };` | only with `choose lspe_effects_true`; only as a `let` initialiser; arms are flat statements |
 | Audit bypass | `lspe pass "reason" { … }` | section 5.1.5; the reason is mandatory (E038) |
 | Expression statement | `f(x);` | a call for its effect |
 
 ### 2.0.10 Expressions and precedence
 
-Primary expressions: integer / string / `true` / `false` literals, identifiers, `E::Variant`,
-calls `f(a, b)`, method calls `obj.m(a)`, field access `e.f`, indexing `e[i]`, parenthesised
-`(e)`, struct literals `S { a: 1 }` (2026.3 also accepts the shorthand `S { a }`, meaning
-`S { a: a }`), array literals `[1, 2, 3]`, and `&e` / `&mut e` in **call-argument position**.
+Primary expressions: integer / string / interpolated-string / `true` / `false` literals,
+identifiers, `E::Variant`, calls `f(a, b)`, method calls `obj.m(a)`, field access `e.f`,
+indexing `e[i]`, parenthesised `(e)`, struct literals `S { a: 1 }` (2026.3 also accepts the
+shorthand `S { a }`, meaning `S { a: a }`), array literals `[1, 2, 3]`, and `&e` / `&mut e`.
+From 2026.3 a borrow is an ordinary expression of type `&T` (it can initialise a local, be a
+struct field, or be returned); before 2026.3 it was accepted in call-argument position only.
+Under `choose fp`, a bare function name / `&name` and a closure `(x) => expr` are expressions
+too; a call looks the same whether the callee is a function name or a local of function type.
 
 Postfix: call, field, index, `?` (propagation).
 
@@ -389,6 +418,10 @@ is why bytes that no string literal can carry (NUL, non-UTF-8) survive.
 | Bump heap | 64 KiB (sealed) / 1 MiB (`hosted`) | SIGILL, exit 132, nothing printed |
 | `defer` captures (self-hosted) | 8 per function, 4 arguments each, 64 nesting levels | named error (`too many defer statements…`) |
 | Root table (`gc_auto`) | 1024 slots | refused by name, never silently written past |
+| Function-value capture | one 8-byte slot per capture; only integer / `bool` / `ptr` | E0224 |
+| Classes (self-hosted) | C4a only - non-virtual; vtable / `virtual` / `override` / `super` / `abstract` refused | named error; the reference has C1-C3 |
+| Effects (reference) | tail-resumptive inlining only; handler in the same function; `handle` as a `let` initialiser; flat arms; 0 or 1 `resume` per path | E0217-E0231 |
+| Block scope | `tur2027.1Alpha` only; other editions keep the function-level `let` leak | opt-in edition |
 | Unit size | fixed capacity | E33 |
 
 ### 2.0.14 Foreign surface grammars: what each one accepts
@@ -423,12 +456,14 @@ program     := grammar_decl? "module" IDENT item*
 grammar_decl:= "choose" "write" "grammar" IDENT
 
 item        := "use" (IDENT | STRING)
-             | "const" IDENT ":" type "=" const_lit ";"
-             | "fn" IDENT generics? "(" params? ")" ("->" type)? block
+             | "const" IDENT ":" type "=" literal ";"
+             | "fn" IDENT generics? "(" params? ")" ("->" type)? ("effects" IDENT ("," IDENT)*)? block
              | "struct" IDENT "{" (IDENT ":" type),* "}"
              | "enum" IDENT "{" variant,* "}"
              | "trait" IDENT "{" fn_sig* "}"
              | "impl" IDENT "for" IDENT block
+             | "abstract"? "class" IDENT ("extends" IDENT)? "{" class_item* "}"   // class_on
+             | "effect" IDENT "{" fn_sig* "}"                                     // lspe_effects_true
              | "extern" "fn" IDENT "(" params? ")" ("->" type)? ";"
              | "capability" IDENT ":" IDENT "[" INT ".." INT "]" "revocable"?
              | "excluded" STRING
@@ -447,7 +482,7 @@ generics    := "<" IDENT ">"
 variant     := IDENT ("(" type ")")?
 fn_sig      := "fn" IDENT "(" params? ")" ("->" type)? ";"
 
-statement   := "let" "mut"? IDENT ":" type "=" expr ";"
+statement   := "let" "mut"? IDENT (":" type "=" | ":=" | ": auto =") expr ";"
              | lvalue "=" expr ";"
              | "if" expr block ("else" "if" expr block)* ("else" block)?
              | "if" "let" pattern "=" expr block ("else" block)?
@@ -468,9 +503,10 @@ pattern     := IDENT "::" IDENT ("(" IDENT ")")?
 expr        := unary (binop unary)*
 unary       := ("-" | "!") unary | postfix
 postfix     := primary ("(" args? ")" | "." IDENT | "[" expr "]" | "?")*
-primary     := INT | STRING | "true" | "false"
-             | IDENT | IDENT "::" IDENT ("(" expr ")")?
+primary     := INT | STRING | FSTRING | "true" | "false"
+             | IDENT | IDENT "::" IDENT ("(" expr ")")?    // a bare IDENT may be a function value (fp)
              | "(" expr ")"
+             | "(" (IDENT (":" type)?),* ")" "=>" expr      // closure, fp; expression body only
              | IDENT "{" (IDENT (":" expr)?),* "}"         // bare name = 2026.3+ shorthand
              | "[" (expr),* "]" | "&" ("mut")? expr
 cast        := expr "as" type                              // binds tighter than any binop
@@ -482,9 +518,13 @@ binop       := "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
 type        := INT_TYPE | "bool" | "ptr" | "str" | "()"
              | IDENT | "[" type ";" INT "]" | "[" type "]"
              | "mut" "[" type "]" | IDENT "<" (type),* ">"
+             | "&" ("mut")? type                            // 2026.3, lifetime_auto+
+             | "(" (type),* ")" "->" type                    // function type, fp
 ```
 
 Three things the sketch makes visible because they surprise people: **there is no float or char
-type**, **`&` is an expression only in argument position**, and **a `match` arm is a block, not
-an expression** (the `=> 0,` form is not in the grammar).
+type**, **a `match` arm is a block, not an expression** (the `=> 0,` form is not in the
+grammar; the 2026.3 `let x = match …` form is a separate initialiser production), and **the
+new surfaces are opt-in** - `&` in a type position needs 2026.3, a function type needs
+`choose fp`, a class needs `choose class_on`, and `handle` needs `choose lspe_effects_true`.
 

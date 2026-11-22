@@ -1,6 +1,6 @@
 ---
 name: loment-syntax
-description: Quick reference for Loment - the syntax cheat sheet, the complete builtin table (including Tur 2 print_num, syscall7 and thread_spawn), the standard-library entry points, and the E001-E038 error-code table with what each code asks you to do. Read when you need a signature, a construct, or to decode a diagnostic. Part of the LomentSkill suite; section numbers are global.
+description: Quick reference for Loment - the syntax cheat sheet, the complete builtin table (including Tur 2 print_num, syscall4p/6p/7 and thread_spawn), the standard-library packages, and the diagnostic table (E001-E041 family codes plus the 241 fine E0xxx codes) with what each code asks you to do. Read when you need a signature, a construct, or to decode a diagnostic. Part of the LomentSkill suite; section numbers are global.
 ---
 
 ## 2. Syntax cheat sheet
@@ -15,14 +15,14 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Module | `module <name>` on the first line after the optional grammar declaration (no semicolon) |
 | Grammar | `choose write grammar <name>` **before `module`**, once per file; no declaration means the **newest Tur edition** (today `tur2026.3`) - see `loment-tur` 2.0.3 |
 | Entry point | `fn main()` (no parameters, no return type) is the normal entry; `fn _start()` is the freestanding entry and wins if both exist - see 2.0.12 |
-| Project mode | `choose` - **seven dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `lvm` / `no_lvm` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` / `lms_close_admin` · `lspe_open_admin` / `lspe_close_admin` - see 2.1 |
+| Project mode | `choose` - **11 dimensions**, each written at most once and **only in the entry unit**; libraries may not write it (E22). `std` / `no_std` · `gc_manual` / `gc_auto` / `gc_auto_alpha` / `no_gc` · `runtime` / `no_runtime` · `sealed` / `hosted` · `lvm` / `no_lvm` / `lvm_dismemory_true` · `lms_full` / `lms_forensic_admin` / `lms_daily_admin` / `lms_manage_only_admin` / `lms_close_admin` · `lspe_open_admin` / `lspe_close_admin` · `lifetime_no` / `lifetime_auto` / `lifetime_manual` · `fp` / `no_fp` · `class_on` / `class_off` · `flomtc_true` / `flomtc_false`. Two orthogonal **slots**: `lspe_aicheck_true` / `lspe_aicheck_false` and `lspe_effects_true` / `lspe_effects_false` (both default false) - see 2.1 |
 | Switch setting | `addin <name>` (**entry unit only**) - pulls in a "switch settings" unit, see 2.2 |
 | Custom syntax | `comefor let "word" to { … }` … `byuse "word" done` - **define a new syntax at compile time**. The block after `to` is **a Loment program** (`fn main` is its entry; **the return value is how many tokens it ate**) which reads and emits tokens with `ct_n` / `ct_tok` / `ct_out` / `ct_syn`. Definition and terminator are **top-level only** and cannot nest; expansion happens at the token layer **before parsing**, so errors and jumps still point at the line you wrote. See `docs/184` |
 | Import | **Two spellings, neither takes a semicolon**: `use name` resolves in this order - (1) `deps/<name>/<name><ext>` in the project; (2) **exactly one** module named `name` across the five built-in roots `loment/lib` → `examples` → `selfhost` → `tools` → `lspe` (several hits is E18 "ambiguous"); (3) **exactly one** module inside the packaged store `share/lompi/store/` (a module inside a package, e.g. `std/0.1.0/vec.lomt`; several hits is E18). An importer that lives **inside the store** flips (2) and (3). `use "path/to/other.lomt"` is relative to the file or the working directory - **use this form for a sibling file in your own directory**. `<ext>` defaults to `.lomt` and a project can change it (section 7). At most **300** `use` lines in one file. **Several name-form `use` lines are allowed in 0.1.5** (older packages stopped at one) - see 6.3 |
 | Function | `fn f(a: u32, b: str) -> u32 { ... }` (no return value: `fn f()`); **at most 10 parameters** (a hard constraint of the self-hosted side's layout: the parameter table has 10 slots. It fails in two shapes: a count mismatch between parameters and arguments is the normal E3, while **a call site with more than 10 arguments** goes through `panic` - exit code 132 with **no diagnostic**. When you see "no error but exit 132", count your arguments) |
 | Export | Add `pub` for cross-module visibility: `pub fn` / `pub struct` / `pub const` |
-| Constant | `const NAME: u32 = 3` - the initialiser is **one integer literal** (decimal or hex, optional `-`); it is not an expression, and there are no string constants - see 6.1.8 |
-| Variable | `let x: u32 = e;`, assignment `x = e;` - **the type annotation is required**; the language has no type inference |
+| Constant | `const NAME: u32 = 3` - one **integer** literal (decimal or hex, optional `-`), or, from Tur 2026.3, one **string** literal (`const GREETING: str = "hi";`). It is never an expression; a string constant is inlined at each use - see `loment-traps` 6.1.8/6.1.9 |
+| Variable | `let x: u32 = e;`, assignment `x = e;` - the type annotation is normally required. From 2026.3, `let x := e;` / `let x: auto = e;` infers the type, but the initialiser must **spell a type** (a local/parameter, a field chain, a whole `as T` cast, or `true`/`false`); a literal, call, operator or module constant is E0215/E0216 (`docs/347`) |
 | Control flow | `if` / `else if` / `else`, `while`, `for i in lo..hi` (upper bound exclusive), `return <expr>;` (the value is **required**). **Tur 2 adds** `for x in xs`, `break` / `continue`, bare `return;` in unit functions, and `defer f(a, b);` - see 2.0.4. **Tur 2026.3 adds** `for i, x in xs` (index copy + element copy), `for x in <call>` (array/slice return, evaluated once), and `let x: T = if c { a } else { b };` / `let x: T = match e { E::A => a, _ => b };` (expression forms in the initialiser only) - see 2.0.5 |
 | Struct | `struct S { a: u32, b: u32 }`; literal `S { a: 1, b: 2 }` (2026.3: `S { a, b }` shorthand); field `s.a` |
 | Enum | `enum E { A, B(u32) }`; construction `E::B(3)`; no payload `E::A` |
@@ -33,7 +33,13 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 | Slice | Parameter types `[T]` / `mut [T]`, pass `&xs` / `&mut xs`, `slice_len(s)` for the length |
 | Generics | `fn max_of<T>(a: T, b: T) -> T` (monomorphised at compile time) |
 | trait | `trait M { fn m(self) -> u32; }` + `impl M for S { … }`, static dispatch `obj.m()` |
-| Types | `u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str` `()`, a struct/enum name, `[T; N]`, `[T]`, `mut [T]`. **No floats, no `char`, no tuples**; `f64` is a library over `u64` bit patterns, not a language type - see 2.0.8 |
+| Borrow | `&T` / `&mut T` in any type position from 2026.3 (`lifetime_auto`, the default): `fn f(a: &str) -> &str`, `Cursor { data: &[u32] }`, `Box<&u32>`. `*r` derefs; `r.f` / `r[i]` auto-deref. `&a T` (source marker) only under `lifetime_manual`; `lifetime_no` restores the pre-2026.3 parse error (`docs/299`, `docs/351`) |
+| Function value | Under `choose fp` (default `no_fp`): type `(u64, u64) -> u64`; value `f` or `&f`; closure `(x) => expr` (**expression body only**). Off by default - E0222 |
+| Class | Under `choose class_on` (default `class_off`): `[abstract] class S [extends B] { … }`, `virtual` / `override`, `super.m(...)`, `S { … }` / `S::new(...)`. Reference has C1-C3; self-hosted has C4a (non-virtual) (`docs/345`) |
+| Effect | Under `choose lspe_effects_true` (slot, default off): `effect E { fn op(…) -> R; }`, `fn f(…) -> R effects E { … }`, `perform E.op(…)`, `handle E { … } with { op(x) => { … } }`, `resume(v)`. Reference-only; the package refuses with E0217 (`docs/341`) |
+| Interpolation | `f"n={n}"` / `rf"raw\n{n}"`; holes are `str`, `bool` or an integer; `{{`/`}}` escape; `{e=}` debug, `!r` repr, `{x:>5}` / `{:05}` width. Single line only (`docs/346`) |
+| Block scope | `choose write grammar tur2027.1Alpha`: every `{ }` is a lexical scope; inner `let` shadows, same-block duplicate is E0241. The default `tur2026.3` still has function-level `let` leak (`docs/353`) |
+| Types | `u8 u16 u32 u64 i8 i16 i32 i64 bool ptr str` `()`, a struct/enum/class name, `[T; N]`, `[T]`, `mut [T]`, `&T` / `&mut T` (2026.3), `(T, …) -> R` (under `fp`). **No floats, no `char`, no tuples**; `f64` is a library over `u64` bit patterns, not a language type - see 2.0.8 |
 | Conversion | `x as u64` - integer/pointer conversions are always written out |
 | Strings | `"..."`, escapes exactly `\n \t \r \0 \\ \"`; **any other escape is an error** (E19), not a silent degradation; the operations are the `str_*` builtins in section 3 |
 | Raw foreign block | `let c { …raw bytes… }` / `py { … }`, after `command <lang>` / `foruse <lang>` - see 2.0.12 |
@@ -44,9 +50,10 @@ you are reading. The entry skill (`loment`) carries the map; this file carries i
 
 ### 2.1 Project mode `choose`
 
-`choose` is how a program states a property of **the whole artifact**. There are **seven
-dimensions**, each written at most once, and each one lands in the Potato form object - so
-"what kind of artifact is this" is answerable on the side that does **not** read the source.
+`choose` is how a program states a property of **the whole artifact**. There are **11
+dimensions**, each written at most once, plus two orthogonal **slots**; each dimension lands in
+the Potato form object, so "what kind of artifact is this" is answerable on the side that does
+**not** read the source.
 
 ```rust
 module myapp
@@ -60,19 +67,33 @@ choose no_std          // ← once for the whole program; the default is std
 | **Reclamation** | `gc_manual` · `gc_auto` · `gc_auto_alpha` · `no_gc` | `gc_manual` | how memory is reclaimed - see `loment-safety` 8.1 and `docs/210`; `no_gc` declares the artifact carries no collector |
 | **Runtime** | `runtime` · `no_runtime` | `no_runtime` | whether the artifact may carry the runtime block. `alloc`, `guard`, `print_num` and the automatic GC tiers need it; `no_runtime` refuses them **by name** (E031) |
 | **Port** | `sealed` · `hosted` | `sealed` | whether the artifact may reach outside itself by linking host libraries |
-| **Execution model** | `lvm` · `no_lvm` | `no_lvm` | which execution model the program is for - see below |
+| **Execution model** | `lvm` · `no_lvm` · `lvm_dismemory_true` | `no_lvm` | which execution model the program is for - see below. `lvm_dismemory_true` is LVM-A's address-free model (the IR gets `; loment-memory: dismemory`, which the native linker refuses; `docs/373`) |
 | **Memory safety** | `lms_full` · `lms_forensic_admin` · `lms_daily_admin` · `lms_manage_only_admin` · `lms_close_admin` | `lms_full` | which of the seven LMS levels are on. **The direction is reversed**: the default is full, and a non-full value is a downgrade; every non-full value carries `_admin` |
 | **Audit ledger** | `lspe_open_admin` · `lspe_close_admin` | `lspe_open_admin` | whether LSPE records the ledger (off changes the ledger, never a verdict); the Potato v16 ledger records the site, obligation and evidence |
+| **Lifetime** | `lifetime_no` · `lifetime_auto` · `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | the compile-time borrow system - `auto` is region inference with zero annotations, `manual` adds the `&a T` source marker, `no` makes `&` in a type position a parse error (`docs/299`) |
+| **Indirect dispatch** | `fp` · `no_fp` | `no_fp` | function values, closures and indirect calls. Off means the call graph stays static and every entry is E0222 (`docs/348`) |
+| **Classes** | `class_on` · `class_off` | `class_off` | the `class` / `extends` / `virtual` / `override` / `abstract` syntax and dispatch (`docs/345`) |
+| **Compile fast path** | `flomtc_true` · `flomtc_false` | `flomtc_false` | Flomtc's native compile path; artifact semantics are unchanged (`docs/350`) |
 
-What holds for all seven:
+Two **slots** are orthogonal build knobs. They may be written together with the dimension value
+(they are not a second write of that dimension):
+
+| Slot | Values | Default | What it decides |
+|---|---|---|---|
+| **AI checker** | `lspe_aicheck_true` · `lspe_aicheck_false` | `false` | adds Q014 questions to the ledger/CLI; it never adds evidence to an obligation |
+| **Effects** | `lspe_effects_true` · `lspe_effects_false` | `false` | the effect syntax surface (`effect` / `effects` / `perform` / `handle` / `resume`). Reference-only today; the package refuses with E0217 (`docs/341`) |
+
+What holds for all of them:
 
 - **It is a property of the program, not of a file**: each dimension appears at most once, and
   **only in the entry unit** (a library pulled in by `use` that writes one is E22). Both compilers
   enforce this.
-- **A default preserves the pre-dimension behaviour - with one recorded exception.** `lms`
+- **A default preserves the pre-dimension behaviour - with two recorded exceptions.** `lms`
   defaults to `lms_full`, and that tier adds inline bounds checks on `alloc(<const>)`-derived
   accesses, so it does change the artifact and some out-of-bounds behaviour (`docs/270` section
-  6). Treat that as a documented exception, not as the rule.
+  6). `lifetime` defaults to `lifetime_auto` from 2026.3 on (older editions stay
+  `lifetime_no`, so their artifacts do not change). Treat both as documented exceptions, not as
+  the rule.
 - **Contradictory pairs are named, not lumped.** `gc_auto` with `no_runtime` is refused because
   automatic reclamation *is* that runtime; `hosted` with `no_std` is refused because `no_std` says
   there is nothing underneath and `hosted` says to link against it; both automatic tiers with
@@ -84,10 +105,12 @@ What holds for all seven:
 
 **`lvm` says "which execution model", not "which tier".** The release gate opened on 2026-10-17
 (`docs/231`), so an installed toolchain accepts `choose lvm`. The spelling was `vm` / `no_vm`
-before Potato v24 (2026-11-21); the old spelling is no longer a switch. Today it only records
-the dimension: the artifact is **byte-identical to `no_lvm`**, and there is no bytecode. The
-interpreted tier is a separate tool - `loment-lvm file.ll` runs the LVM interpreter over LLVM
-IR (`docs/243`) - and the artifact does not carry it.
+before Potato v24 (2026-11-21); the old spelling is no longer a switch. Today it records the
+dimension: `lvm` and `no_lvm` produce the **same artifact bytes**, and there is no bytecode in
+the product. `lvm_dismemory_true` is the third value - it makes LVM-A's address-free model
+explicit and adds `; loment-memory: dismemory` to the IR (the native linker rejects that
+line; `docs/373`). The interpreted tier is a separate tool - `loment-lvm file.ll` runs the LVM
+interpreter over LLVM IR (`docs/243`) - and the artifact does not carry it.
 
 **`no_std` is what Loment actually is** (it was written for FujoOS in the first place). `std` is
 the default and means you may use host capabilities. **When it is required**: writing systems,
@@ -278,7 +301,9 @@ a criterion checks the two compile to **byte-identical** IR).
 
 
 **These are the only builtins.** There are no built-in types like `String` / `Vec` / `HashMap`,
-no I/O wrappers, no string formatting. **But the toolchain ships a standard library**
+no I/O wrappers, and no printf. String interpolation (`f"…"`) is a **front-end rewrite** to
+`str_concat` / `str_show` / `str_repr` / `str_pad`, not a formatter with a format language.
+**But the toolchain ships a standard library**
 (`lompi/store/`, installed with the package, nothing to fetch) - `use vec` / `use map` / `use fs`
 each bring in one module, see 3.1 at the end of this section.
 
@@ -290,9 +315,7 @@ each bring in one module, see 3.1 at the end of this section.
 | `str_concat(a: str, b: str) -> str` | Concatenation - **allocates from the same 64 KiB arena at run time**, so do not build big strings (or loop over it) |
 | `str_num(n) -> str` | Decimal text of **any integer type** (signed prints `-`) - **allocates from the same arena**, and it lives in the runtime block, so `no_runtime` refuses it by name (E31). `docs/337` |
 | `str_show(v) -> str` | Interpolation value (docs/341): `str` is the identity, `bool` prints `true`/`false`, any integer is decimal. May allocate, so `no_runtime` refuses it by name (E31) - including for a plain `str` hole |
-| `str_repr(v) -> str` | Same inputs as `str_show`; a `str` comes back quoted and escaped (`\`, `\"`, `
-`, `	`, `
-`). The `!r` conversion |
+| `str_repr(v) -> str` | Same inputs as `str_show`; a `str` comes back quoted and escaped (`\`, `\"`, `\n`, `\t`, `\r`). The `!r` conversion |
 | `str_pad(s, width, fill, align) -> str` | Interpolation width / zero-pad (docs/341): align 0 left, 1 right, 2 centre; returns the string unchanged when it is already wide enough, otherwise allocates. E31 under `no_runtime` |
 | `str_ptr(s: str) -> ptr` | The data pointer (for feeding syscalls) |
 | `print(s: str) -> u32` | Write the string's bytes to stdout (one `write` syscall) |
@@ -345,10 +368,25 @@ fn _start() {
 }
 ```
 
-| Package | Roughly what is in it | Examples |
-|---|---|---|
-| `std` | 133 **portable** modules (not one syscall): containers, text, big integers, floating point, hashing and checksums, compression, bit twiddling | `vec` `map` `set` `heap` `deque` `trie` `text` `utf8` `parse` `fmt` `bigint` `f64` `crc32` `deflate` `png` |
-| `host` | The host side (needs syscalls): files, directories, argv, stat, logging | `fs` `io` `dir` `argv` `stat` `log` |
+The store is no longer two packages. As of 2026-11-22 it holds **13 packages** (about 332
+`.lomt` files); the counts below are a snapshot - use `ls lompi/store/<name>/0.1.0/` for the
+live list.
+
+| Package | Modules | Roughly what is in it | Examples |
+|---|---|---|---|
+| `std` | 148 | portable modules (not one syscall): containers, text, big integers, floating point, hashing and checksums, compression, crypto, bit twiddling | `vec` `map` `set` `heap` `deque` `trie` `text` `utf8` `parse` `fmt` `bigint` `f64` `crc32` `deflate` `png` `aes` `aead` |
+| `host` | 8 | the host side (needs syscalls): files, directories, argv, stat, logging | `fs` `io` `dir` `argv` `stat` `log` |
+| `os` | 44 | process, signals, memory, time, user/group, mounts, ptrace/`/proc` surfaces | |
+| `system` | 41 | kernel-facing tables, loader, syscall wrappers, boot data | |
+| `world` | 22 | composition layer: the packages above used together | |
+| `dev` | 15 | build/tooling helpers, source readers, hashing, archives | |
+| `lowlevel` | 12 | bits, endianness, atomics, raw memory | |
+| `internet` | 11 | sockets, DNS-free peers, HTTP framing, TLS building blocks | |
+| `math` | 9 | integer/rational/fixed-point helpers | |
+| `science` | 6 | measurement and unit conversions | |
+| `baremetal` | 6 | freestanding entry, port I/O, early console | |
+| `windows` | 6 | PE-side names for the same surfaces | |
+| `engineering` | 4 | checksums, encoders, protocol helpers | |
 
 - **Several name-form `use` lines are allowed in 0.1.5** (verified: `use vec` plus `use numfmt`
   compiles). Older packages limited a unit to one name-form `use`; on those, the **path** form
@@ -419,6 +457,15 @@ what you should do, not by wording**:
 | E36 | **LSPE self-check failed** - should never appear in production; if it does, the ledger itself missed an entry |
 | E37 | **LSPE policy lock** - reserved; the policy layer does not exist today, so it is never emitted |
 | E38 | **`lspe pass` without a reason** - the reason is mandatory; an anonymous bypass is an unlabelled floor |
+| E39 | **`lgc` with `no_gc`** - there is no collector to control; add a collector or remove `lgc` |
+| E40 | **A new keyword collides with a name** in an undeclared file (`break`, `continue`, `defer`, `print_num`, `lgc`, …) - rename it, or pin the old reading |
+| E41 | **A borrow region does not hold** - a returned borrow not from a parameter, `free(p)` while `p` is borrowed, or an unsupported composite generic argument (`Box<&T>`) |
+
+**The family codes above are fallbacks; the actual table has 241 fine codes.** `E001`–`E041`
+group them by what to do; a fine code such as `E0215`, `E0236`, `E0240` or `E0241` names one
+diagnosis and has its own card. Read `loment codes` (the list) or `loment explain E0236` (one
+card) rather than inferring a fine code from its family. Notable bands: E0215/E0216 (`auto`),
+E0217–E0231 (effects), E0222–E0227 (`fp`), E0240 (partial move), E0241 (same-block duplicate).
 
 `E0900` / `E0999` are internal ("wrote no diagnostic record" / "unclassified - please report");
 they are not source errors.

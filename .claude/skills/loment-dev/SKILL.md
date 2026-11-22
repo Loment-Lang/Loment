@@ -1,6 +1,6 @@
 ---
 name: loment-dev
-description: Development workflow for the Loment-DEV repository (FujoJTOP/loment, mirrored as Loment-Lang/Loment). Use before any commit, push, or PR work in this repo - especially when continuing work in a branch or worktree from an earlier session. Covers the PR-bound check (a branch whose PR is already merged/closed must not receive new commits), branch/worktree discipline from origin/main, the hand-written vs generated commit split (seed, genesis provenance, gate floors), and the verification set that must pass before a push is called done.
+description: Development workflow for the Loment-DEV repository (FujoJTOP/loment, mirrored as Loment-Lang/Loment), currently at the 0.1.6 generation. Use before any commit, push, or PR work in this repo - especially when continuing work in a branch or worktree from an earlier session. Covers the PR-bound check (a branch whose PR is already merged/closed must not receive new commits), branch/worktree discipline from origin/main, the hand-written vs generated commit split (seed, genesis provenance, trust.json, gate floors/skips), the serial landing rule for seed-touching changes, and the verification set that must pass before a push is called done.
 ---
 
 # Loment-DEV: how work lands in this repo
@@ -46,18 +46,29 @@ work; that is what auto-merge is for.
 
 * **Hand-written commit** and **generated-artifact commit** are separate. The generated one is
   titled `[生成物] 只有生成物：…` and contains nothing else.
-* Generated artifacts that must follow a source change:
+* Generated artifacts that must follow a source change (the current generation, 0.1.6):
   * `loment/build/selfhost_driver.ll` — `python tools/loment_seed.py --emit`;
-  * `loment/build/genesis/provenance.json` (and `SHA256SUMS` when it changes) —
+  * `loment/build/genesis/provenance.json` + `SHA256SUMS` + `seed.sha256` —
     `PATH="/c/Program Files/LLVM/bin:$PATH" python tools/loment_genesis.py --emit`
     (clang is installed but not on PATH on this machine; it is 22.1.8, the same version the
-    record pins);
-  * `.github/gate-floors.txt` when a suite gains/loses criteria;
+    record pins). `provenance.json` is now **format 2**: it carries `source_closure`,
+    `genesis_source_closure` and `seed_env`, and `bootstrap.sh` verifies `seed.sha256`
+    before executing genesis, failing closed on drift (`LOMENT_ALLOW_DRIFT=1` is for
+    experiments only);
+  * `loment/build/trust.json` — `python tools/loment_trust.py --emit`; it records the root,
+    recipe, trust surface and budget (the current root is seed `7,501,283` B / cap
+    `8,388,608` B). A stale one is a red criterion (`loment_trust_test`);
+  * `.github/gate-floors.txt` when a suite gains/loses criteria — it is a **two-way ratchet**
+    (a new criterion without the floor line turns main red too); `.github/gate-skips.txt` may
+    only **shrink**;
   * `.github/lspe-pass-baseline.txt` and `.github/lspe-coverage-baseline.txt` when a corpus
     unit's sites change (`python tools/lspe_ratchet.py --emit` — that call is the explicit
     acknowledgment);
   * `docs/270-lms-0151.md` seed `bytes:`/`sha256:` whenever the seed changes
     (`loment_lms_test` recomputes them and fails otherwise).
+* **Seed-touching changes land one at a time.** Genesis binds the seed hash and the floors
+  bind the seed bytes, so two parallel PRs that both change the seed make each other red.
+  Serialise them or fold them into one PR.
 * A new tracked `tools/*.py` must be added to **both** `tools/loment_release.py:GLOBS` and
   `loment/tools/lomrel.lomt`'s `globs_text()` at the same position, and to
   `tools/loment_publish.py`'s `paths` if the gate closure imports it.
@@ -71,15 +82,26 @@ test. The usual minimum:
 
 ```bash
 PYTHONUTF8=1 python tools/lspe_test.py
-PYTHONUTF8=1 python tools/loment_potato_emit_test.py   # seed freshness + twin, 49 units
+PYTHONUTF8=1 python tools/loment_potato_emit_test.py   # seed freshness + twin
 PYTHONUTF8=1 python tools/loment_lms_test.py           # seed floor numbers
 PYTHONUTF8=1 python tools/loment_publish.py --check    # gate closure
 PYTHONUTF8=1 python tools/loment_caps_test.py
+PYTHONUTF8=1 python tools/loment_choose_matrix_test.py # every legal choose cell
+PYTHONUTF8=1 python tools/loment_trust_test.py         # trust.json / provenance
 ```
 
-Add `loment_p8_test.py` (self-host IR), `loment_seed_test.py` (bootstrap fixed point) and
-`loment_tools_test.py` when `loment/selfhost/**` or `tools/**` changed. On this machine set
-`PYTHONUTF8=1`; without it subprocess output is decoded as GBK and the suite reports false reds.
+Add `loment_p8_test.py` (self-host IR), `loment_seed_test.py` (bootstrap fixed point),
+`loment_tools_test.py` and `loment_cli_test.py` when `loment/selfhost/**` or `tools/**`
+changed; `lnotary_test.py` when the artifact/Potato shape changed; `loment_oracle_test.py`
+when the semantics oracle or a builtin changed; `loment_pe_test.py` and `loment_ffi_test.py`
+for the PE shim / FFI paths. On this machine set `PYTHONUTF8=1`; without it subprocess output
+is decoded as GBK and the suite reports false reds.
+
+The CI gate now runs **10 shards** (`ci.py` balances by measured cost, not by criterion count)
+and `python tools/loment_dev.py gate` wraps the same run locally. The gate criteria are
+`ci.py --static-only`; a new `tools/*.py` must be added to both `loment_release.py:GLOBS` and
+`lomrel.lomt`'s `globs_text()`, and a new criterion needs its `gate-floors.txt` line in the
+same PR.
 
 ## 4. PR mechanics
 

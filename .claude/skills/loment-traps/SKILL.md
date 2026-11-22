@@ -1,6 +1,6 @@
 ---
 name: loment-traps
-description: Measured Loment traps that cost the most time - syntax and type traps, runtime behavior (heap, escapes, bounds, wrapping, signals, sockets), toolchain limits, and Tur 2 traps. Read before writing or debugging a nontrivial Loment program. Part of the LomentSkill suite; section numbers are global.
+description: Measured Loment traps that cost the most time - syntax and type traps, runtime behavior (heap, escapes, bounds, wrapping, signals, sockets), toolchain limits, Tur 2/2026.3 traps, and the opt-in surfaces (effects, classes, function pointers, block scope). Read before writing or debugging a nontrivial Loment program. Part of the LomentSkill suite; section numbers are global.
 ---
 
 ## 6. The trap list (every entry was measured; reading this first saves most of the rework)
@@ -40,13 +40,16 @@ things, and it is worth knowing which one you are looking at.
    type P, should be bool"); parentheses do not help. Compare a field: `if p.a { }`.
 7. **One parse error stops the whole check** - every diagnostic after it is missing. So change one
    thing at a time and re-run `loment check`; "no other errors" does not mean there are none.
-8. **A `const` initialiser must be one integer literal.** Decimal or hexadecimal, optionally
-   negative (`const A: i32 = -1;` and `const M: u32 = 0x10;` both work). It is **not** an
+8. **A `const` initialiser is one literal, not an expression.** Since Tur 2026.3 a `str`
+   constant takes **one string literal** (`const GREETING: str = "hello";`, `docs/342`);
+   otherwise it is one integer literal (decimal or hex, optional `-`). It is **not** an
    expression: `const B: u32 = A + 1;` and `const B: u32 = A;` are parse errors ("expected
-   number, got `A`"). Long tables of offsets end up written out as plain numbers.
-9. **There are no string constants**: `pub const NAME: str = "x";` is a parse error (the
-   initialiser must be an integer literal), not E001. For a string label write
-   `pub fn name() -> str { return "x"; }` - that is how `.lomp` manifests do it (section 10).
+   number, got `A`"). Long tables of offsets end up written out as plain numbers. Older
+   editions keep `const` integer-only.
+9. **A string constant is inlined at every use, not stored once.** `const NAME: str = "x";`
+   works from 2026.3 on, but each use site gets its own `.str.<fn>.<n>` literal - it is a
+   spelling, not a shared object. For a manifest label the `pub fn name() -> str { return "x"; }`
+   form still works and is what `.lomp` files use (section 10).
 10. **`use` takes no semicolon.** `use parse;` is a parse error ("top level allows
     use/capability/fn, got `;`"). Write `use parse` on its own line.
 11. **`mut` is only rewritten in the `tur` spelling.** In the default `loment` spelling `mut` is
@@ -172,19 +175,95 @@ knowing costs half a day. The text says which ones 0.1.5 already fixed.
     function, 4 arguments, 64 nesting levels** and refuses beyond that by name; the reference
     compiler has no caps. The Rust translation backend refuses `defer`. In Tur 1 the word is an
     ordinary identifier, so a user `fn defer` still works.
-25. **`orelse` / `catch` are not general expression operators.** They work only on the right-hand
-    side of a `let` or an assignment, and only for an enum with **exactly two variants whose
-    first carries the payload** (`Option`, `Result`). `f(a orelse 0)`, `return x orelse 0;` and
-    `catch |e| { … }` are not accepted.
-26. **`for x in xs` only walks a named array or slice variable.** `for x in f()` and
-    `for x in self.items` are Tur 2026.3. A slice parameter works (`xs: [u32]`); a fixed array
-    works (`let xs: [u32; 4]`). `x` is a **copy**, so assigning to it does not write back.
+25. **`orelse` / `catch` are still not general expression operators.** They work only on the
+    right-hand side of a `let` or an assignment, and only for an enum with **exactly two
+    variants whose first carries the payload** (`Option`, `Result`). `f(a orelse 0)` and
+    `return x orelse 0;` are not accepted. Since 2026.3 the RHS also accepts `catch |e| { EXPR }`
+    (one expression, binds the error payload) and `catch return` (returns the error as
+    `Err(…)`); the old "handler is not accepted" note is stale (`docs/343`).
+26. **`for x in xs` walks a named array/slice, or a call returning one.** Since 2026.3
+    `for x in f()` is accepted: the call is evaluated once into a temporary and the loop walks
+    that; `for i, x in xs` also binds the index. `for x in self.items` and **array literals**
+    are still refused, and `x` / `i` are **copies**, so assigning to them does not write back.
 27. **Bare `return;` is for unit functions only.** The moment the signature says `-> T`, `return;`
     is E19 again - including inside an `if` that is meant as an early exit.
 28. **`break` / `continue` need a loop, and in Tur 1 they are just names.** Outside a loop in
     Tur 2 they are E19. In Tur 1 a variable called `break` is legal, so a file that uses it as
     a name cannot simply be switched to `tur2`.
-29. **`&T` in a type position does not parse.** `struct V { data: &str }`, `fn f(a: &str) ->
-    &str`, and a struct field of `str`/`ptr` are all refused. Borrowing is argument-only; use
-    `ptr` + an explicit length when the value has to be stored.
+29. **`&T` in a type position parses from 2026.3 on - under `lifetime_auto` (the default).**
+    `fn f(a: &str) -> &str`, `struct Cursor { data: &[u32] }` and `Box<&u32>` are accepted;
+    `&` in a type position is a parse error only under `lifetime_no` (the default before 2026.3,
+    still selectable). The boundaries: a returned borrow must come from a parameter; `free(p)`
+    while `p` is borrowed is E041; a stored `&mut` excludes later borrows (E007, judged per
+    place, so `v.x` and `v.y` are separate); composite generic arguments (`Box<&T>`, `Box<[T]>`)
+    are refused **by name** (E041). A borrowed `&mut` local may be used **once** in the
+    reference implementation; field-level partial moves are tracked by path in the reference
+    (E0240), while the self-hosted side is still name-level (`docs/351`).
+
+### 6.5 The opt-in surfaces (2026-11, each behind its own switch)
+
+30. **There are 11 `choose` dimensions, not seven, plus two build slots.** The dimensions are
+    `mode`, `gc`, `runtime`, `port`, `lvm`, `lms`, `lspe`, `lifetime`, `fp`, `class`, `flomtc`;
+    the slots are `lspe_aicheck_true|false` and `lspe_effects_true|false`. A dimension is
+    written **at most once and only in the entry unit**; an unknown or misspelled value is
+    E022. Do not assume a feature is on because the edition is new: `fp`, `class` and the
+    effects slot default to **off**.
+31. **`let x := e` / `let x: auto = e` only accepts an initialiser that spells a type.** A
+    local or parameter, a field chain, a whole `as T` cast, or `true`/`false` - nothing else.
+    `let x := 5;`, `let x := f();`, `let x := a + 1;` and `let x := K;` are **E0215**; `auto`
+    with an `if`/`match` expression is **E0216**. The `:=` must be glued (`let x: = 1` is a
+    parse error).
+32. **An interpolated string is a front-end rewrite, not a formatter.** `f"…"` / `rf"…"`
+    accept holes of type `str`, `bool` or an integer; `{{` / `}}` escape braces; `{expr=}` is
+    the debug form and `!r` quotes/escapes a `str`. **One line only**, no dynamic width and no
+    nested interpolation. A hole that is a struct, an enum or an array is not accepted.
+33. **Effects are reference-only, opt-in, and refused by the package.** `effect` / `effects` /
+    `perform` / `handle` / `resume` are parsed only under `choose lspe_effects_true`; the
+    reference implements **tail-resumptive handlers by inlining** (abort = arm without
+    `resume`) with the handler in the **same function**, `handle` only as a `let` initialiser,
+    `perform` only as a statement or `let` initialiser, and arms that are flat statements.
+    General (non-tail) handlers, multi-shot `resume`, cross-function `perform` and capture
+    writes are not implemented. **The self-hosted compiler refuses all of them with E0217**
+    until the A3b-3 rewrite - so "it compiles in the package" is false today.
+34. **Classes are opt-in and the two implementations stop at different points.** `class` /
+    `extends` / `virtual` / `override` / `abstract` / `super` need `choose class_on`. The
+    reference has C1 (layout + non-virtual methods + `self` + construction), C2 (vtables,
+    virtual dispatch, `super`, abstract classes - **requires `choose runtime`**, the vtable is
+    allocated) and C3 (closed-world function-pointer targets); the self-hosted side has **C4a
+    only - non-virtual classes** - and still refuses vtable/virtual/override/super/abstract.
+    If a class program builds on the package where the reference expected, check this boundary
+    first.
+35. **Function pointers and closures are a dimension (`choose fp`), not a default.** Off
+    (`no_fp`, the default) every function value / closure / indirect call is **E0222**. With
+    `fp`: a function type is `(u64, u64) -> u64`; a value is a bare name or `&name`; a closure
+    is `(x) => expr` - **expression body only** (`(x) => { … }` is illegal); `extern fn` is not
+    a value (E0223); a capture holds one 8-byte slot (integers / `bool` / `ptr` only, E0224);
+    a by-ref-captured closure cannot escape (E0226); a missing param type and no expected type
+    is E0225. There are no module-level function values, no `ptr`→fn cast and no FFI function
+    pointers.
+36. **Block scope is `tur2027.1Alpha`, not the default.** `choose write grammar
+    tur2027.1Alpha` makes every `{ }` a lexical scope (inner `let` shadows; same-block second
+    declaration is **E0241**; standalone `{ }` is a statement). The default `tur2026.3` and
+    every older edition keep the **function-level leak**: a `let` inside an `if` is still
+    visible after it. GC is conservative here: a name declared more than once in a function
+    drops that **name's** L0/L1/L2 and slot masks, and its `ReclaimScoped` answer is
+    `Assumed` - which is **not** in that obligation's accept set, so the site stays
+    **undecided** (floored), not proved.
+37. **PE and fault behaviour differ from ELF.** PE dispatches **146** Linux syscall numbers;
+    every other number returns **`-ENOSYS` (-38)**, not `-1`. `--fault-report` (on `lomelf`)
+    is **default off**; when on, an ELF artifact re-raises the signal (SIGSEGV = **139**), while
+    a PE artifact reports a **VEH exception code** (`0xC0000005` / `0xC000001D`) and refuses
+    `--fault-heal`. `choose lvm_dismemory_true` emits `; loment-memory: dismemory`, which the
+    native linker **refuses** - dismemory is an LVM tier, not a native artifact.
+38. **The code table has 241 fine codes, not 27.** `E001`–`E041` remain family fallbacks;
+    `E0xxx` names one diagnosis each. The ones you will meet in the new surface: E0215/E0216
+    (`auto`), E0217–E0221 (effects), E0222–E0227 (`fp`), E0236 (a construct outside the
+    selected surface grammar), E0240 (partial move), E0241 (same-block duplicate), E040
+    (new keyword collides with a name), E041 (borrow region does not hold). Use `loment codes`
+    / `loment explain E0236`; do not infer a code from its family.
+39. **`lnotary_true` and `lms_pangu_true` are user switches, not dimensions.** They are
+    declared with `set choose NAME { }` like any user switch; `lnotary_true` additionally
+    requires the artifact to declare `choose lvm` (otherwise `LNT-VM`), and `lms_pangu_true`
+    changes the native fault exit to **101**. Neither is in `CORE_DIMS`; writing them as a
+    core value is a different thing from writing a user switch.
 

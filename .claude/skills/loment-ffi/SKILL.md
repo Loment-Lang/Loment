@@ -1,6 +1,6 @@
 ---
 name: loment-ffi
-description: Linking Loment to other languages - the C ABI (extern fn, --link .o/.a/.so, --allow-ports), the process bridge (use proc), LibL's libc face, Java AOT without a JVM, net_ladder, and thread_spawn. Read before calling a foreign library or writing network/thread code. Part of the LomentSkill suite; section numbers are global.
+description: Linking Loment to other languages - the C ABI (extern fn, --link .o/.a/.so, --allow-ports), the process bridge (use proc), LibL's libc face, Java AOT without a JVM, net_ladder, thread_spawn, function values under choose fp, and the PE syscall shim (146 of Linux's 385 numbers dispatched, 239 explicitly refused, everything else -ENOSYS). Read before calling a foreign library or writing network/thread/PE code. Part of the LomentSkill suite; section numbers are global.
 ---
 
 ## 7.3 Libraries written in other languages (FFI)
@@ -61,9 +61,16 @@ that works. The boundary is the **port gate** (meeting it produces an **error**,
   shared object on the self-hosted linker, and function symbols (not data symbols) are
   imported. `choose hosted` (section 2.1) is what allows the artifact to reach them.
 - several `--link` flags may be given at once; they are appended in order.
-- the linker's input and output text are capped at **4 MiB each** (`docs/192`), so your IR plus
+- the linker's input and output text are capped at **8 MiB each** (`lomrel.lomt` `IN_CAP` /
+`NORM_CAP = 8388608`; the inline comments still say "6 MiB" - that is stale), so your IR plus
 the linked sections of every `--link` object must fit; over that is an error, never a truncated
 build.
+- **PE has no user FFI.** `loment build --link` with a `.o` is refused on the PE target
+(`lomelf.py`; `docs/311` §4.4). The PE `--opt` path does link internal COFF, but that is not
+exposed. `choose hosted` is ELF-only.
+- **Function values are a language feature, not FFI.** Under `choose fp` a function is a value
+and an indirect call is allowed; the closed-world rule still refuses `extern fn` as a value
+(E0223) and an FFI function pointer, because the static call graph is the point.
 
 ### 7.3.2 Python / Java / JS (the process bridge)
 
@@ -87,8 +94,8 @@ fn _start() {
 nothing on the Loment side moves.
 
 Three boundaries: **what crosses is a byte stream, not a pointer** (no structs); it is
-**Linux/ELF only** (the Windows shim has no `fork`/`pipe` and returns -1 there); and the machine
-has to have that interpreter.
+**Linux/ELF only** (the PE shim refuses `fork`/`pipe` and returns **-ENOSYS**, and has no
+`proc` bridge); and the machine has to have that interpreter.
 
 **With the package installed rather than the repository**, `proc` is not in your project and
 `use proc` reports "name import not found". The packaged copy is at
@@ -109,8 +116,10 @@ when it installs a library.)
 carries `PT_INTERP` / `PT_DYNAMIC` / `DT_NEEDED` and a PLT/GOT; the system's `ld.so` binds it).
 Objects with undefined symbols are refused by default; the launchers pass `--allow-ports` in
 both channels, and the linker can then supply `memcpy` / `memset` / `memcmp` / `malloc` /
-`free` / `__stack_chk_fail` itself. PE has **no FFI at all**. Measured end-to-end: C, C++,
-Rust and Zig; the same mechanism covers every language that exports C symbols.
+`free` / `__stack_chk_fail` itself. **PE has no user FFI** (`--link` is refused); the PE
+syscall shim in section 8.10 is a different mechanism and does not link foreign objects.
+Measured end-to-end: C, C++, Rust and Zig; the same mechanism covers every language that
+exports C symbols.
 
 **Leg 2 - the process bridge** (`use proc`, section 7.3.2): measured end-to-end for Go, Python,
 Java, JavaScript, Perl and Lua. What crosses is a **byte stream**, not a pointer; it is
@@ -128,7 +137,12 @@ at build, no JVM at run. It is a **closed world, static subset**: no reflection,
 loading. The class-file verifier (#1058), inheritance/closed-world dispatch, `tableswitch`/
 `lookupswitch`, object arrays, `checkcast`/`instanceof`, boxed types and `<clinit>` are landed
 (#1062 / PR #1148); the JNI path still exists in `hosted` mode for cases the AOT path does not
-cover.
+cover. **2026-11-20:** the front door names **varargs** (#852) and its declaration scanner was
+fixed for **nine constructs** (interface/record/sealed, package/import, annotations,
+static-init, overloads, labels, generics) with source locations; C1 single-inheritance layout
+is on the reference side (2026-11-17) and C4a non-virtual classes on the self-hosted side
+(2026-11-19/20). `lompi` carries a Java package as `kind java` (IR + interface + `link.txt` +
+jar); the consumer needs no JDK or compiler. A JVM-side **class-collision check** is #1055.
 
 ### 8.10 Network and threads
 
@@ -144,11 +158,23 @@ need:
 
 The four rungs are always present and `w0+w1+w2+w3 == total_net == surfaces.net`. The width
 itself (how many connections at once, how many bytes, how long) is not counted.
+`lom/net.lom`'s `Syscall` enum grew from 29 to **146** entries (only additions) when the PE
+shim was completed.
+
+**The PE syscall shim (`docs/378`, 2026-11-21).** All **385** Linux x86-64 numbers have a
+disposition: **146 dispatched** and **239 explicitly refused** in 37 reason classes. The
+dispatch split is file 70 / proc 43 / net 26 / mem 7. A number with no disposition returns
+**`-ENOSYS` (-38)**, not `-1`. The import table is six DLLs: `kernel32`, `ws2_32`, `pdh`,
+`psapi`, `advapi32` (`SystemFunction036`), and `api-ms-win-core-synch-l1-2-0` (`WaitOnAddress`
+family). `/proc/self/cmdline` is synthesised from `GetCommandLineA`; `mkdir` / `mkdirat` /
+`openat` / `unlink` / `rmdir` / `rename` are dispatched on PE now (the old "PE has no mkdir"
+note in the package manager guide is stale).
 
 **Two measured network traps** are in section 6.2: SIGPIPE kills the process on the second
 write after the peer's RST, and a blocking `read` on an accepted socket blocks forever unless
 you set `SO_RCVTIMEO`. `syscall7` exists so `sendto`/`recvfrom` can carry their sixth argument
-(`socklen_t`).
+(`socklen_t`). `syscall4p` / `syscall6p` put a **typed `ptr` slot** in the third argument and
+do **not** `ptrtoint` it - that is what lets an LVM-A / dismemory artifact pass a token.
 
 **Threads** (`docs/245`): `thread_spawn("entry", stack_top, arg, done)` starts a real Linux
 thread. The entry is a **string literal naming a function in the unit**, so the product contains
@@ -156,6 +182,7 @@ a direct `call @entry` and the static call graph stays static. The product switc
 to the supplied stack before calling the entry (the shared frame is a structural race
 otherwise). `done` is a `u32` the product **atomically increments and `futex_wake`s after the
 entry returns** - the entry cannot do it itself, because returning exits the thread. **ELF
-only**; PE refuses by name. Stage 1 does not include function pointers or indirect calls
-(`docs/246` is that line).
+only**; PE refuses by name. `thread_spawn` still takes a **function name literal**, not a
+function value - even under `choose fp` - so the product keeps a direct call edge. The
+`docs/246` line B (an indirect entry target) is still open.
 

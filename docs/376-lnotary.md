@@ -1,4 +1,4 @@
-# 370 · LNotary：产物公证人
+# 376 · LNotary：产物公证人
 
 > 状态: **V0–V2 + V5 已落地**（2026-11-21，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
 > `docs/357` §4.2 · `docs/262`（LSPE）· `docs/147`（Potato 台阶）· `docs/353`（Dissigsegv）

@@ -236,7 +236,11 @@ def test_dismemory_snapshot_keeps_the_fault() -> None:
 
 
 def _first_line(text: str) -> str:
-    return text.splitlines()[0] if text.splitlines() else ""
+    """故障首行；**令牌编号不算观察量** —— 快照准备会额外派生令牌，
+    编号顺序不是 guest 能看到的东西（码 + 站点才是）。"""
+    import re  # noqa: PLC0415
+    line = text.splitlines()[0] if text.splitlines() else ""
+    return re.sub(r"\(token=[^)]*\)", "(token=<id>)", line)
 
 
 def test_engines_agree_on_corpus() -> None:

@@ -3,6 +3,7 @@
 > 状态: **已落**（2026-11-22） · S1（PR #2140）· S2/S3/S4/S5（PR #2142）
 > 上游: `docs/373`（dismemory）· `docs/372`（快照）· `docs/371`（P5/封印）· `docs/364`（sw_tag）·
 > `docs/311`（PE 的 Linux 仿真，另一条并行线）· `docs/367`（原生故障）· issue #2135
+> 深度 4 的后续: `docs/377`（引用 = 类型化路径）
 > 判据: `lvm_dismemory_test`（I/O 与表示不变性）· `lvm_twin_test`（镜像同答）·
 > `lvm_cp_test`（dismemory / sw_tag 快照）· 新增 `lvm_addrless_test`
 > 一句话: 第一期把“地址”从 guest 的**代数**里拿掉并写在 O 上；第二期把解释器内部

@@ -278,6 +278,17 @@ const IOS_END: u32 = 19569668;       // IOS_OFF + IOS_CAP
 //: "这辈子造过的所有体"，循环里调函数的程序是 O(n²)（2000 次 store32 要 57s）。
 const LIVE_OFF: u32 = 19569668;      // = IOS_END，MAX_DB 条 u32 体号
 const LIVE_END: u32 = 19586052;      // LIVE_OFF + MAX_DB * 4
+//: 路径身份（`docs/377` §3.2）：每个令牌一条，与 DT 行同下标。
+//: 0 dlo / 1 dhi —— 路径的 64 位摘要；2 plo / 3 phi —— **去掉最后一步**的前缀摘要
+//: （推进同一根数组轴时要用它重算）；4 叶宽；5..8 最后一步（kind/index/count/width）。
+const DG_OFF: u32 = 19586052;        // = LIVE_END，MAX_DT 行 × 12 u32
+const DG_END: u32 = 20372484;        // DG_OFF + MAX_DT * 48
+const RG_OFF: u32 = 20372484;        // = DG_END，MAX_DR 条 dhi
+const RG_END: u32 = 20438020;        // RG_OFF + MAX_DR * 4
+//: 路径去重表（开放寻址）：body / dlo / dhi / token_lo / token_hi / state。
+const PH_OFF: u32 = 20438020;        // = RG_END
+const MAX_PH: u32 = 65536;
+const PH_END: u32 = 22535172;        // PH_OFF + MAX_PH * 32
 const C_TAGSEQ: u32 = 64;           // 标签轮转序列（1 + seq % 15）
 const C_SHN: u32 = 68;              // 影子表写了几条（环形下标 = 它 % SH_CAP）
 const C_DSH: u32 = 72;              // 表示层摆法（`docs/375` §2.3；0 = 规范）
@@ -368,13 +379,15 @@ fn fail_tok(a: ptr, msg: str, off: u32, len: u32) -> u32 {
 }
 
 //: 读整个文件进 dst，返回读到的字节数；**打不开回 -1**（`#718`）。
-//: 用 `open`(2) 而不是 `openat`(257)：前者参数少一格，`syscall4` 正好装得下。
+//: 用 `openat`(257) 而不是 `open`(2)：解释器自己编成 PE 时（`docs/311` §5 L4），宿主那张
+//: 能力集里只有 `openat` —— `open` 会拿到 −38。`syscall6` 装得下四格实参，两边的语义也
+//: 与 `argv_n` 里那条同源。
 //:
 //: **0 是一个合法的字节数**（空文件），不能兼作错误码。从前两者共用 0，于是一份 0 字节的
 //: IR 被报成"读不了输入" —— 它读得了，只是里面没有 `_start`（同一条路径上 T0/T2 一直报对，
 //: 差别就在这句判断）。错误码要**分开**：那是"读不到"与"读到了、是空的"两件事。
 fn read_file(path: ptr, dst: ptr, cap: u64) -> i64 {
-    let fd: i64 = syscall4(2, path as u64, 0, 0);
+    let fd: i64 = syscall6(257, (0 as u64) - 100, path as u64, 0, 0, 0);
     if fd < 0 {
         return 0 - 1;
     }
@@ -847,6 +860,17 @@ fn arr_count(a: ptr, off: u32, len: u32) -> u32 {
         if is_digit(load8(a, i)) {
             n = n * 10 + (load8(a, i) - 48);
         }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn arr_n(a: ptr, off: u32, len: u32) -> u32 {
+    if ctx_get(a, C_EXEC) == 1 { ctx_set(a, C_MISS, ctx_get(a, C_MISS) + 1); }
+    let i: u32 = off + 1;
+    let n: u32 = 0;
+    while i < off + len && is_digit(load8(a, i)) {
+        n = n * 10 + (load8(a, i) as u32) - 48;
         i = i + 1;
     }
     return n;
@@ -2389,7 +2413,8 @@ fn place_globals(a: ptr, m: ptr) {
         if d_on(a) == 1 {
             // 全局 = 一颗体；G 表不存地址，令牌进 GD（u64 拆两格）。
             let gbi: u32 = d_body_new(a, DK_GLOBAL, sz, va);
-            let gtk: u64 = d_tok_new(a, gbi, 0);
+            let gtk: u64 = d_tok_new(a, gbi, 0, d_root_lo(gbi), d_root_hi(gbi),
+                                      d_root_lo(gbi), d_root_hi(gbi), sz, 2, 0, 0, 0);
             wr(a, GD_OFF, i * 2, d_tok_lo(gtk));
             wr(a, GD_OFF, i * 2 + 1, d_tok_hi(gtk));
             i = i + 1;
@@ -2549,34 +2574,8 @@ fn arith(a: ptr, m: ptr, fr: u32, io: u32, il: u32, k: u32) -> u64 {
                           hi32(trim_span(a, p2, e)), lo32(trim_span(a, p2, e)));
     let bits: u32 = bits_of(a, hi32(ts), lo32(ts));
     if d_on(a) == 1 && (d_is_tok(a1) == 1 || d_is_tok(a2) == 1) {
-        if k == K_ADD {
-            if d_is_tok(a1) == 1 && d_is_tok(a2) == 1 {
-                return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
-            }
-            if d_is_tok(a1) == 1 {
-                return d_derive(a, a1, a2 as u32, io, il, 0, 0);
-            }
-            return d_derive(a, a2, a1 as u32, io, il, 0, 0);
-        }
-        if k == K_SUB {
-            if d_is_tok(a1) == 1 && d_is_tok(a2) == 1 {
-                let x1: u32 = d_find(a, a1);
-                let x2: u32 = d_find(a, a2);
-                if x1 == NONE || x2 == NONE {
-                    return d_fault(a, DF_DANGLING, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
-                }
-                let b1: u32 = rd(a, DT_OFF, x1 * 4 + 2);
-                let b2: u32 = rd(a, DT_OFF, x2 * 4 + 2);
-                if b1 != b2 {
-                    return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
-                }
-                let o1: u32 = rd(a, DT_OFF, x1 * 4 + 3);
-                let o2: u32 = rd(a, DT_OFF, x2 * 4 + 3);
-                return mask_bits((o1 - o2) as u64, bits);
-            }
-            if d_is_tok(a1) == 1 {
-                return d_derive(a, a1, (0 - a2) as u32, io, il, 0, 0);
-            }
+        // 深度 4（`docs/377` §2.2）：引用没有可加减的整数；两个引用的差是"序"。
+        if k == K_SUB && d_is_tok(a1) == 1 && d_is_tok(a2) == 1 {
             return d_fault(a, DF_NOORDER, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
         }
         return d_fault(a, DF_NOADDR, 0, 0, 0, 8, 0, io, il, 0, 0) as u64;
@@ -2811,7 +2810,123 @@ fn gep(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
         q = seg_next(a, qe, e);
     }
     if d_on(a) == 1 && d_is_tok(base) == 1 {
-        return d_derive(a, base, acc, io, il, 0, 0);
+        let ix: u32 = d_find(a, base);
+        if ix == NONE {
+            let _f: u32 = d_fault(a, DF_DANGLING, base, 0, 0, 1, 0, io, il, 0, 0);
+            return 0;
+        }
+        let bi: u32 = rd(a, DT_OFF, ix * 4 + 2);
+        let bsz: u32 = d_body(a, bi, 1);
+        let dlo: u32 = d_dg(a, ix, 0);
+        let dhi: u32 = d_dg(a, ix, 1);
+        let plo: u32 = d_dg(a, ix, 2);
+        let phi: u32 = d_dg(a, ix, 3);
+        dlo = d_dg(a, ix, 0);
+        dhi = d_dg(a, ix, 1);
+        plo = d_dg(a, ix, 2);
+        phi = d_dg(a, ix, 3);
+        let lk: u32 = d_dg(a, ix, 5);
+        let li: u32 = d_dg(a, ix, 6);
+        let lc: u32 = d_dg(a, ix, 7);
+        let lw: u32 = d_dg(a, ix, 8);
+        // 第二趟：按类型逐步折摘要（索引的**结构位置**，不是字节数）。
+        let cur2_o: u32 = cur_o;
+        let cur2_l: u32 = cur_l;
+        let kk: u32 = 0;
+        let q2: u32 = seg_next(a, seg_end(a, op, e), e);
+        while q2 < e {
+            let qe2: u32 = seg_end(a, q2, e);
+            let idx2: u32 = operand_text(a, m, fr, q2, qe2) as u32;
+            if kk == 0 {
+                let w: u32 = ty_size(a, cur2_o, cur2_l);
+                let c0: u32 = load8(a, cur2_o);
+                let scalar: u32 = 0;
+                if c0 != 91 && c0 != 123 { scalar = 1; }
+                if idx2 != 0 {
+                    if lk == 0 && lw == w {
+                        let ni: u32 = li + idx2;
+                        if ni >= lc {
+                            let _f: u32 = d_fault(a, DF_BOUNDS, base, bi, ni, w, 3, io, il, 0, 0);
+                            return 0;
+                        }
+                        let f: u64 = d_fold(plo, phi, d_step(0, ni, lc, w));
+                        dlo = lo32(f);
+                        dhi = hi32(f);
+                        li = ni;
+                    } else if lk == 2 {
+                        let cnt: u32 = bsz / w;
+                        if idx2 >= cnt {
+                            let _f: u32 = d_fault(a, DF_BOUNDS, base, bi, idx2, w, 3, io, il, 0, 0);
+                            return 0;
+                        }
+                        let f: u64 = d_fold(plo, phi, d_step(0, idx2, cnt, w));
+                        dlo = lo32(f);
+                        dhi = hi32(f);
+                        lk = 0;
+                        li = idx2;
+                        lc = cnt;
+                        lw = w;
+                    } else {
+                        let _f: u32 = d_fault(a, DF_NOADDR, base, bi, 0, w, 4, io, il, 0, 0);
+                        return 0;
+                    }
+                } else if scalar == 1 {
+                    if lk == 0 && lw == w {
+                        // 停在同一元素上
+                    } else if lk == 2 {
+                        let cnt: u32 = bsz / w;
+                        let f: u64 = d_fold(plo, phi, d_step(0, 0, cnt, w));
+                        dlo = lo32(f);
+                        dhi = hi32(f);
+                        lk = 0;
+                        li = 0;
+                        lc = cnt;
+                        lw = w;
+                    } else {
+                        let _f: u32 = d_fault(a, DF_NOADDR, base, bi, 0, w, 4, io, il, 0, 0);
+                        return 0;
+                    }
+                }
+            } else if load8(a, cur2_o) == 91 {
+                let et: u64 = arr_elem(a, cur2_o, cur2_l);
+                let n: u32 = arr_n(a, cur2_o, cur2_l);
+                let w: u32 = ty_size(a, hi32(et), lo32(et));
+                if idx2 >= n {
+                    let _f: u32 = d_fault(a, DF_BOUNDS, base, bi, idx2, w, 3, io, il, 0, 0);
+                    return 0;
+                }
+                let f: u64 = d_fold(dlo, dhi, d_step(0, idx2, n, w));
+                plo = dlo;
+                phi = dhi;
+                dlo = lo32(f);
+                dhi = hi32(f);
+                lk = 0;
+                li = idx2;
+                lc = n;
+                lw = w;
+                cur2_o = hi32(et);
+                cur2_l = lo32(et);
+            } else if load8(a, cur2_o) == 123 {
+                let ft: u64 = fld_ty(a, cur2_o, cur2_l, idx2);
+                let w: u32 = ty_size(a, hi32(ft), lo32(ft));
+                let f: u64 = d_fold(dlo, dhi, d_step(1, idx2, 0, w));
+                plo = dlo;
+                phi = dhi;
+                dlo = lo32(f);
+                dhi = hi32(f);
+                lk = 1;
+                li = idx2;
+                lc = 0;
+                lw = w;
+                cur2_o = hi32(ft);
+                cur2_l = lo32(ft);
+            } else {
+                return fail_tok(a, "GEP 的这一步 T0 没实现:", io, il) as u64;
+            }
+            kk = kk + 1;
+            q2 = seg_next(a, qe2, e);
+        }
+        return d_tok_new(a, bi, acc, dlo, dhi, plo, phi, lw, lk, li, lc, lw);
     }
     return base + (acc as u64);
 }
@@ -2862,7 +2977,8 @@ fn insertvalue(a: ptr, m: ptr, fr: u32, io: u32, il: u32, do_: u32, dl: u32) -> 
     return (d as u64) | (((sz as u64)) << 32);
 }
 
-/// 被解释程序唯一能出去的门（`docs/243` §3.4）。表里没有的**点名拒**。
+/// 被解释程序唯一能出去的门（`docs/243` §3.4）。表里没有的回 **`-ENOSYS`**
+/// （`docs/311` §4.2）：Linux 对不认得的号就是这个答案，guest 探测一个号是合法程序。
 /// `openat` 的那个路径**恰好**是 `/proc/self/cmdline` 吗（末尾的 NUL 也要对上）。
 fn lit_is_cmdline(m: ptr, p: u32) -> bool {
     if load8(m, p + str_len("/proc/self/cmdline")) != 0 {
@@ -3085,11 +3201,10 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         syscall4(60, x1 & 255, 0, 0);
         return 0;
     }
-    wstr(2, "lvm: 系统调用表里没有 ");
-    write_num(a, 2, nr as u32);
-    wstr(2, "（docs/243 §3.4）
-");
-    return die(2) as u64;
+    // 表外的号：guest 拿 Linux 会给的那个答案（`-38`），不是一次崩溃（`docs/311` §4.2）。
+    // "这一条没实现"的可数形态在参考实现的 `--syscall-report` 上；镜像这一侧
+    // 只有 guest 的那一半（同一份 IR 在两边的 stdout/rc 因此一致）。
+    return (0 as u64) - 38;
 }
 
 fn do_asm(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
@@ -3269,45 +3384,118 @@ fn d_ser_next(a: ptr) -> u64 {
     return ((209 as u64) << 56) | ((hi as u64) << 32) | (lo as u64);
 }
 
-fn d_tok_new(a: ptr, bi: u32, off: u32) -> u64 {
-    // 反向表按 (体,偏移) 有序：同一个引用点只发一个令牌。
-    let n: u32 = ctx_get(a, C_DNR);
-    let lo: u32 = 0;
-    let hi: u32 = n;
-    while lo < hi {
-        let mid: u32 = (lo + hi) / 2;
-        let mb: u32 = rd(a, DR_OFF, mid * 4);
-        let mo: u32 = rd(a, DR_OFF, mid * 4 + 1);
-        if mb < bi || (mb == bi && mo < off) {
-            lo = mid + 1;
-        } else {
-            hi = mid;
+fn d_root_lo(bi: u32) -> u32 { return d_mix(bi, 40009); }
+fn d_root_hi(bi: u32) -> u32 { return d_mix(bi, 40507); }
+
+fn d_mix(x: u32, y: u32) -> u32 {
+    let h: u32 = x * 16777619;
+    return h ^ (y + 2166136261 + (h << 13) + (h >> 7));
+}
+
+/// 路径的一步 -> 32 位摘要。
+fn d_step(kind: u32, idx: u32, cnt: u32, w: u32) -> u32 {
+    let h: u32 = d_mix(idx, cnt);
+    h = d_mix(h, w);
+    if kind == 1 {
+        h = d_mix(h, 81021);
+    }
+    return h;
+}
+
+fn d_fold(lo: u32, hi: u32, sh: u32) -> u64 {
+    let a1: u32 = d_mix(lo, sh);
+    let b1: u32 = d_mix(hi, sh ^ 2654435761);
+    return ((b1 as u64) << 32) | (a1 as u64);
+}
+
+fn d_ph_hash(bi: u32, dlo: u32, dhi: u32) -> u32 {
+    return d_mix(d_mix(bi, dlo), dhi) % MAX_PH;
+}
+
+/// 路径去重：命中回令牌；没有回 0。空槽用 state=0 表示。
+fn d_path_find(a: ptr, bi: u32, dlo: u32, dhi: u32) -> u64 {
+    let h: u32 = d_ph_hash(bi, dlo, dhi);
+    let i: u32 = 0;
+    let stop: u32 = 0;
+    let out: u64 = 0;
+    while i < MAX_PH && stop == 0 {
+        let s: u32 = h + i;
+        let q: u32 = s;
+        if q >= MAX_PH {
+            q = q - MAX_PH;
         }
+        let st: u32 = rd(a, PH_OFF, q * 8 + 5);
+        if st == 0 {
+            stop = 1;
+        } else if rd(a, PH_OFF, q * 8) == bi
+                && rd(a, PH_OFF, q * 8 + 1) == dlo
+                && rd(a, PH_OFF, q * 8 + 2) == dhi {
+            out = ((rd(a, PH_OFF, q * 8 + 4) as u64) << 32)
+                  | (rd(a, PH_OFF, q * 8 + 3) as u64);
+            stop = 1;
+        }
+        i = i + 1;
     }
-    if lo < n && rd(a, DR_OFF, lo * 4) == bi && rd(a, DR_OFF, lo * 4 + 1) == off {
-        return (((rd(a, DR_OFF, lo * 4 + 3) as u64)) << 32)
-               | (rd(a, DR_OFF, lo * 4 + 2) as u64);
+    return out;
+}
+
+fn d_path_put(a: ptr, bi: u32, dlo: u32, dhi: u32, tok: u64) {
+    let h: u32 = d_ph_hash(bi, dlo, dhi);
+    let i: u32 = 0;
+    let stop: u32 = 0;
+    while i < MAX_PH && stop == 0 {
+        let s: u32 = h + i;
+        let q: u32 = s;
+        if q >= MAX_PH {
+            q = q - MAX_PH;
+        }
+        let st: u32 = rd(a, PH_OFF, q * 8 + 5);
+        if st == 0 {
+            wr(a, PH_OFF, q * 8, bi);
+            wr(a, PH_OFF, q * 8 + 1, dlo);
+            wr(a, PH_OFF, q * 8 + 2, dhi);
+            wr(a, PH_OFF, q * 8 + 3, d_tok_lo(tok));
+            wr(a, PH_OFF, q * 8 + 4, d_tok_hi(tok));
+            wr(a, PH_OFF, q * 8 + 5, 1);
+            stop = 1;
+        }
+        i = i + 1;
     }
+    if stop == 0 {
+        let _f: u32 = d_fault(a, DF_LIMIT, 0, bi, 0, 1, 6, 0, 0, 0, 0);
+    }
+}
+
+fn d_dg(a: ptr, ix: u32, f: u32) -> u32 {
+    return rd(a, DG_OFF, ix * 12 + f);
+}
+
+fn d_dgs(a: ptr, ix: u32, f: u32, v: u32) {
+    wr(a, DG_OFF, ix * 12 + f, v);
+    return;
+}
+
+fn d_tok_new(a: ptr, bi: u32, off: u32, dlo: u32, dhi: u32,
+             plo: u32, phi: u32, leaf: u32, lk: u32, li: u32, lc: u32, lw: u32) -> u64 {
+    // 路径去重（`docs/377` §3.2）：同一个 (体, 路径摘要) 只发一个令牌。
+    let got: u64 = d_path_find(a, bi, dlo, dhi);
+    if got != 0 {
+        return got;
+    }
+    let n: u32 = ctx_get(a, C_DNR);
     if n >= MAX_DR || ctx_get(a, C_DNT) >= MAX_DT {
-        // 与参考对齐：容量用尽在 guest 看来是 **F06 身份预算**，不是工具崩溃。
         let _f: u32 = d_fault(a, DF_LIMIT, 0, bi, off, 1, 5, 0, 0, 0, 0);
         return 0;
     }
     let s: u64 = d_ser_next(a);
     let tl: u32 = d_tok_lo(s);
     let th: u32 = d_tok_hi(s);
-    let i: u32 = n;
-    while i > lo {
-        wr(a, DR_OFF, i * 4, rd(a, DR_OFF, (i - 1) * 4));
-        wr(a, DR_OFF, i * 4 + 1, rd(a, DR_OFF, (i - 1) * 4 + 1));
-        wr(a, DR_OFF, i * 4 + 2, rd(a, DR_OFF, (i - 1) * 4 + 2));
-        wr(a, DR_OFF, i * 4 + 3, rd(a, DR_OFF, (i - 1) * 4 + 3));
-        i = i - 1;
-    }
-    wr(a, DR_OFF, lo * 4, bi);
-    wr(a, DR_OFF, lo * 4 + 1, off);
-    wr(a, DR_OFF, lo * 4 + 2, tl);
-    wr(a, DR_OFF, lo * 4 + 3, th);
+    // 反向表：追加即可（去重已经在 PH 里做过）。
+    wr(a, DR_OFF, n * 4, bi);
+    wr(a, DR_OFF, n * 4 + 1, off);
+    wr(a, DR_OFF, n * 4 + 2, tl);
+    wr(a, DR_OFF, n * 4 + 3, th);
+    wr(a, RG_OFF, n * 4, dhi);
     ctx_set(a, C_DNR, n + 1);
     let m: u32 = ctx_get(a, C_DNT);
     let l2: u32 = 0;
@@ -3328,13 +3516,28 @@ fn d_tok_new(a: ptr, bi: u32, off: u32) -> u64 {
         wr(a, DT_OFF, j * 4 + 1, rd(a, DT_OFF, (j - 1) * 4 + 1));
         wr(a, DT_OFF, j * 4 + 2, rd(a, DT_OFF, (j - 1) * 4 + 2));
         wr(a, DT_OFF, j * 4 + 3, rd(a, DT_OFF, (j - 1) * 4 + 3));
+        let f: u32 = 0;
+        while f < 12 {
+            wr(a, DG_OFF, j * 12 + f, rd(a, DG_OFF, (j - 1) * 12 + f));
+            f = f + 1;
+        }
         j = j - 1;
     }
     wr(a, DT_OFF, l2 * 4, tl);
     wr(a, DT_OFF, l2 * 4 + 1, th);
     wr(a, DT_OFF, l2 * 4 + 2, bi);
     wr(a, DT_OFF, l2 * 4 + 3, off);
+    d_dgs(a, l2, 0, dlo);
+    d_dgs(a, l2, 1, dhi);
+    d_dgs(a, l2, 2, plo);
+    d_dgs(a, l2, 3, phi);
+    d_dgs(a, l2, 4, leaf);
+    d_dgs(a, l2, 5, lk);
+    d_dgs(a, l2, 6, li);
+    d_dgs(a, l2, 7, lc);
+    d_dgs(a, l2, 8, lw);
     ctx_set(a, C_DNT, m + 1);
+    d_path_put(a, bi, dlo, dhi, s);
     return s;
 }
 
@@ -3494,6 +3697,11 @@ fn d_retire_body(a: ptr, bi: u32) {
             wr(a, DT_OFF, w * 4 + 1, rd(a, DT_OFF, i * 4 + 1));
             wr(a, DT_OFF, w * 4 + 2, rd(a, DT_OFF, i * 4 + 2));
             wr(a, DT_OFF, w * 4 + 3, rd(a, DT_OFF, i * 4 + 3));
+            let f: u32 = 0;
+            while f < 12 {
+                wr(a, DG_OFF, w * 12 + f, rd(a, DG_OFF, i * 12 + f));
+                f = f + 1;
+            }
             w = w + 1;
             i = i + 1;
         }
@@ -3712,30 +3920,14 @@ fn d_eq_lit(a: ptr, loc: u64, lit: str) -> u32 {
     return 1;
 }
 
-/// 令牌 + 整数：在表里派生一个新令牌（体内偏移）；出体 → F01。
-fn d_derive(a: ptr, t: u64, delta: u32, io: u32, il: u32, oo: u32, ol: u32) -> u64 {
-    let ix: u32 = d_find(a, t);
-    if ix == NONE {
-        let _f: u32 = d_fault(a, DF_DANGLING, t, 0, 0, 0, 0, io, il, oo, ol);
-        return 0;
-    }
-    let bi: u32 = rd(a, DT_OFF, ix * 4 + 2);
-    let off: u32 = rd(a, DT_OFF, ix * 4 + 3);
-    let n: u32 = off + delta;
-    if n > d_body(a, bi, 1) {
-        let _f: u32 = d_fault(a, DF_BOUNDS, t, bi, n, 1, 0, io, il, oo, ol);
-        return 0;
-    }
-    return d_tok_new(a, bi, n);
-}
-
 fn d_alloc_body(a: ptr, kind: u32, size: u32) -> u64 {
     let sz: u32 = size;
     if sz == 0 {
         sz = 1;
     }
     let bi: u32 = d_body_new(a, kind, sz, 0);
-    return d_tok_new(a, bi, 0);
+    return d_tok_new(a, bi, 0, d_root_lo(bi), d_root_hi(bi),
+                     d_root_lo(bi), d_root_hi(bi), sz, 2, 0, 0, 0);
 }
 
 fn d_gaddr(a: ptr, no: u32, nl: u32) -> u64 {
@@ -4693,7 +4885,7 @@ fn snapshot_write(a: ptr, m: ptr) {
     if pl == 0 {
         fail("checkpoint：没给输出路径（ckpt-out=...）");
     }
-    let fd: i64 = syscall4(2, ptr_add(a, ARGV_OFF + po) as u64, 577, 420);
+    let fd: i64 = syscall6(257, (0 as u64) - 100, ptr_add(a, ARGV_OFF + po) as u64, 577, 420, 0);
     if fd < 0 {
         fail("checkpoint：写不了快照");
     }
@@ -4702,7 +4894,7 @@ fn snapshot_write(a: ptr, m: ptr) {
     store8(a, SNAP_HDR + 1, 86);      // V
     store8(a, SNAP_HDR + 2, 77);      // M
     store8(a, SNAP_HDR + 3, 67);      // C
-    store32(a, SNAP_HDR + 4, 1);      // version
+    store32(a, SNAP_HDR + 4, 2);      // version（docs/377：路径身份）
     store32(a, SNAP_HDR + 8, ctx_get(a, C_IFHASH));
     if d_on(a) == 1 {
         store32(a, SNAP_HDR + 12, 3);               // 3 = dismemory（docs/375 §2.5）
@@ -4858,6 +5050,11 @@ fn snapshot_write(a: ptr, m: ptr) {
             wu32(f, a, rd(a, DT_OFF, i * 4 + 1));
             wu32(f, a, rd(a, DT_OFF, i * 4 + 2));
             wu32(f, a, rd(a, DT_OFF, i * 4 + 3));
+            let f2: u32 = 0;
+            while f2 < 9 {
+                wu32(f, a, d_dg(a, i, f2));
+                f2 = f2 + 1;
+            }
             i = i + 1;
         }
         let nr2: u32 = ctx_get(a, C_DNR);
@@ -4965,9 +5162,28 @@ fn snap_read_dis(a: ptr, f: u64) {
         wr(a, DT_OFF, i * 4 + 1, ru32(f, a));
         wr(a, DT_OFF, i * 4 + 2, ru32(f, a));
         wr(a, DT_OFF, i * 4 + 3, ru32(f, a));
+        let f2: u32 = 0;
+        while f2 < 9 {
+            d_dgs(a, i, f2, ru32(f, a));
+            f2 = f2 + 1;
+        }
         i = i + 1;
     }
     ctx_set(a, C_DNT, nt2);
+    // 路径去重表按令牌重建（同侧快照：格式与参考不同，见 docs/377 §3.2）。
+    i = 0;
+    while i < MAX_PH {
+        wr(a, PH_OFF, i * 8 + 5, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < nt2 {
+        let bi: u32 = rd(a, DT_OFF, i * 4 + 2);
+        let tok: u64 = ((rd(a, DT_OFF, i * 4 + 1) as u64) << 32)
+                       | (rd(a, DT_OFF, i * 4) as u64);
+        d_path_put(a, bi, d_dg(a, i, 0), d_dg(a, i, 1), tok);
+        i = i + 1;
+    }
     let nr2: u32 = ru32(f, a);
     if nr2 > MAX_DR {
         fail("checkpoint：反向表超过镜像上限");
@@ -5005,7 +5221,7 @@ fn snap_read_dis(a: ptr, f: u64) {
 }
 
 fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
-    let fd: i64 = syscall4(2, ptr_add(a, ARGV_OFF + po) as u64, 0, 0);
+    let fd: i64 = syscall6(257, (0 as u64) - 100, ptr_add(a, ARGV_OFF + po) as u64, 0, 0, 0);
     if fd < 0 {
         fail("checkpoint：读不了快照");
     }
@@ -5017,7 +5233,7 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             || load8(a, SNAP_HDR + 2) != 77 || load8(a, SNAP_HDR + 3) != 67 {
         fail("checkpoint：魔数不对");
     }
-    if load32(a, SNAP_HDR + 4) != 1 {
+    if load32(a, SNAP_HDR + 4) != 2 {
         fail("checkpoint：不认识的版本");
     }
     if load32(a, SNAP_HDR + 8) != ctx_get(a, C_IFHASH) {
@@ -6703,7 +6919,7 @@ fn run(a: ptr) -> u32 {
     // T1（`docs/247`）：第二个实参（有的话）= 剖面写到哪个文件。**不给就不记**。
     if lo32(f2) != 0 && !is_opt_arg(ab, f2) {
         // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512 = 577，mode 0644 = 420
-        let pfd: i64 = syscall4(2, ptr_add(ab, hi32(f2)) as u64, 577, 420);
+        let pfd: i64 = syscall6(257, (0 as u64) - 100, ptr_add(ab, hi32(f2)) as u64, 577, 420, 0);
         if pfd < 0 {
             return fail("写不了剖面文件");
         }
@@ -6734,7 +6950,7 @@ fn run(a: ptr) -> u32 {
     }
     // T2（`docs/259` §7，#586）：第三个实参写 `t2` 就先把操作数/类型折成表再跑。
     if lo32(f4) > 0 && !is_opt_arg(ab, f4) {
-        let sfd: i64 = syscall4(2, ptr_add(ab, hi32(f4)) as u64, 577, 420);
+        let sfd: i64 = syscall6(257, (0 as u64) - 100, ptr_add(ab, hi32(f4)) as u64, 577, 420, 0);
         if sfd >= 0 {
             ctx_set(a, C_STATS_FD, sfd as u32);
         }
@@ -6798,7 +7014,7 @@ fn run(a: ptr) -> u32 {
 
 fn _start() -> u32 {
     // 末尾多留 `sw_tag` 的标签/能力表（`TAG_OFF` / `CAP_OFF`）—— 既有偏移一个都不挪。
-    let a: ptr = sys_alloc(LIVE_END as u64) as ptr;
+    let a: ptr = sys_alloc(PH_END as u64) as ptr;
     if a as u64 == 0 {
         return fail("oom (brk 失败)");
     }

@@ -2141,6 +2141,11 @@ PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHand
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
               "FindFirstFileA", "FindNextFileA", "Sleep",
               "GetCurrentProcessId",
+              # `docs/367` stage 4：PE 上没有信号 —— 未处理异常走 SEH。用**向量化**异常
+              # 处理器（VEH）：它由加载器在 SEH 之前直接调用。顶层过滤器
+              # （SetUnhandledExceptionFilter）在无 CRT 的产物上实测**不会被调用**，
+              # 这一格是量出来的，不是偏好。
+              "AddVectoredExceptionHandler",
               # 系统与进程信息（`docs/303` §2.3/§2.6）：全部平 C API、无回调。
               "GlobalMemoryStatusEx", "OpenProcess", "CreateToolhelp32Snapshot",
               "Process32First", "Process32Next", "Thread32First", "Thread32Next",
@@ -5753,9 +5758,31 @@ class PeEmitter(Emitter):
 
     #: PE 目标标记 —— `_call` 用它把"只有 ELF 兑现得了的降级"点名拒（`docs/348`）。
     pe_target = True
+    #: `docs/367` stage 4：装向量化异常处理器时要用的 IAT 槽。
+    pe_slots: dict | None = None
 
     def _emit_syscall(self) -> None:
         self.asm.call("__win_syscall")
+
+    def emit_func(self, f: Func) -> None:
+        if self.fault is not None and f.name == "__lom_pe_shim":
+            # Win64 回调 → 栈机：rcx = PEXCEPTION_POINTERS，先落到全局，再 call 报告器。
+            # 与 ELF 的 `__lom_shim` 同一条理由（内核/宿主用寄存器传参，内部调用走栈）。
+            a = self.asm
+            a.label(f.name)
+            exc = self.globals["@__lom_pe_exc"].addr
+            # Win64 的**非易失**寄存器里有 rdi / rsi，而栈机把它们当实参寄存器用 ——
+            # 回调不恢复它们，控制交回 ntdll 之后异常会**原地重来**（实测：报告刷屏）。
+            a.emit(b"\x57")                                # push rdi
+            a.emit(b"\x56")                                # push rsi
+            a.emit(b"\x48\xB8" + struct.pack("<Q", exc))   # movabs rax, &__lom_pe_exc
+            a.emit(b"\x48\x89\x08")                        # mov [rax], rcx（VEH 唯一的实参）
+            a.call("__lom_pe_body")
+            a.emit(b"\x5E")                                # pop rsi
+            a.emit(b"\x5F")                                # pop rdi
+            a.emit(b"\xC3")                                # ret（rax = 0）
+            return
+        super().emit_func(f)
 
     def _call_spawn(self, m, d):
         """`thread_spawn` 是 Linux 的 `clone` 直译 —— Windows 侧没有对应物（`CreateThread`
@@ -5767,6 +5794,13 @@ class PeEmitter(Emitter):
         a = self.asm
         a.label("__entry")
         a.emit(b"\x48\x83\xEC\x28")                # sub rsp, 0x28
+        if self.fault is not None:
+            # `docs/367` stage 4：PE 上不是信号，是 SEH —— 向量化异常处理器在 SEH 之前
+            # 由加载器直接调用。**默认不装**（`--fault-report` 才走到这里），产物逐字节不变。
+            # 第一个实参 1 = 先于 SEH 调用；第二个 = 处理器（rcx/rdx 是 Win64 的前两格）。
+            a.mov_abs(RDX, "__lom_pe_shim")
+            a.emit(mov_ri32(RCX, 1))
+            _call_iat(a, self.pe_slots["AddVectoredExceptionHandler"])
         a.call(start_name)
         a.emit(mov_ri32(RAX, SYS_EXIT))            # exit(0) 也走 shim，保持单一路径
         a.emit(mov_ri32(RDI, 0))
@@ -5933,19 +5967,26 @@ def _entry_name(funcs) -> str:
     return "main"
 
 
-def _pe_emit(funcs, globals_, slots, entry: str) -> tuple[bytes, int]:
+def _pe_emit(funcs, globals_, slots, entry: str, fault_plan: dict | None = None,
+             data: bytearray | None = None) -> tuple[bytes, int]:
     em = PeEmitter(globals_)
+    em.pe_slots = slots
+    if fault_plan is not None:
+        em.fault = {"plan": fault_plan, "funcs": funcs}
     for g in globals_:
         em.asm.labels[g.name] = g.addr
     em.emit_entry_stub(entry)
     emit_win_shim(em, slots)
     for f in funcs:
         em.emit_func(f)
+    if fault_plan is not None and data is not None:
+        # 站点/函数/块/名字四张表：条目在发射时收集，这里整片写回 `.data`。
+        _fault_patch_tables(em, fault_plan, data, em.asm.here())
     return em.asm.finalize(), em.asm.labels["__entry"]
 
 
-def compile_pe(text: str) -> tuple[bytes, dict]:
-    global TEXT_VADDR
+def compile_pe(text: str, fault_report: bool = False) -> tuple[bytes, dict]:
+    global TEXT_VADDR, DATA_VADDR
     globals_, funcs, _externs = parse_ll(text)
     entry = _entry_name(funcs)
 
@@ -5953,9 +5994,21 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
     # （早先按"代码长度决定 .data 的 RVA"排过一次，那是为了迁就 .text 只能钉在最低 RVA；
     #   现在每节都钉死了，两遍发射连同它引发的节区重叠问题一起消失。）
     TEXT_VADDR = PE_IMAGE_BASE + PE_TEXT_RVA
+    DATA_VADDR = PE_IMAGE_BASE + PE_DATA_RVA
+    fault_plan: dict | None = None
+    if fault_report:
+        # `docs/367` stage 4：报告的运行期是**一段与程序无关的 IR**（同 stage 1 的思路），
+        # 只是把 rt_sigaction 那一套换成 SEH 的回调。表照样由链接器发射后回填。
+        fault_plan = _fault_plan(funcs)
+        text = text + "\n" + _fault_pe_runtime_ir(fault_plan)
+        globals_, funcs, _externs = parse_ll(text)
+        for g in globals_:
+            if g.name in ("@__lom_sites", "@__lom_fns",
+                          "@__lom_blks", "@__lom_strs"):
+                g.data = b"\xEE" + b"\0" * (size_of(g.ty) - 1)
     data, bss = _pe_layout_globals(globals_, PE_DATA_RVA)
     idata, slots = build_pe_idata()
-    code, entry = _pe_emit(funcs, globals_, slots, entry)
+    code, entry = _pe_emit(funcs, globals_, slots, entry, fault_plan, data)
 
     blob = build_pe(code, bytes(data), entry - PE_IMAGE_BASE, idata)
     return blob, {"text": len(code), "data": len(data), "bss": bss,
@@ -7841,6 +7894,153 @@ def _fault_shim_bytes(sig_addr: int, info_addr: int, uctx_addr: int,
     return bytes(b)
 
 
+# ------------------------------------------------------------------ PE 故障报告（docs/367 stage 4）
+#
+# PE 上**没有信号**：一次坏访存是 SEH 异常 0xC0000005，`ud2` 是 0xC000001D。所以
+# stage 1 的那一套（`rt_sigaction` + 备栈 + `rt_sigreturn`）在这里一个都不能用；
+# 等价的机制是 **向量化异常处理器**（`AddVectoredExceptionHandler`）：加载器在 SEH
+# 之前直接回调，回调拿到 `PEXCEPTION_POINTERS`（ExceptionRecord + ContextRecord）。
+# （顶层过滤器 `SetUnhandledExceptionFilter` 在无 CRT 的产物上实测不会被调用 ——
+# 这一格是量出来的，不是偏好。）
+#
+# 报告仍由产物自己发出（与 stage 1 同一个形状）：一个 IR 函数读现场、写 stderr，
+# 一个机器码 shim 把 Win64 回调约定（rcx = PEXCEPTION_POINTERS）接到**栈机**上
+# （与 ELF 的 `__lom_shim` 同一个理由：内核/宿主用寄存器传参，本链接器的内部调用走栈）。
+# 与 ELF 的差别写进 docs/367 §4.4：没有备栈（栈溢出时最佳努力）、没有"重发信号"，
+# 返回 EXCEPTION_CONTINUE_SEARCH，进程按 Windows 的方式终止（退出码是异常码）。
+#
+# 现场偏移（WinNT.h 的公开布局）：EXCEPTION_RECORD 的 code@0、ExceptionAddress@0x10、
+# NumberParameters@0x18、ExceptionInformation[1]@0x28；x86-64 CONTEXT 的 Rsp@0x98、
+# Rip@0xF8。判据 `test_pe_fault_report_is_default_off` 的 Windows 那一段按这几格核报告。
+
+
+def _fault_pe_messages() -> list[tuple[str, str]]:
+    """PE 报告自己的那几句。**不并进 `_fault_messages()`** —— 那一段是 ELF 与自举
+    镜像逐字节相同的那份文本，多一句就会改掉 ELF 产物。"""
+    return [
+        ("__lom_pe_h1", "loment: 原生档故障（PE 异常）\n"),
+        ("__lom_pe_h2", "error[FAULT]: 原生档在执行时收到异常"
+                        "（PE；docs/367 stage 4）\n"),
+        ("__lom_pe_arrow", "  --> 原生产物:"),
+        ("__lom_pe_code", "   | 异常："),
+        ("__lom_pe_addr", "；地址："),
+        ("__lom_pe_pc", "   | PC："),
+        ("__lom_pe_rsp", "；RSP："),
+        ("__lom_pe_fact", "   |\n   = 事实：原生档在执行上述 PC 时收到 PE 异常。"
+                          "它没有对象表，所以不给对象现场；站点由产物里的表解析。\n"),
+        ("__lom_pe_tip", "   = 建议：要逐站点的对象诊断（对象表 / 对象代 / 现场），"
+                         "用 LVM 档运行（--substrate sw_cap，见 docs/366）。"
+                         "PE 上没有信号与备栈，栈溢出这一类可能报不出来"
+                         "（docs/367 stage 4）。\n"),
+    ]
+
+
+def _fault_pe_globals_ir(plan: dict) -> str:
+    out = [_fault_table_globals_ir(plan),
+           "@__lom_pe_exc = global [8 x i8] zeroinitializer",
+           "@__lom_hexbuf = global [18 x i8] zeroinitializer",
+           "@__lom_decbuf = global [3 x i8] zeroinitializer"]
+    # 站点那一行的文案与 ELF 同一份（`_ir_site_lookup` 按名字引用）。
+    site_names = ("__lom_m_nl", "__lom_ms1", "__lom_ms2", "__lom_ms3",
+                  "__lom_ms4", "__lom_ms5", "__lom_ms5a", "__lom_ms5b",
+                  "__lom_ms6")
+    msgs = dict(_fault_messages())
+    for name in site_names:
+        out.append(f"@{name} = global [{len(msgs[name].encode('utf-8'))} x i8] "
+                   f"{_cstr(msgs[name])}")
+    for name, text in _fault_pe_messages():
+        out.append(f"@{name} = global [{len(text.encode('utf-8'))} x i8] {_cstr(text)}")
+    return "\n".join(out)
+
+
+def _emit_pe_msg_write(name: str, parts: list[str]) -> None:
+    u = len(parts)
+    text = dict(_fault_pe_messages()).get(name)
+    if text is None:
+        text = dict(_fault_messages())[name]
+    parts += [f"  %b{u} = ptrtoint ptr @{name} to i64",
+              f"  %w{u} = {_SYS3}(i64 1, i64 2, i64 %b{u}, "
+              f"i64 {len(text.encode('utf-8'))})"]
+
+
+def _fault_pe_body_ir() -> str:
+    """`__lom_pe_body`：读 `PEXCEPTION_POINTERS` 的现场，按 lomenterr 的形状写 stderr。"""
+    parts = [
+        "define i64 @__lom_pe_body() {",
+        "entry:",
+        "  %x = load i64, ptr @__lom_pe_exc",
+        "  %xp = inttoptr i64 %x to ptr",
+        "  %rec = load i64, ptr %xp",
+        "  %c8 = add i64 %x, 8",
+        "  %c8p = inttoptr i64 %c8 to ptr",
+        "  %ctx = load i64, ptr %c8p",
+        # 异常码（u32）
+        "  %recp = inttoptr i64 %rec to ptr",
+        "  %cw = load i32, ptr %recp",
+        "  %code = zext i32 %cw to i64",
+        # ExceptionAddress（+0x10）
+        "  %ea = add i64 %rec, 16",
+        "  %eap = inttoptr i64 %ea to ptr",
+        "  %exaddr = load i64, ptr %eap",
+        # 访问违例带两个参数：Information[0] 读写方向、Information[1] 故障地址。
+        "  %np = add i64 %rec, 24",
+        "  %npp = inttoptr i64 %np to ptr",
+        "  %npw = load i32, ptr %npp",
+        "  %npv = zext i32 %npw to i64",
+        "  %has2 = icmp uge i64 %npv, 2",
+        "  br i1 %has2, label %withparams, label %noparams",
+        "withparams:",
+        "  %pa = add i64 %rec, 40",
+        "  %pap = inttoptr i64 %pa to ptr",
+        "  %paddr = load i64, ptr %pap",
+        "  br label %addrchosen",
+        "noparams:",
+        "  br label %addrchosen",
+        "addrchosen:",
+        "  %addr = phi i64 [ %paddr, %withparams ], [ %exaddr, %noparams ]",
+        # RIP / RSP（x86-64 CONTEXT）
+        "  %ro = add i64 %ctx, 248",
+        "  %rop = inttoptr i64 %ro to ptr",
+        "  %rip = load i64, ptr %rop",
+        "  %so = add i64 %ctx, 152",
+        "  %sop = inttoptr i64 %so to ptr",
+        "  %rsp = load i64, ptr %sop",
+    ]
+    _emit_pe_msg_write("__lom_pe_h1", parts)
+    _emit_pe_msg_write("__lom_pe_h2", parts)
+    _emit_pe_msg_write("__lom_pe_arrow", parts)
+    parts += ["  call void @__wrhex(i64 %rip)"]
+    _emit_pe_msg_write("__lom_m_nl", parts)
+    _emit_pe_msg_write("__lom_pe_code", parts)
+    parts += ["  call void @__wrhex(i64 %code)"]
+    _emit_pe_msg_write("__lom_pe_addr", parts)
+    parts += ["  call void @__wrhex(i64 %addr)"]
+    _emit_pe_msg_write("__lom_m_nl", parts)
+    _emit_pe_msg_write("__lom_pe_pc", parts)
+    parts += ["  call void @__wrhex(i64 %rip)"]
+    _emit_pe_msg_write("__lom_pe_rsp", parts)
+    parts += ["  call void @__wrhex(i64 %rsp)"]
+    _emit_pe_msg_write("__lom_m_nl", parts)
+    _ir_site_lookup(parts, from_block="addrchosen")
+    _emit_pe_msg_write("__lom_pe_fact", parts)
+    _emit_pe_msg_write("__lom_pe_tip", parts)
+    # 0 = EXCEPTION_CONTINUE_SEARCH：打印完继续找处理器；没人接就按 Windows 的
+    # 方式终止（退出码是异常码本身，例如 0xC0000005 —— 与"不装处理器"同一个结局）。
+    parts += ["  ret i64 0", "}", ""]
+    return "\n".join(parts)
+
+
+def _fault_pe_runtime_ir(plan: dict) -> str:
+    return "\n".join([_fault_pe_globals_ir(plan), "",
+                      _ir_wrhex(), "", _ir_wrdec(), "",
+                      _fault_pe_body_ir(), "",
+                      # 机器码 shim 的占位函数：字节由 PeEmitter.emit_func 直接写出。
+                      "define void @__lom_pe_shim() {",
+                      "entry:",
+                      "  ret void",
+                      "}"])
+
+
 def compile_ll(text: str, objects: list | None = None,
                allow_ports: bool = False, interp: str | None = None,
                collect_hot: bool = True,
@@ -8489,18 +8689,27 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 2
     if link and target == "pe":
-        print("[ERR] --link 目前只支持 ELF 目标 (docs/173 §3)", file=sys.stderr)
+        # **点名的拒绝**（`docs/311` §4.4）：PE 没有 `.o` 这条路 —— 归档/目标文件的
+        # 重定位与符号表是 ELF 的形态，PE 一侧只有 COFF 对象，而链接它们的代码不存在。
+        # 这条不是"还没做"，是"这一档的入口不在这里"；判据钉住它（`test_pe_link_refusal_is_named`）。
+        print("[ERR] --link 只支持 ELF 目标：PE 一侧没有 COFF 对象的链接面"
+              "（docs/311 §4.4 点名的拒绝，不是待办）", file=sys.stderr)
         return 2
     if profile == "hotswap" and target != "elf":
         print("[ERR] --profile hotswap 目前只支持 ELF 目标", file=sys.stderr)
+        return 2
+    if fault_heal > 0 and target == "pe":
+        print("[ERR] --fault-heal 只在 ELF 目标可用：PE 上恢复一条故障要"
+              "改异常上下文（ContextRecord）并返回 EXCEPTION_CONTINUE_EXECUTION，"
+              "这一段还没做（docs/367 stage 4）", file=sys.stderr)
         return 2
     if opt and target != "pe":
         print("[ERR] --opt 在 lomelf 里只接 PE 目标（ELF 那条在启动器里，docs/212 §5A）",
               file=sys.stderr)
         return 2
-    if fault_report and target == "pe":
-        print("[ERR] --fault-report 目前只支持 ELF 目标（docs/367 stage 4 才做 PE）",
-              file=sys.stderr)
+    if opt and fault_report:
+        print("[ERR] --opt 与 --fault-report 暂不叠加：PE 的 --opt 走 clang 用户代码"
+              "那一条入口桩，报告器只接在默认档上（docs/367 stage 4）", file=sys.stderr)
         return 2
     src = Path(files[0])
     try:
@@ -8508,7 +8717,8 @@ def main(argv: list[str] | None = None) -> int:
         text = texts[0] if len(texts) == 1 else merge_ir_texts(texts, files)
         objs = [load_foreign(p) for p in link]
         if target == "pe":
-            blob, info = (compile_pe_opt(text) if opt else compile_pe(text))
+            blob, info = (compile_pe_opt(text) if opt
+                          else compile_pe(text, fault_report=fault_report))
         else:
             blob, info = compile_ll(text, objs, allow_ports, interp,
                                     hotswap=(profile == "hotswap"),

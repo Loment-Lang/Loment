@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .sites import verify_fault_coverage
 from .verify import Error, LEVELS, lvm_enabled
 
 SCHEMA = 1
@@ -85,6 +86,10 @@ def derive_lawspace(doc: dict, artifact_bytes: bytes,
     if not lvm_enabled(doc):
         raise ValueError("LNT-VM: LNotary 只在 choose lvm（旧拼写 choose vm）的产物上启用"
                          f"（这份是 vm={doc.get('vm')!r} lvm={doc.get('lvm')!r}）")
+    if sites is not None:
+        bad = verify_fault_coverage(sites, doc)
+        if bad:
+            raise ValueError("; ".join(f"{e.code}: {e.message}" for e in bad))
     dims = dims_of(doc)
     g = dict(GENESIS_DEFAULTS)
     if genesis:
@@ -124,6 +129,8 @@ def verify_lawspace(doc: dict, side: object,
     if not isinstance(side, dict):
         _err(out, "LNT-LS", f"旁挂必须是对象，得到 {type(side).__name__}")
         return out
+    if sites is not None:
+        out += verify_fault_coverage(sites, doc)
     if side.get("schema") != SCHEMA:
         _err(out, "LNT-LS", f"旁挂 schema 必须是 {SCHEMA}，得到 {side.get('schema')!r}")
     if side.get("potato") != doc.get("potato"):

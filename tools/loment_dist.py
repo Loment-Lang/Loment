@@ -3236,9 +3236,13 @@ def _lomelf_link(ir_text: str, target: str, profile: str = "") -> bytes:
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import lomelf
-    if target == "pe":
-        return lomelf.compile_pe(ir_text)[0]
+    # **两半都要那把锁**：`compile_pe` 也改模块级的 `TEXT_VADDR` / `DATA_VADDR`
+    # （`build_tools` 的线程池里 ELF 与 PE 同时链）。只锁 ELF 那一半，PE 仍能在
+    # ELF 链接期间把地址换掉 —— 产物字节数不变、哈希变、装上就段错误
+    # （2026-11-22 本机 `loment_dist_test` 的 `lompi` 段错误查出来的）。
     with _LINK_LOCK:
+        if target == "pe":
+            return lomelf.compile_pe(ir_text)[0]
         return lomelf.compile_ll(ir_text, hotswap=(profile == "hotswap"))[0]
 
 

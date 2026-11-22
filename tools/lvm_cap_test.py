@@ -233,8 +233,9 @@ def test_substrate_is_t0_only() -> None:
 def test_corpus_has_no_false_positives() -> None:
     """判 E：整套语料在两种基质下 `rc + stdout` 逐字节同。
 
-    ⚠ `selfcheck` 在两边都**跑不了**（要系统调用 317，`lvm_test` 的棘轮记着这条）；
-    这一格比的是"两边**同样**跑不了"，不是"它能跑"。
+    `selfcheck` 从 2026-11-22 起也在这张表里真跑：它对系统调用 317 的探测拿到
+    `-ENOSYS`（`docs/311` §4.2），三种基质都走同一条路。这一格比的是"同一份输入，
+    基质只换那条观察轴"。
     """
     checked = 0
     for rel in ELF.CORPUS:

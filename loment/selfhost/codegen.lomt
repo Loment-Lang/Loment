@@ -11980,7 +11980,7 @@ fn lms_mask(src: ptr, toks: ptr) -> u32 {
                 if tok_is(src, toks, j, "lms_seed") {
                     bit = 64;
                 }
-                // 盘古档（`docs/371`）：第 **128** 位是**非级位** —— 七级只占 0..6。
+                // 盘古档（`docs/363`）：第 **128** 位是**非级位** —— 七级只占 0..6。
                 // `choose lms_pangu_true` 把 g1 的致命出口换成 `__loment_fault(1)`。
                 if tok_is(src, toks, j, "lms_pangu_true") {
                     if neg == 1 {
@@ -14166,9 +14166,9 @@ fn emit_runtime(s: ptr, out: ptr) -> u32 {
     emit_str(s, out, "define internal void @__loment_memset(ptr %p, i8 %v, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %q = getelementptr i8, ptr %p, i64 %i\n  store i8 %v, ptr %q\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_memcpy(ptr %d, ptr %s, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %i1, %body ]\n  %done = icmp uge i64 %i, %n\n  br i1 %done, label %end, label %body\nbody:\n  %sp = getelementptr i8, ptr %s, i64 %i\n  %b = load i8, ptr %sp\n  %dp = getelementptr i8, ptr %d, i64 %i\n  store i8 %b, ptr %dp\n  %i1 = add i64 %i, 1\n  br label %loop\nend:\n  ret void\n}\n\n");
     emit_str(s, out, "define internal void @__loment_abort() {\n  call void @llvm.trap()\n  unreachable\n}\n\ndeclare void @llvm.trap()\n\n");
-    // 盘古档（`docs/371`）：与参考实现的 `_IR_FAULT` 逐字节同。
+    // 盘古档（`docs/363`）：与参考实现的 `_IR_FAULT` 逐字节同。
     if load32(s, 588) & 128 != 0 {
-        emit_str(s, out, "\n; ---- LMS fault ABI (docs/371): 100 + kind ----\ndefine internal void @__loment_fault(i32 %kind) {\n  %c = add i32 %kind, 100\n  %c64 = sext i32 %c to i64\n  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 60, i64 %c64, i64 0, i64 0)\n  unreachable\n}\n");
+        emit_str(s, out, "\n; ---- LMS fault ABI (docs/363): 100 + kind ----\ndefine internal void @__loment_fault(i32 %kind) {\n  %c = add i32 %kind, 100\n  %c64 = sext i32 %c to i64\n  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 60, i64 %c64, i64 0, i64 0)\n  unreachable\n}\n");
     }
     return 0;
 }

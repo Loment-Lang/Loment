@@ -1,7 +1,7 @@
 # 367 · 原生档的段错误详细化：从宿主报告器到产物自述
 
-> 状态: **stage 0 / 1 / 2 / 2.5 已实装**（2026-11-21）—— stage 2（自举镜像）与参考
-> **逐字节**相同；stage 2.5 是**可恢复故障**（`--fault-heal N`）；stage 3 起是计划
+> 状态: **stage 0 / 1 / 2 / 2.5 已实装**（2026-11-21）；**stage 4（PE）已实装**（2026-11-22，
+> 参考发射器那一半 —— 自举镜像尚未跟进）；stage 3 / 5 是计划
 > 上游: `docs/366`（LVM 档的同一件事）· `docs/356`（DSG：安全子集不段错误）·
 > `docs/182`（Lomenterr 的形状）· `docs/263`（上限）· `docs/167`（原生后端）
 > 判据: `tools/loment_segv_test.py`（10 条：stage 0 四条 + 产物自述六条）·
@@ -188,7 +188,7 @@ stage 1 挂在 `compile_ll(..., fault_report=True)`（以及 CLI 的 `--fault-re
 | **2** ✅ | 自举镜像 `loment/tools/lomelf.lomt` 同形 | `loment_elf_test` 的孪生格：开关打开时两边产物**逐字节相同**（`_start` / `main` 两个入口） |
 | **2.5** ✅ | 可恢复故障：`--fault-heal N` 把未映射页置零后从同一条指令继续，预算用完才死 | `loment_segv_test` 判据 J：第一页修复后继续、第二页致命；孪生格带 `--fault-heal 2` |
 | **3** | 默认打开 | 现有 ELF 判据全绿；体积与启动开销记账（`docs/263`） |
-| **4** | Windows PE | PE 上不是信号，是异常处理器；形状相同、机制另写（lomelf 的 PE 发射器 + `win_shim`） |
+| **4** ✅ | Windows PE（参考发射器） | `loment_pe_test::test_pe_fault_report_is_default_off`（默认关、逐字节同，打开后有 VEH + 文案）· `test_pe_fault_report_prints_site_on_windows`（坏访存 / `ud2` 的码、地址、PC、RSP、站点；退出码是异常码）· `test_pe_fault_heal_is_refused_for_pe`（`--fault-heal` 点名拒） |
 | **5** | 语言级 fault 走同一条通道（`docs/356` §5 的 `__loment_fault`） | 编译期已知的 panic / trap 站点带 kind + witness，不再只靠信号 |
 
 **clang 路**（`loment_elf_test` 的 (a) 路）不在 stage 1–3 里：它不经 lomelf，注入点
@@ -301,7 +301,65 @@ loment: 故障已修复（未映射页置零）：0x0000000000010000；剩余 1 
 两侧（参考与镜像）都在发射后把长度填进表里；判据 F 现在断言归属到 `down`，而不是某个
 相邻函数。
 
-### 4.4 接下来要模拟的三台"下一代硬件"（设计，未实装）
+### 4.4 stage 4：Windows PE（参考发射器，本机实测）
+
+**一句话：PE 上不是信号，是 SEH 异常。** 同一份坏访存，ELF 侧是 SIGSEGV（11），
+PE 侧是异常码 `0xC0000005`；`ud2` 是 `0xC000001D`。stage 1 的那一套
+（`rt_sigaction`、备栈、`rt_sigreturn`、`tgkill` 重发）在这里**一个都不能用**。
+
+**机制**（`tools/lomelf.py` 的 `_fault_pe_runtime_ir` + `PeEmitter`）：
+
+1. **安装**：入口桩先 `AddVectoredExceptionHandler(1, handler)`。它是**向量化**处理器，
+   由加载器在 SEH 之前直接调用。**实测**：`SetUnhandledExceptionFilter` 在无 CRT 的
+   产物上根本不会被调用（回调里塞 `ExitProcess(42)` 探针，拿到的仍是崩溃退出码）——
+   这一格是量出来的，不是偏好。
+2. **桥**：`__lom_pe_shim` 是机器码，把回调的 `rcx`（`PEXCEPTION_POINTERS`）落到全局，
+   再 `call __lom_pe_body`。**必须保存 `rdi` / `rsi`**：Win64 上它们是非易失的，而栈机
+   把它们当实参寄存器用 —— 不保存，控制交回 ntdll 之后异常会**原地重来**（实测：报告
+   刷屏直到栈耗尽）。这一条与 ELF 的 shim 恰好相反：那边 handler 不返回。
+3. **报告**：`__lom_pe_body` 是一段与程序无关的 IR（与 stage 1 同一个思路），读
+   `ExceptionRecord`（码 / `ExceptionAddress` / `ExceptionInformation[1]`）与
+   `ContextRecord`（RSP `+0x98`、RIP `+0xF8`），用与 ELF 同一套 `__wrhex` / `__wrnum`
+   与站点表打出 lomenterr 形状。站点查找直接复用 `_ir_site_lookup` —— 两边的站点行
+   是**同一段文本**。
+4. **结局**：返回 `EXCEPTION_CONTINUE_SEARCH`（0）。打印完 nobody 接，进程按 Windows
+   的方式终止 —— **退出码就是异常码本身**（`0xC0000005` / `0xC000001D`），与不装处理器
+   同一个结局。ELF 那边是"重发信号、仍然死于信号"；两边语义不同，本文件不主张同形。
+
+**本机实测**（空指针写夹具，`--target pe --fault-report`）：
+
+```text
+loment: 原生档故障（PE 异常）
+error[FAULT]: 原生档在执行时收到异常（PE；docs/367 stage 4）
+  --> 原生产物:0x0000000140005154
+   | 异常：0x00000000c0000005；地址：0x0000000000000000
+   | PC：0x0000000140005154；RSP：0x00000000013fff18
+   | 站点：_start / entry / 第 1 条（距该指令 0x0000000000000013）
+   |
+   = 事实：…
+   = 建议：…
+```
+
+**与 ELF 的差别（都写在这里，不留白）**：
+
+* **先于 SEH**。VEH 在程序自己的 SEH 之前跑：一份**自己接了**这个异常的程序也会先
+  看到一行报告，然后照常处理（返回值是 `CONTINUE_SEARCH`，不改变结局）。这一档的产物
+  今天不用 SEH，所以实际不会出现；写在这里免得以后把它当成"报告器错了"。
+* **没有备栈**。PE 的 SEH 在同一个栈上回调，栈溢出时报告器自己也会崩 —— 所以
+  "像是栈溢出"那条判据在 PE 上是**最佳努力**，不是保证（建议那一行已写明）。
+* **没有恢复分支**。`--fault-heal` 在 PE 上点名拒：要改 `ContextRecord` 再返回
+  `EXCEPTION_CONTINUE_EXECUTION`，那是另一段运行期。
+* **单位置**：参考发射器这一半；自举镜像（`loment/tools/lomelf.lomt`）尚未跟进 ——
+  与 stage 2 的 ELF 不同，PE 这一侧没有"逐字节孪生"判据，直到镜像也发这一段。
+* **体积**：同一份 `user_hello`，默认 23,040 B → 打开后 33,792 B（+10,752 B，约 1.47 倍；
+  比 ELF 的 3.27 倍小 —— 没有备栈、没有信号分派链）。默认关，产物逐字节不变。
+
+**判据**（`loment_pe_test`）：默认关时逐字节不变；打开后产物里有 VEH 与报告文案；
+Windows 上坏访存 / `ud2` 两格有报告且退出码等于异常码；`--fault-heal` 与 `--link`
+在 PE 上是点名拒绝。
+
+
+### 4.5 接下来要模拟的三台"下一代硬件"（设计，未实装）
 
 站点表 + handler 已经把"故障现场"变成**可查询的结构**；下面三件事只差在这张表上再加
 一点状态。按代价从低到高：
@@ -334,7 +392,8 @@ loment: 故障已修复（未映射页置零）：0x0000000000010000；剩余 1 
 2. **不主张原生能给 LVM 那种对象细节**。没有对象表就没有"右越界 28 字节"；
    原生能给的是信号、地址、PC、站点、读写方向，以及栈溢出的判据。
 3. **不主张源行**。默认产物没有行表；`--debug` + `--map` 是 stage 0 的一条可选路。
-4. **不主张 Windows 与 Linux 同形**（stage 4）。
+4. **不主张 Windows 与 Linux 同形**（stage 4）：PE 上进程按 Windows 的方式终止
+   （退出码是异常码），也没有备栈（§4.4）。
 5. **不主张体积免费**。站点表与备栈的代价要量（stage 3 的判据）。
 
 ---

@@ -46,8 +46,8 @@ _WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
 
 
 #: 语料**复用 `loment_elf_test.CORPUS`，不另抄一份** —— 抄了必然漂。
-#: 其中 `tools/lvm.py` 自己跑不了的那几份（`lvm.LVM_KNOWN_GAPS`：要 257/63/39 号
-#: 系统调用）在这里**自动出局** —— 参考都跑不了，就没有"两边一致"可谈。
+#: `lvm_test.VM_KNOWN_GAPS` 从 2026-11-22 起是空的（表外的号回 `-ENOSYS`，`docs/311`
+#: §4.2），所以这一格比的是**整份语料**，没有"参考跑不了、于是自动出局"的条目。
 CORPUS = ELF.CORPUS
 
 #: **棘轮**：参考跑得了、而镜像跑不了或对不上的那些。**只许变短** ——

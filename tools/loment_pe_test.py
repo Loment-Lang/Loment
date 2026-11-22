@@ -61,6 +61,10 @@ PORTABLE = [
 TOOLS = [
     ("lomstatus", "loment/tools/lomstatus.lomt", ["--check"], "loment_status"),
     ("lomrel", "loment/tools/lomrel.lomt", ["--check"], "loment_release"),
+    # `docs/311` §5 L4：**解释器自己**。它的参照物不是"另一个工具"，而是
+    # `tools/lvm.py` 对同一份 IR 的答案 —— 所以它不走下面那条"工具目录遍历"的用例，
+    # 走 `test_pe_lvm_interprets_ir_like_the_reference`（argv 是 IR 路径，不是 --check）。
+    ("lvm", "loment/tools/lvm.lomt", [], "lvm"),
 ]
 # 程序自己的规格输出（与 clang 路对过；这里是给"不碰 clang/WSL"那条用例用的定值）
 GOLDEN = {
@@ -507,6 +511,8 @@ def test_pe_runs_the_loment_toolchain_natively():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         for name, rel, argv, pymod in TOOLS:
+            if not argv:
+                continue        # `lvm`：解释器，走它自己的那条判据
             ll = _ir(ROOT / rel, td)
             exe = td / f"{name}.exe"
             blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
@@ -2284,6 +2290,166 @@ def _check_openat(d: Path) -> None:
     assert (d / "probe.txt").read_bytes() == b"abcd"
     assert (d / "append.txt").read_bytes() == b"0123456789abcd"
     assert (d / "keep.txt").read_bytes() == b"KEEP"
+
+
+# ---------------------------------------------------------------- docs/311 P4：LVM 编成 PE
+#: 解释器自己当产物时的语料。**不是 `PORTABLE` 的原样复用**：解释器要吃的输入是 IR，
+#: 这几份各自钉一件台面上不同的东西 —— 命令行合成（`cmd_hello`）、`uname` 合成
+#: （`bootprobe`）、以及表外的号（`selfcheck` 的 317，`docs/311` §4.2 之后两边都拿 -38）。
+LVM_CORPUS = [
+    "loment/examples/user_hello.lomt",
+    "loment/examples/cmd_hello.lomt",
+    "loment/examples/bootprobe.lomt",
+    "loment/examples/selfcheck.lomt",
+]
+
+
+@test
+def test_pe_lvm_interprets_ir_like_the_reference():
+    """`docs/311` §5 L4：**PE 版的解释器**解释语料，与 `tools/lvm.py` 的 stdout+rc 相同。
+
+    这是本线的验收格，也是 §1 那条症状的封口：同一份 `lvm.lomt`，宿主换成 PE 之后
+    guest 的可观察行为不变。证伪很直接 —— 只要 `vm_syscall` 转发了 PE 没有的号，
+    或者读输入那一步走的是 `open`(2) 而不是 `openat`(257)，这里的 stdout/rc 就会分叉。
+
+    只在 Windows 上真跑（PE 产物需要 Windows）；编译与结构检查在别的用例里。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows（PE 产物本机跑不了）")
+        return
+    import lvm  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        exe = td / "lvm.exe"
+        blob, _info = lomelf.compile_pe(
+            _ir(ROOT / "loment/tools/lvm.lomt", td).read_text(encoding="utf-8"))
+        exe.write_bytes(blob)
+        ok = 0
+        for rel in LVM_CORPUS:
+            src = ROOT / rel
+            ll = _ir(src, td)
+            ir = ll.read_text(encoding="utf-8")
+            buf = io.BytesIO()
+            rc_ref = lvm.run_ir(ir, buf, None, [str(ll)])
+            r = subprocess.run([str(exe), str(ll)], capture_output=True,
+                               timeout=300, shell=False)
+            assert (rc_ref, buf.getvalue()) == (r.returncode, r.stdout), (
+                f"[{src.stem}] PE 版解释器与参考不一致："
+                f"参考 rc={rc_ref} {buf.getvalue()[:80]!r} / "
+                f"PE rc={r.returncode} {r.stdout[:80]!r} {r.stderr[-120:]!r}")
+            ok += 1
+    print(f"      {ok} 份语料：PE 版 LVM 的 stdout + 退出码与 tools/lvm.py 相同")
+
+
+# ---------------------------------------------------------------- docs/367 stage 4：PE 故障报告
+_CRASH_STORE = """define i32 @_start() {
+entry:
+  %p = inttoptr i64 0 to ptr
+  store i32 7, ptr %p
+  ret i32 0
+}
+"""
+_CRASH_UD2 = """define i32 @_start() {
+entry:
+  unreachable
+  ret i32 0
+}
+"""
+
+
+@test
+def test_pe_fault_report_is_default_off():
+    """`--fault-report` 默认关：不开时 PE 产物**逐字节不变**（`docs/367` §3）。
+
+    开了以后才有向量化异常处理器。这条判据也钉住"报告器确实被编进去了"：
+    消息文本与导入名都在产物里 —— 否则 Windows 那条跑红时会看不出是没编进去。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ir = _ir(ROOT / PORTABLE[0], td).read_text(encoding="utf-8")
+        plain, _ = lomelf.compile_pe(ir)
+        explicit, _ = lomelf.compile_pe(ir, fault_report=False)
+        assert plain == explicit, "默认关时开/不开参数给了不同的产物"
+        with_fault, _ = lomelf.compile_pe(ir, fault_report=True)
+        assert with_fault != plain, "开了 --fault-report 产物却一个字节都没变"
+        assert b"AddVectoredExceptionHandler" in with_fault, \
+            "PE 故障报告器没有装向量化异常处理器"
+        assert "loment: 原生档故障".encode("utf-8") in with_fault, \
+            "报告文案没有进产物"
+        assert "站点：".encode("utf-8") in with_fault, "站点那一行的文案没进产物"
+    print("      --fault-report 默认关（产物逐字节同）；打开后带 VEH + 报告文案")
+
+
+@test
+def test_pe_fault_report_prints_site_on_windows():
+    """PE 上真跑一记坏访存与一记 `ud2`：报告里有异常码/地址/PC/RSP/站点。
+
+    与 ELF 的 stage 1 同形（`docs/367` §4.1），但**机制不同、结局也不同**：
+    PE 上不是信号，进程按 Windows 的方式终止（退出码就是异常码本身，这里是
+    0xC0000005 / 0xC000001D）。这条不主张两边同形（§5.4）。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows（PE 产物本机跑不了）")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        cases = ((_CRASH_STORE, 0xC0000005, "store"), (_CRASH_UD2, 0xC000001D, "ud2"))
+        for src_text, code, tag in cases:
+            ll = td / f"{tag}.ll"
+            ll.write_text(src_text, encoding="utf-8", newline="\n")
+            exe = td / f"{tag}.exe"
+            exe.write_bytes(lomelf.compile_pe(src_text, fault_report=True)[0])
+            r = subprocess.run([str(exe)], capture_output=True, timeout=30, shell=False)
+            err = r.stderr.decode("utf-8", "replace")
+            assert (r.returncode & 0xFFFFFFFF) == code, (
+                f"[{tag}] 退出码应当是 {code:#x}（Windows 异常码），"
+                f"得到 {r.returncode:#x}: {err[-200:]!r}")
+            for needle in ("loment: 原生档故障", "error[FAULT]",
+                           f"异常：0x{code:016x}", "PC：0x", "RSP：0x", "站点："):
+                assert needle in err, f"[{tag}] 报告里没有 {needle!r}: {err!r}"
+            if tag == "store":
+                # 坏访存点在 `_start / entry` 的 store 上；地址是 0。
+                assert "地址：0x0000000000000000" in err, err
+                assert "_start / entry" in err, err
+            else:
+                assert "_start" in err, err
+    print("      坏访存 / ud2：PE 报告有异常码、地址、PC、RSP、站点；退出码是异常码")
+
+
+@test
+def test_pe_link_refusal_is_named():
+    """`--link --target pe` 是**点名拒绝**（`docs/311` §4.4），不是静默忽略。
+
+    PE 一侧没有 COFF 对象的链接面；这条拒绝在文档里有点名，判据只钉"它还在拒绝、
+    而且说的是哪份文档"—— 哪天实现了归档/对象，这条会红，逼着去改文档而不是悄悄放开。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ir(ROOT / PORTABLE[0], td)
+        obj = td / "x.o"
+        obj.write_bytes(b"\x7fELF")          # 只要能让参数解析过去；链接面在更早一步拒
+        r = subprocess.run([sys.executable, str(LOMELF), str(ll),
+                            "--target", "pe", "--link", str(obj)],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 2, f"--link --target pe 应当 rc=2，得到 {r.returncode}"
+        assert "--link" in r.stderr and "docs/311" in r.stderr, r.stderr[-300:]
+    print("      --link --target pe：rc=2，点名 docs/311 §4.4")
+
+
+@test
+def test_pe_fault_heal_is_refused_for_pe():
+    """`--fault-heal` 在 PE 上是**点名拒绝**：恢复要改 ContextRecord 并返回
+    EXCEPTION_CONTINUE_EXECUTION，这一段还没做（`docs/367` stage 4）。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ir(ROOT / PORTABLE[0], td)
+        r = subprocess.run([sys.executable, str(LOMELF), str(ll),
+                            "--target", "pe", "--fault-heal", "2"],
+                           capture_output=True, text=True, shell=False)
+        assert r.returncode == 2, f"应当 rc=2，得到 {r.returncode}"
+        assert "docs/367" in r.stderr and "fault-heal" in r.stderr, r.stderr[-300:]
+    print("      --fault-heal --target pe：rc=2，点名 docs/367 stage 4")
 
 
 def main() -> int:

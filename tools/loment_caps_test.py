@@ -133,8 +133,10 @@ def test(fn):
 #: 同日 main 的两条线又加了：原生更新器 `update.lomt` 三处（`SCR_CAP` / `NAME_CAP`
 #: 两处沉默、`PAYLOAD_CAP` 有话）与 LSPE SDK 的一处字面量。合并后条数 **290**、
 #: 沉默 **183**（以本机 `loment_caps.scan()` 实测为准）。
-CAPACITY_SITES = 292
-SILENT_SITES = 183
+#: 2026-11-22 原生公证人（`loment/tools/lomlnotary.lomt`）：整块工作区上限 `M_CAP`
+#: 是一个新容量 —— 293 / 184（沉默那一条的来路写进 `loment_caps.EXPLAINED`）。
+CAPACITY_SITES = 293
+SILENT_SITES = 184
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。

@@ -153,7 +153,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 这条是唯一一条**不靠"两个实现一致"**的判据。
                  "loment_oracle_test",
                  # 渠道（`docs/231` §5 判据 D/F）：发行版种子可重算、且与 dev 只差一个字节；
-                 # 发行版驱动器拒 `choose vm`、dev 收（后者要 clang + WSL，没有就 SKIP）。
+                 # 发行版驱动器与 dev 都收 `choose lvm`（判据留着、期望在 2026-10-17 反转）；要 clang + WSL，没有就 SKIP。
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
                  "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
@@ -226,9 +226,25 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "lvm_t3_test",
                  # LVM 的失败面（`docs/262`）：三档都不挂死、五种拒绝都点名、上限写在纸上。
                  "lvm_stability_test",
+                 # LVM-A 的基质（`docs/362` / `docs/364`）：`sw_cap` 对象代（精确）与
+                 # `sw_tag` 4 位标签（概率）。合法程序三档同答；越界/悬垂/堆越界带站点；
+                 # 复用碰撞里 sw_cap 全抓、sw_tag 至少漏一次（声明降级的判据）。
+                 "lvm_cap_test",
+                 # LVM-A 的底层设施（`docs/371` / `docs/364`）：显式栈引擎 + checkpoint/resume。
+                 # 两个引擎同答；任意指令边界存/取；调用栈进快照；链式；`sw_tag` 状态也进快照。
+                 "lvm_cp_test",
+                 # **没有地址**的那一档（`docs/373`）：令牌/体/三维排他、K=0/1/7 同答、
+                 # F01–F06 的码与站点、身份预算、原生拒绝、与基质不叠加。
+                 "lvm_dismemory_test",
+                 # 盘古的三件（`docs/371`）：封印 / 零 import 验证器 / 同产物创世衰减。
+                 # 篡改三种都红；hw_cap 降级与伪造；B5 同字节码；`sw_tag` 的 no_dangling 必须 floored。
+                 "lvm_seal_test",
                  # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
                  # ⚠ 挂在独占那一片之外：它跑 T0 的重的那份（~7s），但**不写仓库共享位置**。
                  "lvm_perf_test",
+                 # 原生档段错误报告器（`docs/367` stage 0）：ptrace 接住信号，按 Lomenterr
+                 # 形状报出信号/地址/PC；正常程序不误报，`ud2` 是 ILL。要 Linux/WSL。
+                 "loment_segv_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
@@ -519,17 +535,28 @@ SHARD_COST = {
     "lvm_perf_test": 25.0,
     "lvm_profile_test": 22.9,
     "lvm_stability_test": 10.0,
+    # 2026-11-20（`docs/362`）：本机 Windows 实测 19.0s（7 条判据；判 E 要编 10 份语料两次）。
+    "lvm_cap_test": 33.5,      # 2026-11-21：本机 33.0s（`sw_tag` 扫复用长度 + 详细化三条）
+    # 2026-11-21（`docs/364`）：`sw_tag` 快照一条。
+
+    # 2026-11-20（`docs/371`）：显式栈引擎要编语料两次 + 32 个采样点各存/取一次。
+    "lvm_cp_test": 21.0,
+    # 封印/验证器/派生都是纯标准库；大头是判 F 的子进程与判 A/B 的编译。
+    "lvm_seal_test": 1.0,
+    # 2026-11-21（`docs/367`）：本机 WSL 实测 3.8s（真前端 + lomelf 编三份 ELF，各跑一次）。
+    "loment_segv_test": 6.5,   # 2026-11-21：本机 WSL 实测 6.0s（stage 0 + 产物自述四条）
     "lvm_fusion_test": 32.0,
     "lvm_t2_test": 138.6,
     "lvm_a0_test": 12.0,
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
-    "lvm_twin_test": 29.2,
+    "lvm_twin_test": 120.0,    # 2026-11-21：本机 Windows 实测 91.1s；sw_tag 判据 M 再加 19 次镜像运行
+    "lvm_dismemory_test": 5.0, # 2026-11-21：本机（纯进程内 + 五份手写 IR；K/L 再加几次重排与重跑）
     "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,
     "vscode_ext_test": 1.2,
-}  # 99 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
+}  # 101 条 = `len(STATIC_CHECKS)`；`unpriced_checks()` 钉住这条等式。
 
 #: 不参与均分、也**不需要** `SHARD_COST` 条目的判据。**今天是空的** —— 89 条全有实测值。
 #: 留着这个集合是为了让"新判据还没量过"有一个**明确**的落脚处：放进来的代价是它按

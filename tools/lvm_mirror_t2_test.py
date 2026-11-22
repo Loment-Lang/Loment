@@ -239,6 +239,24 @@ def test_twin_reference_and_mirror_t2_agree() -> None:
     print("      参考 T0 与镜像 T2：stdout / 退出码 / 剖面逐字节相同")
 
 
+
+def test_ctx_cells_stay_below_the_compiled_tables() -> None:
+    """CTX 格子**必须 < 256**：T2 的编译表 `CC_OFF` 从 `CTX_OFF + 256` 起。
+
+    dismemory 的 `C_DIS = 256` 曾经正好压在这张表的第一个字节上：T2 一编译就把
+    "dismemory 开着"写成了真，`t2` 档全线拒绝（2026-11-21 的 CI 红）。这条静态判据
+    不跑解释器，只读源码里的常量表，任何新格子越界都会当场点名。
+    """
+    import re  # noqa: PLC0415
+    text = (ROOT / "loment" / "tools" / "lvm.lomt").read_text(encoding="utf-8")
+    cells = [(n, int(v)) for n, v in
+             re.findall(r"const (C_[A-Z0-9_]+): u32 = (\d+);", text)]
+    assert cells, "没有找到任何 C_* 格子 —— 扫描口径失效了"
+    bad = [(n, v) for n, v in cells if v >= 256]
+    assert not bad, (
+        f"这些 CTX 格子越过 255，会写进 T2 编译表（CC_OFF = CTX_OFF + 256）：{bad}")
+    print(f"      {len(cells)} 个 CTX 格子全部 < 256（T2 编译表从 +256 起）")
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 

@@ -1,6 +1,6 @@
-# 372 · 只信产物：把 PANGU Ω 压成一个封印
+# 358 · 只信产物：把 PANGU Ω 压成一个封印
 
-> 状态: **激进提案**（2026-11-20），未实装
+> 状态: **激进提案**（2026-11-20）；Seal / verify / derive 的第一实现落在 `docs/363`
 > 上游: `docs/357`（PANGU Ω 对账的三件增量）· `docs/253`（LMS 七级）· `docs/320`（权能时序）·
 > `docs/356`（Dissigsegv / `fault_ladder`）· `docs/344`（LSPE 框架）· `docs/349`（语义 oracle）·
 > `docs/270` §4（信任地板）· `docs/245`（`thread_spawn`）

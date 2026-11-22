@@ -1,4 +1,4 @@
-# 375 · LMS 的盘古档：站点账本、fault ABI 与时间桥梁
+# 363 · LMS 的盘古档：站点账本、fault ABI 与时间桥梁
 
 > 状态: **V1 已落地（两套实现 + 种子）**（2026-11-20）
 > 上游: `docs/357`（三件增量）· `docs/358`（只信产物）· `docs/359`（本世代的墙）·
@@ -165,7 +165,7 @@ LNotary 的 `sites.verify_sites` 只核自洽、绑定与规则引用，不重�
 * 站点表自己的封印被改 ⇒ `LNT-SEAL`。
 
 登记：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt`
-（`lnotary_test 37`、`lms_bridge_test 5`）。
+（`lnotary_test 34`、`lms_bridge_test 5`）。
 
 ---
 

@@ -50,8 +50,8 @@ SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
 #:
 #: **这条流水线造出来的东西就是发行版**，所以它用的每一个二进制都由**发行版种子**建 ——
 #: 种子现算：`loment_seed.reference_ir("release")`，而那个注入**只改
-#: `loment/selfhost/checker.lomt` 里那一行渠道常量**。于是"发行版里 `choose vm` 是编译
-#: 错误"是**这条流水线的属性**，不是"谁记得去翻某个开关"。
+#: `loment/selfhost/checker.lomt` 里那一行渠道常量**。于是"发行版里 `.lls` 源被拒"是
+#: **这条流水线的属性**，不是"谁记得去翻某个开关"（`choose lvm` 从 2026-10-17 起两边都收）。
 #:
 #: 代价（明写）：包里的 `selfhost_driver.ll` **不等于**仓库里那份。判据因此从"逐字节相等"
 #: 换成"**可重算的定点相等**"：`release_seed_text()` 任何时候重算都得得出同一串字节
@@ -109,7 +109,7 @@ TOOLS: list[tuple] = [
     # Loment 写的、由同一条自举链编出来的。源码的**正本在开发者的工作区** (`lompi/` 这份
     # 是随包发布的快照), 两边靠 tools/lompi_sync.py 校验, 见 docs/170。
     ("lompi", "lompi/lompi.lomt", "."),
-    # **VM（`choose vm` 的执行体）** —— `#355`，`docs/263`。2026-10-18 起随包发：
+    # **LVM（`choose lvm` 的执行体；v24 前叫 `vm`）** —— `#355`，`docs/263`。2026-10-18 起随包发：
     # 引擎 T0–T3 与去优化都落了（`docs/259`/`docs/261`），失败面有判据（`docs/262`）。
     # ⚠ 它是**镜像**（Loment 写的那份），走同一条自举链；`docs/231` §2 的渠道闸也同日放开，
     # 所以"发行版可以调 VM"这句话现在有东西可调，不是一句声明。
@@ -3823,7 +3823,7 @@ def _use_release_seed() -> None:
     """把 `ACTIVE_SEED` 换成**发行版种子**（现算，落盘到 `STAGE`）。
 
     **这是"包 = 发行版"的落点**（`docs/231` §2.3）：只要走这条流水线，包里每一个工具都是
-    发行版渠道建的 —— `loment-driver` 在其中，于是它会对 `choose vm` 报编译错误。
+    发行版渠道建的 —— `loment-driver` 在其中，于是它拒 `.lls` 源（`choose lvm` 两边都收）。
 
     种子每次现算（不读盘上那份缓存）：缓存只省本机重复构建的时间，**判据不在缓存上** ——
     `tools/loment_channel_test.py` 每次都重算一遍再对。

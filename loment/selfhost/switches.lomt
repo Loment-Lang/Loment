@@ -154,7 +154,7 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     if sw_tok_is(unit, toks, k, "hosted") {
         return true;
     }
-    // 第五维（`docs/231`）：`vm` / `no_vm` —— **要哪种执行模型**。取值只说"有没有"。
+    // 第五维（`docs/231`；v24 起由 `vm` 改名）：`lvm` / `no_lvm` —— **要哪种执行模型**。取值只说"有没有"。
     //
     // ⚠ **这一处是加第五维时唯一漏掉的登记处**，症状值得记：漏了它，`choose vm` 会被
     // 当成**开关**去查开关表，查不到 ⇒ 报 **E022「未定义的开关」** —— **码是对的、理由是错的**。
@@ -162,10 +162,13 @@ pub fn sw_is_core(unit: ptr, toks: ptr, k: u32) -> bool {
     // 抓出它的是 `loment_channel_test` 那条**正向**用例（"dev 驱动器必须**收** `choose vm`"）
     // —— 这正是"孪生判据只证明一致、不证明对"那条教训的又一实例。
     // ⇒ **加一维时，这张表（`sw_is_core`）与 `checker.lomt` 的 `chk_core_dim` 都要动。**
-    if sw_tok_is(unit, toks, k, "vm") {
+    if sw_tok_is(unit, toks, k, "lvm") {
         return true;
     }
-    if sw_tok_is(unit, toks, k, "no_vm") {
+    if sw_tok_is(unit, toks, k, "no_lvm") {
+        return true;
+    }
+    if sw_tok_is(unit, toks, k, "lvm_dismemory_true") {
         return true;
     }
     // 第六维（`docs/253` §11.3，2026-10-18 改判）：四个**档名**，不是开/关。

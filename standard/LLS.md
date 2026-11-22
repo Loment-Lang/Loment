@@ -2255,7 +2255,7 @@ Loment has **nine** dimensions. Each selects a property of the whole program.
 | `gc` | `gc_manual`, `gc_auto`, `gc_auto_alpha`, `no_gc` | `gc_manual` | who reclaims memory |
 | `runtime` | `runtime`, `no_runtime` | `no_runtime` | whether the artifact may carry the runtime block |
 | `port` | `sealed`, `hosted` | `sealed` | whether the artifact may link host libraries |
-| `vm` | `vm`, `no_vm` | `no_vm` | the execution model |
+| `lvm` | `lvm`, `no_lvm` | `no_lvm` | the execution model (was `vm` before 2026.11) |
 | `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | which memory-safety levels are on |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | whether the audit ledger is recorded |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | compile-time borrow regions |
@@ -2280,7 +2280,7 @@ rule.
 ### 25.3 Value names say *whether*, not *which*
 
 A value states presence or absence, never a level or version of its contents. `runtime` is
-`runtime` or `no_runtime`; `vm` is `vm` or `no_vm`. The contents grow over years; a name
+`runtime` or `no_runtime`; `lvm` is `lvm` or `no_lvm`. The contents grow over years; a name
 that encoded today's contents would need renaming to admit tomorrow's, and renaming a
 value is a change to the frozen surface.
 
@@ -2521,10 +2521,11 @@ is**, answerable without reading the source. It is not a debug dump and not a pr
 
 Versions are cumulative and forward-only: `v0` … `v22`. Each new required field bumps the
 version; older objects remain valid; a new version never rewrites an older one. The
-current version is **v22**, which adds the `lifetime` dimension.
+current version is **v24**, which renames the execution-model dimension `vm` to `lvm`.
 
 The ladder includes, in order: grammar, boundary, gc, runtime, gc ladder, port, surfaces,
-vm, net ladder, lms, lspe, lms levels, lms budgets, gc control, lifetime.
+lvm (named `vm` before v24), net ladder, lms, lspe, lms levels, lms budgets, gc control,
+lifetime, indirect dispatch, lvm rename.
 
 ### 29.3 Required content
 
@@ -2592,11 +2593,12 @@ instruction set is the subset the linker already parses, plus execution.
 T4 (generational/concurrent collection) is out of LVM's scope: the VM is a reader of the
 IR, not a runtime with its own collector.
 
-### 30.3 `choose vm`
+### 30.3 `choose lvm`
 
-`choose vm` records the dimension; the artifact is currently **byte-identical to
-`no_vm`** and carries no bytecode. The interpreter is a separate tool. A program MUST NOT
-assume that `choose vm` changes the artifact.
+`choose lvm` records the dimension; the artifact is currently **byte-identical to
+`no_lvm`** and carries no bytecode. The interpreter is a separate tool. A program MUST NOT
+assume that `choose lvm` changes the artifact. The spelling was `vm` / `no_vm` before
+2026.11 (Potato v24 renamed it); the old spelling is no longer a switch.
 
 ### 30.4 Entry shapes
 
@@ -3080,7 +3082,7 @@ is the standard's summary and the record is the evidence — the discrepancy is 
 | 7 | `aarch64` is emitted but not executed | "emits" is not "runs" |
 | 8 | The FFI input/output text is capped at 8 MiB on the self-hosted linker | a larger object is refused, not truncated |
 | 9 | One relocation form (`R_X86_64_PC64`) is sign-extended in the reference and zero-extended in the self-hosted linker | measured unreachable today; recorded so the equivalence claim has no unrecorded exception |
-| 10 | `choose vm` does not change the artifact | the interpreter is a separate tool |
+| 10 | `choose lvm` does not change the artifact | the interpreter is a separate tool |
 
 ### 39.3 Tooling and records
 
@@ -3310,7 +3312,7 @@ the full statement.
 | `gc` | `gc_manual`, `gc_auto`, `gc_auto_alpha`, `no_gc` | `gc_manual` | |
 | `runtime` | `runtime`, `no_runtime` | `no_runtime` | |
 | `port` | `sealed`, `hosted` | `sealed` | |
-| `vm` | `vm`, `no_vm` | `no_vm` | artifact unchanged today |
+| `lvm` | `lvm`, `no_lvm` | `no_lvm` | artifact unchanged today |
 | `lms` | `lms_full`, `lms_forensic_admin`, `lms_daily_admin`, `lms_manage_only_admin`, `lms_close_admin` | `lms_full` | |
 | `lspe` | `lspe_open_admin`, `lspe_close_admin` | `lspe_open_admin` | |
 | `lifetime` | `lifetime_no`, `lifetime_auto`, `lifetime_manual` | `lifetime_auto` from 2026.3; `lifetime_no` before | edition-gated |
@@ -3355,7 +3357,7 @@ The shape spellings are `[a..b]`, `[a..a]`, `[()..b]`, `[a..()]`, `[()..()]`.
 | v10 | gc ladder (four rungs) |
 | v11 | port |
 | v12 | surfaces |
-| v13 | vm |
+| v13 | vm (renamed to `lvm` in v24) |
 | v14 | net ladder |
 | v15 | lms |
 | v16 | lspe |
@@ -3365,8 +3367,10 @@ The shape spellings are `[a..b]`, `[a..a]`, `[()..b]`, `[a..()]`, `[()..()]`.
 | v20 | systems fields (the v20 record) |
 | v21 | gc control (`lgc`) |
 | v22 | lifetime dimension |
+| v23 | indirect dispatch (`fp`) |
+| v24 | `vm` renamed to `lvm` |
 
-A version adds required fields; an older object remains valid. The current version is v22.
+A version adds required fields; an older object remains valid. The current version is v24.
 
 ## Appendix G — Conformance checklist
 

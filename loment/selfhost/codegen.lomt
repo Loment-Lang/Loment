@@ -4972,9 +4972,12 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_str(s, out, " = extractvalue { ptr, i64 } ");
             emit_val(s, out, lvl);
             emit_str(s, out, ", 1\n  ");
-            let rr: u32 = new_temp(s, out);
+            let rr: u32 = 0;
             if contains_ident(src, toks, "lvm_dismemory_true") == 1 {
                 // `docs/374` §3：dismemory 下令牌不能 ptrtoint —— 直接把 `ptr` 交给 asm。
+                // **临时值顺序要与参考逐字节同**：这一支没有 ptrtoint 那条，所以 `rr`
+                // 是紧随 `el` 的下一个临时值；普通支先 `ip` 后 `rr`（见下）。
+                rr = new_temp(s, out);
                 emit_str(s, out, " = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, ptr %t");
                 emit_dec(s, out, ep);
                 emit_str(s, out, ", i64 %t");
@@ -4985,7 +4988,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                 emit_str(s, out, " = ptrtoint ptr %t");
                 emit_dec(s, out, ep);
                 emit_str(s, out, " to i64\n  ");
-                let rr2: u32 = new_temp(s, out);
+                rr = new_temp(s, out);
                 emit_str(s, out, " = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, i64 %t");
                 emit_dec(s, out, ip);
                 emit_str(s, out, ", i64 %t");

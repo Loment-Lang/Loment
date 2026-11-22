@@ -66,7 +66,8 @@ def build_program(sources: list[str], seed: str = "seed-0",
                   recipe: str = "toy-compiler/1",
                   allowed: list[str] | None = None,
                   l0_root: str | None = None,
-                  provenance: str = "loment/build/genesis/provenance.json") -> tuple[bytes, dict, dict]:
+                  provenance: str = "loment/build/genesis/provenance.json",
+                  l0_safe: dict | None = None) -> tuple[bytes, dict, dict]:
     if allowed is None:
         allowed = ["print"]
     nodes: list[dict] = []
@@ -115,7 +116,21 @@ def build_program(sources: list[str], seed: str = "seed-0",
     }
     add("link", "LINK", unit_ids, linked)
     peaks = [K.static_check(u) for u in units]
-    add("safe", "SAFE", ["link"], {"kind": "Safe", "ok": True, "max_depth": peaks})
+    safe_j = {"kind": "Safe", "ok": True, "max_depth": peaks}
+    if l0_safe is not None:
+        rec = dict(l0_safe)
+        base = Path(str(rec.get("root", "."))).resolve()
+        if not rec.get("potato") or not rec.get("lawspace"):
+            raise SystemExit("l0_safe needs potato and lawspace")
+        try:
+            for key in ("potato", "sites", "lawspace"):
+                rel = rec.get(key)
+                if rel:
+                    rec[f"{key}_sha256"] = K._sha((base / rel).read_bytes())
+        except OSError as e:
+            raise SystemExit(f"bad L0 safe record: {e}") from None
+        safe_j["l0_safe"] = rec
+    add("safe", "SAFE", ["link"], safe_j)
     required = K._required_caps(units)
     add("cap", "CAP", ["safe"], {"kind": "Caps", "required": required,
                                  "allowed": sorted(allowed)})
@@ -179,9 +194,11 @@ def decode_unit(b: bytes) -> list[dict]:
 def write_program(out: Path, sources: list[str], seed: str = "seed-0",
                   recipe: str = "toy-compiler/1", allowed: list[str] | None = None,
                   l0_root: str | None = None,
-                  provenance: str = "loment/build/genesis/provenance.json") -> dict:
+                  provenance: str = "loment/build/genesis/provenance.json",
+                  l0_safe: dict | None = None) -> dict:
     art, deriv, conc = build_program(sources, seed=seed, recipe=recipe, allowed=allowed,
-                                     l0_root=l0_root, provenance=provenance)
+                                     l0_root=l0_root, provenance=provenance,
+                                     l0_safe=l0_safe)
     out.mkdir(parents=True, exist_ok=True)
     (out / "program.toy").write_bytes(art)
     (out / "program.deriv").write_text(
@@ -220,11 +237,24 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--l0-root", default=None,
                    help="把该根下的 loment/build/genesis/provenance.json 接成 PROV 前提")
     b.add_argument("--provenance", default="loment/build/genesis/provenance.json")
+    b.add_argument("--l0-safe-root", default=None,
+                   help="LNotary 的 lawspace/sites/potato 所在根")
+    b.add_argument("--l0-potato", default=None)
+    b.add_argument("--l0-sites", default=None)
+    b.add_argument("--l0-lawspace", default=None)
     a = ap.parse_args(argv)
     sources = [Path(p).read_text(encoding="utf-8") for p in a.source]
+    l0_safe = None
+    if a.l0_potato or a.l0_sites or a.l0_lawspace:
+        if not (a.l0_safe_root and a.l0_potato and a.l0_lawspace):
+            raise SystemExit("--l0-safe-root/--l0-potato/--l0-lawspace must be together")
+        l0_safe = {"root": a.l0_safe_root, "potato": a.l0_potato,
+                   "lawspace": a.l0_lawspace}
+        if a.l0_sites:
+            l0_safe["sites"] = a.l0_sites
     budget = write_program(Path(a.out), sources, seed=a.seed, recipe=a.recipe,
                            allowed=a.allow, l0_root=a.l0_root,
-                           provenance=a.provenance)
+                           provenance=a.provenance, l0_safe=l0_safe)
     print(f"[OK] {a.out}/program.toy  proof {budget['proof_bytes']} B  "
           f"rules {budget['rules']}")
     return 0

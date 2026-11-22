@@ -28,6 +28,17 @@ ARITY = {"PUSH": 1, "ADD": 0, "MUL": 0, "PRINT": 0, "HALT": 0}
 MAX_DEPTH = 64
 CAPS = {"PRINT": {"print"}}
 
+#: LNotary / Potato 的 V0 不变量（R3）。内核独立核这些，不 import LNotary。
+LMS_LEVELS = ("lms_check", "lms_manage", "lms_guard", "lms_reject",
+              "lms_crash", "lms_restart", "lms_seed")
+BUDGETS = frozenset({"none", "instructions", "state", "outside"})
+DIMS = ("mode", "gc", "runtime", "port", "vm", "lms", "lifetime", "fp", "lvm")
+LAWS = frozenset({"no_runtime", "lms_full", "lifetime_auto"})
+SITE_OPS = frozenset({"load", "store", "atomicrmw"})
+SITE_GRADES = frozenset({"proven", "checked", "unsafe"})
+SITE_RULES = frozenset({"R1", "R2", "R3", "R4"})
+SITE_FAULTS = frozenset({"F01", "F02", "F03"})
+
 #: 规则表。改一条就换哈希；推导里的 `kernel.rules_sha256` 随之失效。
 RULES = ("AX-K", "AX-S", "PARSE", "TV-L1", "TV-L2", "LINK",
          "SAFE", "CAP", "SEM", "COMPOSE", "PROV", "REPRO")
@@ -314,6 +325,9 @@ def _r_safe(node, pre, ctx):
     peaks = [static_check(u) for u in units]
     if j.get("max_depth") != peaks:
         raise Reject("SAFE: max_depth does not match the static check")
+    l0 = j.get("l0_safe")
+    if l0 is not None:
+        _check_l0_safe(l0)
     return j
 
 
@@ -493,6 +507,176 @@ def _check_l0(j) -> None:
             sha, size = _file_meta(_safe_join(root, e.get("path", "")))
             if sha != e.get("sha256") or size != e.get("size"):
                 raise Reject(f"L0: closure file mismatch: {e.get('path')!r}")
+
+
+def _read_json_rel(root: str, rel) -> tuple[bytes, dict]:
+    p = _safe_join(root, rel)
+    raw = p.read_bytes()
+    try:
+        return raw, json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as e:
+        raise Reject(f"L0Safe: {rel!r} is not readable JSON: {e}") from None
+
+
+def _check_potato(doc: dict) -> None:
+    ver = doc.get("potato")
+    if not isinstance(ver, str) or not ver.startswith("v") or not ver[1:].isdigit():
+        raise Reject("L0Safe: potato version is not vN")
+    n = int(ver[1:])
+    if n < 20:
+        raise Reject("L0Safe: lawspace requires Potato v20+")
+    if not (doc.get("lvm") == "lvm" or doc.get("vm") in ("vm", "lvm")):
+        raise Reject("L0Safe: artifact does not declare choose lvm/vm")
+    ladder = doc.get("gc_ladder")
+    if not isinstance(ladder, dict):
+        raise Reject("L0Safe: gc_ladder is missing")
+    keys = ("l0", "l0_5", "l1", "l2", "l3") if n >= 19 else ("l0", "l1", "l2", "l3")
+    try:
+        total = sum(int(ladder[k]) for k in keys)
+    except (KeyError, TypeError, ValueError):
+        raise Reject("L0Safe: gc_ladder has a non-integer cell") from None
+    if total != ladder.get("total_sites"):
+        raise Reject("L0Safe: gc_ladder sum identity is false")
+    levels = doc.get("lms_levels")
+    if not isinstance(levels, dict) or set(levels) != set(LMS_LEVELS) or \
+            any(not isinstance(levels[k], bool) for k in LMS_LEVELS):
+        raise Reject("L0Safe: lms_levels is not exactly seven booleans")
+    budgets = doc.get("lms_budgets")
+    if not isinstance(budgets, dict) or any(v not in BUDGETS for v in budgets.values()):
+        raise Reject("L0Safe: lms_budgets has an unknown value")
+    if doc.get("runtime") == "no_runtime" and any(v == "state" for v in budgets.values()):
+        raise Reject("L0Safe: no_runtime artifact carries a stateful level")
+    lspe = doc.get("lspe")
+    if not isinstance(lspe, dict) or not isinstance(lspe.get("state"), str) or \
+            not isinstance(lspe.get("sites"), int):
+        raise Reject("L0Safe: lspe ledger is malformed")
+    sw = doc.get("switches")
+    if not isinstance(sw, list) or any(
+            not isinstance(x, dict) or not isinstance(x.get("name"), str)
+            or not isinstance(x.get("on"), bool) for x in sw):
+        raise Reject("L0Safe: switches are malformed")
+
+
+def _dims_of(doc: dict) -> dict:
+    out = {k: doc[k] for k in DIMS if isinstance(doc.get(k), str)}
+    lspe = doc.get("lspe")
+    if isinstance(lspe, dict) and isinstance(lspe.get("state"), str):
+        out["lspe"] = lspe["state"]
+    return out
+
+
+def _check_lawspace(doc: dict, side: dict, potato_sha: str, potato_size: int,
+                    sites: dict | None) -> None:
+    if side.get("schema") != 1:
+        raise Reject("L0Safe: lawspace schema is not 1")
+    if side.get("potato") != doc.get("potato"):
+        raise Reject("L0Safe: lawspace potato version mismatch")
+    art = side.get("artifact") or {}
+    if art.get("sha256") != potato_sha or art.get("bytes") != potato_size:
+        raise Reject("L0Safe: lawspace is not bound to the Potato bytes")
+    dims = _dims_of(doc)
+    if side.get("dims") != dims or side.get("dims_hash") != _sha(_canon(dims)):
+        raise Reject("L0Safe: lawspace dims/dims_hash mismatch")
+    laws = side.get("laws")
+    if not isinstance(laws, list):
+        raise Reject("L0Safe: lawspace laws is not a list")
+    seen: set[str] = set()
+    for law in laws:
+        if not isinstance(law, dict) or law.get("id") not in LAWS:
+            raise Reject("L0Safe: unknown law")
+        if law["id"] in seen:
+            raise Reject("L0Safe: duplicate law")
+        seen.add(law["id"])
+        if law.get("declared") != law["id"]:
+            raise Reject("L0Safe: law declared does not match its id")
+        if law.get("checked") is not True:
+            raise Reject("L0Safe: law was not checked by the notary")
+    g = side.get("genesis")
+    if not isinstance(g, dict) or g.get("mode") != "same_artifact":
+        raise Reject("L0Safe: genesis mode is not same_artifact")
+    for k in ("max_depth", "max_children", "max_total"):
+        v = g.get(k)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            raise Reject(f"L0Safe: genesis.{k} is not a non-negative integer")
+    rec = side.get("sites")
+    if sites is not None:
+        if not isinstance(rec, dict):
+            raise Reject("L0Safe: sites were provided but the lawspace does not bind them")
+        if rec.get("sha256") != sites.get("seal") or \
+                rec.get("count") != (sites.get("counts") or {}).get("sites"):
+            raise Reject("L0Safe: lawspace does not match the site table")
+    elif rec is not None:
+        raise Reject("L0Safe: lawspace binds sites but none were provided")
+    body = {k: v for k, v in side.items() if k != "seal"}
+    if side.get("seal") != _sha(_canon(body)):
+        raise Reject("L0Safe: lawspace seal mismatch")
+
+
+def _check_sites(table: dict) -> None:
+    if table.get("schema") != 1:
+        raise Reject("L0Safe: site table schema is not 1")
+    sites = table.get("sites")
+    if not isinstance(sites, list):
+        raise Reject("L0Safe: site table has no sites list")
+    seen: set[tuple[str, str, int]] = set()
+    proven = checked = unsafe = 0
+    for s in sites:
+        if not isinstance(s, dict) or not isinstance(s.get("fn"), str) or \
+                not isinstance(s.get("blk"), str) or \
+                not isinstance(s.get("idx"), int) or isinstance(s.get("idx"), bool):
+            raise Reject("L0Safe: malformed site")
+        key = (s["fn"], s["blk"], s["idx"])
+        if key in seen:
+            raise Reject("L0Safe: duplicate site")
+        seen.add(key)
+        if s.get("op") not in SITE_OPS:
+            raise Reject("L0Safe: unknown site op")
+        if s.get("grade") not in SITE_GRADES:
+            raise Reject("L0Safe: unknown site grade")
+        if s["grade"] == "proven":
+            proven += 1
+            if s.get("rule") not in SITE_RULES:
+                raise Reject("L0Safe: proven site has no rule")
+        elif s["grade"] == "checked":
+            checked += 1
+            if s.get("fault") not in SITE_FAULTS:
+                raise Reject("L0Safe: checked site has no fault")
+        else:
+            unsafe += 1
+    counts = table.get("counts")
+    want = {"sites": len(sites), "proven": proven,
+            "checked": checked, "unsafe": unsafe}
+    if not isinstance(counts, dict) or any(counts.get(k) != v for k, v in want.items()):
+        raise Reject("L0Safe: site counts do not match")
+    body = {k: v for k, v in table.items() if k != "seal"}
+    if table.get("seal") != _sha(_canon(body)):
+        raise Reject("L0Safe: site table seal mismatch")
+
+
+def _check_l0_safe(j) -> None:
+    """R3: LNotary lawspace + 站点表 + Potato V0 作为 SAFE 的前提。
+
+    内核不 import LNotary：它独立重算 lawspace/站点表的封印，并核对 Potato 的
+    `gc_ladder` / `lms_levels` / `lms_budgets` / `lspe` / `switches` 不变量。
+    """
+    if not isinstance(j, dict):
+        raise Reject("L0Safe: record is not an object")
+    root = j.get("root", ".")
+    potato_raw, potato = _read_json_rel(root, j.get("potato", ""))
+    if j.get("potato_sha256") != _sha(potato_raw):
+        raise Reject("L0Safe: Potato file hash mismatch")
+    sites_raw = sites = None
+    if j.get("sites"):
+        sites_raw, sites = _read_json_rel(root, j["sites"])
+        if j.get("sites_sha256") != _sha(sites_raw):
+            raise Reject("L0Safe: site table file hash mismatch")
+    law_raw, law = _read_json_rel(root, j.get("lawspace", ""))
+    if j.get("lawspace_sha256") != _sha(law_raw):
+        raise Reject("L0Safe: lawspace file hash mismatch")
+    _check_potato(potato)
+    _check_lawspace(potato, law, _sha(potato_raw), len(potato_raw), sites)
+    if sites is not None:
+        _check_sites(sites)
 
 
 def _r_prov(node, pre, ctx):

@@ -301,6 +301,138 @@ def test_l0_file_mismatch_is_rejected():
     print("      L0 闭包文件对不上 -> 拒绝")
 
 
+_BUNDLE: dict | None = None
+
+
+def _bundle() -> dict:
+    """用真编译器 + 真 lms_sites + 真 LNotary 造一份 R3 夹具。只造一次。"""
+    global _BUNDLE
+    if _BUNDLE is not None:
+        return _BUNDLE
+    sys.path.insert(0, str(REPO / "loment"))
+    from lnotary import lawspace
+    td = Path(tempfile.mkdtemp(prefix="trust-r3-"))
+    src = td / "r3.lomt"
+    src.write_text(
+        "module r3\nchoose lvm\nchoose runtime\nchoose lifetime_auto\n\n"
+        "fn _start() {\n"
+        "    let p: ptr = alloc(4);\n"
+        "    let x: u32 = load8(p, 4);\n"
+        "    syscall4(60, 0, 0, 0);\n"
+        "}\n", encoding="utf-8")
+    potato = td / "potato.json"
+    r = subprocess.run([sys.executable, str(REPO / "tools" / "lomentc.py"), str(src),
+                        "--emit-potato", str(potato)], cwd=str(REPO),
+                       capture_output=True, text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stdout + r.stderr
+    ir = td / "r3.ll"
+    r = subprocess.run([sys.executable, str(REPO / "tools" / "lomentc.py"), str(src),
+                        "--print", "llvm"], cwd=str(REPO), capture_output=True,
+                       text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stdout + r.stderr
+    ir.write_text(r.stdout, encoding="utf-8")
+    sites = td / "sites.json"
+    r = subprocess.run([sys.executable, str(REPO / "tools" / "lms_sites.py"), str(ir),
+                        "--out", str(sites)], cwd=str(REPO), capture_output=True,
+                       text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stdout + r.stderr
+    doc = json.loads(potato.read_text(encoding="utf-8"))
+    site_doc = json.loads(sites.read_text(encoding="utf-8"))
+    side = lawspace.derive_lawspace(doc, potato.read_bytes(), sites=site_doc)
+    law = td / "lawspace.json"
+    law.write_text(json.dumps(side, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                   encoding="utf-8", newline="\n")
+    _BUNDLE = {"root": str(td), "potato": "potato.json",
+               "sites": "sites.json", "lawspace": "lawspace.json"}
+    return _BUNDLE
+
+
+def _reseal(obj: dict) -> dict:
+    body = {k: v for k, v in obj.items() if k != "seal"}
+    obj["seal"] = K._sha(K._canon(body))
+    return obj
+
+
+@test
+def test_real_lnotary_bundle_is_accepted():
+    """R3: 真 Potato + 真站点表 + LNotary lawspace 作为 SAFE 前提。"""
+    b = _bundle()
+    art, d, c = _build(l0_safe=b)
+    ok, why = K.verify(art, d, c)
+    assert ok, why
+    safe = [n["judgment"] for n in d["nodes"] if n["rule"] == "SAFE"][0]
+    assert safe["l0_safe"]["potato_sha256"] == K._sha(
+        (Path(b["root"]) / b["potato"]).read_bytes())
+    print(f"      LNotary bundle 被接受 (potato {safe['l0_safe']['potato_sha256'][:16]}…)")
+
+
+@test
+def test_tampered_lawspace_claim_is_rejected():
+    b = _bundle()
+    root = Path(b["root"])
+    side = json.loads((root / b["lawspace"]).read_text(encoding="utf-8"))
+    assert side["laws"], "R3 夹具没有可篡改的 law"
+    side["laws"][0]["checked"] = False
+    _reseal(side)
+    bad = root / "lawspace_bad.json"
+    bad.write_text(json.dumps(side, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                   encoding="utf-8", newline="\n")
+    l0 = dict(b)
+    l0["lawspace"] = "lawspace_bad.json"
+    art, d, c = _build(l0_safe=l0)
+    assert not K.verify(art, d, c)[0], "lawspace 的 checked=false 仍然被接受"
+    print("      改 lawspace 的 checked -> 拒绝")
+
+
+@test
+def test_tampered_site_table_is_rejected():
+    b = _bundle()
+    root = Path(b["root"])
+    sites = json.loads((root / b["sites"]).read_text(encoding="utf-8"))
+    sites["sites"][0]["grade"] = "bogus"
+    _reseal(sites)
+    bad_sites = root / "sites_bad.json"
+    bad_sites.write_text(json.dumps(sites, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                         encoding="utf-8", newline="\n")
+    side = json.loads((root / b["lawspace"]).read_text(encoding="utf-8"))
+    side["sites"] = {"sha256": sites["seal"],
+                     "count": (sites.get("counts") or {}).get("sites")}
+    _reseal(side)
+    bad_law = root / "lawspace_sites_bad.json"
+    bad_law.write_text(json.dumps(side, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8", newline="\n")
+    l0 = dict(b)
+    l0["sites"] = "sites_bad.json"
+    l0["lawspace"] = "lawspace_sites_bad.json"
+    art, d, c = _build(l0_safe=l0)
+    assert not K.verify(art, d, c)[0], "站点等级被改成 bogus 仍然被接受"
+    print("      改站点等级 -> 拒绝")
+
+
+@test
+def test_tampered_potato_invariant_is_rejected():
+    b = _bundle()
+    root = Path(b["root"])
+    sys.path.insert(0, str(REPO / "loment"))
+    from lnotary import lawspace
+    doc = json.loads((root / b["potato"]).read_text(encoding="utf-8"))
+    doc["gc_ladder"]["total_sites"] = int(doc["gc_ladder"]["total_sites"]) + 1
+    bad_potato = root / "potato_bad.json"
+    bad_potato.write_text(json.dumps(doc, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                          encoding="utf-8", newline="\n")
+    site_doc = json.loads((root / b["sites"]).read_text(encoding="utf-8"))
+    side = lawspace.derive_lawspace(doc, bad_potato.read_bytes(), sites=site_doc)
+    bad_law = root / "lawspace_potato_bad.json"
+    bad_law.write_text(json.dumps(side, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8", newline="\n")
+    l0 = dict(b)
+    l0["potato"] = "potato_bad.json"
+    l0["lawspace"] = "lawspace_potato_bad.json"
+    art, d, c = _build(l0_safe=l0)
+    assert not K.verify(art, d, c)[0], "gc_ladder 恒等式被破坏仍然被接受"
+    print("      改 Potato 的 gc_ladder -> 拒绝")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

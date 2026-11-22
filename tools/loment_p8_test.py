@@ -1242,6 +1242,180 @@ def test_m88_l0_alpha_pair_is_byte_identical():
     assert ".buf" not in outs["manual"], "gc_manual 那一份不该有提升的缓冲"
 
 
+#: **栈区**（`#1655`）那套形状的探针。m88 那一对盖的是"哪些站点被提走"；
+#: 这一组盖的是**提走之后的登记形状** —— 一块缓冲一条 `(起点, 字数)`：
+#: 尺寸取整、L0.5 的共用区、两块并存、与普通根槽混排、递归时的 push/pop，
+#: 以及两个**旧口径会死**的尺寸（8 KiB = 整张根表、16 KiB = 写穿表）。
+#: 非 alpha 那一条是阴性对照：`gc_auto` 的产物里不该出现任何 `.buf`。
+_ALPHA_REGION_SRC = {
+    "buf8": """module buf8
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let b: ptr = alloc(8);
+    store8(b, 0, 1 as u8);
+    if load8(b, 0) == 1 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "buf20": """module buf20
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let b: ptr = alloc(20);
+    store8(b, 0, 1 as u8);
+    if load8(b, 0) == 1 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "buf8192": """module buf8192
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let b: ptr = alloc(8192);
+    store8(b, 0, 1 as u8);
+    if load8(b, 0) == 1 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "buf16384": """module buf16384
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let b: ptr = alloc(16384);
+    store8(b, 0, 1 as u8);
+    if load8(b, 0) == 1 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "two_bufs": """module two_bufs
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let a: ptr = alloc(8);
+    let b: ptr = alloc(64);
+    store8(a, 0, 1 as u8);
+    store8(b, 0, 2 as u8);
+    let v: u32 = load8(a, 0) as u32;
+    let w: u32 = load8(b, 0) as u32;
+    if v + w == 3 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "l05": """module l05
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let a: ptr = alloc(64);
+    let b: ptr = alloc(32);
+    let c: ptr = alloc(16);
+    store8(a, 0, 1 as u8);
+    store8(b, 0, 2 as u8);
+    store8(c, 0, 3 as u8);
+    let v: u32 = load8(a, 0) as u32;
+    let w: u32 = load8(b, 0) as u32;
+    let x: u32 = load8(c, 0) as u32;
+    if v + w + x == 6 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "mixed_roots": """module mixed_roots
+choose gc_auto_alpha
+choose runtime
+
+fn _start() {
+    let s: str = "hi";
+    let b: ptr = alloc(64);
+    store8(b, 0, 1 as u8);
+    print(s);
+    let v: u32 = load8(b, 0) as u32;
+    if v == 1 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "rec": """module rec
+choose gc_auto_alpha
+choose runtime
+
+fn rec(n: u32) -> u32 {
+    let b: ptr = alloc(32);
+    store8(b, 0, n as u8);
+    if n == 0 { return load8(b, 0) as u32; }
+    let r: u32 = rec(n - 1);
+    return r + (load8(b, 0) as u32);
+}
+
+fn _start() {
+    let v: u32 = rec(5);
+    if v == 5 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+    "auto_ptr": """module auto_ptr
+choose gc_auto
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(16);
+    store8(p, 0, 7 as u8);
+    let i: u32 = 0;
+    while i < 1000 {
+        let q: u64 = alloc(16) as u64;
+        store8(q as ptr, 0, 1);
+        i = i + 1;
+    }
+    if load8(p, 0) == 7 { syscall4(60, 7, 0, 0); }
+    syscall4(60, 3, 0, 0);
+}
+""",
+}
+
+
+@test
+def test_m108_alpha_stack_region_shapes_are_byte_identical():
+    """**栈区登记**（`#1655`）的形状，两个实现**逐字节**一致。
+
+    **Why**：m88 只盖"哪些站点被提走"。提走之后**怎么登记**是另一套手写走法 ——
+    一块缓冲一条 `(起点, 字数)`，字数按 `(n + 7) // 8` 取整，L0.5 的共用区也走同一条，
+    push/pop 各自一条游标。差一格就是"一边多扫 8 字节"或"另一边少退一条"，
+    而那些形状里有两种**旧口径会静默死掉**：`alloc(8192)` 正好 1024 个字填满根表
+    （SIGILL 132），`alloc(16384)` 写穿表（SIGSEGV 139）。
+
+    **How to apply**：九份探针各编两遍 —— 参考实现发 IR、自举 codegen 发 IR —— 逐字节比。
+    非 alpha 那一条是阴性对照（`gc_auto` 的产物里不许有 `.buf`）；两条不许空转的断言
+    钉住"alpha 那一侧真的发过区游标的 store"。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, src in _ALPHA_REGION_SRC.items():
+            target = Path(td) / f"reg_{tag}.lomt"
+            target.write_text(src, encoding="utf-8", newline="\n")
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 80)
+                raise AssertionError(
+                    f"reg_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 120]!r}\n python {want[a:(i or 0) + 120]!r}")
+    # 不许空转：alpha 的产物里真的写过区游标；`gc_auto` 那一份一个 `.buf` 都没有
+    assert "ptr @__loment_regionn" in outs["buf8"], "alpha 那一份没有区游标 —— 这条判据在空转"
+    assert "%b.buf" in outs["buf8192"], "8192 那一格没有提升缓冲 —— 空的"
+    assert "%b.buf" in outs["buf16384"], "16384 那一格没有提升缓冲 —— 空的"
+    assert ".buf" not in outs["auto_ptr"], "`gc_auto` 那一份不该有提升的缓冲"
+
+
 @test
 def test_m92_slot_table_is_byte_identical():
     """**块内槽表**（`docs/210` §2.9）那一份真值表源，两个实现**逐字节**一致。

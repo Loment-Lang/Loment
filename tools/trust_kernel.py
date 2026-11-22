@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# trust_kernel.py — R0 玩具内核 (docs/378)
+# trust_kernel.py — R0–R5 玩具内核 (docs/378)
 #
-# 它只做一件事: 检查一份 `(artifact, derivation, conclusion)` 是否按 12 条规则成立。
+# 它只做一件事: 检查一份 `(artifact, derivation, conclusion)` 是否按 13 条规则成立。
 # **零工具链 import** —— 不 import 编译器、LSPE、LNotary、Potato。它自带：
 #
 #   * 一个玩具源语言解析器（所以 PARSE 不是"编译器说什么就是什么"）；
 #   * 一个玩具栈机解释器（所以 SEM 不是查表）；
-#   * 一个静态栈检查器（所以 SAFE 不是自由标签）。
+#   * 一个静态栈检查器（所以 SAFE 不是自由标签）；
+#   * 一条 REFINE 规则（所以热更新的「只减不增」不是自由标签）。
 #
 # 用法:
 #   python trust_kernel.py verify --artifact A --derivation D [--conclusion C]
@@ -42,7 +43,7 @@ SITE_EDGES = frozenset({"fault", "abort", "skip"})
 
 #: 规则表。改一条就换哈希；推导里的 `kernel.rules_sha256` 随之失效。
 RULES = ("AX-K", "AX-S", "PARSE", "TV-L1", "TV-L2", "LINK",
-         "SAFE", "CAP", "SEM", "COMPOSE", "PROV", "REPRO")
+         "SAFE", "CAP", "SEM", "COMPOSE", "PROV", "REPRO", "REFINE")
 
 
 def _sha(b: bytes) -> str:
@@ -208,7 +209,7 @@ def _premises(node: dict, judgments: dict[str, dict]) -> list[dict]:
     return out
 
 
-# ---------------------------------------------------------------- 12 条规则
+# ---------------------------------------------------------------- 13 条规则
 
 
 def _r_ax_k(node, pre, ctx):
@@ -714,6 +715,55 @@ def _check_l0_safe(j) -> None:
         _check_fault_coverage(potato, sites)
 
 
+def _deviations(units: list[list[dict]]) -> list[dict]:
+    """R5: 一代产物里的偏差站点 —— 玩具里是每一个 PRINT（可观察副作用）。"""
+    return [{"unit": u, "index": i, "op": ins["op"]}
+            for u, unit in enumerate(units)
+            for i, ins in enumerate(unit) if ins["op"] == "PRINT"]
+
+
+def _dev_key(d: dict) -> tuple[int, int]:
+    return (d["unit"], d["index"])
+
+
+def _r_refine(node, pre, ctx):
+    """R5/T6: `T'` refines `T` 当且仅当偏差站点只减不增。"""
+    if len(pre) != 1 or pre[0].get("kind") != "Repro":
+        raise Reject("REFINE: needs one Repro premise")
+    j = node.get("judgment") or {}
+    if j.get("kind") != "Refines":
+        raise Reject("REFINE: judgment is not Refines")
+    if j.get("artifact_sha256") != ctx["artifact_sha"]:
+        raise Reject("REFINE: the new artifact hash does not match")
+    if not _hex64(j.get("from_artifact_sha256")):
+        raise Reject("REFINE: from_artifact_sha256 is not a sha256")
+    try:
+        old = bytes.fromhex(j.get("from_container_hex", ""))
+    except ValueError:
+        raise Reject("REFINE: from_container_hex is not hex") from None
+    if _sha(old) != j["from_artifact_sha256"]:
+        raise Reject("REFINE: the predecessor container hash does not match")
+    linked = lookup_linked(node, ctx)
+    d_to = _deviations(decode_artifact(bytes.fromhex(linked["container_hex"])))
+    d_from = _deviations(decode_artifact(old))
+    if j.get("to_deviations") != d_to:
+        raise Reject("REFINE: to_deviations do not match the new artifact")
+    if j.get("from_deviations") != d_from:
+        raise Reject("REFINE: from_deviations do not match the predecessor")
+    to_keys = {_dev_key(x) for x in d_to}
+    from_keys = {_dev_key(x) for x in d_from}
+    added = [x for x in d_to if _dev_key(x) not in from_keys]
+    removed = [x for x in d_from if _dev_key(x) not in to_keys]
+    delta = j.get("delta")
+    if not isinstance(delta, dict):
+        raise Reject("REFINE: delta is not an object")
+    if delta.get("added") != added or delta.get("removed") != removed:
+        raise Reject("REFINE: delta does not match the two deviation sets")
+    if added:
+        raise Reject("REFINE: the update adds deviations")
+    return j
+
+
 def _r_prov(node, pre, ctx):
     if len(pre) != 1 or pre[0].get("kind") != "Program":
         raise Reject("PROV: needs one Program premise")
@@ -755,6 +805,7 @@ RULES_IMPL = {
     "TV-L1": _r_tv_l1, "TV-L2": _r_tv_l2, "LINK": _r_link,
     "SAFE": _r_safe, "CAP": _r_cap, "SEM": _r_sem,
     "COMPOSE": _r_compose, "PROV": _r_prov, "REPRO": _r_repro,
+    "REFINE": _r_refine,
 }
 
 

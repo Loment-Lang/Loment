@@ -1,4 +1,4 @@
-/* trust_kernel_c.c — R4 第二个独立内核 (docs/378 §3.4 / C6)
+/* trust_kernel_c.c — R4/R5 第二个独立内核 (docs/378 §3.4 / C6 / C11)
  *
  * 它检查同一份 `(artifact, derivation, conclusion)`，与 tools/trust_kernel.py
  * **不共享一行代码**：自带 JSON 解析、SHA-256、玩具源解析器、静态栈检查与解释器。
@@ -990,12 +990,121 @@ static void collect(Ctx *c, int idx, const char *kind, int *seen, JVal **out, in
 
 /* ------------------------------------------------------------------ 规则 */
 
+/* ------------------------------------------------------------------ 偏差站点 (R5) */
+
+static JVal *dev_obj(int unit, int index) {
+    JVal *o = jnew(J_OBJ);
+    o->keys = (char **)xalloc(3 * sizeof *o->keys);
+    o->klens = (size_t *)xalloc(3 * sizeof *o->klens);
+    o->items = (JVal **)xalloc(3 * sizeof *o->items);
+    o->keys[0] = xstrdup("unit");
+    o->klens[0] = 4;
+    o->items[0] = jnew(J_INT);
+    o->items[0]->i = unit;
+    o->keys[1] = xstrdup("index");
+    o->klens[1] = 5;
+    o->items[1] = jnew(J_INT);
+    o->items[1]->i = index;
+    o->keys[2] = xstrdup("op");
+    o->klens[2] = 2;
+    o->items[2] = jnew(J_STR);
+    o->items[2]->s = xstrdup("PRINT");
+    o->items[2]->slen = 5;
+    o->n = 3;
+    return o;
+}
+
+static JVal *deviations_json(const Program *p) {
+    int count = 0;
+    for (int u = 0; u < p->n; u++)
+        for (int i = 0; i < p->units[u].n; i++)
+            if (p->units[u].v[i].op == OP_PRINT) count++;
+    JVal *a = jnew(J_ARR);
+    a->items = (JVal **)xalloc((size_t)(count ? count : 1) * sizeof *a->items);
+    int k = 0;
+    for (int u = 0; u < p->n; u++)
+        for (int i = 0; i < p->units[u].n; i++)
+            if (p->units[u].v[i].op == OP_PRINT) a->items[k++] = dev_obj(u, i);
+    a->n = (size_t)k;
+    return a;
+}
+
+static int dev_key(const JVal *d, int *u, int *i) {
+    JVal *ju = jget(d, "unit"), *ji = jget(d, "index");
+    if (!ju || ju->kind != J_INT || !ji || ji->kind != J_INT) return 0;
+    *u = (int)ju->i;
+    *i = (int)ji->i;
+    return 1;
+}
+
+static int dev_has(const JVal *devs, int u, int i) {
+    for (size_t k = 0; k < devs->n; k++) {
+        int du, di;
+        if (dev_key(devs->items[k], &du, &di) && du == u && di == i) return 1;
+    }
+    return 0;
+}
+
+/* 返回 devs 里 key 不在 other 中的项（保持 devs 的顺序）。 */
+static JVal *dev_missing(JVal *devs, JVal *other) {
+    JVal *a = jnew(J_ARR);
+    a->items = (JVal **)xalloc((devs->n ? devs->n : 1) * sizeof *a->items);
+    size_t k = 0;
+    for (size_t j = 0; j < devs->n; j++) {
+        int u, i;
+        if (dev_key(devs->items[j], &u, &i) && !dev_has(other, u, i))
+            a->items[k++] = devs->items[j];
+    }
+    a->n = k;
+    return a;
+}
+
+static JVal *r_refine(JVal *n, JVal **pre, int np, Ctx *c, Node *self) {
+    if (np != 1 || !kind_is(pre[0], "Repro"))
+        fail("REFINE: needs one Repro premise%s", "");
+    JVal *j = jget(n, "judgment");
+    if (!j || j->kind != J_OBJ) fail("REFINE: judgment is not an object%s", "");
+    if (!kind_is(j, "Refines")) fail("REFINE: judgment is not Refines%s", "");
+    if (!jstr_is(jget(j, "artifact_sha256"), c->artifact_sha))
+        fail("REFINE: the new artifact hash does not match%s", "");
+    JVal *fh = jget(j, "from_artifact_sha256");
+    if (!fh || fh->kind != J_STR || !is_hex64(fh->s))
+        fail("REFINE: from_artifact_sha256 is not a sha256%s", "");
+    size_t on = 0;
+    unsigned char *ob = hex_decode(jget(j, "from_container_hex"), &on);
+    char oh[65];
+    sha_hex(ob, on, oh);
+    if (!jstr_is(fh, oh))
+        fail("REFINE: the predecessor container hash does not match%s", "");
+    int li = linked_of(c, (int)(self - c->nodes));
+    size_t nn = 0;
+    unsigned char *nb = hex_decode(jget(c->nodes[li].judgment, "container_hex"), &nn);
+    Program newp, oldp;
+    program_from_container_bytes(nb, nn, &newp);
+    program_from_container_bytes(ob, on, &oldp);
+    JVal *dn = deviations_json(&newp), *df = deviations_json(&oldp);
+    if (!canon_eq(jget(j, "to_deviations"), dn))
+        fail("REFINE: to_deviations do not match the new artifact%s", "");
+    if (!canon_eq(jget(j, "from_deviations"), df))
+        fail("REFINE: from_deviations do not match the predecessor%s", "");
+    JVal *added = dev_missing(dn, df);
+    JVal *removed = dev_missing(df, dn);
+    JVal *delta = jget(j, "delta");
+    if (!delta || delta->kind != J_OBJ) fail("REFINE: delta is not an object%s", "");
+    if (!canon_eq(jget(delta, "added"), added) || !canon_eq(jget(delta, "removed"), removed))
+        fail("REFINE: delta does not match the two deviation sets%s", "");
+    if (added->n > 0) fail("REFINE: the update adds deviations%s", "");
+    free(ob);
+    free(nb);
+    return j;
+}
+
 static char *RULES_SHA = NULL;
 
 static void init_rules_sha(void) {
     static const char *lit =
         "{\"format\":1,\"rules\":[\"AX-K\",\"AX-S\",\"PARSE\",\"TV-L1\",\"TV-L2\","
-        "\"LINK\",\"SAFE\",\"CAP\",\"SEM\",\"COMPOSE\",\"PROV\",\"REPRO\"]}";
+        "\"LINK\",\"SAFE\",\"CAP\",\"SEM\",\"COMPOSE\",\"PROV\",\"REPRO\",\"REFINE\"]}";
     RULES_SHA = (char *)xalloc(65);
     sha_hex((const unsigned char *)lit, strlen(lit), RULES_SHA);
 }
@@ -1416,6 +1525,7 @@ static int do_verify(const char *art_path, const char *der_path, const char *con
         else if (strcmp(rule, "COMPOSE") == 0) r_compose(n, pj, np, &c, node);
         else if (strcmp(rule, "PROV") == 0) r_prov(n, pj, np, &c, node);
         else if (strcmp(rule, "REPRO") == 0) r_repro(n, pj, np, &c, node);
+        else if (strcmp(rule, "REFINE") == 0) r_refine(n, pj, np, &c, node);
         else fail("unknown rule%s", "");
         c.n++;
     }

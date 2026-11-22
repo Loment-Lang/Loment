@@ -436,8 +436,8 @@ SHARD_COST = {
     # 9 条判据: 闭包解析 + provenance 核对 + 一次 WSL bootstrap 漂移检查。
     # 2026-11-22 本机实测 40.9s（与 genesis 自举并发时量的）。
     "loment_trust_test": 41.0,
-    # R0–R4 玩具内核 + 商团：33 条判据，含 C 内核编译运行、真实 L0 provenance 与真 LNotary 夹具。
-    "trust_kernel_test": 7.0,
+    # R0–R5 玩具内核 + 商团：40 条判据，含 C 内核编译运行、真实 L0 provenance 与真 LNotary 夹具。
+    "trust_kernel_test": 10.0,
     "loment_gotrans_test": 5.8,
     "loment_grammar_test": 2.1,
     "loment_hosted_test": 3.6,

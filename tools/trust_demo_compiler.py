@@ -187,26 +187,49 @@ def build_program(sources: list[str], seed: str = "seed-0",
     return art, deriv, root
 
 
-def decode_unit(b: bytes) -> list[dict]:
-    return K._decode_unit(b)
+def build_refinement(old_sources: list[str], new_sources: list[str],
+                     seed: str = "seed-0", recipe: str = "toy-compiler/1",
+                     allowed: list[str] | None = None) -> tuple[bytes, bytes, dict, dict]:
+    """R5/T6: 两代产物 + 一条 `T' refines T` 的推导。"""
+    old_art, _, _ = build_program(old_sources, seed=seed, recipe=recipe, allowed=allowed)
+    new_art, new_d, _ = build_program(new_sources, seed=seed, recipe=recipe,
+                                      allowed=allowed)
+    nodes = []
+    for n in new_d["nodes"]:
+        nn = json.loads(json.dumps(n))
+        nn["id"] = "to." + nn["id"]
+        nn["premises"] = ["to." + p for p in nn.get("premises", [])]
+        nodes.append(nn)
+    old_sha, new_sha = K._sha(old_art), K._sha(new_art)
+    d_old = K._deviations(K.decode_artifact(old_art))
+    d_new = K._deviations(K.decode_artifact(new_art))
+    new_keys = {K._dev_key(x) for x in d_new}
+    old_keys = {K._dev_key(x) for x in d_old}
+    judgment = {
+        "kind": "Refines",
+        "artifact_sha256": new_sha,
+        "from_artifact_sha256": old_sha,
+        "from_container_hex": old_art.hex(),
+        "from_deviations": d_old,
+        "to_deviations": d_new,
+        "delta": {
+            "removed": [x for x in d_old if K._dev_key(x) not in new_keys],
+            "added": [x for x in d_new if K._dev_key(x) not in old_keys],
+        },
+    }
+    nodes.append({"id": "refine", "rule": "REFINE", "premises": ["to." + new_d["root"]],
+                  "judgment": judgment})
+    deriv = {
+        "format": K.FORMAT,
+        "kernel": {"rules_sha256": K.RULES_SHA256},
+        "nodes": nodes,
+        "root": "refine",
+        "artifact_sha256": new_sha,
+    }
+    return old_art, new_art, deriv, judgment
 
 
-def write_program(out: Path, sources: list[str], seed: str = "seed-0",
-                  recipe: str = "toy-compiler/1", allowed: list[str] | None = None,
-                  l0_root: str | None = None,
-                  provenance: str = "loment/build/genesis/provenance.json",
-                  l0_safe: dict | None = None, quorum: dict | None = None) -> dict:
-    art, deriv, conc = build_program(sources, seed=seed, recipe=recipe, allowed=allowed,
-                                     l0_root=l0_root, provenance=provenance,
-                                     l0_safe=l0_safe)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "program.toy").write_bytes(art)
-    (out / "program.deriv").write_text(
-        json.dumps(deriv, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
-        encoding="utf-8", newline="\n")
-    (out / "program.phi").write_text(
-        json.dumps(conc, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
-        encoding="utf-8", newline="\n")
+def _write_budget(out: Path, deriv: dict, quorum: dict | None) -> dict:
     spec = Path(__file__).resolve().parent.parent / "docs" / "378-trust-quorum.md"
     budget = {
         "format": 1,
@@ -229,6 +252,47 @@ def write_program(out: Path, sources: list[str], seed: str = "seed-0",
     return budget
 
 
+def write_refinement(out: Path, old_sources: list[str], new_sources: list[str],
+                     seed: str = "seed-0", recipe: str = "toy-compiler/1",
+                     allowed: list[str] | None = None,
+                     quorum: dict | None = None) -> dict:
+    old_art, new_art, deriv, conc = build_refinement(
+        old_sources, new_sources, seed=seed, recipe=recipe, allowed=allowed)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "old.toy").write_bytes(old_art)
+    (out / "program.toy").write_bytes(new_art)
+    (out / "program.deriv").write_text(
+        json.dumps(deriv, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8", newline="\n")
+    (out / "program.phi").write_text(
+        json.dumps(conc, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8", newline="\n")
+    return _write_budget(out, deriv, quorum)
+
+
+def decode_unit(b: bytes) -> list[dict]:
+    return K._decode_unit(b)
+
+
+def write_program(out: Path, sources: list[str], seed: str = "seed-0",
+                  recipe: str = "toy-compiler/1", allowed: list[str] | None = None,
+                  l0_root: str | None = None,
+                  provenance: str = "loment/build/genesis/provenance.json",
+                  l0_safe: dict | None = None, quorum: dict | None = None) -> dict:
+    art, deriv, conc = build_program(sources, seed=seed, recipe=recipe, allowed=allowed,
+                                     l0_root=l0_root, provenance=provenance,
+                                     l0_safe=l0_safe)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "program.toy").write_bytes(art)
+    (out / "program.deriv").write_text(
+        json.dumps(deriv, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8", newline="\n")
+    (out / "program.phi").write_text(
+        json.dumps(conc, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8", newline="\n")
+    return _write_budget(out, deriv, quorum)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="trust_demo_compiler",
                                  description="R0 toy compiler/prover (docs/378)")
@@ -247,7 +311,22 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--l0-potato", default=None)
     b.add_argument("--l0-sites", default=None)
     b.add_argument("--l0-lawspace", default=None)
+    r = sub.add_parser("refine")
+    r.add_argument("--old-source", action="append", required=True)
+    r.add_argument("--new-source", action="append", required=True)
+    r.add_argument("--out", required=True)
+    r.add_argument("--seed", default="seed-0")
+    r.add_argument("--recipe", default="toy-compiler/1")
+    r.add_argument("--allow", action="append", default=None)
     a = ap.parse_args(argv)
+    if a.cmd == "refine":
+        old_sources = [Path(p).read_text(encoding="utf-8") for p in a.old_source]
+        new_sources = [Path(p).read_text(encoding="utf-8") for p in a.new_source]
+        budget = write_refinement(Path(a.out), old_sources, new_sources,
+                                  seed=a.seed, recipe=a.recipe, allowed=a.allow)
+        print(f"[OK] {a.out}/program.deriv  proof {budget['proof_bytes']} B  "
+              f"rules {budget['rules']}")
+        return 0
     sources = [Path(p).read_text(encoding="utf-8") for p in a.source]
     l0_safe = None
     if a.l0_potato or a.l0_sites or a.l0_lawspace:

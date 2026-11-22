@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# trust_kernel_test.py — R0 判据 (docs/378 §6 C1/C2/C3/C4/C5 的玩具形态)
+# trust_kernel_test.py — R0–R5 判据 (docs/378 §6 C1–C7 / C11 的玩具形态)
 #
 # 它钉住四件事:
 #   1. 有效推导被接受;
@@ -210,7 +210,7 @@ def test_budget_is_recorded():
         out = Path(td)
         C.write_program(out, [SRC_A])
         b = json.loads((out / "trust.json").read_text(encoding="utf-8"))
-        assert b["rules"] == len(K.RULES) == 12
+        assert b["rules"] == len(K.RULES) == 13
         assert b["proof_bytes"] > 0
         assert b["n"] == 1 and b["k"] == 1 and b["assumptions"] == 7
         art, d, c = _build()
@@ -663,6 +663,121 @@ def test_quorum_budget_is_recorded():
         assert trust["n"] == 2 and trust["k"] == 2 and trust["diversity_axes"] == 1
         assert trust["quorum"]["kernels"][1]["lang"] == "c"
     print(f"      n={b['n']} k={b['k']} axes={b['diversity_axes']} (language)")
+
+
+_REFINE_OLD = "PUSH 1\nPRINT\nPUSH 2\nPRINT\nHALT\n"
+_REFINE_NEW = "PUSH 1\nPRINT\nHALT\n"
+_REFINE_ADDED = "PUSH 1\nPRINT\nPUSH 2\nPRINT\nPUSH 3\nPRINT\nHALT\n"
+
+
+def _refine(name: str) -> tuple[bytes, dict, dict]:
+    old = _REFINE_OLD
+    new = _REFINE_NEW
+    if name == "added":
+        old, new = _REFINE_NEW, _REFINE_ADDED
+    _, art, d, c = C.build_refinement([old], [new])
+    return art, d, c
+
+
+@test
+def test_refinement_removing_a_deviation_is_accepted():
+    """C11/T6: 新代只剩一个 PRINT，旧代有两个 -> 接受。"""
+    art, d, c = _refine("valid")
+    assert c["delta"] == {"removed": [{"unit": 0, "index": 3, "op": "PRINT"}],
+                          "added": []}, c["delta"]
+    ok, why = K.verify(art, d, c)
+    assert ok, why
+    print(f"      T' 删除 1 个偏差站点 -> 接受（{c['delta']['removed']}）")
+
+
+@test
+def test_refinement_adding_a_deviation_is_rejected():
+    """C11: 反向或新增偏差 -> 拒绝。"""
+    art, d, c = _refine("added")
+    ok, why = K.verify(art, d, c)
+    assert not ok and "adds deviations" in why[0], why
+    print(f"      T' 新增偏差站点 -> 拒绝（{why[0]}）")
+
+
+@test
+def test_refinement_delta_lie_is_rejected():
+    """C11: delta 是推导的一部分；少报/多报都拒。"""
+    art, d, c = _refine("valid")
+    bad = json.loads(json.dumps(d))
+    for n in bad["nodes"]:
+        if n["rule"] == "REFINE":
+            n["judgment"]["delta"]["removed"] = []
+    assert not K.verify(art, bad, c)[0], "少报 removed 仍然被接受"
+    bad2 = json.loads(json.dumps(d))
+    for n in bad2["nodes"]:
+        if n["rule"] == "REFINE":
+            n["judgment"]["from_deviations"] = []
+    assert not K.verify(art, bad2, c)[0], "改旧代偏差集仍然被接受"
+    print("      改 delta / 旧代偏差集 -> 拒绝")
+
+
+@test
+def test_refinement_predecessor_tamper_is_rejected():
+    """C11: 旧代按内容哈希绑定；改一个字节而哈希不动 -> 拒绝。"""
+    art, d, c = _refine("valid")
+    bad = json.loads(json.dumps(d))
+    for n in bad["nodes"]:
+        if n["rule"] == "REFINE":
+            h = n["judgment"]["from_container_hex"]
+            n["judgment"]["from_container_hex"] = ("00" if h[:2] != "00" else "01") + h[2:]
+    assert not K.verify(art, bad, c)[0], "旧代容器被改而哈希不变仍然被接受"
+    bad2 = json.loads(json.dumps(d))
+    for n in bad2["nodes"]:
+        if n["rule"] == "REFINE":
+            n["judgment"]["from_artifact_sha256"] = "0" * 64
+    assert not K.verify(art, bad2, c)[0], "旧代哈希被改仍然被接受"
+    print("      旧代容器 / 哈希篡改 -> 拒绝")
+
+
+@test
+def test_refinement_new_artifact_tamper_is_rejected():
+    art, d, c = _refine("valid")
+    bad = bytearray(art)
+    bad[len(bad) // 2] ^= 1
+    assert not K.verify(bytes(bad), d, c)[0], "新代产物被改仍然被接受"
+    print("      新代产物改一个字节 -> 拒绝")
+
+
+@test
+def test_second_kernel_agrees_on_refinement_batch():
+    """C6 × C11: C 内核也实现 REFINE，判决与 Python 一致。"""
+    ck = _c_loader().kernel()
+    art, d, c = _refine("valid")
+    added_art, added_d, added_c = _refine("added")
+    lie = json.loads(json.dumps(d))
+    for n in lie["nodes"]:
+        if n["rule"] == "REFINE":
+            n["judgment"]["delta"]["added"] = [{"unit": 0, "index": 99, "op": "PRINT"}]
+    old_tamper = json.loads(json.dumps(d))
+    for n in old_tamper["nodes"]:
+        if n["rule"] == "REFINE":
+            n["judgment"]["from_artifact_sha256"] = "1" * 64
+    batch = [("valid", art, d, c), ("added", added_art, added_d, added_c),
+             ("delta lie", art, lie, c), ("old tamper", art, old_tamper, c)]
+    for name, a, dd, cc in batch:
+        mine, why = K.verify(a, dd, cc)
+        theirs, twhy = ck.runner(a, dd, cc)
+        assert (theirs == Q.ACCEPT) == mine, (
+            f"{name}: python={'ACCEPT' if mine else 'REJECT'} c={theirs} ({twhy})")
+    print(f"      C 内核与 Python 在 {len(batch)} 份 refinement 推导上判决一致")
+
+
+@test
+def test_quorum_accepts_a_refinement():
+    """C7 × C11: 两内核商团接受只减不增的更新。"""
+    pk, ck = Q.python_kernel(), _c_loader().kernel()
+    art, d, c = _refine("valid")
+    ok, det = Q.quorum_verify(art, d, c, [pk, ck], 2)
+    assert ok, det
+    added_art, added_d, added_c = _refine("added")
+    ok2, det2 = Q.quorum_verify(added_art, added_d, added_c, [pk, ck], 2)
+    assert not ok2, det2
+    print(f"      商团接受只减不增的更新；新增偏差被拒（{det['reason']}）")
 
 
 def main() -> int:

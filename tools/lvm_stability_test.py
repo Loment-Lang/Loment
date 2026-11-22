@@ -95,24 +95,32 @@ entry:
 }
 """
 
-#: 不认识的系统调用：走真前门（Loment 源）。
+#: 不认识的系统调用：走真前门（Loment 源）。**它不再是一条"拒绝"** —— guest 拿的是
+#: Linux 会给的 `-ENOSYS`（`docs/311` §4.2），所以退出码说得出它拿到了什么。
 _BAD_SYSCALL = """module badsys
 choose runtime
 use bytes
 
-fn _start() -> u32 {
-    syscall4(999, 0, 0, 0);
-    return 0;
+pub fn loment_command() -> str {
+    return "badsys";
+}
+
+fn command_main(argv: ptr, argc: u32) -> u32 {
+    let r: i64 = syscall4(999, 0, 0, 0);
+    if r == (0 - 38) {
+        return 0;
+    }
+    return 1;
 }
 """
 
 
-def _run_tier(ir: str, tier: str):
+def _run_tier(ir: str, tier: str, report=None):
     if tier == "t0":
-        return lvm.run_ir(ir, io.BytesIO())
+        return lvm.run_ir(ir, io.BytesIO(), None, ["p"], report=report)
     if tier == "t2":
-        return lvm_t2.run_ir_t2(ir, io.BytesIO())
-    return lvm_t3.run_ir_t3(ir, io.BytesIO())
+        return lvm_t2.run_ir_t2(ir, io.BytesIO(), None, ["p"])
+    return lvm_t3.run_ir_t3(ir, io.BytesIO(), None, ["p"])
 
 
 def test_hang_is_bounded_and_named() -> None:
@@ -136,7 +144,11 @@ def test_hang_is_bounded_and_named() -> None:
 
 
 def test_refusals_are_loud() -> None:
-    """判 B：五种拒绝各来一次 —— **响亮地失败**，不是继续算。"""
+    """判 B：五种失败各来一次 —— 四种**响亮地失败**，系统调用那一格 **guest 拿 -ENOSYS**。
+
+    `docs/311` §4.2 之后，"这个号没有"不再是工具的响亮（`die`），而是 Linux 的答案；
+    它仍然可证伪：探针只有在拿到 `-38` 时才退 0。其余四格照旧点名拒。
+    """
     cases = [
         ("不支持的指令", _UNSUPPORTED, ("没实现",)),
         ("写越界", _OOB_WRITE, ("写越界",)),
@@ -165,14 +177,14 @@ def test_refusals_are_loud() -> None:
         errs = lomentc.check(mod, deps=deps)
         assert not errs, errs[:2]
         ir = lomentc.emit_llvm(mod, ROOT, deps)
+    rep = lvm.SyscallReport()
     for tier in ("t0", "t2"):
-        try:
-            _run_tier(ir, tier)
-        except lvm.LvmError as e:
-            assert "999" in str(e), f"[{tier}] 报错没点名那个号: {e}"
-        else:
-            raise AssertionError(f"[{tier}] 不认识的系统调用被放过去了")
-    print("      不支持的指令 / 写越界 / 读越界 / 栈溢出 / 未知系统调用（t0+t2）—— 全部点名拒")
+        rc = _run_tier(ir, tier, report=rep if tier == "t0" else None)
+        assert rc == 0, f"[{tier}] 表外的号没有回 -ENOSYS（rc={rc}）"
+    assert rep.text().startswith("999\t"), \
+        f"覆盖报告没有记下那个号: {rep.text()!r}"
+    print("      不支持的指令 / 写越界 / 读越界 / 栈溢出 —— 点名拒；"
+          "未知系统调用（t0+t2）—— guest 拿 -ENOSYS，报告记下 999")
 
 
 def test_limits_are_on_paper() -> None:

@@ -57,6 +57,7 @@ loment_elf_test 93
 loment_pe_test 18
 loment_genesis_test 9
 loment_trust_test 9
+trust_kernel_test 14
 loment_status_test 4
 lvm_test 10
 lvm_twin_test 16

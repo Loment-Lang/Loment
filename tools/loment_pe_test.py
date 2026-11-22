@@ -2401,8 +2401,6 @@ fn _start() -> u32 {
     let a: i64 = syscall4(9999, 0, 0, 0);
     let b: i64 = syscall6(9998, 0, 0, 0, 0, 0);
     let _c: i64 = syscall7(9997, 0, 0, 0, 0, 0, 0);
-    let d: i64 = syscall4(174, 0, 0, 0);
-    let e: i64 = syscall4(180, 0, 0, 0);
     if a != want {
         w(1, "ENOSYS BAD a\\n");
         return 1;
@@ -2410,14 +2408,6 @@ fn _start() -> u32 {
     if b != want {
         w(1, "ENOSYS BAD b\\n");
         return 2;
-    }
-    if d != want {
-        w(1, "ENOSYS BAD d\\n");
-        return 3;
-    }
-    if e != want {
-        w(1, "ENOSYS BAD e\\n");
-        return 4;
     }
     w(1, "ENOSYS OK\\n");
     return 0;

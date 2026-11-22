@@ -1,6 +1,6 @@
 # 362 · LVM-A 的第一档基质：`sw_cap`
 
-> 状态: **已实装**（2026-11-20），参考 T0 + 自举镜像（镜像是对齐的地址那一半，见 `docs/363` §6）
+> 状态: **已实装**（2026-11-20），参考 T0 + 自举镜像（镜像是对齐的地址那一半，见 `docs/371` §6）
 > 上游: `docs/360`（时间桥梁：六个原语）· `docs/359`（本世代的墙）· `docs/358`（只信产物）·
 > `docs/243`（T0 是那份 IR 的第四个读者）· `docs/356`（fault 类与站点）· `docs/320` §5.3（对象表 / 槽表）
 > 判据: `tools/lvm_cap_test.py`（7 条，全绿）
@@ -110,11 +110,11 @@
 2. **只在 T0。** `tools/lvm_t2.py` / `tools/lvm_t3.py` / 紧凑形都还没有它；
    `--substrate sw_cap` 对它们**点名拒**。自举镜像 `loment/tools/lvm.lomt` 有**按地址**的
    那一半（没有 SSA 能力表），三条故障与语料由 `lvm_twin_test::test_cap_*` 钉住；
-   checkpoint/封印在 `docs/363`，自举 checkpoint 与 `sw_tag` 在 `docs/364`。
+   checkpoint/封印在 `docs/371`，自举 checkpoint 与 `sw_tag` 在 `docs/364`。
 3. **没有封印字段。** `docs/360` §3.4 的 `substrate` 剖面还没有进 Potato；
    今天是 CLI 开关 + 旁挂封印（`tools/lvm_seal.py`），不是默认产物里的字段。
 4. **解释器体积预算（B8）与 `hw_cap` 的真跑没有。** `docs/360` §7 的八条里，
-   B1/B2/B3 由 `lvm_cap_test` 落，B4/B5/B6/B7 由 `docs/363` 落；
+   B1/B2/B3 由 `lvm_cap_test` 落，B4/B5/B6/B7 由 `docs/371` 落；
    B8 今天只给**验证器**标了价，解释器本身仍未标价。
 5. **零误报只在 10 份语料上量过。** `loment_elf_test.CORPUS` 每一份两种基质同答
    （判据 E）。这是实测，不是证明；语料扩了要重新跑。

@@ -1,7 +1,7 @@
 # 364 · 自举 checkpoint 与第二档基质 `sw_tag`
 
 > 状态: **已实装**（2026-11-21），自举镜像 + 参考实现
-> 上游: `docs/360`（时间桥梁）· `docs/362`（`sw_cap`）· `docs/363`（P5 / 封印 / 验证器）·
+> 上游: `docs/360`（时间桥梁）· `docs/362`（`sw_cap`）· `docs/371`（P5 / 封印 / 验证器）·
 > `docs/359` §0（本世代的六个原语）· `docs/320` §1.2 ⑧（MTE 是检测不是保证）
 > 判据: `tools/lvm_cp_test.py`（7 条）· `tools/lvm_cap_test.py`（9 条）·
 > `tools/lvm_seal_test.py`（9 条）· `tools/lvm_twin_test.py`（14 条）
@@ -47,7 +47,7 @@
 ### 1.2 快照格式
 
 自举这一侧没有 JSON/zlib，格式是原始二进制。**2026-11-21 起与参考实现同一份**
-（`docs/370`）：头 16 B / ctx 256 B / 全局表（名字 + 地址）/ 对象表（7 × u32 一条）/
+（`docs/372`）：头 16 B / ctx 256 B / 全局表（名字 + 地址）/ 对象表（7 × u32 一条）/
 续延栈 2,112 B / guest 4 MiB / 扩展（帧名字段）。早先那版是自举私有布局
 （全局表固定 6,144 B、对象表分段裸拷），统一时被替换掉。
 
@@ -75,7 +75,7 @@ lvm IN.ll resume=/tmp/a.snap [ckpt=80 ckpt-out=/tmp/b.snap]
 * 实测（本机 WSL）：K=1..120 每个点在自举侧都能存取；链式 30 -> 60 -> 跑完；
   `sw_cap` + checkpoint 也过。
 
-**边界**：本文只证「各自的 guest 状态够全」。快照跨实现交接是 `docs/370` 的事
+**边界**：本文只证「各自的 guest 状态够全」。快照跨实现交接是 `docs/372` 的事
 （同一份字节、两个方向，`lvm_twin_test` 各一条判据）。
 
 ---
@@ -156,13 +156,13 @@ lvm IN.ll resume=/tmp/a.snap [ckpt=80 ckpt-out=/tmp/b.snap]
 | `lvm_cap_test` | 9 | `sw_tag` 未复用悬垂 / 复用碰撞（概率） |
 | `lvm_cp_test` | 7 | `sw_tag` 快照带对象与标签 |
 | `lvm_seal_test` | 9 | `sw_tag` 的 `no_dangling` 必须 `floored` |
-| `lvm_twin_test` | 10 | 自举 checkpoint 与参考同答（含跨实现两条，`docs/370`） |
+| `lvm_twin_test` | 10 | 自举 checkpoint 与参考同答（含跨实现两条，`docs/372`） |
 
 ---
 
 ## 5. 我不主张
 
-1. **快照跨实现已在 `docs/370` 落地。** 这条原先写的是"两种格式，不互通"；
+1. **快照跨实现已在 `docs/372` 落地。** 这条原先写的是"两种格式，不互通"；
    2026-11-21 起两边写同一份字节，`lvm_twin_test` 有两条跨方向判据。
 2. **不主张 `sw_tag` 是随机标签。** 确定轮转，便于判据；MTE 真机是随机/派生。
 3. **不主张 `sw_tag` 抓得住所有悬垂。** 碰撞就漏，判据里明写了 N=10。
@@ -176,7 +176,7 @@ lvm IN.ll resume=/tmp/a.snap [ckpt=80 ckpt-out=/tmp/b.snap]
 
 ## 6. 与其它文档的关系
 
-* `docs/363` —— 参考实现的 P5；本文把同一件事搬到自举镜像，并补第二档基质。
+* `docs/371` —— 参考实现的 P5；本文把同一件事搬到自举镜像，并补第二档基质。
 * `docs/362` —— `sw_cap` 的 T0 实现；§3 的影子表 bug 是它的一处真缺陷，本文修掉。
 * `docs/360` §3.3 —— `sw_tag` 在四档表里就是「中间态，声明要降级」；本文给它执行与判据。
 * `docs/320` §1.2 ⑧ —— MTE 是检测不是保证；`no_dangling: floored` 是那句话的机械形态。

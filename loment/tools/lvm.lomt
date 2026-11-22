@@ -8,7 +8,7 @@
 //
 // CLI:  lvm IN.ll [sw_cap]   （只吃 IR：Loment 侧没有前端，前端在 driver）
 // 退出码 = 被解释程序自己的退出码；输入读不了 / 解析不了 = 2（与参考实现的 main 同）
-// `sw_cap`（`docs/363`）：任意附加实参等于它就在 T0 上开对象表检查。故障退出码
+// `sw_cap`（`docs/371`）：任意附加实参等于它就在 T0 上开对象表检查。故障退出码
 // `100 + kind`，站点与 `llvm.trap` 同形。自举侧是**按地址**的（没有 SSA 能力表）。
 //
 // 与参考实现的关系（`docs/243` §2 那张表）：**整段跳过**的是 x86 编码、`Asm`、
@@ -202,7 +202,7 @@ const C_VFD_OPEN: u32 = 124;         // 合成文件开着没有（0 = 没开）
 //: 合成文件的 fd 号。**两边实现必须给同一个数**（`tools/lvm.py` 的 `VFD_BASE`）。
 const VFD: u64 = 1000;
 
-// ---------------------------------------------------------------- sw_cap（docs/363）
+// ---------------------------------------------------------------- sw_cap（docs/371）
 //
 // 参考实现的 `SwCap` 落的是「对象表 + 能力 + 对象代」。自举侧没有 SSA 能力表
 // （`VAL_REC` 只有 16 字节），所以这一份是**按地址**的那一半：每个地址问一句
@@ -2956,7 +2956,7 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     }
     if nr == 201 {                                       // time(NULL)
         if d_on(a) == 1 {
-            // `docs/371`：dismemory 下时间也在观察代数里，按已执行指令数给虚拟秒。
+            // `docs/373`：dismemory 下时间也在观察代数里，按已执行指令数给虚拟秒。
             return (ctx_get(a, C_STEPS) / 1000) as u64;
         }
         return syscall4(201, 0, 0, 0) as u64;
@@ -2975,7 +2975,7 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         let sec: u64 = 0;
         let nsec: u64 = 0;
         if d_on(a) == 1 {
-            // 与参考同一条口径（`docs/371`）：1 条已执行指令 = 1 ms 的虚拟钟。
+            // 与参考同一条口径（`docs/373`）：1 条已执行指令 = 1 ms 的虚拟钟。
             let ns: u64 = (ctx_get(a, C_STEPS) as u64) * 1000000;
             sec = ns / 1000000000;
             nsec = ns % 1000000000;
@@ -3067,7 +3067,7 @@ fn do_asm(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
 }
 
 /// 一个指令的求值（控制流那五条在 `exec_body` 里就地处理，不走这儿）。
-// ---------------------------------------------------------------- dismemory（docs/371）
+// ---------------------------------------------------------------- dismemory（docs/373）
 //
 // **guest 的指针是一个不透明令牌**：高 8 位 `0xD1`，其余 48 位是**永不复用**的序号。
 // 令牌表在运行期（`DT` 按令牌有序、`DR` 按 (体,偏移) 有序）：值里没有体号、没有偏移。
@@ -4271,7 +4271,7 @@ fn read_exact(fd: u64, p: ptr, n: u32) -> u32 {
     return 1;
 }
 
-/// 快照（共同格式，docs/370）：头 16 B + ctx 256 B + 全局表 + 对象表 +
+/// 快照（共同格式，docs/372）：头 16 B + ctx 256 B + 全局表 + 对象表 +
 /// 续延栈 2112 B + guest 内存 4 MiB + 扩展（帧名字段 + 四个空段）。
 fn wu32(f: u64, a: ptr, v: u32) {
     store32(a, SNAP_HDR + 16, v);
@@ -4545,7 +4545,7 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
     }
     let flags: u32 = load32(a, SNAP_HDR + 12);
     if flags == 2 {
-        fail("checkpoint：跨实现恢复不支持 sw_tag（docs/370）");
+        fail("checkpoint：跨实现恢复不支持 sw_tag（docs/372）");
     }
     // 自己进程的 cmdline 位置不能被快照里的值覆盖（那是参考侧的数）。
     let my_arg0: u32 = ctx_get(a, C_ARG0);
@@ -4610,7 +4610,7 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             fail("checkpoint：扩展魔数不对");
         }
         if load32(a, SNAP_HDR + 24) != 0 {
-            fail("checkpoint：跨实现恢复不支持停在 phi 中途（docs/370）");
+            fail("checkpoint：跨实现恢复不支持停在 phi 中途（docs/372）");
         }
         let nf: u32 = ru32(f, a);
         if nf >= MAX_CONT {
@@ -4659,7 +4659,7 @@ fn snapshot_read(a: ptr, m: ptr, po: u32, pl: u32) {
             cont_set(a, d, 13, pv);
             d = d + 1;
         }
-        // caps：跳过 —— 镜像的能力按地址重建（`docs/370` §2 的保真度边界）。
+        // caps：跳过 —— 镜像的能力按地址重建（`docs/372` §2 的保真度边界）。
         let nc: u32 = ru32(f, a);
         let ci: u32 = 0;
         while ci < nc {
@@ -4777,7 +4777,7 @@ fn is_opt_arg(ab: ptr, f: u64) -> bool {
     if lo32(arg_tail(ab, f, "resume=")) > 0 {
         return true;
     }
-    // `docs/371`：重定位档。**必须在这里认**，否则它会被当成第二个位置实参（剖面文件），
+    // `docs/373`：重定位档。**必须在这里认**，否则它会被当成第二个位置实参（剖面文件），
     // 于是 `relocate=0` 变成一个被写出来的文件名 —— 实测在工作目录里留下了这三个空文件。
     if lo32(arg_tail(ab, f, "relocate=")) > 0 {
         return true;
@@ -4969,7 +4969,7 @@ const COP_OFF: u32 = 11507968;                 // CC_OFF + 32768*48；操作数�
 const CX_OFF: u32 = 13605120;                  // COP_OFF + 131072*16；附加池
 const CSL_OFF: u32 = 13867264;                 // CX_OFF + 65536*4；槽名表 2 u32
 const FS2_OFF: u32 = 14129408;                 // CSL_OFF + 32768*8；每函数 4 u32
-const ARENA_T2: u64 = 14982148;                // NAME_SCRATCH + 256（docs/370 的共同快照）
+const ARENA_T2: u64 = 14982148;                // NAME_SCRATCH + 256（docs/372 的共同快照）
 
 //: 编译记录 12 格
 const CR_KIND: u32 = 0;
@@ -6243,13 +6243,13 @@ fn run(a: ptr) -> u32 {
         t2_compile_all(a);
     }
     if ctx_get(a, C_SUB) != 0 && ctx_get(a, C_TIER) == 1 {
-        return fail("sw_cap 只在 T0（docs/363）");
+        return fail("sw_cap 只在 T0（docs/371）");
     }
     if ctx_get(a, C_DIS) != 0 && ctx_get(a, C_SUB) != 0 {
-        return fail("dismemory 与基质（sw_cap）不叠加（docs/371 §1.6）");
+        return fail("dismemory 与基质（sw_cap）不叠加（docs/373 §1.6）");
     }
     if ctx_get(a, C_DIS) != 0 && ctx_get(a, C_TIER) == 1 {
-        return fail("dismemory 只在 T0（docs/371）");
+        return fail("dismemory 只在 T0（docs/373）");
     }
     if ctx_get(a, C_MODE) == 1 {
         if ctx_get(a, C_PROF_FD) != 0 || ctx_get(a, C_STATS_FD) != 0 {

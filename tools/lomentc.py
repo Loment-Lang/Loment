@@ -210,11 +210,11 @@ define internal void @__loment_abort() {
 declare void @llvm.trap()
 '''
 
-#: **LMS fault ABI**（`docs/356` §5.3 / `docs/363`）：`100 + kind`。
+#: **LMS fault ABI**（`docs/356` §5.3 / `docs/371`）：`100 + kind`。
 #: 只在 `choose lms_pangu_true` 时发；默认档一个字节都不加。
 #: 站点由 LVM 的 `sw_cap` 基质报（`<函数>:<块>#<序号>`）；原生侧这一版只报 kind。
 _IR_FAULT = '''
-; ---- LMS fault ABI (docs/363): 100 + kind ----
+; ---- LMS fault ABI (docs/371): 100 + kind ----
 define internal void @__loment_fault(i32 %kind) {
   %c = add i32 %kind, 100
   %c64 = sext i32 %c to i64
@@ -3645,7 +3645,7 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **2026-11-21 改名**（用户裁决）：`vm` / `no_vm` → `lvm` / `no_lvm`。
     # 旧拼写**不是别名** —— `choose vm` 从此是未定义的开关（E022），Potato v13–v23
     # 的对象仍按旧拼写回放（v24 起才是这一格）。
-    # **2026-11-21 第三个取值**（用户裁决，`docs/371`）：`lvm_dismemory_true` ——
+    # **2026-11-21 第三个取值**（用户裁决，`docs/373`）：`lvm_dismemory_true` ——
     # LVM 在**没有地址**的内存模型上跑（体 + 句柄 + 三维排他）。它仍然是一个 `lvm`
     # 取值（第五维），只是给引擎多一句"按 dismemory 跑"的声明；IR 末尾因此多一行
     # `; loment-memory: dismemory`（与 `; loment-gc: no_gc` 同一条路），原生链接器拒收。
@@ -16071,7 +16071,7 @@ class _Ir:
                     join = self.l("lmsjoin")
                     self.w(f"br label %{join}")
                 else:
-                    # **第 5 级**：拒不了就崩。盘古档带 kind（`docs/363`）。
+                    # **第 5 级**：拒不了就崩。盘古档带 kind（`docs/371`）。
                     self.w(self._lms_fatal(1))
                     self.w("unreachable")
                 self.terminated = True
@@ -17530,7 +17530,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 只有 `no_gc` 才多发这一行，其余档的 IR 一个字节都不变。
     if mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "no_gc":
         out.append("; loment-gc: no_gc")
-    # `choose lvm_dismemory_true`（`docs/371`）：产物**自己声明**"我按没有地址的那一档跑"。
+    # `choose lvm_dismemory_true`（`docs/373`）：产物**自己声明**"我按没有地址的那一档跑"。
     # 与 `no_gc` 同一条纪律：只有这一档才多发一行，默认 `no_lvm` / `lvm` 的 IR 一个字节
     # 都不变。**原生链接器读到这行就拒**（原生有地址，链出来只会静默错编）。
     if mod.chooses.get("lvm", CORE_DEFAULTS["lvm"]) == "lvm_dismemory_true":

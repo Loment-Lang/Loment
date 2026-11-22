@@ -132,9 +132,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_grammar_test",
                  # `lmgr`: 38 槽注册表与 19 项能力表，以及二进制如实说出去（docs/303）
                  "lmgr_test",
-                 # 独立公证人（`docs/370`）：只读 Potato，零工具链 import。
+                 # 独立公证人（`docs/372`）：只读 Potato，零工具链 import。
                  "lnotary_test",
-                 # LMS × LVM 时间桥梁（`docs/363`）：原生 fault ABI 101、`sw_cap` 101、
+                 # LMS × LVM 时间桥梁（`docs/371`）：原生 fault ABI 101、`sw_cap` 101、
                  # 默认无 fault 符号、缓存键看见用户开关。
                  "lms_bridge_test",
                  "loment_tools_test", "loment_p7_test", "loment_p8_test", "loment_p9_test",
@@ -230,13 +230,13 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # `sw_tag` 4 位标签（概率）。合法程序三档同答；越界/悬垂/堆越界带站点；
                  # 复用碰撞里 sw_cap 全抓、sw_tag 至少漏一次（声明降级的判据）。
                  "lvm_cap_test",
-                 # LVM-A 的底层设施（`docs/363` / `docs/364`）：显式栈引擎 + checkpoint/resume。
+                 # LVM-A 的底层设施（`docs/371` / `docs/364`）：显式栈引擎 + checkpoint/resume。
                  # 两个引擎同答；任意指令边界存/取；调用栈进快照；链式；`sw_tag` 状态也进快照。
                  "lvm_cp_test",
-                 # **没有地址**的那一档（`docs/371`）：令牌/体/三维排他、K=0/1/7 同答、
+                 # **没有地址**的那一档（`docs/373`）：令牌/体/三维排他、K=0/1/7 同答、
                  # F01–F06 的码与站点、身份预算、原生拒绝、与基质不叠加。
                  "lvm_dismemory_test",
-                 # 盘古的三件（`docs/363`）：封印 / 零 import 验证器 / 同产物创世衰减。
+                 # 盘古的三件（`docs/371`）：封印 / 零 import 验证器 / 同产物创世衰减。
                  # 篡改三种都红；hw_cap 降级与伪造；B5 同字节码；`sw_tag` 的 no_dangling 必须 floored。
                  "lvm_seal_test",
                  # LVM 的性能护栏（`docs/226` §2.2）：绝对天花板 + 只判符号，外加"账上真有这张表"。
@@ -539,7 +539,7 @@ SHARD_COST = {
     "lvm_cap_test": 33.5,      # 2026-11-21：本机 33.0s（`sw_tag` 扫复用长度 + 详细化三条）
     # 2026-11-21（`docs/364`）：`sw_tag` 快照一条。
 
-    # 2026-11-20（`docs/363`）：显式栈引擎要编语料两次 + 32 个采样点各存/取一次。
+    # 2026-11-20（`docs/371`）：显式栈引擎要编语料两次 + 32 个采样点各存/取一次。
     "lvm_cp_test": 21.0,
     # 封印/验证器/派生都是纯标准库；大头是判 F 的子进程与判 A/B 的编译。
     "lvm_seal_test": 1.0,

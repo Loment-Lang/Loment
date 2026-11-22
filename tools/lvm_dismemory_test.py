@@ -24,8 +24,17 @@
   文案里没有体号/坐标/体素。
 * **L 时钟被虚拟化** —— 228/201 在 dismemory 下按**已执行指令数**给虚拟钟；
   同一程序 K=0/1/7 的 stdout（含两次时间戳）逐字节相同。
-* **S I/O 可用** —— `syscall4p` / `sys` 库的指针槽不 ptrtoint：`print` 与
-  `sys_write` 在 dismemory 下真的写出字节，K=0/1/7 同答（`docs/374` §3）。
+* **S I/O 可用** —— `syscall4p` / `sysio` 库的指针槽不 ptrtoint：`print` 与
+  `sys_write` 在 dismemory 下真的写出字节，K=0/1/7 同答（`docs/375` §3）。
+* **M 表示不变性** —— 深度 3（`docs/375` §2）：体不再有连续字节数组，内容是一张
+  稀疏格映射。`shuffle=0/1/7` 与 100 次确定性随机摆法下，stdout / stderr / 退出码
+  逐字节相同 —— 任何"基址 + 字节数"的路径都会在换摆法时露出来。
+* **N 体内没有连续字节数组** —— 分配 1 MiB、只写 2 字节，背后只有 2 个格；
+  体对象上没有 `data` 那样的可按下标寻址的缓冲区。
+* **P 语义保留** —— 同一份程序，普通档与 `lvm_dismemory_true` 档（shuffle=0/1/7）
+  rc 与 stdout 逐字节相同：**换表示不是换语言**。排除项写在 `_P_EXCLUDED` 里：
+  那几份把 `str_ptr(...) as u64` 交给内核，按设计就是 F04 —— 它们是 S1 那条
+  类型化指针通道要解决的写法，与本判据无关。
 
 ⚠ **为什么有一半夹具是手写 IR**：ptrtoint / inttoptr / 跨体减法这些操作**在 Loment 源里
 写不出来**（这正是这一档要的）；要证明 LVM 边界拒绝它们，只能直接喂 IR。合法路径
@@ -64,11 +73,13 @@ def _ir(src: str) -> str:
         return lomentc.emit_llvm(mod, ROOT, deps)
 
 
-def _run(ir: str, rel: int = 0, substrate: str = "none") -> tuple[int, bytes, str]:
+def _run(ir: str, rel: int = 0, substrate: str = "none",
+         shuffle: int = 0) -> tuple[int, bytes, str]:
     out = io.BytesIO()
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        rc = lvm.run_ir(ir, out, relocate_every=rel, substrate=substrate)
+        rc = lvm.run_ir(ir, out, relocate_every=rel, substrate=substrate,
+                        shuffle=shuffle)
     return rc, out.getvalue(), err.getvalue()
 
 
@@ -359,7 +370,7 @@ fn _start() {
 
 
 def test_typed_pointer_syscalls_write_bytes() -> None:
-    """判 S（`docs/374` §3）：dismemory 下的 I/O 不经过 ptrtoint。
+    """判 S（`docs/375` §3）：dismemory 下的 I/O 不经过 ptrtoint。
 
     `print` 与 `syscall4p` 的第三个实参是**类型化指针槽**：lowering 发 `ptr %t` 而不是
     `ptrtoint`，于是令牌原样进寄存器、运行期按号解码。K=0/1/7 的 stdout 必须逐字节同。
@@ -373,6 +384,105 @@ def test_typed_pointer_syscalls_write_bytes() -> None:
         outs.append(out)
     assert outs[0] == outs[1] == outs[2] == b"io ok\nB", outs
     print("      syscall4p/print 在 dismemory 下真的写出字节；K=0/1/7 同答")
+
+
+def test_representation_is_invariant_under_shuffle() -> None:
+    """判 M（`docs/375` §2.4）：摆法只改物理键，改不了任何可观察量。
+
+    深度 3 之后体是`逻辑格号 -> 字节`的稀疏映射。`--dismemory-shuffle N` 给每颗体一个
+    确定性的移位 —— 同一个逻辑下标落到不同的桶。**任何"基址 + 字节数"的访问路径**
+    在这种换摆法下都会读到别的格，于是 stdout / stderr / 退出码会变。这里用
+    `shuffle=0/1/7` 加 100 次固定种子的随机摆法把这件事钉住；故障详细块也必须逐字节同。
+    """
+    import random  # noqa: PLC0415
+
+    body = _ir(_BODY)
+    base = _run(body)
+    assert base[0] == 10, base
+    rng = random.Random(20261122)  # 固定种子：判据可复现
+    plans = [0, 1, 7] + [rng.randrange(1, 1 << 30) for _ in range(100)]
+    for sh in plans:
+        rc, out, err = _run(body, shuffle=sh)
+        assert (rc, out) == (base[0], base[1]), (
+            f"shuffle={sh} 改变了被解释程序的结果: rc={rc} out={out!r}\n{err[:300]}")
+    io_ir = _ir(_IO)
+    for sh in (0, 1, 7):
+        rc, out, _err = _run(io_ir, shuffle=sh)
+        assert (rc, out) == (0, b"io ok\nB"), (sh, rc, out)
+    errs = [_run(_HAND, shuffle=sh)[2] for sh in (0, 1, 7)]
+    assert errs[0] == errs[1] == errs[2], (
+        "换摆法改变了故障详细块：\n" + errs[0][:300] + "\n---\n" + errs[2][:300])
+    print(f"      shuffle=0/1/7 + 100 次随机摆法：rc/stdout/stderr 逐字节相同")
+
+
+def test_body_is_sparse_not_a_byte_array() -> None:
+    """判 N（`docs/375` §2.3）：体背后**没有连续字节数组**。
+
+    分配 1 MiB 只写 2 字节时，背后应当只有 2 个格 —— 一块可按下标寻址的缓冲区会
+    立刻铺满 1 MiB，而且访问路径一定写成 `base + k`。这条判据在换表示之前是红的：
+    那时的 `_DismBody` 有 `data = bytearray(size)`。
+    """
+    m0 = lvm.Dismem()
+    t0 = m0.alloc(1 << 20, kind="heap")
+    b0, off0 = m0.decode(t0, 1)
+    assert off0 == 0, off0
+    assert not hasattr(b0, "data"), "体上仍挂着可按下标寻址的连续缓冲区"
+    m0.put(t0, b"AB")
+    assert len(b0.cells) <= 2, f"写 2 字节却落了 {len(b0.cells)} 个格"
+    assert m0.get(t0, 4) == b"AB\0\0"
+    assert all(0 <= k < b0.size for k in b0.cells), "格号越出了体的逻辑尺寸"
+    m7 = lvm.Dismem(shuffle=7)
+    t7 = m7.alloc(1 << 20, kind="heap")
+    b7, _o7 = m7.decode(t7, 1)
+    m7.put(t7, b"AB")
+    assert m7.get(t7, 4) == m0.get(t0, 4), "换摆法改变了逻辑内容"
+    assert set(b7.cells) != set(b0.cells), "换摆法后物理键没变 —— 摆法没生效"
+    print("      1 MiB 只写 2 字节 ⇒ 2 个格；换摆法改物理键、不改逻辑内容")
+
+
+#: P 的排除项：这几份例子把 `str_ptr(...) as u64` 递给 syscall4 —— 在 dismemory 下
+#: 那就是 ptrtoint，按设计就该 F04（`docs/375` §3 的 `syscall4p` 才是那条通道）。
+#: **不是**表示层改了语义；把它们排除在外比"顺手改语料"诚实。
+_P_EXCLUDED = {
+    "tour.lomt": "str_ptr(...) as u64 交给 syscall4（F04 是本档的正确答复）",
+    "native_match_full.lomt": "同上",
+    "all_loment.lomt": "同上",
+}
+
+
+def _inject_marker(src: str) -> str:
+    """在 `module` 行之后插 `choose lvm_dismemory_true`（choose 必须在 module 之后）。"""
+    out, done = [], False
+    for line in src.splitlines(True):
+        out.append(line)
+        if not done and line.startswith("module "):
+            out.append("choose lvm_dismemory_true\n")
+            done = True
+    assert done, "源里没有 module 行"
+    return "".join(out)
+
+
+def test_dismemory_preserves_observable_semantics() -> None:
+    """判 P（`docs/375` §2.4）：换表示不是换语言。
+
+    同一份例子，普通档与 dismemory 档各跑一遍 —— rc 与 stdout 必须逐字节相同，
+    而且 dismemory 侧在 shuffle=0/1/7 下也相同。这条比 M 更硬：M 只证明"摆法
+    不影响"，P 证明"整个表示层(稀疏格)不影响程序看到的东西"。
+    """
+    for rel in ("loment/examples/user_hello.lomt", "loment/examples/switch.lomt"):
+        entry = ROOT / rel
+        src = entry.read_text(encoding="utf-8")
+        plain = _run(_ir(src))
+        dis_ir = _ir(_inject_marker(src))
+        got = [_run(dis_ir, shuffle=sh) for sh in (0, 1, 7)]
+        for sh, g in zip((0, 1, 7), got):
+            assert (g[0], g[1]) == (plain[0], plain[1]), (
+                f"{rel} shuffle={sh}: 普通档 rc={plain[0]} out={plain[1][:40]!r} / "
+                f"dismemory rc={g[0]} out={g[1][:40]!r}")
+    for name, why in _P_EXCLUDED.items():
+        assert (ROOT / "loment" / "examples" / name).exists(), name
+        assert why, name
+    print("      普通档 vs dismemory（shuffle=0/1/7）：rc 与 stdout 逐字节相同")
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 

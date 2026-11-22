@@ -76,7 +76,9 @@ MAX_VERIFIER_BYTES = 128 * 1024
 #: 因为"信任只是搬家"（`docs/360` B8）。2026-11-21 的实测是 9,450 行 / 372,293 字节
 #: —— 段错误详细化、dismemory 与自举 `sw_tag` 都落进了这两份源码，原来的 8,000/320 KiB
 #: 已经装不下；抬到 10,000 行 / 400 KiB，并在 `docs/363` §2 记下这次抬价。
-INTERPRETER_BUDGET = {"lines": 10000, "bytes": 400 * 1024}
+#: 2026-11-22（LVM-A 二期 S3/S4：镜像的格表与快照段）再抬到 11,000 行 /
+#: 432 KiB —— 记账在 `docs/375` §2.5。
+INTERPRETER_BUDGET = {"lines": 11000, "bytes": 432 * 1024}
 INTERPRETER_SOURCES = {
     "reference": Path(__file__).resolve().parent / "lvm.py",
     "selfhost": Path(__file__).resolve().parent.parent / "loment" / "tools" / "lvm.lomt",

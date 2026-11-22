@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import shlex
 import shutil
@@ -464,7 +466,693 @@ def test_twin_error_parity() -> None:
     print(f"      四份 IR 的退出码 / stdout / stderr 逐字节相同（{', '.join(_PARITY_CASES)}）")
 
 
+# ---------------------------------------------------------------- sw_cap（docs/363）
+#
+# `docs/360` B7：两套解释器对**同一故障**给同一 code + site。自举侧没有 SSA 能力表
+# （`VAL_REC` 只有 16 字节），所以它落的是**按地址**的那一半；三条探针钉住两边的
+# 退出码与站点，合法语料钉住「加了检查，没加行为」。
+
+_CAP_PROBES = {
+    "cap_oob": """module cap_oob
+choose runtime
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let i: u32 = 10;
+    a[i] = 99;
+    syscall4(60, a[0] as u64, 0, 0);
+}
+""",
+    "cap_uaf": """module cap_uaf
+choose runtime
+use bytes
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    free(p);
+    let q: ptr = r64(slot, 0) as ptr;
+    let v: u32 = load32(q, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+""",
+    "cap_heap_oob": """module cap_heap_oob
+choose runtime
+use bytes
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 16, 99);
+    syscall4(60, 0, 0, 0);
+}
+""",
+}
+
+
+def _ref_ir_text(text: str, name: str, td: Path) -> Path:
+    src = td / f"{name}.lomt"
+    src.write_text(text, encoding="utf-8", newline="\n")
+    mod = lomentc.load(src)
+    deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+    errs = lomentc.check(mod, deps=deps)
+    assert not errs, f"{name}: {errs[:2]}"
+    ll = td / f"{name}.ll"
+    with ll.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(lomentc.emit_llvm(mod, ROOT, deps))
+    return ll
+
+
+def _ref_cap(ll: Path, argv0: str) -> tuple[int, bytes, str]:
+    import io as _io  # noqa: PLC0415
+    buf, err = _io.BytesIO(), _io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = lvm.run_ir(ll.read_text(encoding="utf-8"), buf, None, [argv0],
+                        "t0", substrate="sw_cap")
+    return rc, buf.getvalue(), err.getvalue()
+
+
+def _run_mirror_args(mir: Path, ll: Path, extra: list[str],
+                     timeout: int = 180, tag_extra: str = "") -> tuple[int, bytes, bytes]:
+    """镜像 + 任意附加实参 -> `(rc, stdout, stderr)`。输入路径与 `_mirror_input_path` 同名。
+
+    `tag_extra` 给 WSL 里的那份输入换个名字 —— 用来量"宿主 argv 与快照里的不同"
+    （W5 的命令行那条判据）。同一内容、不同路径 ⇒ FNV 仍匹配。
+    """
+    args = " ".join(extra)
+    if sys.platform != "win32":
+        r = subprocess.run([str(mir), str(ll), *extra], capture_output=True,
+                           timeout=timeout, shell=False)
+        return r.returncode, r.stdout, r.stderr
+    tag = f"/tmp/lvm_twin_{os.getpid()}{tag_extra}"
+    script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.err; "
+              f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
+              f"chmod +x {tag}.bin && cd /tmp && "
+              f"timeout {timeout} {tag}.bin {tag}.ll {args} > {tag}.out 2> {tag}.err; echo -n $?")
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                       capture_output=True, timeout=timeout + 180, shell=False)
+    import base64  # noqa: PLC0415
+    out = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {tag}.out 2>/dev/null || true"]).stdout
+    err = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {tag}.err 2>/dev/null || true"]).stdout
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    return (rc,
+            base64.b64decode(out) if out.strip() else b"",
+            base64.b64decode(err) if err.strip() else b"")
+
+
+def _run_mirror_cap(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes, bytes]:
+    return _run_mirror_args(mir, ll, ["sw_cap"], timeout)
+
+
+def _snapshot_token(td: Path, name: str) -> str:
+    """镜像**看得见**的快照路径（Windows 上在 WSL 的 `/tmp`，Linux 上就是临时目录）。"""
+    if sys.platform != "win32":
+        return str(td / name)
+    snap = f"/tmp/lvm_cross_{os.getpid()}_{name}"
+    subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                   capture_output=True, timeout=60, shell=False)
+    return snap
+
+
+def _snapshot_to_mirror(blob: bytes, snap: str) -> None:
+    """参考侧的快照字节送到镜像能读的位置（Windows 上经宿主临时文件 + WSL 的 `cp`）。"""
+    if sys.platform != "win32":
+        Path(snap).write_bytes(blob)
+        return
+    host = Path(tempfile.gettempdir()) / f"lvm_cross_{os.getpid()}.snap"
+    host.write_bytes(blob)
+    subprocess.run([*_WSLCMD, "bash", "-lc",
+                    f"cp {ELF._wsl_path(host)} {snap}"],
+                   capture_output=True, timeout=120, shell=False)
+
+
+def _snapshot_from_mirror(snap: str) -> bytes:
+    if sys.platform != "win32":
+        p = Path(snap)
+        return p.read_bytes() if p.exists() else b""
+    out = _build([*_WSLCMD, "bash", "-lc",
+                  f"base64 -w0 {snap} 2>/dev/null || true"]).stdout
+    import base64  # noqa: PLC0415
+    return base64.b64decode(out) if out.strip() else b""
+
+
+def _fault_line(err: str) -> str:
+    line = next((x for x in err.splitlines() if x.startswith("lvm: F0")), "")
+    return line.split(" (")[0]          # 码 + 站点；witness 文案两边可以不同
+
+
+def test_cap_faults_match_reference() -> None:
+    """判 I（B7）：越界 / 悬垂 / 堆越界 —— 两边的退出码与 `F0k + 站点` 相同。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang（这条判据要它把种子编成 stage1）")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for name, text in _CAP_PROBES.items():
+            ll = _ref_ir_text(text, name, td)
+            rrc, _rout, rerr = _ref_cap(ll, "prog")
+            mrc, _mout, merr = _run_mirror_cap(mir, ll)
+            assert rrc == mrc, f"[{name}] 退出码不同：参考 {rrc} / 镜像 {mrc}"
+            rl = _fault_line(rerr)
+            ml = _fault_line(merr.decode("utf-8", "replace"))
+            assert rl and ml, f"[{name}] 有一边没有故障行：参考 {rerr!r} / 镜像 {merr!r}"
+            assert rl == ml, f"[{name}] 站点不同：参考 {rl!r} / 镜像 {ml!r}"
+    print("      三条故障：两边的退出码与 `F0k + 站点` 逐字节同")
+
+
+def test_cap_faults_render_details_on_both_sides() -> None:
+    """判 O（`docs/366`）：同一个越界，两边的详细块**形状**都在；首行仍是故障行。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for name, text in list(_CAP_PROBES.items())[:1]:
+            ll = _ref_ir_text(text, name, td)
+            rrc, _rout, rerr = _ref_cap(ll, "prog")
+            mrc, _mout, merr = _run_mirror_cap(mir, ll)
+            assert rrc == mrc, f"[{name}] 退出码不同：参考 {rrc} / 镜像 {mrc}"
+            for side, err in (("参考", rerr), ("镜像", merr.decode("utf-8", "replace"))):
+                assert err.splitlines()[0].startswith("lvm: F0"), (side, err[:200])
+                for want in ("error[F01]:", "  --> IR:", "这里访问", "= 事实：",
+                             "= 站点：函数 ", "= 建议："):
+                    assert want in err, (side, want, err[:300])
+            assert "= 对象 #" in rerr or "最近的活对象" in rerr, rerr[:400]
+            assert "= 对象 #" in merr.decode("utf-8", "replace") or \
+                "最近的活对象" in merr.decode("utf-8", "replace"), merr[:400]
+    print("      越界：两边都是首行 + Lomenterr 形状的详细块")
+
+
+def test_cap_legal_programs_match() -> None:
+    """判 J：合法语料在 `sw_cap` 下两边同答 —— 加了检查，没加行为。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    ran = 0
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        for rel in CORPUS:
+            ll = _ref_ir(ROOT / rel, td)
+            try:
+                rrc, rout, _rerr = _ref_cap(ll, _mirror_input_path(ll))
+            except Exception:  # noqa: BLE001
+                continue                 # 参考自己跑不了（`lvm_test` 的棘轮管它）
+            mrc, mout, merr = _run_mirror_cap(mir, ll)
+            assert (rrc, rout) == (mrc, mout), (
+                f"{rel}: 参考 rc={rrc} out={rout[:40]!r} / 镜像 rc={mrc} "
+                f"out={mout[:40]!r} err={merr[-120:]!r}")
+            ran += 1
+    assert ran >= len(CORPUS) - 2, f"只跑成了 {ran} 份"
+    print(f"      {ran} 份合法语料：sw_cap 下两边 stdout + rc 逐字节同")
+
+
+_CKPT_PROG = """module cap_ckpt
+choose runtime
+
+fn add(a: u32, b: u32) -> u32 {
+    return a + b;
+}
+
+fn _start() {
+    print("A");
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 10 {
+        s = add(s, i);
+        i = i + 1;
+    }
+    print("B");
+    syscall4(60, s as u64, 0, 0);
+}
+"""
+
+
+def test_checkpoint_matches_reference() -> None:
+    """判 K：同一份 IR、同一个停点 —— 两边各自存/取，最后的 rc + stdout 相同。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CKPT_PROG, "cap_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        for at in (0, 40):
+            b1, b2 = io.BytesIO(), io.BytesIO()
+            _rc1, blob = lvm.run_checkpointed(ir, b1, "none", at, None, ["prog"])
+            assert blob is not None, f"参考实现在 {at} 条指令处没有停"
+            rc2, blob2 = lvm.run_checkpointed(ir, b2, "none", None, blob, ["prog"])
+            assert blob2 is None
+            ref = (rc2, b1.getvalue() + b2.getvalue())
+            assert ref == (base_rc, base.getvalue()), (
+                f"参考自己就不一致（at={at}）：{(base_rc, base.getvalue())} vs {ref}")
+
+            snap = f"/tmp/lvm_ckpt_{os.getpid()}_{at}.snap"
+            subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                           capture_output=True, timeout=60, shell=False)
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={snap}"])
+            mrc2, mout2, merr2 = _run_mirror_args(mir, ll, [f"resume={snap}"])
+            assert (mrc1, mrc2) == (0, ref[0]), (
+                f"镜像存/取退出码不对（at={at}）：{mrc1}/{mrc2}（参考 {ref[0]}）"
+                f" err1={merr1[-120:]!r} err2={merr2[-120:]!r}")
+            assert mout1 + mout2 == ref[1], (
+                f"镜像 stdout 不同（at={at}）：{mout1 + mout2!r} vs {ref[1]!r}")
+    print("      停点 0 与 40：两边各自存/取，最后的 rc + stdout 相同")
+
+
+def test_checkpoint_cross_reference_first() -> None:
+    """判 L（`docs/365`）：参考存下的快照，**镜像**接着跑 —— 与一口气跑完同 rc + stdout。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CKPT_PROG, "cross_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        for at in (0, 40):
+            pre = io.BytesIO()
+            _prc, blob = lvm.run_checkpointed(ir, pre, "none", at, None, ["prog"])
+            assert blob is not None, f"参考在 {at} 条指令处没有停"
+            snap = _snapshot_token(td, f"ref_{at}.snap")
+            _snapshot_to_mirror(blob, snap)
+            mrc, mout, merr = _run_mirror_args(mir, ll, [f"resume={snap}"])
+            got = pre.getvalue() + mout
+            assert (mrc, got) == (base_rc, base.getvalue()), (
+                f"参考→镜像（at={at}）：rc={mrc}（要 {base_rc}）"
+                f" stdout={got!r}（要 {base.getvalue()!r}）err={merr[-160:]!r}")
+    print("      停点 0 与 40：参考存 → 镜像恢复，rc + stdout 与一口气跑完相同")
+
+
+def test_checkpoint_cross_mirror_first() -> None:
+    """判 M（`docs/365`）：镜像存下的快照，**参考**接着跑 —— 同上一条的反方向。"""
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CKPT_PROG, "cross_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        for at in (0, 40):
+            snap = _snapshot_token(td, f"mir_{at}.snap")
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={snap}"])
+            assert mrc1 == 0, (
+                f"镜像在 {at} 处没有正常停（rc={mrc1}）：{merr1[-160:]!r}")
+            blob = _snapshot_from_mirror(snap)
+            assert blob, f"镜像没有写下快照：{snap}"
+            post = io.BytesIO()
+            rc2, _blob2 = lvm.run_checkpointed(ir, post, "none", None, blob, ["prog"])
+            got = mout1 + post.getvalue()
+            assert (rc2, got) == (base_rc, base.getvalue()), (
+                f"镜像→参考（at={at}）：rc={rc2}（要 {base_rc}）"
+                f" stdout={got!r}（要 {base.getvalue()!r}）")
+    print("      停点 0 与 40：镜像存 → 参考恢复，rc + stdout 与一口气跑完相同")
+
+
+_CMDLINE_PROG = """module w5_cmdline
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(64);
+    let at: i64 = (0 as i64) - (100 as i64);
+    let fd: i64 = syscall4(257, at as u64, str_ptr("/proc/self/cmdline") as u64, 0 as u64);
+    let n1: i64 = syscall4(0, fd as u64, p as u64, 8 as u64);
+    let i: u32 = 0;
+    while i < 20 {
+        i = i + 1;
+    }
+    let n2: i64 = syscall4(0, fd as u64, (p as u64) + (8 as u64), 40 as u64);
+    let n: u64 = (n1 + n2) as u64;
+    syscall4(1, 1 as u64, p as u64, n);
+    syscall4(3, fd as u64, 0 as u64, 0 as u64);
+    syscall4(60, 0 as u64, 0 as u64, 0 as u64);
+}
+"""
+
+
+def test_checkpoint_cross_carries_the_command_line() -> None:
+    """判 N（W5，`docs/360` §4）：合成命令行的**字节与读游标**跨实现交接。
+
+    两个方向各带一个"宿主 argv 与快照里不同"的陷阱：参考存的那份由镜像在**另一个
+    路径名**下恢复；镜像存的那份由参考在**另一组 argv** 下恢复。只认宿主 argv 的实现
+    会打印另一个名字 —— 快照里的那一份必须盖过它。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_CMDLINE_PROG, "w5_cmdline", td)
+        ir = ll.read_text(encoding="utf-8")
+        argv0 = _mirror_input_path(ll)
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, [argv0], "t0")
+        assert base_rc == 0 and base.getvalue().endswith(b"\0"), base.getvalue()
+        ghost = td / "w5_ghost.ll"
+        ghost.write_bytes(ll.read_bytes())
+        for at in (0, 20, 40, 50):
+            pre = io.BytesIO()
+            _rc, blob = lvm.run_checkpointed(ir, pre, "none", at, None, [argv0])
+            assert blob is not None, f"参考在 {at} 处没有停"
+            snap = _snapshot_token(td, f"w5_ref_{at}.snap")
+            _snapshot_to_mirror(blob, snap)
+            mrc, mout, merr = _run_mirror_args(
+                mir, ghost, [f"resume={snap}"], tag_extra=f"_g{at}")
+            assert (mrc, pre.getvalue() + mout) == (base_rc, base.getvalue()), (
+                f"参考→镜像（at={at}）：rc={mrc} out={pre.getvalue() + mout!r}"
+                f"（要 {base.getvalue()!r}）err={merr[-160:]!r}")
+
+            msnap = _snapshot_token(td, f"w5_mir_{at}.snap")
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={msnap}"])
+            assert mrc1 == 0, f"镜像在 {at} 处没有停：{merr1[-160:]!r}"
+            blob2 = _snapshot_from_mirror(msnap)
+            post = io.BytesIO()
+            rc2, _b = lvm.run_checkpointed(ir, post, "none", None, blob2,
+                                           ["different-argv"])
+            assert (rc2, mout1 + post.getvalue()) == (base_rc, base.getvalue()), (
+                f"镜像→参考（at={at}）：rc={rc2} out={mout1 + post.getvalue()!r}"
+                f"（要 {base.getvalue()!r}）")
+    print("      停点 0/20/40/50：两边都按快照里的命令行与游标接着读")
+
+
+#: `docs/368` dismemory 的孪生夹具：一份**真前端**的合法程序 + 五份**手写**的禁止操作。
+#: 手写的那几份在 Loment 源里写不出来（`ptrtoint` / 跨体减法 / `inttoptr`）—— 那正是
+#: 这一档要的；要证明边界拒绝它们，只能直接喂 IR。
+_DIS_SRC = """module dis_twin
+choose lvm_dismemory_true
+choose runtime
+use bytes
+
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        s = s + a[i];
+        i = i + 1;
+    }
+    let p: ptr = alloc(16);
+    store32(p, 0, s);
+    let v: u32 = load32(p, 0);
+    free(p);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+_DIS_FAULTS = {
+    "oob": """; loment-memory: dismemory
+@x = global [4 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %q = getelementptr [4 x i8], ptr @x, i64 0, i64 4
+  %v = load i8, ptr %q
+  ret void
+}
+""",
+    "pti": """; loment-memory: dismemory
+@x = global [4 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %n = ptrtoint ptr @x to i64
+  ret void
+}
+""",
+    "cross": """; loment-memory: dismemory
+@x = global [4 x i8] zeroinitializer
+@y = global [4 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %d = sub i64 @x, @y
+  ret void
+}
+""",
+    "dang": """; loment-memory: dismemory
+define ptr @mk() {
+entry:
+  %p = alloca [4 x i8]
+  ret ptr %p
+}
+define void @_start() {
+entry:
+  %p = call ptr @mk()
+  store i8 1, ptr %p
+  ret void
+}
+""",
+    "null": """; loment-memory: dismemory
+define void @_start() {
+entry:
+  %v = load i8, ptr null
+  ret void
+}
+""",
+}
+
+
+def test_dismemory_matches_reference() -> None:
+    """判 L（`docs/368`）：没有地址那一档的孪生 —— 合法程序的 rc/stdout + 故障的码/站点。
+
+    详细块的**文案可以不同**（`docs/366` §5.3：两边不主张逐字节同文），但 `lvm: F0k`
+    的码与 `函数:块#序号` 必须同 —— 那是"两边死在同一处"的那句话。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang/WSL（要它把种子编成 stage1）")
+        return
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "dis.lomt"
+        src.write_text(_DIS_SRC, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, errs[:2]
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        ll = td / "dis.ll"
+        ll.write_text(ir, encoding="utf-8", newline="\n")
+        for k in (0, 1, 7):
+            buf = io.BytesIO()
+            ref_rc = lvm.run_ir(ir, buf, relocate_every=k)
+            rc, out, err = _run_mirror_args(mir, ll, [f"relocate={k}"])
+            assert ref_rc == 10, (ref_rc, k)
+            assert (rc, out) == (ref_rc, buf.getvalue()), (
+                k, rc, ref_rc, out[:80], buf.getvalue()[:80], err[-300:])
+        for name, body in _DIS_FAULTS.items():
+            p = td / f"{name}.ll"
+            p.write_text(body, encoding="utf-8", newline="\n")
+            e = io.StringIO()
+            with contextlib.redirect_stderr(e):
+                ref_rc = lvm.run_ir(body, io.BytesIO())
+            rc, _out, err = _run_mirror_args(mir, p, [])
+            merr = err.decode("utf-8", "replace")
+            assert rc == ref_rc, (name, rc, ref_rc, merr[-300:])
+            assert _fault_line(e.getvalue()) == _fault_line(merr), (
+                name, e.getvalue()[:200], merr[:200])
+    print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同")
+
+
+#: 判 M 的夹具：合法程序 + 未复用悬垂 + 碰撞扫描（与 `lvm_cap_test` 判 H/I 同一形状，
+#: 但这里的重点是**两边同答**，不是参考自己）。
+_TAG_SAFE = """module tag_safe
+choose runtime
+use bytes
+
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        s = s + a[i];
+        i = i + 1;
+    }
+    let p: ptr = alloc(16);
+    store32(p, 0, s);
+    let v: u32 = load32(p, 0);
+    free(p);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+_TAG_UAF = """module tag_uaf
+choose runtime
+use bytes
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    free(p);
+    let q: ptr = r64(slot, 0) as ptr;
+    let v: u32 = load32(q, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+_TAG_COLL = """module tag_coll
+choose runtime
+use bytes
+
+fn w64(p: ptr, off: u32, v: u64) {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (i * 8)) & 255) as u8);
+        i = i + 1;
+    }
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let p: ptr = alloc(16);
+    store32(p, 0, 7);
+    let slot: ptr = alloc(8);
+    w64(slot, 0, p as u64);
+    let alias: ptr = r64(slot, 0) as ptr;
+    free(alias);
+    let k: u32 = 0;
+    while k < @N@ {
+        let q: ptr = alloc(16);
+        free(q);
+        k = k + 1;
+    }
+    let last: ptr = alloc(16);
+    store32(last, 0, 9);
+    let v: u32 = load32(p, 0);
+    syscall4(60, v as u64, 0, 0);
+}
+"""
+
+
+def _run_ref_tag(ir: str) -> tuple[int, bytes, str]:
+    """参考侧跑一遍 `sw_tag`；stderr 单独要回来（故障行在里面）。"""
+    out, err = io.BytesIO(), io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = lvm.run_ir(ir, out, None, ["prog"], "t0", substrate="sw_tag")
+    return rc, out.getvalue(), err.getvalue()
+
+
+def test_sw_tag_matches_reference() -> None:
+    """判 M（`docs/364` §2）：自举镜像也有 `sw_tag`，且与参考**同答**。
+
+    4 位标签、确定性轮转、概率检测：合法程序两边都过；未复用的悬垂两边都是 F02；
+    复用长度 N=0..16 扫一遍，两边在**同一个 N** 漏（标签碰撞）—— 那才是"模拟了 4 位"
+    的证据，而不是"恰好都抓得住"。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang/WSL（要它把种子编成 stage1）")
+        return
+    mir = _mirror()
+
+    def build(name: str, body: str, td: Path) -> tuple[str, Path]:
+        src = td / f"{name}.lomt"
+        src.write_text(body, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, td, entry=src)
+        errs = lomentc.check(mod, deps=deps)
+        assert not errs, errs[:2]
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        ll = td / f"{name}.ll"
+        ll.write_text(ir, encoding="utf-8", newline="\n")
+        return ir, ll
+
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ir, ll = build("tag_safe", _TAG_SAFE, td)
+        ref_rc, ref_out, _e = _run_ref_tag(ir)
+        rc, out, _err = _run_mirror_args(mir, ll, ["sw_tag"])
+        assert (rc, out) == (ref_rc, ref_out) == (10, b""), (rc, ref_rc, out)
+        ir, ll = build("tag_uaf", _TAG_UAF, td)
+        ref_rc, ref_out, ref_err = _run_ref_tag(ir)
+        rc, out, err = _run_mirror_args(mir, ll, ["sw_tag"])
+        assert (rc, out) == (ref_rc, ref_out), (rc, ref_rc, out[:60])
+        assert _fault_line(err.decode("utf-8", "replace")) == _fault_line(ref_err), (
+            ref_err[:160], err[:160])
+        passes = faults = 0
+        for n in range(17):
+            ir, ll = build(f"tag_coll_{n}", _TAG_COLL.replace("@N@", str(n)), td)
+            ref_rc, ref_out, ref_err = _run_ref_tag(ir)
+            rc, out, err = _run_mirror_args(mir, ll, ["sw_tag"])
+            assert (rc, out) == (ref_rc, ref_out), (
+                f"N={n}: rc {rc} vs {ref_rc}", n, out[:40], ref_out[:40])
+            if ref_rc == 100 + lvm.FAULT_DANGLING:
+                assert _fault_line(err.decode("utf-8", "replace")) == _fault_line(ref_err), (
+                    n, ref_err[:120], err[:120])
+                faults += 1
+            else:
+                passes += 1
+        assert passes and faults, f"没有出现标签碰撞（过 {passes} / 故障 {faults}）"
+    print(f"      sw_tag：合法同答、未复用悬垂同码同站点；N=0..16 里 "
+          f"{faults} 抓 / {passes} 漏（两边同一批）")
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+
 
 
 def main() -> int:

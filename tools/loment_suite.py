@@ -152,11 +152,17 @@ def run_unittest(case: type, suite: str) -> int:
 
         def addFailure(self, test: unittest.TestCase, err) -> None:  # noqa: ANN001
             super().addFailure(test, err)
-            self._line("FAIL", test, f": {err[0].__name__}: {err[1]}")
+            self._line("FAIL", test, f": {_last_line(err)}")
 
         def addError(self, test: unittest.TestCase, err) -> None:  # noqa: ANN001
             super().addError(test, err)
-            self._line("FAIL", test, f": {err[0].__name__}: {err[1]}")
+            self._line("FAIL", test, f": {_last_line(err)}")
+
+    def _last_line(err) -> str:  # noqa: ANN001
+        # unittest 的 `err` 是**traceback 文本**，不是 `(type, value)` —— 拿 `err[0].__name__`
+        # 会在第一条失败时把运行器自己打死，整条套件于是报成一个看不出原因的 `*`。
+        lines = [x.strip() for x in str(err).splitlines() if x.strip()]
+        return lines[-1][:300] if lines else "?"
 
     cases = unittest.TestLoader().loadTestsFromTestCase(case)
     result = unittest.TextTestRunner(
@@ -168,7 +174,7 @@ def run_unittest(case: type, suite: str) -> int:
         tail += f", {nskip} SKIP"
     if failed:
         tail += f", {len(failed)} 失败"
-        why = "；".join(f"{n}: {e[0].__name__}: {str(e[1])[:400]}".replace("\n", " ")
+        why = "；".join(f"{n}: {_last_line(e)}".replace("\n", " ")
                         for n, e in failed)
         tail += f"\n  红: {why}"
     print(tail)

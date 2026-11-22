@@ -8,6 +8,10 @@
 //   loment/selfhost/potato.lomt   pt_surf_code     (自举侧的 `surfaces`)
 // 校验: python tools/lom_audit.py + python tools/loment_net_test.py
 //
+// 2026-11-21.1: 补上 `getpid`(39)/`uname`(63)/`time`(201)/`clock_gettime`(228) ——
+//   `docs/311` P0 把 PE shim 补齐了，运行时派发面因此与表同宽。下游影响：兼容线的
+//   PE 侧多出四个可派发号（都是 Linux 标准号，语义与 ELF 侧相同）；`uname` 是**合成**
+//   的 `Linux`，与宿主无关。
 // 2026-10-12.1: 联网面补完 —— `sendmsg`(46)/`recvmsg`(47)/`socketpair`(53)/
 //   `epoll_wait`(232)/`epoll_ctl`(233)/`epoll_create1`(291) 一起从 NotDispatched 移进
 //   `Syscall`，于是那一族**空了**（`docs/234`）。`select` 那一笔见 2026-10-11.2。
@@ -21,7 +25,7 @@ module net
 meta {
   schema = "fujo-net-spec/v1"
   title = "network surface contract: Linux syscall number -> surface"
-  version = "2026-10-12.1"
+  version = "2026-11-21.1"
   authority = "docs/224 §3（面进 Potato）+ docs/227（收口账）：本文件是那张表的单源，两边实现由它校验"
   layers {
     surface = "号 → 面的划分。**面名由用的人定** —— file/mem/net/proc 只是本仓库自己的划法，other 是兜底"
@@ -56,6 +60,7 @@ enum Syscall : u32 {
   poll         = 7   { surface = "net"  }
   brk          = 12  { surface = "mem"  }
   select       = 23  { surface = "net"  }
+  getpid       = 39  { surface = "proc" }
   socket       = 41  { surface = "net"  }
   connect      = 42  { surface = "net"  }
   accept       = 43  { surface = "net"  }
@@ -69,7 +74,10 @@ enum Syscall : u32 {
   setsockopt   = 54  { surface = "net"  }
   getsockopt   = 55  { surface = "net"  }
   exit         = 60  { surface = "proc" }
+  uname        = 63  { surface = "proc" }
+  time         = 201 { surface = "proc" }
   getdents64   = 217 { surface = "file" }
+  clock_gettime = 228 { surface = "proc" }
   openat       = 257 { surface = "file" }
   newfstatat   = 262 { surface = "file" }
   accept4      = 288 { surface = "net"  }

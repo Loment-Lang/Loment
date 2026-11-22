@@ -9,7 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 #: 认识的 Potato 版本上限。加一版要在这里加一 —— 这是公证人的规格，不是编译器的。
-MAX_VERSION = 23
+#: v24（2026-11-21）：第五维改名 `vm` → `lvm`；本文件的 `LVM_ON_VALUES` 两边都认。
+MAX_VERSION = 24
 
 #: 声明"这份产物要求公证"的用户开关。编译器把它记进 `switches`。
 CLAIM_SWITCH = "lnotary_true"
@@ -23,6 +24,8 @@ def lvm_enabled(doc: dict) -> bool:
     return doc.get("vm") in LVM_ON_VALUES or doc.get("lvm") == "lvm"
 
 SYSTEMS = ("gc", "runtime", "port", "vm", "lms", "lspe")
+#: v24 起第五维改名：`systems` 里的键也跟着叫 `lvm`（旧产物仍按 `vm` 读）。
+SYSTEMS_V24 = ("gc", "runtime", "port", "lvm", "lms", "lspe")
 SYSTEM_DETAIL = {"gc": "gc_ladder", "lms": "lms_levels", "lspe": "lspe"}
 LEVELS = ("lms_check", "lms_manage", "lms_guard", "lms_reject",
           "lms_crash", "lms_restart", "lms_seed")
@@ -114,11 +117,12 @@ def _check_systems(v: Verdict, doc: dict) -> None:
     if not isinstance(sy, dict):
         _err(v, "LNT-SYS", f"systems 必须是对象（六个系统各一条），得到 {type(sy).__name__}")
         return
-    _keys_check(v, "LNT-SYS", sy, SYSTEMS, "systems")
+    keys = SYSTEMS_V24 if v.version >= 24 else SYSTEMS
+    _keys_check(v, "LNT-SYS", sy, keys, "systems")
     ladder = doc.get("gc_ladder")
     levels = doc.get("lms_levels")
     lspe = doc.get("lspe")
-    for k in SYSTEMS:
+    for k in keys:
         if k not in sy:
             continue
         e = sy[k]

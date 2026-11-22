@@ -3,7 +3,7 @@
 
 **这一条为什么必须存在**：渠道（`LOMENT_CHANNEL`）不是一个命令，是**这条流水线**
 （`loment_dist.py`）—— 它把自举侧那一行常量翻成 `1` 再建包。**没有判据的话，那一步
-悄悄失效谁也不知道**。它当初守的是"发行版拒 `choose vm`"（用户 2026-10-11 定）；
+悄悄失效谁也不知道**。它当初守的是"发行版拒 `choose vm`"（用户 2026-10-11 定）；2026-11-21 起这一维拼写为 `lvm`；
 **2026-10-20 起五道闸全放开**（最后一道 `lspe` 随 0.1.5 落地），于是它现在守的是
 "注入仍然生效、而且只生效在那一处" —— 五份探针在两端都必须被**收**。
 
@@ -33,11 +33,11 @@ import loment_seed  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 SEED = loment_seed.SEED
 
-#: 探针：一份**声明了 `choose vm`** 的最小单元。**2026-10-17 起发行版也必须收它**
+#: 探针：一份**声明了 `choose lvm`** 的最小单元。**2026-10-17 起发行版也必须收它**
 #: （用户裁决：LVM 完成一大半）。与 `use libl`、`choose hosted` 同一个棘轮做法：
 #: 探针**留着**、期望**反转** —— 删掉等于把"这道闸曾经存在"一起删掉。
-PROBE_VM = "module probe_vm\n\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"
-#: 对照组：同样一份、**不声明** `choose vm` —— 两个驱动器都必须收。
+PROBE_LVM = "module probe_lvm\n\nchoose lvm\n\nfn f() -> u32 {\n    return 1;\n}\n"
+#: 对照组：同样一份、**不声明** `choose lvm` —— 两个驱动器都必须收。
 PROBE_PLAIN = "module probe_plain\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 探针：`choose hosted`（`docs/222` §4）。**2026-10-17 起发行版必须收它**（`#406` 开闸：
 #: V1 静态 `.a`（`#359`）与 V2 运行期 `.so`（`#360`）两半都落齐了）。与 `use libl` 那条
@@ -85,7 +85,7 @@ def test(fn):
 
 @test
 def test_repo_seed_is_dev_channel():
-    """仓里那份种子是 **dev** —— 于是本仓的工具链接受 `choose vm`（`docs/231` §2.2）。"""
+    """仓里那份种子是 **dev** —— 于是本仓的工具链接受 `choose lvm`（`docs/231` §2.2）。"""
     got = loment_seed.reference_ir("dev")
     assert SEED.exists(), f"缺种子 {SEED}（跑 python tools/loment_seed.py --emit）"
     want = SEED.read_text(encoding="utf-8")
@@ -120,7 +120,7 @@ def test_release_seed_differs_only_in_the_channel_constant():
         f"两个种子长度不同（dev {len(dev)}B vs release {len(rel)}B）—— 注入改的"
         "**不止那个常量**（`docs/231` §2.3）")
     diff = [i for i in range(len(dev)) if dev[i] != rel[i]]
-    assert diff, "两个种子一模一样 —— 渠道注入**根本没生效**（发行版会照收 `choose vm`）"
+    assert diff, "两个种子一模一样 —— 渠道注入**根本没生效**（发行版会照收 `choose lvm`）"
     assert len(diff) == CHANNEL_READ_SITES, (
         f"两个种子差 {len(diff)} 处（第 {diff[:5]} 个字符），而钉住的是 "
         f"{CHANNEL_READ_SITES} 处 —— 渠道常量被读到的**处数变了**。"
@@ -157,7 +157,7 @@ def test_dist_builds_with_the_release_seed():
     loment_dist._use_release_seed()
     assert loment_dist.ACTIVE_SEED == loment_dist.RELEASE_SEED, (
         "`emit()` 没有把打包用的种子换成发行版那份 —— 包里会是 dev 工具链，"
-        "于是发行版照样收 `choose vm`（`docs/231` §2.3）")
+        "于是发行版照样收 `choose lvm`（`docs/231` §2.3）")
     assert loment_dist.RELEASE_SEED.read_text(encoding="utf-8") == \
         loment_seed.reference_ir("release"), "落盘的发行版种子与现算的不一致"
 
@@ -226,7 +226,7 @@ def test_release_driver_refuses_channel_gated_constructs():
 
     机制同一条（读同一个渠道常量）。五道闸的历史：
 
-    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**2026-10-17 放开**
+    * **`choose lvm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**2026-10-17 放开**
       （用户裁决，LVM 完成一大半）：探针留着、期望反转，发行版现在必须**收**它；
     * **`choose hosted`** —— 另一维核心模式。**2026-10-17 放开**（`#406`：V1 与 V2 两半
       都落齐了）：探针留着、期望反转，发行版现在必须**收**它；
@@ -255,7 +255,7 @@ def test_release_driver_refuses_channel_gated_constructs():
     #: 已由上面那条 Python 判据守着。原来那一栏只服务 `use libl` 那条点名闸，闸放开了。
     #: 第 4 列是**文件后缀** —— `.lls` 那一格的闸认的是后缀，不是内容（`docs/349` §10）。
     probes = [("plain", PROBE_PLAIN, False, ".lomt"),
-              ("vm", PROBE_VM, False, ".lomt"),
+              ("lvm", PROBE_LVM, False, ".lomt"),
               ("libl", PROBE_LIBL, False, ".lomt"),
               ("hosted", PROBE_HOSTED, False, ".lomt"),
               # 2026-10-20：最后一道闸也打开 —— LSPE 第一部分已随 0.1.5 落地。

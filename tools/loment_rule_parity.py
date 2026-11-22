@@ -259,17 +259,20 @@ _CASES: list[tuple[str, str]] = [
     # **有一条不冲突的配对必须记着**：`hosted` + `gc_manual` / `gc_auto` = "要对外、
     # 但内存我自己管" —— 合法档，**不该**报错。这套件只收负例，所以合法的那一对由
     # `potato_test` 的 `v11-hosted-gc_manual` 合法样本守着，这里不重复。
-    # ---- 第五维 `vm`（`docs/231`）------------------------------------------
+    # ---- 第五维 `lvm`（`docs/231`；v24 起由 `vm` 改名，2026-11-21）------------
     # 与前四维同一套：按维一次、取值只有两个。**但这一维没有冲突用例** ——
-    # `vm` 与 `runtime` 今天确实合不来（VM 要用运行期），那条由 `docs/227` 那条**既有的**
+    # 这一维与 `runtime` 今天确实合不来（引擎要用运行期），那条由 `docs/227` 那条**既有的**
     # 检查接住（它读源码里用没用到运行期构造），不是一条写进 `CORE_CONFLICTS` 的冲突。
-    ("choose-vm-twice", "module m\n\nchoose vm\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
-    ("choose-vm-two-values", "module m\n\nchoose vm\nchoose no_vm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-lvm-twice", "module m\n\nchoose lvm\nchoose lvm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    ("choose-lvm-two-values", "module m\n\nchoose lvm\nchoose no_lvm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
     # 取值只有两个 —— 拼错的词与 `choose fast` 同一条路（未定义的开关）。
-    ("choose-vm-bad-value", "module m\n\nchoose vm_x\n\nfn f() -> u32 {\n    return 1;\n}\n"),
-    # **渠道闸不在这里测**：这套件跑在仓库里，两边都是 dev 通道，`choose vm` 是**合法**的。
-    # "发行版拒"只能靠**打包侧端到端**（照 `docs/202`"真装真跑"）—— 见 `docs/231` §5 判据 D。
-    # 合法的那一对（dev + `choose vm`）由 `potato_test` 的 v13 正例守着，这里不重复。
+    ("choose-lvm-bad-value", "module m\n\nchoose lvm_x\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **旧拼写不是别名**（2026-11-21 改名）：`choose vm` 从此是未定义的开关 ——
+    # 与 `choose fast` 同一条路（E022），不是"弃用警告"，也不是兼容层。
+    ("choose-legacy-vm-is-an-unknown-switch",
+     "module m\n\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"),
+    # **渠道闸不在这里测**：这套件跑在仓库里，两边都是 dev 通道，`choose lvm` 是**合法**的
+    # （2026-10-17 起发行版也收）。合法的那一对由 `potato_test` 的 v13 正例守着。
     # ---- 开关 (docs/182 §1) -------------------------------------------------
     # **关着**: 体连 token 都不进 parser（docs/182 §2）。所以体内那条类型错**不该报**，
     # 只报体外面那条 —— 两边都得这样。**不要**把体写成一个"关着就什么都不报"的源：

@@ -129,7 +129,7 @@ const M_HOTPATH: u32 = 43069440;   // 4 KiB   `--hot-meta` 的路径
 const M_META: u32 = 43073536;      // 256 KiB 元数据文本
 const M_SCRATCH: u32 = 43335680;   // 512 KiB 排序数组 + 规范化串 + sha 状态
 const M_CALLBUF: u32 = 43859968;   // 64 KiB  当前函数的调用点（函数末尾并进元数据）
-const ARENA: u64 = 43925504;
+const ARENA: u64 = 44580864;
 
 // 热更新状态块（`M_SCRATCH` 头 64 字节）。**不占 `tab` 的单元格** —— 那 64 格已经
 // 用满到 252，`TB_G` 从 256 开始。
@@ -2109,6 +2109,14 @@ fn one_global(tab: ptr, t: ptr, gb: ptr, ls: u32, le: u32) -> u32 {
     let sz: u32 = tysz;
     if zi == 0 {
         sz = emit_init(t, gb, doff, to, tl, k, le - k);
+    }
+    // 段错误报告的四张表（`docs/367` stage 2）：IR 里是 `zeroinitializer`，这里给一个
+    // 标记字节把它们钉进 `.data` —— 与参考实现给 `g.data` 标记同一时刻（**按全局的
+    // 文本顺序**，不是等收集完再补）。表的真实内容在 `fa_fill` 里整片回填。
+    if zi == 1 && load32(fs(tab), FS_ON) == 1
+            && fa_is_table_global(t, noff, nlen) == 1 {
+        zi = 0;
+        store8(gb, doff, 238 as u8);
     }
     // 全零 -> bss。与参考实现同判: 判据是**内容长度 + 内容**, 不是 `zeroinitializer`
     // 关键字（`if g.data != b"\0" * size_of(g.ty)`）—— 长度不等于类型大小的一律进 data,
@@ -4984,6 +4992,10 @@ fn resolve_fixups(tab: ptr, t: ptr, txt: ptr) -> u32 {
             } else {
                 w64(txt, site, addr as u64);
             }
+        } else if kind == 2 {
+            // abs32（`mov [abs32], reg` 的段内地址）。段错误 shim 用：bss 的地址
+            // 要等 `place_bss`，发射那一刻还定不下来（`docs/367` stage 2）。
+            w32(txt, site, addr);
         } else {
             w32(txt, site, addr - (txt_base(tab) + site + 4));
         }
@@ -7069,6 +7081,10 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
                     txt_base(tab) + d);
         } else {
             let dst: u64 = line_dest(t, ls2, me2);
+            let d0: u32 = d;
+            if load32(fs(tab), FS_ON) == 1 {
+                fa_site_hit(tab, t, ls2, d);
+            }
             store32(tab, C_DESTO, hi32(dst));
             store32(tab, C_DESTL, lo32(dst));
             if dst != 0 {
@@ -7077,6 +7093,9 @@ fn emit_func(tab: ptr, out: ptr, c: u32, t: ptr, ls: u32, le: u32, bs: u32, be: 
                 d = lower(tab, out, d, t, op2, me2, mb);
             } else {
                 d = lower(tab, out, d, t, ls2, me2, mb);
+            }
+            if load32(fs(tab), FS_ON) == 1 {
+                fa_site_len(tab, d0, d);
             }
         }
         i = le2 + 1;
@@ -7180,6 +7199,11 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32,
     if nl == 4 && entry_bare(t, n, ss + nl) == 0 {
         return fail("`main` must not take parameters -- the entry stub calls it with none");
     }
+    if load32(fs(tab), FS_ON) == 1 {
+        // 入口桩改调运行期的包装（它装栈、装 handler，再调用户的入口）。
+        ss = load32(fs(tab), FS_ENTRYO);
+        nl = load32(fs(tab), FS_ENTRYL);
+    }
     let d: u32 = c;
     if load32(hot_sc(mb), HS_HRUN) == 1 {
         hs_prepass(mb, tab, t, n);
@@ -7237,13 +7261,851 @@ fn emit_all(tab: ptr, out: ptr, c: u32, t: ptr, n: u32, tlsn: u32, tls: u32,
                     j = je + 1;
                 }
             }
-            d = emit_func(tab, out, d, t, ls, le, bs2, be, mb);
+            if load32(fs(tab), FS_ON) == 1 && fa_is_shim(t, ls, le) == 1 {
+                // 内核按 SysV 传参、本链接器是栈机：这个函数发的是原始字节，
+                // 与参考实现 `Emitter.emit_func` 的特判同一处、同一串。
+                let nm: u64 = fa_span(t, ls, le);
+                lbl_add(tab, hi32(nm), lo32(nm), 0, 0, txt_base(tab) + d);
+                d = fa_shim(tab, out, d, t);
+            } else {
+                d = emit_func(tab, out, d, t, ls, le, bs2, be, mb);
+            }
             i = be + 1;
         } else {
             i = le + 1;
         }
     }
     return d;
+}
+
+// ---------------------------------------------------------------- 原生段错误报告（`docs/367` stage 2）
+//
+// 与参考实现的关系：运行期里**与程序无关**的那一段（消息池、`__wrhex` / `__wrnum`、
+// handler、shim 的函数头）在这边是一串**十六进制常量**，是 `tools/lomelf.py` 的
+// `_fault_runtime_fixed()` 的逐字节副本。链接器在用户文本之后接上：四行表声明 +
+// 这段常量 + 入口包装（按用户入口名生成）；站点/函数区间/块名/名字池发射后回填。
+//
+// 为什么不像 stage 1 那样"生成 IR 再解析一遍"：那段 IR 原先带着 `nsites` / `nfns`
+// 两个数（循环上界），是**程序**的函数，两边文本必然分叉。`docs/367` §4.2 记了
+// 改成"条数从表头读"那一笔；改完这一段才真正与程序无关。
+//
+// **十六进制而不是字符串字面量**：那段文本里有 `c"\XX"` 形式的字节串（消息含中文），
+// 写进 Loment 源码要再转义一层，静默改字节的风险比可读性更贵。
+
+const FAULT_SITE_MAX: u32 = 8192;
+const FAULT_FN_MAX: u32 = 4096;
+const FAULT_BLK_MAX: u32 = 16384;
+const FAULT_POOL_MAX: u32 = 65536;
+// 640 KiB：状态 256 B + 站点 256 KiB + 函数 64 KiB + 块 192 KiB + 名字池 64 KiB
+const M_FAULT: u32 = 43925504;
+// 下面四条是上一条 + 各段容量（`const` 只吃字面量，算式写在注释里）：
+// 256 -> 43925760; +32×8192=262144 -> 44187904; +16×4096=65536 -> 44253440;
+// +12×16384=196608 -> 44450048。
+const FAULT_SITE: u32 = 43925760;
+const FAULT_FN: u32 = 44187904;
+const FAULT_BLK: u32 = 44253440;
+const FAULT_POOL: u32 = 44450048;
+const FAULT_TEXT_RESERVE: u32 = 40960;
+
+// 状态块（相对 `M_FAULT`）
+const FS_ON: u32 = 0;
+const FS_UN: u32 = 4;
+const FS_NSITE: u32 = 8;
+const FS_NFN: u32 = 12;
+const FS_NBLK: u32 = 16;
+const FS_POOLN: u32 = 20;
+const FS_CUR: u32 = 24;
+const FS_NEWN: u32 = 28;
+const FS_USERO: u32 = 32;
+const FS_USERL: u32 = 36;
+const FS_SITESO: u32 = 40;
+const FS_SITESL: u32 = 44;
+const FS_FNSO: u32 = 48;
+const FS_FNSL: u32 = 52;
+const FS_BLKSO: u32 = 56;
+const FS_BLKSL: u32 = 60;
+const FS_STRSO: u32 = 64;
+const FS_STRSL: u32 = 68;
+const FS_SIGO: u32 = 72;
+const FS_SIGL: u32 = 76;
+const FS_INFOO: u32 = 80;
+const FS_INFOL: u32 = 84;
+const FS_UCTXO: u32 = 88;
+const FS_UCTXL: u32 = 92;
+const FS_HANDO: u32 = 96;
+const FS_HANDL: u32 = 100;
+const FS_SHIMO: u32 = 104;
+const FS_SHIML: u32 = 108;
+const FS_ENTRYO: u32 = 112;
+const FS_ENTRYL: u32 = 116;
+const FS_WRHEXO: u32 = 120;
+const FS_WRHEXL: u32 = 124;
+const FS_HEAL: u32 = 128;
+
+// 站点描述（每 32 字节）
+const FT_LINE: u32 = 0;
+const FT_FN: u32 = 4;
+const FT_BLK: u32 = 8;
+const FT_INS: u32 = 12;
+const FT_LEN: u32 = 20;
+const FT_ADDR: u32 = 24;
+
+// 函数描述（每 16 字节）
+const FF_NOFF: u32 = 0;
+const FF_NLEN: u32 = 4;
+const FF_POOL: u32 = 8;
+
+// 块描述（每 12 字节）
+const FB_NOFF: u32 = 0;
+const FB_NLEN: u32 = 4;
+const FB_POOL: u32 = 8;
+
+fn fs(tab: ptr) -> ptr {
+    return ptr_add(tab, M_FAULT - M_TAB);
+}
+
+/// `define ...` 行里函数名的跨度。与 `plan_params` 的前半段同一条读法。
+fn fa_span(t: ptr, ls: u32, le: u32) -> u64 {
+    let j: u32 = skip_sp(t, ls + 6, le);
+    if lit_at(t, j, le, "internal") == 1 {
+        j = skip_sp(t, j + 8, le);
+    }
+    if lit_at(t, j, le, "private") == 1 {
+        j = skip_sp(t, j + 7, le);
+    }
+    let rts: u64 = type_span(t, j, le);
+    let j2: u32 = skip_sp(t, hi32(rts) + lo32(rts), le);
+    let ns: u32 = j2 + 1;
+    let ne: u32 = word_end(t, ns, le);
+    return pk16(ns, ne - ns);
+}
+
+/// `[a,b)` 与字面量逐字节相等。
+fn fa_lit_eq(t: ptr, a: u32, b: u32, s: str) -> u32 {
+    let n: u32 = str_len(s);
+    if b - a != n {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if (load8(t, a + i) as u32) != (str_byte(s, i) as u32) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn fa_no_eq(t: ptr, a: u32, e: u32) -> u32 {
+    let i: u32 = a;
+    while i < e {
+        if load8(t, i) == 61 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 名字池去重 + 追加（源是输入文本的跨度）。满了点名退出。
+fn fa_intern(sp: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let n: u32 = load32(sp, FS_POOLN);
+    let p: u32 = 0;
+    while p < n {
+        let ln: u32 = 0;
+        while load8(sp, FAULT_POOL - M_FAULT + p + ln) != 0 {
+            ln = ln + 1;
+        }
+        if ln == nlen {
+            let eq: u32 = 1;
+            let k: u32 = 0;
+            while k < ln {
+                if load8(sp, FAULT_POOL - M_FAULT + p + k) != load8(t, noff + k) {
+                    eq = 0;
+                }
+                k = k + 1;
+            }
+            if eq == 1 {
+                return p;
+            }
+        }
+        p = p + ln + 1;
+    }
+    if n + nlen + 1 > FAULT_POOL_MAX {
+        let _f: u32 = fail("the fault-report name pool overflows (raise FAULT_POOL_MAX in loment/tools/lomelf.lomt)");
+        return NO;
+    }
+    let k2: u32 = 0;
+    while k2 < nlen {
+        store8(sp, FAULT_POOL - M_FAULT + n + k2, load8(t, noff + k2) as u8);
+        k2 = k2 + 1;
+    }
+    store8(sp, FAULT_POOL - M_FAULT + n + nlen, 0 as u8);
+    store32(sp, FS_POOLN, n + nlen + 1);
+    return n;
+}
+
+/// 同 `fa_intern`，源是字面量（没有标签的入口块叫 `entry`）。
+fn fa_intern_lit(sp: ptr, s: str) -> u32 {
+    let n: u32 = load32(sp, FS_POOLN);
+    let sn: u32 = str_len(s);
+    let p: u32 = 0;
+    while p < n {
+        let ln: u32 = 0;
+        while load8(sp, FAULT_POOL - M_FAULT + p + ln) != 0 {
+            ln = ln + 1;
+        }
+        if ln == sn {
+            let eq: u32 = 1;
+            let k: u32 = 0;
+            while k < ln {
+                if (load8(sp, FAULT_POOL - M_FAULT + p + k) as u32) != (str_byte(s, k) as u32) {
+                    eq = 0;
+                }
+                k = k + 1;
+            }
+            if eq == 1 {
+                return p;
+            }
+        }
+        p = p + ln + 1;
+    }
+    if n + sn + 1 > FAULT_POOL_MAX {
+        let _f: u32 = fail("the fault-report name pool overflows (raise FAULT_POOL_MAX in loment/tools/lomelf.lomt)");
+        return NO;
+    }
+    let k2: u32 = 0;
+    while k2 < sn {
+        store8(sp, FAULT_POOL - M_FAULT + n + k2, str_byte(s, k2) as u8);
+        k2 = k2 + 1;
+    }
+    store8(sp, FAULT_POOL - M_FAULT + n + sn, 0 as u8);
+    store32(sp, FS_POOLN, n + sn + 1);
+    return n;
+}
+
+/// 这条指令是不是访存站点。**只判是不是** —— 展开长度在发射后才知道（`fa_site_len`）。
+/// 参考实现 `_site_kind_width` 还要解一次类型（解不出来就**不**算站点）；那一类输入
+/// 在本链接器上本来就会在 `lower` 里失败，所以两侧对"能编出来的输入"判的是同一件事。
+fn fa_site(t: ptr, i: u32, e: u32) -> u32 {
+    if lit_at(t, i, e, "load ") == 1 {
+        return 1;
+    }
+    if lit_at(t, i, e, "store ") == 1 {
+        return 1;
+    }
+    if lit_at(t, i, e, "atomicrmw ") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+/// 扫**用户文本**（`docs/367` stage 2）：函数、块、访存站点、指令序号。
+///
+/// 与参考实现的 `_fault_plan` 同一份顺序：函数按文本序，块按函数内文本序，
+/// 名字池先函数名、再块名。`ins` 是**块内**全部指令的序号（不只是站点）。
+fn fa_scan(tab: ptr, t: ptr, n: u32) -> u32 {
+    let sp: ptr = fs(tab);
+    let i: u32 = 0;
+    while i < n {
+        let le: u32 = line_end(t, i, n);
+        let ls: u32 = skip_sp(t, i, le);
+        if lit_at(t, ls, le, "define ") == 1 {
+            let nm: u64 = fa_span(t, ls, le);
+            let nf: u32 = load32(sp, FS_NFN);
+            if nf >= FAULT_FN_MAX {
+                let _f1: u32 = fail("too many functions for --fault-report (raise FAULT_FN_MAX in loment/tools/lomelf.lomt)");
+                return 1;
+            }
+            let fb: u32 = FAULT_FN - M_FAULT + nf * 16;
+            store32(sp, fb + FF_NOFF, hi32(nm));
+            store32(sp, fb + FF_NLEN, lo32(nm));
+            store32(sp, fb + FF_POOL, 0);
+            store32(sp, FS_NFN, nf + 1);
+            let j: u32 = le + 1;
+            let blk: u32 = NO;
+            let ins: u32 = 0;
+            let go: u32 = 1;
+            while j < n && go == 1 {
+                let je: u32 = line_end(t, j, n);
+                let js: u32 = skip_sp(t, j, je);
+                if js < je && load8(t, js) == 125 {
+                    go = 0;
+                    j = je + 1;
+                } else if js >= je || load8(t, js) == 59 || lit_at(t, js, je, "#dbg") == 1 {
+                    j = je + 1;
+                } else {
+                    let le2: u32 = logical_end(t, j, n);
+                    let me2: u32 = strip_meta(t, js, le2);
+                    let e3: u32 = me2;
+                    let tr: u32 = 1;
+                    while e3 > js && tr == 1 {
+                        let c3: u32 = load8(t, e3 - 1);
+                        if c3 == 32 || c3 == 9 || c3 == 13 {
+                            e3 = e3 - 1;
+                        } else {
+                            tr = 0;
+                        }
+                    }
+                    if e3 > js && load8(t, e3 - 1) == 58 && fa_no_eq(t, js, me2) == 1
+                            && load8(t, js) != 37 {
+                        let nb: u32 = load32(sp, FS_NBLK);
+                        if nb >= FAULT_BLK_MAX {
+                            let _f2: u32 = fail("too many basic blocks for --fault-report (raise FAULT_BLK_MAX in loment/tools/lomelf.lomt)");
+                            return 1;
+                        }
+                        let bb: u32 = FAULT_BLK - M_FAULT + nb * 12;
+                        store32(sp, bb + FB_NOFF, js);
+                        store32(sp, bb + FB_NLEN, e3 - 1 - js);
+                        store32(sp, bb + FB_POOL, 0);
+                        store32(sp, FS_NBLK, nb + 1);
+                        blk = nb;
+                        ins = 0;
+                    } else {
+                        if blk == NO {
+                            let nb2: u32 = load32(sp, FS_NBLK);
+                            if nb2 >= FAULT_BLK_MAX {
+                                let _f3: u32 = fail("too many basic blocks for --fault-report (raise FAULT_BLK_MAX in loment/tools/lomelf.lomt)");
+                                return 1;
+                            }
+                            let bb2: u32 = FAULT_BLK - M_FAULT + nb2 * 12;
+                            store32(sp, bb2 + FB_NOFF, NO);
+                            store32(sp, bb2 + FB_NLEN, 0);
+                            store32(sp, bb2 + FB_POOL, 0);
+                            store32(sp, FS_NBLK, nb2 + 1);
+                            blk = nb2;
+                        }
+                        let dst: u64 = line_dest(t, js, me2);
+                        let os: u32 = js;
+                        if dst != 0 {
+                            os = skip_sp(t, hi32(dst) + lo32(dst), me2);
+                            os = skip_sp(t, os + 1, me2);
+                        }
+                        if fa_site(t, os, me2) == 1 {
+                            let ns0: u32 = load32(sp, FS_NSITE);
+                            if ns0 >= FAULT_SITE_MAX {
+                                let _f4: u32 = fail("too many memory sites for --fault-report (raise FAULT_SITE_MAX in loment/tools/lomelf.lomt)");
+                                return 1;
+                            }
+                            let se: u32 = FAULT_SITE - M_FAULT + ns0 * 32;
+                            store32(sp, se + FT_LINE, js);
+                            store32(sp, se + FT_FN, nf);
+                            store32(sp, se + FT_BLK, blk);
+                            store32(sp, se + FT_INS, ins);
+                            store32(sp, se + FT_LEN, 0);
+                            w64(sp, se + FT_ADDR, 0 as u64);
+                            store32(sp, FS_NSITE, ns0 + 1);
+                        }
+                        ins = ins + 1;
+                    }
+                    j = le2 + 1;
+                }
+            }
+            i = j;
+        } else {
+            i = le + 1;
+        }
+    }
+    return 0;
+}
+
+/// 先函数名、再块名（与参考实现的 `_fault_plan` 同一顺序），去重后写池。
+fn fa_pool(t: ptr, sp: ptr) -> u32 {
+    let i: u32 = 0;
+    while i < load32(sp, FS_NFN) {
+        let fb: u32 = FAULT_FN - M_FAULT + i * 16;
+        let o: u32 = fa_intern(sp, t, load32(sp, fb + FF_NOFF), load32(sp, fb + FF_NLEN));
+        if o == NO {
+            return 1;
+        }
+        store32(sp, fb + FF_POOL, o);
+        i = i + 1;
+    }
+    i = 0;
+    while i < load32(sp, FS_NBLK) {
+        let bb: u32 = FAULT_BLK - M_FAULT + i * 12;
+        let no: u32 = load32(sp, bb + FB_NOFF);
+        let o: u32 = 0;
+        if no == NO {
+            o = fa_intern_lit(sp, "entry");
+            store32(sp, bb + FB_NLEN, 5);
+        } else {
+            o = fa_intern(sp, t, no, load32(sp, bb + FB_NLEN));
+        }
+        if o == NO {
+            return 1;
+        }
+        store32(sp, bb + FB_POOL, o);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 十六进制 -> 字节，返回新游标。
+fn fa_hex(dst: ptr, at: u32, hx: str) -> u32 {
+    let n: u32 = str_len(hx) / 2;
+    let d: u32 = at;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = hexval(str_byte(hx, i * 2) as u32);
+        let lo: u32 = hexval(str_byte(hx, i * 2 + 1) as u32);
+        store8(dst, d, (hi * 16 + lo) as u8);
+        d = d + 1;
+        i = i + 1;
+    }
+    return d;
+}
+
+/// 入口包装：`__lom_entry`。与参考实现 `_fault_entry_ir` 逐字节同。
+fn fa_entry(t: ptr, at: u32, sp: ptr) -> u32 {
+    let a: u32 = at;
+    a = put_cstr(t, a, "define i64 @__lom_entry() {\n");
+    a = put_cstr(t, a, "entry:\n");
+    a = put_cstr(t, a, "  %sb = ptrtoint ptr @__lom_ss to i64\n");
+    a = put_cstr(t, a, "  %sp = inttoptr i64 %sb to ptr\n");
+    a = put_cstr(t, a, "  %alt = ptrtoint ptr @__lom_alt to i64\n");
+    a = put_cstr(t, a, "  store i64 %alt, ptr %sp\n");
+    a = put_cstr(t, a, "  %f8 = add i64 %sb, 8\n");
+    a = put_cstr(t, a, "  %fp = inttoptr i64 %f8 to ptr\n");
+    a = put_cstr(t, a, "  store i32 0, ptr %fp\n");
+    a = put_cstr(t, a, "  %f16 = add i64 %sb, 16\n");
+    a = put_cstr(t, a, "  %sq = inttoptr i64 %f16 to ptr\n");
+    a = put_cstr(t, a, "  store i64 32768, ptr %sq\n");
+    a = put_cstr(t, a, "  %rss = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}\"(i64 131, i64 %sb, i64 0, i64 0, i64 0, i64 0, i64 0)\n");
+    a = put_cstr(t, a, "  %ab = ptrtoint ptr @__lom_act to i64\n");
+    a = put_cstr(t, a, "  %hs = ptrtoint ptr @__lom_shim to i64\n");
+    a = put_cstr(t, a, "  store i64 %hs, ptr @__lom_act\n");
+    a = put_cstr(t, a, "  %ff = add i64 %ab, 8\n");
+    a = put_cstr(t, a, "  %ffp = inttoptr i64 %ff to ptr\n");
+    a = put_cstr(t, a, "  store i64 201326596, ptr %ffp\n");
+    a = put_cstr(t, a, "  %rs = ptrtoint ptr @__lom_restore to i64\n");
+    a = put_cstr(t, a, "  %rf = add i64 %ab, 16\n");
+    a = put_cstr(t, a, "  %rfp = inttoptr i64 %rf to ptr\n");
+    a = put_cstr(t, a, "  store i64 %rs, ptr %rfp\n");
+    a = put_cstr(t, a, "  store i64 ");
+    a = put_dec(t, a, load32(sp, FS_HEAL));
+    a = put_cstr(t, a, ", ptr @__lom_heal\n");
+    a = put_cstr(t, a, "  %s0 = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}\"(i64 13, i64 11, i64 %ab, i64 0, i64 8, i64 0, i64 0)\n");
+    a = put_cstr(t, a, "  %s1 = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}\"(i64 13, i64 7, i64 %ab, i64 0, i64 8, i64 0, i64 0)\n");
+    a = put_cstr(t, a, "  %s2 = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}\"(i64 13, i64 4, i64 %ab, i64 0, i64 8, i64 0, i64 0)\n");
+    a = put_cstr(t, a, "  %s3 = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}\"(i64 13, i64 8, i64 %ab, i64 0, i64 8, i64 0, i64 0)\n");
+    a = put_cstr(t, a, "  %s4 = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},{r10},{r8},{r9},~{cx},~{r11},~{memory}\"(i64 13, i64 6, i64 %ab, i64 0, i64 8, i64 0, i64 0)\n");
+    let uo: u32 = load32(sp, FS_USERO);
+    let ul: u32 = load32(sp, FS_USERL);
+    if ul == 4 {
+        a = put_cstr(t, a, "  %rv = call i32 @");
+        a = put_span(t, a, t, uo, ul);
+        a = put_cstr(t, a, "()\n");
+        a = put_cstr(t, a, "  %rv2 = zext i32 %rv to i64\n");
+        a = put_cstr(t, a, "  ret i64 %rv2\n");
+    } else {
+        a = put_cstr(t, a, "  call void @");
+        a = put_span(t, a, t, uo, ul);
+        a = put_cstr(t, a, "()\n");
+        a = put_cstr(t, a, "  ret i64 0\n");
+    }
+    a = put_cstr(t, a, "}");
+    return a;
+}
+
+/// 用户文本之后接上：表声明 + 固定运行期 + 入口包装。返回新的文本长度（0 = 放不下）。
+fn fa_text(tab: ptr, t: ptr, n: u32) -> u32 {
+    let sp: ptr = fs(tab);
+    if n + FAULT_TEXT_RESERVE >= IN_CAP {
+        let _f0: u32 = fail("the input .ll leaves no room for the --fault-report runtime in the input buffer");
+        return 0;
+    }
+    let a: u32 = n;
+    store8(t, a, 10 as u8);
+    a = a + 1;
+    a = put_cstr(t, a, "@__lom_sites = global [");
+    a = put_dec(t, a, 4 + 24 * load32(sp, FS_NSITE));
+    a = put_cstr(t, a, " x i8] zeroinitializer\n");
+    a = put_cstr(t, a, "@__lom_fns = global [");
+    a = put_dec(t, a, 4 + 24 * load32(sp, FS_NFN));
+    a = put_cstr(t, a, " x i8] zeroinitializer\n");
+    a = put_cstr(t, a, "@__lom_blks = global [");
+    a = put_dec(t, a, 4 + 8 * load32(sp, FS_NBLK));
+    a = put_cstr(t, a, " x i8] zeroinitializer\n");
+    a = put_cstr(t, a, "@__lom_strs = global [");
+    a = put_dec(t, a, load32(sp, FS_POOLN));
+    a = put_cstr(t, a, " x i8] zeroinitializer\n");
+    a = fa_blob(t, a);
+    a = fa_entry(t, a, sp);
+    if a >= IN_CAP {
+        let _f1: u32 = fail("the input .ll plus the --fault-report runtime does not fit in the input buffer");
+        return 0;
+    }
+    return a;
+}
+
+/// 参考实现 `_fault_runtime_fixed()` 的十六进制副本（含消息池与 handler）。
+fn fa_blob(t: ptr, at: u32) -> u32 {
+    let a: u32 = at;
+    a = fa_hex(t, a, "405f5f6c6f6d5f736967203d20676c6f62616c205b3820782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f696e666f203d20676c6f62616c205b3820782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f75637478203d20676c6f62616c205b3820782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f616374203d20676c6f62616c205b333220782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f616c74203d20676c6f62616c205b333237363820782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f73");
+    a = fa_hex(t, a, "73203d20676c6f62616c205b323420782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f6865616c203d20676c6f62616c205b3820782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f686578627566203d20676c6f62616c205b313820782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f646563627566203d20676c6f62616c205b3320782069385d207a65726f696e697469616c697a65720a405f5f6c6f6d5f6d5f736967203d20676c6f62616c205b313420782069385d2063225c32305c32305c32305c37435c32305c45345c42465c41315c45");
+    a = fa_hex(t, a, "355c38465c42375c45465c42435c3941220a405f5f6c6f6d5f6d5f6e6c203d20676c6f62616c205b3120782069385d2063225c3041220a405f5f6c6f6d5f6d5f61646472203d20676c6f62616c205b313420782069385d2063225c32305c32305c32305c37435c32305c45355c39435c42305c45355c39445c38305c45465c42435c3941220a405f5f6c6f6d5f6d5f7772203d20676c6f62616c205b313020782069385d2063225c45465c42435c38385c45355c38365c39395c45465c42435c38395c3041220a405f5f6c6f6d5f6d5f7264203d20676c6f62616c205b313020782069385d2063225c45465c42435c38");
+    a = fa_hex(t, a, "385c45385c41465c42425c45465c42435c38395c3041220a405f5f6c6f6d5f6d5f7063203d20676c6f62616c205b313020782069385d2063225c32305c32305c32305c37435c32305c35305c34335c45465c42435c3941220a405f5f6c6f6d5f6d5f727370203d20676c6f62616c205b3920782069385d2063225c45465c42435c39425c35325c35335c35305c45465c42435c3941220a405f5f6c6f6d5f6d5f6172726f77203d20676c6f62616c205b313920782069385d2063225c32305c32305c32445c32445c33455c32305c45355c38455c39465c45375c39345c39465c45345c42415c41375c45375c38395c41");
+    a = fa_hex(t, a, "395c3341220a405f5f6c6f6d5f6d5f736f203d20676c6f62616c205b383020782069385d2063225c32305c32305c32305c37435c32305c45355c38385c41345c45365c38445c41455c45465c42435c39415c45365c39355c38355c45395c39415c39435c45355c39435c42305c45355c39445c38305c45385c42345c42345c45375c39445c38305c32305c35325c35335c35305c45465c42435c38385c45375c39425c42385c45355c42375c41455c32305c33435c32305c33365c33345c32305c34425c36395c34325c45465c42435c38395c45325c38305c39345c45325c38305c39345c32305c45355c38335c3846");
+    a = fa_hex(t, a, "5c45365c39385c41465c45365c41305c38385c45365c42415c41325c45355c38375c42415c3041220a405f5f6c6f6d5f6d5f66616374203d20676c6f62616c205b31353020782069385d2063225c32305c32305c32305c37435c30415c32305c32305c32305c33445c32305c45345c42415c38425c45355c41455c39455c45465c42435c39415c45355c38455c39465c45375c39345c39465c45365c41315c41335c45355c39435c41385c45365c38395c41375c45385c41315c38435c45345c42385c38415c45385c42465c42305c32305c35305c34335c32305c45365c39375c42365c45365c39345c42365c45355c");
+    a = fa_hex(t, a, "38385c42305c45385c41465c41355c45345c42465c41315c45355c38465c42375c45335c38305c38325c45355c41455c38335c45365c42325c41315c45365c39435c38395c45355c41465c42395c45385c42315c41315c45385c41315c41385c45465c42435c38435c45365c38395c38305c45345c42425c41355c45345c42385c38445c45375c42425c39395c45355c41465c42395c45385c42315c41315c45375c38455c42305c45355c39435c42415c45465c42435c39425c45375c41425c39395c45375c38325c42395c45375c39345c42315c45345c42415c41375c45375c38395c41395c45395c38375c38435c");
+    a = fa_hex(t, a, "45375c39415c38345c45385c41315c41385c45385c41375c41335c45365c39455c39305c45335c38305c38325c3041220a405f5f6c6f6d5f6d5f746970203d20676c6f62616c205b31393520782069385d2063225c32305c32305c32305c33445c32305c45355c42425c42415c45385c41455c41455c45465c42435c39415c45385c41365c38315c45395c38305c39305c45375c41425c39395c45375c38325c42395c45375c39415c38345c45355c41465c42395c45385c42315c41315c45385c41465c38415c45365c39365c41445c45465c42435c38385c45355c41465c42395c45385c42315c41315c45385c4131");
+    a = fa_hex(t, a, "5c41385c32305c32465c32305c45355c41465c42395c45385c42315c41315c45345c42425c41335c32305c32465c32305c45375c38455c42305c45355c39435c42415c45465c42435c38395c45465c42435c38435c45375c39345c41385c32305c34435c35365c34445c32305c45365c41315c41335c45385c42465c39305c45385c41315c38435c45465c42435c38385c32445c32445c37335c37355c36325c37335c37345c37325c36315c37345c36355c32305c37335c37375c35465c36335c36315c37305c45465c42435c38435c45385c41375c38315c32305c36345c36465c36335c37335c32465c33335c3336");
+    a = fa_hex(t, a, "5c33365c45465c42435c38395c45465c42435c39425c45365c39435c41435c45365c38415c41355c45355c39315c38415c45375c39345c42315c45345c42415c41375c45375c38395c41395c45385c38375c41415c45355c42375c42315c45355c38465c39315c45355c38375c42415c45465c42435c38385c36345c36465c36335c37335c32465c33335c33365c33375c32305c37335c37345c36315c36375c36355c32305c33315c45465c42435c38395c45335c38305c38325c3041220a405f5f6c6f6d5f6d7331203d20676c6f62616c205b313420782069385d2063225c32305c32305c32305c37435c32305c45");
+    a = fa_hex(t, a, "375c41425c39395c45375c38325c42395c45465c42435c3941220a405f5f6c6f6d5f6d7332203d20676c6f62616c205b3320782069385d2063225c32305c32465c3230220a405f5f6c6f6d5f6d7333203d20676c6f62616c205b3720782069385d2063225c32305c32465c32305c45375c41435c41435c3230220a405f5f6c6f6d5f6d7334203d20676c6f62616c205b323020782069385d2063225c32305c45365c39445c41315c45465c42435c38385c45385c42375c39445c45385c41465c41355c45365c38435c38375c45345c42425c41345c3230220a405f5f6c6f6d5f6d7335203d20676c6f62616c205b3834");
+    a = fa_hex(t, a, "20782069385d2063225c32305c32305c32305c37435c32305c45375c41425c39395c45375c38325c42395c45465c42435c39415c45465c42435c38385c35305c34335c32305c45345c42385c38445c45355c39435c41385c45345c42425c42425c45345c42445c39355c45385c41455c42465c45355c41445c39385c45375c41425c39395c45375c38325c42395c45345c42385c38415c45465c42435c39425c45345c42395c39465c45345c42385c38445c45355c39435c41385c45345c42425c42425c45345c42445c39355c45375c39345c41385c45365c38385c42375c45355c38375c42445c45365c39355c4230");
+    a = fa_hex(t, a, "5c45395c38375c38435c45465c42435c38395c3041220a405f5f6c6f6d5f6d733561203d20676c6f62616c205b363520782069385d2063225c32305c32305c32305c37435c32305c45375c41425c39395c45375c38325c42395c45465c42435c39415c45465c42435c38385c35305c34335c32305c45345c42385c38445c45355c39435c41385c45345c42425c42425c45345c42445c39355c45385c41455c42465c45355c41445c39385c45375c41425c39395c45375c38325c42395c45345c42385c38415c45465c42435c39425c45365c38395c38305c45355c39435c41385c45355c38375c42445c45365c39355c");
+    a = fa_hex(t, a, "42305c45465c42435c3941220a405f5f6c6f6d5f6d733562203d20676c6f62616c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f6d7336203d20676c6f62616c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f686e3131203d20676c6f62616c205b323520782069385d2063225c36435c36465c36445c36355c36455c37345c33415c32305c35335c34395c34375c35335c34355c34375c35365c45465c42435c38385c45345c42465c41315c45355c38465c42375c3230220a405f5f6c6f6d5f68643131203d20676c6f62616c205b34207820");
+    a = fa_hex(t, a, "69385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f68653131203d20676c6f62616c205b343720782069385d2063225c36355c37325c37325c36465c37325c35425c35335c34355c34375c35365c35445c33415c32305c45365c41455c42355c45395c39345c39395c45385c41465c41465c45465c42435c38385c37335c36355c36375c36445c36355c36455c37345c36315c37345c36395c36465c36455c32305c36365c36315c37355c36435c37345c45465c42435c38395c3041220a405f5f6c6f6d5f686e37203d20676c6f62616c205b323420782069385d2063225c36435c36465c36445c3635");
+    a = fa_hex(t, a, "5c36455c37345c33415c32305c35335c34395c34375c34325c35355c35335c45465c42435c38385c45345c42465c41315c45355c38465c42375c3230220a405f5f6c6f6d5f686437203d20676c6f62616c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f686537203d20676c6f62616c205b343020782069385d2063225c36355c37325c37325c36465c37325c35425c34325c35355c35335c35445c33415c32305c45365c38305c42425c45375c42415c42465c45395c39345c39395c45385c41465c41465c45465c42435c38385c36325c37355c37335c32305c36355c37325c37");
+    a = fa_hex(t, a, "325c36465c37325c45465c42435c38395c3041220a405f5f6c6f6d5f686e34203d20676c6f62616c205b323420782069385d2063225c36435c36465c36445c36355c36455c37345c33415c32305c35335c34395c34375c34395c34435c34435c45465c42435c38385c45345c42465c41315c45355c38465c42375c3230220a405f5f6c6f6d5f686434203d20676c6f62616c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f686534203d20676c6f62616c205b353020782069385d2063225c36355c37325c37325c36465c37325c35425c34395c34435c34435c35445c33415c3230");
+    a = fa_hex(t, a, "5c45395c39445c39455c45365c42335c39355c45365c38435c38375c45345c42425c41345c45465c42435c38385c36395c36435c36435c36355c36375c36315c36435c32305c36395c36455c37335c37345c37325c37355c36335c37345c36395c36465c36455c45465c42435c38395c3041220a405f5f6c6f6d5f686e38203d20676c6f62616c205b323420782069385d2063225c36435c36465c36445c36355c36455c37345c33415c32305c35335c34395c34375c34365c35305c34355c45465c42435c38385c45345c42465c41315c45355c38465c42375c3230220a405f5f6c6f6d5f686438203d20676c6f6261");
+    a = fa_hex(t, a, "6c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f686538203d20676c6f62616c205b353520782069385d2063225c36355c37325c37325c36465c37325c35425c34365c35305c34355c35445c33415c32305c45375c41455c39375c45365c39435c41465c45355c42435c38325c45355c42385c42385c45465c42435c38385c36365c36435c36465c36315c37345c36395c36455c36375c32445c37305c36465c36395c36455c37345c32305c36355c37385c36335c36355c37305c37345c36395c36465c36455c45465c42435c38395c3041220a405f5f6c6f6d5f686e36203d2067");
+    a = fa_hex(t, a, "6c6f62616c205b323520782069385d2063225c36435c36465c36445c36355c36455c37345c33415c32305c35335c34395c34375c34315c34325c35325c35345c45465c42435c38385c45345c42465c41315c45355c38465c42375c3230220a405f5f6c6f6d5f686436203d20676c6f62616c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f686536203d20676c6f62616c205b343720782069385d2063225c36355c37325c37325c36465c37325c35425c34315c34325c35325c35345c35445c33415c32305c45385c42465c39425c45375c41385c38425c45385c38375c41415c45");
+    a = fa_hex(t, a, "355c42375c42315c32305c36315c36325c36465c37325c37345c32305c45345c42415c38365c45465c42435c38385c36315c36325c36465c37325c37345c45465c42435c38395c3041220a405f5f6c6f6d5f6867656e203d20676c6f62616c205b313520782069385d2063225c36435c36465c36445c36355c36455c37345c33415c32305c45345c42465c41315c45355c38465c42375c3230220a405f5f6c6f6d5f6867656e32203d20676c6f62616c205b3420782069385d2063225c45465c42435c38395c3041220a405f5f6c6f6d5f6867656e33203d20676c6f62616c205b333920782069385d2063225c36355c");
+    a = fa_hex(t, a, "37325c37325c36465c37325c35425c34365c34315c35355c34435c35345c35445c33415c32305c45385c42465c39425c45375c41385c38425c45365c39345c42365c45355c38385c42305c45385c38375c42345c45355c39315c42445c45345c42465c41315c45355c38465c42375c3041220a405f5f6c6f6d5f686831203d20676c6f62616c205b353020782069385d2063225c36435c36465c36445c36355c36455c37345c33415c32305c45365c39355c38355c45395c39415c39435c45355c42375c42325c45345c42465c41455c45355c41345c38445c45465c42435c38385c45365c39435c41415c45365c3938");
+    a = fa_hex(t, a, "5c41305c45355c42305c38345c45395c41315c42355c45375c42445c41455c45395c39425c42365c45465c42435c38395c45465c42435c3941220a405f5f6c6f6d5f686832203d20676c6f62616c205b313020782069385d2063225c45465c42435c39425c45355c38395c41395c45345c42445c39395c3230220a405f5f6c6f6d5f686833203d20676c6f62616c205b3520782069385d2063225c32305c45365c41435c41315c3041220a0a646566696e6520766f696420405f5f77726865782869363420257629207b0a656e7472793a0a20202562203d20707472746f696e742070747220405f5f6c6f6d5f686578");
+    a = fa_hex(t, a, "62756620746f206936340a202025707a203d20696e74746f7074722069363420256220746f207074720a202073746f72652069382034382c207074722025707a0a2020256231203d20616464206936342025622c20310a2020257031203d20696e74746f707472206936342025623120746f207074720a202073746f7265206938203132302c20707472202570310a202025736830203d206c736872206936342025762c2036300a2020256e30203d20616e642069363420257368302c2031350a2020256730203d2069636d70207567742069363420256e302c20390a2020257a30203d207a65787420693120256730");
+    a = fa_hex(t, a, "20746f206936340a2020256d30203d206d756c2069363420257a302c2033390a2020256430203d206164642069363420256e302c2034380a2020256530203d2061646420693634202564302c20256d300a2020257030203d20616464206936342025622c20320a2020257130203d20696e74746f707472206936342025703020746f207074720a202073746f7265206938202565302c20707472202571300a202025736831203d206c736872206936342025762c2035360a2020256e31203d20616e642069363420257368312c2031350a2020256731203d2069636d70207567742069363420256e312c20390a202025");
+    a = fa_hex(t, a, "7a31203d207a6578742069312025673120746f206936340a2020256d31203d206d756c2069363420257a312c2033390a2020256431203d206164642069363420256e312c2034380a2020256531203d2061646420693634202564312c20256d310a2020257031203d20616464206936342025622c20330a2020257131203d20696e74746f707472206936342025703120746f207074720a202073746f7265206938202565312c20707472202571310a202025736832203d206c736872206936342025762c2035320a2020256e32203d20616e642069363420257368322c2031350a2020256732203d2069636d70207567");
+    a = fa_hex(t, a, "742069363420256e322c20390a2020257a32203d207a6578742069312025673220746f206936340a2020256d32203d206d756c2069363420257a322c2033390a2020256432203d206164642069363420256e322c2034380a2020256532203d2061646420693634202564322c20256d320a2020257032203d20616464206936342025622c20340a2020257132203d20696e74746f707472206936342025703220746f207074720a202073746f7265206938202565322c20707472202571320a202025736833203d206c736872206936342025762c2034380a2020256e33203d20616e642069363420257368332c203135");
+    a = fa_hex(t, a, "0a2020256733203d2069636d70207567742069363420256e332c20390a2020257a33203d207a6578742069312025673320746f206936340a2020256d33203d206d756c2069363420257a332c2033390a2020256433203d206164642069363420256e332c2034380a2020256533203d2061646420693634202564332c20256d330a2020257033203d20616464206936342025622c20350a2020257133203d20696e74746f707472206936342025703320746f207074720a202073746f7265206938202565332c20707472202571330a202025736834203d206c736872206936342025762c2034340a2020256e34203d20");
+    a = fa_hex(t, a, "616e642069363420257368342c2031350a2020256734203d2069636d70207567742069363420256e342c20390a2020257a34203d207a6578742069312025673420746f206936340a2020256d34203d206d756c2069363420257a342c2033390a2020256434203d206164642069363420256e342c2034380a2020256534203d2061646420693634202564342c20256d340a2020257034203d20616464206936342025622c20360a2020257134203d20696e74746f707472206936342025703420746f207074720a202073746f7265206938202565342c20707472202571340a202025736835203d206c73687220693634");
+    a = fa_hex(t, a, "2025762c2034300a2020256e35203d20616e642069363420257368352c2031350a2020256735203d2069636d70207567742069363420256e352c20390a2020257a35203d207a6578742069312025673520746f206936340a2020256d35203d206d756c2069363420257a352c2033390a2020256435203d206164642069363420256e352c2034380a2020256535203d2061646420693634202564352c20256d350a2020257035203d20616464206936342025622c20370a2020257135203d20696e74746f707472206936342025703520746f207074720a202073746f7265206938202565352c20707472202571350a20");
+    a = fa_hex(t, a, "2025736836203d206c736872206936342025762c2033360a2020256e36203d20616e642069363420257368362c2031350a2020256736203d2069636d70207567742069363420256e362c20390a2020257a36203d207a6578742069312025673620746f206936340a2020256d36203d206d756c2069363420257a362c2033390a2020256436203d206164642069363420256e362c2034380a2020256536203d2061646420693634202564362c20256d360a2020257036203d20616464206936342025622c20380a2020257136203d20696e74746f707472206936342025703620746f207074720a202073746f72652069");
+    a = fa_hex(t, a, "38202565362c20707472202571360a202025736837203d206c736872206936342025762c2033320a2020256e37203d20616e642069363420257368372c2031350a2020256737203d2069636d70207567742069363420256e372c20390a2020257a37203d207a6578742069312025673720746f206936340a2020256d37203d206d756c2069363420257a372c2033390a2020256437203d206164642069363420256e372c2034380a2020256537203d2061646420693634202564372c20256d370a2020257037203d20616464206936342025622c20390a2020257137203d20696e74746f707472206936342025703720");
+    a = fa_hex(t, a, "746f207074720a202073746f7265206938202565372c20707472202571370a202025736838203d206c736872206936342025762c2032380a2020256e38203d20616e642069363420257368382c2031350a2020256738203d2069636d70207567742069363420256e382c20390a2020257a38203d207a6578742069312025673820746f206936340a2020256d38203d206d756c2069363420257a382c2033390a2020256438203d206164642069363420256e382c2034380a2020256538203d2061646420693634202564382c20256d380a2020257038203d20616464206936342025622c2031300a2020257138203d20");
+    a = fa_hex(t, a, "696e74746f707472206936342025703820746f207074720a202073746f7265206938202565382c20707472202571380a202025736839203d206c736872206936342025762c2032340a2020256e39203d20616e642069363420257368392c2031350a2020256739203d2069636d70207567742069363420256e392c20390a2020257a39203d207a6578742069312025673920746f206936340a2020256d39203d206d756c2069363420257a392c2033390a2020256439203d206164642069363420256e392c2034380a2020256539203d2061646420693634202564392c20256d390a2020257039203d20616464206936");
+    a = fa_hex(t, a, "342025622c2031310a2020257139203d20696e74746f707472206936342025703920746f207074720a202073746f7265206938202565392c20707472202571390a20202573683130203d206c736872206936342025762c2032300a2020256e3130203d20616e64206936342025736831302c2031350a202025673130203d2069636d70207567742069363420256e31302c20390a2020257a3130203d207a657874206931202567313020746f206936340a2020256d3130203d206d756c2069363420257a31302c2033390a202025643130203d206164642069363420256e31302c2034380a202025653130203d206164");
+    a = fa_hex(t, a, "642069363420256431302c20256d31300a202025703130203d20616464206936342025622c2031320a202025713130203d20696e74746f70747220693634202570313020746f207074720a202073746f726520693820256531302c2070747220257131300a20202573683131203d206c736872206936342025762c2031360a2020256e3131203d20616e64206936342025736831312c2031350a202025673131203d2069636d70207567742069363420256e31312c20390a2020257a3131203d207a657874206931202567313120746f206936340a2020256d3131203d206d756c2069363420257a31312c2033390a20");
+    a = fa_hex(t, a, "2025643131203d206164642069363420256e31312c2034380a202025653131203d206164642069363420256431312c20256d31310a202025703131203d20616464206936342025622c2031330a202025713131203d20696e74746f70747220693634202570313120746f207074720a202073746f726520693820256531312c2070747220257131310a20202573683132203d206c736872206936342025762c2031320a2020256e3132203d20616e64206936342025736831322c2031350a202025673132203d2069636d70207567742069363420256e31322c20390a2020257a3132203d207a65787420693120256731");
+    a = fa_hex(t, a, "3220746f206936340a2020256d3132203d206d756c2069363420257a31322c2033390a202025643132203d206164642069363420256e31322c2034380a202025653132203d206164642069363420256431322c20256d31320a202025703132203d20616464206936342025622c2031340a202025713132203d20696e74746f70747220693634202570313220746f207074720a202073746f726520693820256531322c2070747220257131320a20202573683133203d206c736872206936342025762c20380a2020256e3133203d20616e64206936342025736831332c2031350a202025673133203d2069636d702075");
+    a = fa_hex(t, a, "67742069363420256e31332c20390a2020257a3133203d207a657874206931202567313320746f206936340a2020256d3133203d206d756c2069363420257a31332c2033390a202025643133203d206164642069363420256e31332c2034380a202025653133203d206164642069363420256431332c20256d31330a202025703133203d20616464206936342025622c2031350a202025713133203d20696e74746f70747220693634202570313320746f207074720a202073746f726520693820256531332c2070747220257131330a20202573683134203d206c736872206936342025762c20340a2020256e313420");
+    a = fa_hex(t, a, "3d20616e64206936342025736831342c2031350a202025673134203d2069636d70207567742069363420256e31342c20390a2020257a3134203d207a657874206931202567313420746f206936340a2020256d3134203d206d756c2069363420257a31342c2033390a202025643134203d206164642069363420256e31342c2034380a202025653134203d206164642069363420256431342c20256d31340a202025703134203d20616464206936342025622c2031360a202025713134203d20696e74746f70747220693634202570313420746f207074720a202073746f726520693820256531342c20707472202571");
+    a = fa_hex(t, a, "31340a20202573683135203d206c736872206936342025762c20300a2020256e3135203d20616e64206936342025736831352c2031350a202025673135203d2069636d70207567742069363420256e31352c20390a2020257a3135203d207a657874206931202567313520746f206936340a2020256d3135203d206d756c2069363420257a31352c2033390a202025643135203d206164642069363420256e31352c2034380a202025653135203d206164642069363420256431352c20256d31350a202025703135203d20616464206936342025622c2031370a202025713135203d20696e74746f7074722069363420");
+    a = fa_hex(t, a, "2570313520746f207074720a202073746f726520693820256531352c2070747220257131350a20202577203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025622c20693634203138290a202072657420766f69640a7d0a0a646566696e6520766f696420405f5f77726e756d2869363420257629207b0a656e7472793a0a20202562203d20707472746f696e742070747220405f5f6c6f6d5f");
+    a = fa_hex(t, a, "64656362756620746f206936340a20202568203d2075646976206936342025762c203130300a2020256832203d207572656d206936342025682c2031300a2020256833203d2061646420693634202568322c2034380a20202574203d2075646976206936342025762c2031300a2020257432203d207572656d206936342025742c2031300a2020257433203d2061646420693634202574322c2034380a2020256f203d207572656d206936342025762c2031300a2020256f32203d206164642069363420256f2c2034380a2020257030203d20696e74746f7074722069363420256220746f207074720a202073746f72");
+    a = fa_hex(t, a, "65206938202568332c20707472202570300a2020256231203d20616464206936342025622c20310a2020257031203d20696e74746f707472206936342025623120746f207074720a202073746f7265206938202574332c20707472202570310a2020256232203d20616464206936342025622c20320a2020257032203d20696e74746f707472206936342025623220746f207074720a202073746f726520693820256f322c20707472202570320a2020256830203d2069636d70206571206936342025682c20300a20206272206931202568302c206c6162656c20256c743130302c206c6162656c2025616c6c330a61");
+    a = fa_hex(t, a, "6c6c333a0a2020257733203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025622c206936342033290a202072657420766f69640a6c743130303a0a2020257430203d2069636d7020657120693634202574322c20300a20206272206931202574302c206c6162656c20256f6e652c206c6162656c202574776f0a74776f3a0a2020257732203d2063616c6c206936342061736d207369646565");
+    a = fa_hex(t, a, "6666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c20693634202562312c206936342032290a202072657420766f69640a6f6e653a0a2020257731203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c20693634202562322c206936342031290a2020");
+    a = fa_hex(t, a, "72657420766f69640a7d0a0a646566696e6520766f696420405f5f6c6f6d5f726573746f72652829207b0a656e7472793a0a20202572203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d22286936342031352c2069363420302c2069363420302c206936342030290a202072657420766f69640a7d0a0a646566696e652069363420405f5f6c6f6d5f68616e646c65722829207b0a656e7472793a0a202025736967203d206c6f616420693634");
+    a = fa_hex(t, a, "2c2070747220405f5f6c6f6d5f7369670a202025696e66203d206c6f6164206936342c2070747220405f5f6c6f6d5f696e666f0a202025756374203d206c6f6164206936342c2070747220405f5f6c6f6d5f756374780a2020256961203d20616464206936342025696e662c2031360a202025696170203d20696e74746f707472206936342025696120746f207074720a20202561646472203d206c6f6164206936342c2070747220256961700a2020257261203d206164642069363420257563742c203136380a202025726170203d20696e74746f707472206936342025726120746f207074720a20202572697020");
+    a = fa_hex(t, a, "3d206c6f6164206936342c2070747220257261700a2020257361203d206164642069363420257563742c203136300a202025736170203d20696e74746f707472206936342025736120746f207074720a202025727370203d206c6f6164206936342c2070747220257361700a2020256561203d206164642069363420257563742c203139320a202025656170203d20696e74746f707472206936342025656120746f207074720a202025657272203d206c6f6164206936342c2070747220256561700a202025736370203d20616464206936342025696e662c20380a20202573637070203d20696e74746f7074722069");
+    a = fa_hex(t, a, "3634202573637020746f207074720a202025736369203d206c6f6164206933322c207074722025736370700a202025736376203d207a65787420693332202573636920746f206936340a2020256862203d206c6f6164206936342c2070747220405f5f6c6f6d5f6865616c0a20202568706f73203d2069636d702075677420693634202568622c20300a20202569736d6170203d2069636d702065712069363420257363762c20310a2020256973736967203d2069636d702065712069363420257369672c2031310a2020256831203d20616e64206931202568706f732c202569736d61700a2020256832203d20616e");
+    a = fa_hex(t, a, "64206931202568312c202569737369670a2020256c6f77203d2069636d7020756c74206936342025616464722c20313034383537360a202025686f6b203d20616e64206931202568322c20256c6f770a202062722069312025686f6b2c206c6162656c20256865616c2c206c6162656c202568666174616c0a6865616c3a0a2020257067203d20616e64206936342025616464722c202d343039360a2020256d70203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7b7231307d2c7b72387d2c7b7239");
+    a = fa_hex(t, a, "7d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420392c20693634202570672c2069363420343039362c2069363420332c206936342035302c20693634202d312c206936342030290a20202570676f74203d2069636d702065712069363420256d702c202570670a20206272206931202570676f742c206c6162656c202568676f742c206c6162656c202568666174616c0a68676f743a0a202025686e6577203d2073756220693634202568622c20310a202073746f7265206936342025686e65772c2070747220405f5f6c6f6d5f6865616c0a202025623438203d20707472746f696e742070");
+    a = fa_hex(t, a, "747220405f5f6c6f6d5f68683120746f206936340a202025773438203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256234382c20693634203530290a202063616c6c20766f696420405f5f777268657828693634202561646472290a202025623531203d20707472746f696e742070747220405f5f6c6f6d5f68683220746f206936340a202025773531203d2063616c6c20693634206173");
+    a = fa_hex(t, a, "6d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256235312c20693634203130290a202063616c6c20766f696420405f5f77726e756d286936342025686e6577290a202025623534203d20707472746f696e742070747220405f5f6c6f6d5f68683320746f206936340a202025773534203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c");
+    a = fa_hex(t, a, "7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256235342c206936342035290a20207265742069363420310a68666174616c3a0a2020256830203d2069636d702065712069363420257369672c2031310a20206272206931202568302c206c6162656c20256862302c206c6162656c20256863310a6862303a0a202025623631203d20707472746f696e742070747220405f5f6c6f6d5f686e313120746f206936340a202025773631203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20");
+    a = fa_hex(t, a, "223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256236312c20693634203235290a202063616c6c20766f696420405f5f77726e756d286936342025736967290a202025623634203d20707472746f696e742070747220405f5f6c6f6d5f6864313120746f206936340a202025773634203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e");
+    a = fa_hex(t, a, "7b6d656d6f72797d222869363420312c2069363420322c2069363420256236342c206936342034290a202025623636203d20707472746f696e742070747220405f5f6c6f6d5f6865313120746f206936340a202025773636203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256236362c20693634203437290a202025623638203d20707472746f696e742070747220405f5f6c6f6d5f6d5f");
+    a = fa_hex(t, a, "6172726f7720746f206936340a202025773638203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256236382c20693634203139290a202063616c6c20766f696420405f5f7772686578286936342025726970290a202025623731203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a202025773731203d2063616c6c206936342061736d20736964656566");
+    a = fa_hex(t, a, "66656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256237312c206936342031290a20206272206c6162656c202568646f6e650a6863313a0a2020256831203d2069636d702065712069363420257369672c20370a20206272206931202568312c206c6162656c20256862312c206c6162656c20256863320a6862313a0a202025623738203d20707472746f696e742070747220405f5f6c6f6d5f686e3720746f206936340a202025773738203d2063");
+    a = fa_hex(t, a, "616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256237382c20693634203234290a202063616c6c20766f696420405f5f77726e756d286936342025736967290a202025623831203d20707472746f696e742070747220405f5f6c6f6d5f68643720746f206936340a202025773831203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b");
+    a = fa_hex(t, a, "61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256238312c206936342034290a202025623833203d20707472746f696e742070747220405f5f6c6f6d5f68653720746f206936340a202025773833203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256238332c2069363420343029");
+    a = fa_hex(t, a, "0a202025623835203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6172726f7720746f206936340a202025773835203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256238352c20693634203139290a202063616c6c20766f696420405f5f7772686578286936342025726970290a202025623838203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f20");
+    a = fa_hex(t, a, "6936340a202025773838203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256238382c206936342031290a20206272206c6162656c202568646f6e650a6863323a0a2020256832203d2069636d702065712069363420257369672c20340a20206272206931202568322c206c6162656c20256862322c206c6162656c20256863330a6862323a0a202025623935203d20707472746f696e7420");
+    a = fa_hex(t, a, "70747220405f5f6c6f6d5f686e3420746f206936340a202025773935203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256239352c20693634203234290a202063616c6c20766f696420405f5f77726e756d286936342025736967290a202025623938203d20707472746f696e742070747220405f5f6c6f6d5f68643420746f206936340a202025773938203d2063616c6c20693634206173");
+    a = fa_hex(t, a, "6d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256239382c206936342034290a20202562313030203d20707472746f696e742070747220405f5f6c6f6d5f68653420746f206936340a20202577313030203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f7279");
+    a = fa_hex(t, a, "7d222869363420312c2069363420322c206936342025623130302c20693634203530290a20202562313032203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6172726f7720746f206936340a20202577313032203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623130322c20693634203139290a202063616c6c20766f696420405f5f777268657828693634202572697029");
+    a = fa_hex(t, a, "0a20202562313035203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313035203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623130352c206936342031290a20206272206c6162656c202568646f6e650a6863333a0a2020256833203d2069636d702065712069363420257369672c20380a20206272206931202568332c206c6162656c");
+    a = fa_hex(t, a, "20256862332c206c6162656c20256863340a6862333a0a20202562313132203d20707472746f696e742070747220405f5f6c6f6d5f686e3820746f206936340a20202577313132203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623131322c20693634203234290a202063616c6c20766f696420405f5f77726e756d286936342025736967290a20202562313135203d20707472746f69");
+    a = fa_hex(t, a, "6e742070747220405f5f6c6f6d5f68643820746f206936340a20202577313135203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623131352c206936342034290a20202562313137203d20707472746f696e742070747220405f5f6c6f6d5f68653820746f206936340a20202577313137203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c2022");
+    a = fa_hex(t, a, "3d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623131372c20693634203535290a20202562313139203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6172726f7720746f206936340a20202577313139203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936");
+    a = fa_hex(t, a, "342025623131392c20693634203139290a202063616c6c20766f696420405f5f7772686578286936342025726970290a20202562313232203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313232203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623132322c206936342031290a20206272206c6162656c202568646f6e650a6863343a");
+    a = fa_hex(t, a, "0a2020256834203d2069636d702065712069363420257369672c20360a20206272206931202568342c206c6162656c20256862342c206c6162656c20256863350a6862343a0a20202562313239203d20707472746f696e742070747220405f5f6c6f6d5f686e3620746f206936340a20202577313239203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623132392c20693634203235290a");
+    a = fa_hex(t, a, "202063616c6c20766f696420405f5f77726e756d286936342025736967290a20202562313332203d20707472746f696e742070747220405f5f6c6f6d5f68643620746f206936340a20202577313332203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623133322c206936342034290a20202562313334203d20707472746f696e742070747220405f5f6c6f6d5f68653620746f20693634");
+    a = fa_hex(t, a, "0a20202577313334203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623133342c20693634203437290a20202562313336203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6172726f7720746f206936340a20202577313336203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b7369");
+    a = fa_hex(t, a, "7d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623133362c20693634203139290a202063616c6c20766f696420405f5f7772686578286936342025726970290a20202562313339203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313339203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c20");
+    a = fa_hex(t, a, "69363420322c206936342025623133392c206936342031290a20206272206c6162656c202568646f6e650a6863353a0a20202562313433203d20707472746f696e742070747220405f5f6c6f6d5f6867656e20746f206936340a20202577313433203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623134332c20693634203135290a202063616c6c20766f696420405f5f77726e756d28");
+    a = fa_hex(t, a, "6936342025736967290a20202562313436203d20707472746f696e742070747220405f5f6c6f6d5f6867656e3220746f206936340a20202577313436203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623134362c206936342034290a20202562313438203d20707472746f696e742070747220405f5f6c6f6d5f6867656e3320746f206936340a20202577313438203d2063616c6c2069");
+    a = fa_hex(t, a, "36342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623134382c20693634203339290a20202562313530203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6172726f7720746f206936340a20202577313530203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231");
+    a = fa_hex(t, a, "317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623135302c20693634203139290a202063616c6c20766f696420405f5f7772686578286936342025726970290a20202562313533203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313533203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623135332c");
+    a = fa_hex(t, a, "206936342031290a20206272206c6162656c202568646f6e650a68646f6e653a0a20202562313537203d20707472746f696e742070747220405f5f6c6f6d5f6d5f73696720746f206936340a20202577313537203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623135372c20693634203134290a202063616c6c20766f696420405f5f77726e756d286936342025736967290a20202562");
+    a = fa_hex(t, a, "313630203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313630203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623136302c206936342031290a20202562313632203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6164647220746f206936340a20202577313632203d2063616c6c206936342061736d2073696465656666");
+    a = fa_hex(t, a, "656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623136322c20693634203134290a202063616c6c20766f696420405f5f777268657828693634202561646472290a202025686173657272203d2069636d70206e652069363420256572722c20300a2020627220693120256861736572722c206c6162656c202564697263686b2c206c6162656c20256469726e6f6e650a64697263686b3a0a202025697377203d20616e642069363420256572722c");
+    a = fa_hex(t, a, "20320a20202569737772203d2069636d70206e652069363420256973772c20300a202062722069312025697377722c206c6162656c20256477722c206c6162656c20256472640a6477723a0a20202562313732203d20707472746f696e742070747220405f5f6c6f6d5f6d5f777220746f206936340a20202577313732203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623137322c2069");
+    a = fa_hex(t, a, "3634203130290a20206272206c6162656c202564646f6e650a6472643a0a20202562313736203d20707472746f696e742070747220405f5f6c6f6d5f6d5f726420746f206936340a20202577313736203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623137362c20693634203130290a20206272206c6162656c202564646f6e650a6469726e6f6e653a0a20202562313830203d207074");
+    a = fa_hex(t, a, "72746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313830203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623138302c206936342031290a20206272206c6162656c202564646f6e650a64646f6e653a0a20202562313834203d20707472746f696e742070747220405f5f6c6f6d5f6d5f706320746f206936340a20202577313834203d2063616c6c20");
+    a = fa_hex(t, a, "6936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623138342c20693634203130290a202063616c6c20766f696420405f5f7772686578286936342025726970290a20202562313837203d20707472746f696e742070747220405f5f6c6f6d5f6d5f72737020746f206936340a20202577313837203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c");
+    a = fa_hex(t, a, "7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623138372c206936342039290a202063616c6c20766f696420405f5f7772686578286936342025727370290a20202562313930203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6e6c20746f206936340a20202577313930203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f");
+    a = fa_hex(t, a, "72797d222869363420312c2069363420322c206936342025623139302c206936342031290a202025736230203d20707472746f696e742070747220405f5f6c6f6d5f736974657320746f206936340a2020257362203d206164642069363420257362302c20340a202025736e30203d20707472746f696e742070747220405f5f6c6f6d5f736974657320746f206936340a202025736e7070203d20696e74746f707472206936342025736e3020746f207074720a202025736e636f203d206c6f6164206933322c207074722025736e70700a202025736e6376203d207a657874206933322025736e636f20746f206936");
+    a = fa_hex(t, a, "340a202025666230203d20707472746f696e742070747220405f5f6c6f6d5f666e7320746f206936340a2020256662203d206164642069363420256662302c20340a2020256b6230203d20707472746f696e742070747220405f5f6c6f6d5f626c6b7320746f206936340a2020256b62203d206164642069363420256b62302c20340a202025786230203d20707472746f696e742070747220405f5f6c6f6d5f7374727320746f206936340a2020257862203d206164642069363420257862302c20300a20206272206c6162656c2025736c6f6f700a736c6f6f703a0a2020257369203d2070686920693634205b302c");
+    a = fa_hex(t, a, "202564646f6e655d2c205b257369322c202573636f6e745d0a202025736269203d2070686920693634205b2d312c202564646f6e655d2c205b25736269322c202573636f6e745d0a202025736261203d2070686920693634205b302c202564646f6e655d2c205b25736261322c202573636f6e745d0a20202573646f6e65203d2069636d702073676520693634202573692c2025736e63760a20206272206931202573646f6e652c206c6162656c20257361667465722c206c6162656c202573626f64790a73626f64793a0a202025736f203d206d756c20693634202573692c2032340a2020257361203d2061646420");
+    a = fa_hex(t, a, "693634202573622c2025736f0a202025736170203d20696e74746f707472206936342025736120746f207074720a2020257376203d206c6f6164206936342c2070747220257361700a20202573703230203d2061646420693634202573612c2032300a202025736c70203d20696e74746f7074722069363420257370323020746f207074720a202025736c6e203d206c6f6164206933322c207074722025736c700a202025736c76203d207a657874206933322025736c6e20746f206936340a202025736c65203d2069636d7020756c6520693634202573762c20257269700a202025736c6532203d20616464206936");
+    a = fa_hex(t, a, "34202573762c2025736c760a202025736c74203d2069636d7020756c742069363420257269702c2025736c65320a20202573696e203d20616e642069312025736c652c2025736c740a202025736774203d2069636d702075677420693634202573762c20257362610a20202573626f7468203d20616e64206931202573696e2c20257367740a20206272206931202573626f74682c206c6162656c20257374616b652c206c6162656c202573736b69700a7374616b653a0a20206272206c6162656c202573636f6e740a73736b69703a0a20206272206c6162656c202573636f6e740a73636f6e743a0a202025736269");
+    a = fa_hex(t, a, "32203d2070686920693634205b2573692c20257374616b655d2c205b257362692c202573736b69705d0a20202573626132203d2070686920693634205b2573762c20257374616b655d2c205b257362612c202573736b69705d0a202025736932203d2061646420693634202573692c20310a20206272206c6162656c2025736c6f6f700a7361667465723a0a20202573686173203d2069636d70207367652069363420257362692c20300a202062722069312025736861732c206c6162656c202573686f77736974652c206c6162656c2025736974656e6f6e650a736974656e6f6e653a0a202025666e30203d207074");
+    a = fa_hex(t, a, "72746f696e742070747220405f5f6c6f6d5f666e7320746f206936340a202025666e7070203d20696e74746f707472206936342025666e3020746f207074720a202025666e636f203d206c6f6164206933322c207074722025666e70700a202025666e6376203d207a657874206933322025666e636f20746f206936340a20206272206c6162656c2025666c6f6f700a666c6f6f703a0a2020256669203d2070686920693634205b302c2025736974656e6f6e655d2c205b256669322c202566636f6e745d0a2020256676203d2070686920693634205b2d312c2025736974656e6f6e655d2c205b256676322c202566");
+    a = fa_hex(t, a, "636f6e745d0a20202566646f6e65203d2069636d702073676520693634202566692c2025666e63760a20206272206931202566646f6e652c206c6162656c20256661667465722c206c6162656c202566626f64790a66626f64793a0a2020256665203d206d756c20693634202566692c2032340a2020256670203d2061646420693634202566622c202566650a202025667070203d20696e74746f707472206936342025667020746f207074720a2020256673203d206c6f6164206936342c2070747220256670700a202025667065203d2061646420693634202566702c20380a20202566706570203d20696e74746f");
+    a = fa_hex(t, a, "70747220693634202566706520746f207074720a20202566656e203d206c6f6164206936342c207074722025667065700a202025666765203d2069636d70207567652069363420257269702c202566730a202025666c74203d2069636d7020756c742069363420257269702c202566656e0a20202566696e203d20616e6420693120256667652c2025666c740a20206272206931202566696e2c206c6162656c20256674616b652c206c6162656c202566736b69700a6674616b653a0a20206272206c6162656c202566636f6e740a66736b69703a0a20206272206c6162656c202566636f6e740a66636f6e743a0a20");
+    a = fa_hex(t, a, "2025667632203d2070686920693634205b2566692c20256674616b655d2c205b2566762c202566736b69705d0a202025666932203d2061646420693634202566692c20310a20206272206c6162656c2025666c6f6f700a6661667465723a0a20202566686173203d2069636d702073676520693634202566762c20300a202062722069312025666861732c206c6162656c20256673686f772c206c6162656c2025666e6f6e650a666e6f6e653a0a20202562323734203d20707472746f696e742070747220405f5f6c6f6d5f6d733520746f206936340a20202577323734203d2063616c6c206936342061736d207369");
+    a = fa_hex(t, a, "6465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623237342c20693634203834290a20206272206c6162656c202573697465646f6e650a6673686f773a0a202025666e65203d206d756c20693634202566762c2032340a202025666e70203d2061646420693634202566622c2025666e650a202025666e3136203d20616464206936342025666e702c2031360a202025666e313670203d20696e74746f707472206936342025666e3136");
+    a = fa_hex(t, a, "20746f207074720a202025666e6f203d206c6f6164206933322c207074722025666e3136700a202025666e6f76203d207a657874206933322025666e6f20746f206936340a202025666e3230203d20616464206936342025666e702c2032300a202025666e323070203d20696e74746f707472206936342025666e323020746f207074720a202025666e6c203d206c6f6164206933322c207074722025666e3230700a202025666e6c76203d207a657874206933322025666e6c20746f206936340a202025666e6d32203d2061646420693634202578622c2025666e6f760a20202562323839203d20707472746f696e");
+    a = fa_hex(t, a, "742070747220405f5f6c6f6d5f6d73356120746f206936340a20202577323839203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623238392c20693634203635290a202025775f666e6d203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c");
+    a = fa_hex(t, a, "7e7b6d656d6f72797d222869363420312c2069363420322c206936342025666e6d322c206936342025666e6c76290a20202562323932203d20707472746f696e742070747220405f5f6c6f6d5f6d73356220746f206936340a20202577323932203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623239322c206936342034290a20206272206c6162656c202573697465646f6e650a7368");
+    a = fa_hex(t, a, "6f77736974653a0a2020257365203d206d756c2069363420257362692c2032340a2020257370203d2061646420693634202573622c202573650a202025737038203d2061646420693634202573702c20380a202025737070203d20696e74746f70747220693634202573703820746f207074720a202025736976203d206c6f6164206933322c2070747220257370700a202025736669203d207a65787420693332202573697620746f206936340a20202573703132203d2061646420693634202573702c2031320a202025736270203d20696e74746f7074722069363420257370313220746f207074720a2020257362");
+    a = fa_hex(t, a, "76203d206c6f6164206933322c2070747220257362700a20202573626c6b203d207a65787420693332202573627620746f206936340a20202573703136203d2061646420693634202573702c2031360a202025737870203d20696e74746f7074722069363420257370313620746f207074720a202025737876203d206c6f6164206936342c2070747220257378700a20202573696e73203d20616e642069363420257378762c20343239343936373239350a2020256665203d206d756c2069363420257366692c2032340a2020256670203d2061646420693634202566622c202566650a20202566703136203d206164");
+    a = fa_hex(t, a, "6420693634202566702c2031360a202025667070203d20696e74746f7074722069363420256670313620746f207074720a202025666e6f203d206c6f6164206933322c2070747220256670700a202025666e6f76203d207a657874206933322025666e6f20746f206936340a20202566703230203d2061646420693634202566702c2032300a202025666e6c70203d20696e74746f7074722069363420256670323020746f207074720a202025666e6c203d206c6f6164206933322c207074722025666e6c700a202025666e6c76203d207a657874206933322025666e6c20746f206936340a2020256b65203d206d75");
+    a = fa_hex(t, a, "6c20693634202573626c6b2c20380a2020256b70203d206164642069363420256b622c20256b650a2020256b7070203d20696e74746f7074722069363420256b7020746f207074720a2020256b6e6f203d206c6f6164206933322c2070747220256b70700a2020256b6e6f76203d207a6578742069333220256b6e6f20746f206936340a2020256b7034203d206164642069363420256b702c20340a2020256b6e6c70203d20696e74746f7074722069363420256b703420746f207074720a2020256b6e6c203d206c6f6164206933322c2070747220256b6e6c700a2020256b6e6c76203d207a657874206933322025");
+    a = fa_hex(t, a, "6b6e6c20746f206936340a202025666e6d203d2061646420693634202578622c2025666e6f760a2020256b6e6d203d2061646420693634202578622c20256b6e6f760a20202562333331203d20707472746f696e742070747220405f5f6c6f6d5f6d733120746f206936340a20202577333331203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623333312c20693634203134290a202025");
+    a = fa_hex(t, a, "775f666e203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025666e6d2c206936342025666e6c76290a20202562333334203d20707472746f696e742070747220405f5f6c6f6d5f6d733220746f206936340a20202577333334203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d");
+    a = fa_hex(t, a, "2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623333342c206936342033290a202025775f6b6e203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c2069363420256b6e6d2c2069363420256b6e6c76290a20202562333337203d20707472746f696e742070747220405f5f6c6f6d5f6d733320746f206936340a20202577333337203d2063");
+    a = fa_hex(t, a, "616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623333372c206936342037290a202063616c6c20766f696420405f5f77726e756d28693634202573696e73290a20202562333430203d20707472746f696e742070747220405f5f6c6f6d5f6d733420746f206936340a20202577333430203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b6178");
+    a = fa_hex(t, a, "7d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623334302c20693634203230290a2020257364697374203d207375622069363420257269702c20257362610a202063616c6c20766f696420405f5f77726865782869363420257364697374290a20202562333434203d20707472746f696e742070747220405f5f6c6f6d5f6d733620746f206936340a20202577333434203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c");
+    a = fa_hex(t, a, "7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623334342c206936342034290a20206272206c6162656c202573697465646f6e650a73697465646f6e653a0a2020256431203d207375622069363420257273702c2025616464720a2020256432203d20737562206936342025616464722c20257273700a2020257331203d2069636d7020756c7420693634202564312c2036353533360a2020257332203d2069636d7020756c7420693634202564322c2036353533360a20202567737461636b203d206f7220693120");
+    a = fa_hex(t, a, "2573312c202573320a20206272206931202567737461636b2c206c6162656c202567736f2c206c6162656c2025676e6f736f0a67736f3a0a20202562333535203d20707472746f696e742070747220405f5f6c6f6d5f6d5f736f20746f206936340a20202577333535203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623335352c20693634203830290a20206272206c6162656c202567");
+    a = fa_hex(t, a, "736f646f6e650a676e6f736f3a0a20206272206c6162656c202567736f646f6e650a67736f646f6e653a0a20202562333631203d20707472746f696e742070747220405f5f6c6f6d5f6d5f6661637420746f206936340a20202577333631203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623336312c2069363420313530290a20202562333633203d20707472746f696e742070747220");
+    a = fa_hex(t, a, "405f5f6c6f6d5f6d5f74697020746f206936340a20202577333633203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d222869363420312c2069363420322c206936342025623336332c2069363420313935290a20203b20e681a2e5a48de9bb98e8aea4e5a484e7bdaeefbc8ce5868de9878de58f91e4bfa1e58fb720e28094e2809420e8bf9be7a88be4bb8de784b6e6adbbe4ba8ee4bfa1e58fb7e380820a2020257230203d2063616c6c2069");
+    a = fa_hex(t, a, "36342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7b7231307d2c7b72387d2c7b72397d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d22286936342031332c2069363420257369672c2069363420302c2069363420302c2069363420382c2069363420302c206936342030290a202025706964203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7b7231307d2c7b72387d2c7b72397d2c7e7b6378");
+    a = fa_hex(t, a, "7d2c7e7b7231317d2c7e7b6d656d6f72797d22286936342033392c2069363420302c2069363420302c2069363420302c2069363420302c2069363420302c206936342030290a202025746964203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7b7231307d2c7b72387d2c7b72397d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d2228693634203138362c2069363420302c2069363420302c2069363420302c2069363420302c2069363420302c206936342030290a2020257233203d20");
+    a = fa_hex(t, a, "63616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b61787d2c7b64697d2c7b73697d2c7b64787d2c7b7231307d2c7b72387d2c7b72397d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d2228693634203233342c2069363420257069642c2069363420257469642c2069363420257369672c2069363420302c2069363420302c206936342030290a202025616464203d206164642069363420257369672c203132380a2020257234203d2063616c6c206936342061736d2073696465656666656374202273797363616c6c222c20223d7b61787d2c7b");
+    a = fa_hex(t, a, "61787d2c7b64697d2c7b73697d2c7b64787d2c7e7b63787d2c7e7b7231317d2c7e7b6d656d6f72797d2228693634203233312c2069363420256164642c2069363420302c206936342030290a20207265742069363420300a7d0a0a646566696e6520766f696420405f5f6c6f6d5f7368696d2829207b0a656e7472793a0a202072657420766f69640a7d0a0a");
+    return a;
+}
+
+
+fn fa_r64(p: ptr, off: u32) -> u64 {
+    let lo: u64 = load32(p, off) as u64;
+    let hi: u64 = load32(p, off + 4) as u64;
+    return lo + hi * 4294967296;
+}
+
+fn fa_is_shim(t: ptr, ls: u32, le: u32) -> u32 {
+    let nm: u64 = fa_span(t, ls, le);
+    return fa_lit_eq(t, hi32(nm), hi32(nm) + lo32(nm), "__lom_shim");
+}
+
+fn fa_is_table_global(t: ptr, noff: u32, nlen: u32) -> u32 {
+    if fa_lit_eq(t, noff, noff + nlen, "@__lom_sites") == 1 {
+        return 1;
+    }
+    if fa_lit_eq(t, noff, noff + nlen, "@__lom_fns") == 1 {
+        return 1;
+    }
+    if fa_lit_eq(t, noff, noff + nlen, "@__lom_blks") == 1 {
+        return 1;
+    }
+    if fa_lit_eq(t, noff, noff + nlen, "@__lom_strs") == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+fn fa_prepare(tab: ptr, t: ptr, n: u32) -> u32 {
+    let sp: ptr = fs(tab);
+    store32(sp, FS_ON, 1);
+    store32(sp, FS_UN, n);
+    store32(sp, FS_NSITE, 0);
+    store32(sp, FS_NFN, 0);
+    store32(sp, FS_NBLK, 0);
+    store32(sp, FS_POOLN, 0);
+    store32(sp, FS_CUR, 0);
+    store32(sp, FS_NEWN, 0);
+    let rc: u32 = fa_scan(tab, t, n);
+    if rc != 0 {
+        return rc;
+    }
+    let ep: u64 = find_entry(t, n);
+    if ep == 0 {
+        let _f0: u32 = fail("the unit has no `_start` or `main` entry point -- declare `fn main()` or `fn _start()`");
+        return 1;
+    }
+    store32(sp, FS_USERO, hi32(ep));
+    store32(sp, FS_USERL, lo32(ep));
+    let rp: u32 = fa_pool(t, sp);
+    if rp != 0 {
+        return rp;
+    }
+    let nn: u32 = fa_text(tab, t, n);
+    if nn == 0 {
+        return 1;
+    }
+    store32(sp, FS_NEWN, nn);
+    return 0;
+}
+
+/// 名字池（链接器自己的名字，不是产物的名字池）：跨度写进状态块。
+fn fa_names(tab: ptr, t: ptr) -> u32 {
+    let sp: ptr = fs(tab);
+    let c0: u32 = cell(tab, C_EXTN);
+    store32(sp, FS_SITESO, c0);
+    let c1: u32 = put_name(t, c0, "@__lom_sites");
+    store32(sp, FS_SITESL, c1 - c0);
+    store32(sp, FS_FNSO, c1);
+    let c2: u32 = put_name(t, c1, "@__lom_fns");
+    store32(sp, FS_FNSL, c2 - c1);
+    store32(sp, FS_BLKSO, c2);
+    let c3: u32 = put_name(t, c2, "@__lom_blks");
+    store32(sp, FS_BLKSL, c3 - c2);
+    store32(sp, FS_STRSO, c3);
+    let c4: u32 = put_name(t, c3, "@__lom_strs");
+    store32(sp, FS_STRSL, c4 - c3);
+    store32(sp, FS_SIGO, c4);
+    let c5: u32 = put_name(t, c4, "@__lom_sig");
+    store32(sp, FS_SIGL, c5 - c4);
+    store32(sp, FS_INFOO, c5);
+    let c6: u32 = put_name(t, c5, "@__lom_info");
+    store32(sp, FS_INFOL, c6 - c5);
+    store32(sp, FS_UCTXO, c6);
+    let c7: u32 = put_name(t, c6, "@__lom_uctx");
+    store32(sp, FS_UCTXL, c7 - c6);
+    store32(sp, FS_HANDO, c7);
+    let c8: u32 = put_name(t, c7, "__lom_handler");
+    store32(sp, FS_HANDL, c8 - c7);
+    store32(sp, FS_SHIMO, c8);
+    let c9: u32 = put_name(t, c8, "__lom_shim");
+    store32(sp, FS_SHIML, c9 - c8);
+    store32(sp, FS_ENTRYO, c9);
+    let c10: u32 = put_name(t, c9, "__lom_entry");
+    store32(sp, FS_ENTRYL, c10 - c9);
+    store32(sp, FS_WRHEXO, c10);
+    let c11: u32 = put_name(t, c10, "__wrhex");
+    store32(sp, FS_WRHEXL, c11 - c10);
+    setcell(tab, C_EXTN, c11);
+    return 0;
+}
+
+/// 发射期：把每条站点指令的虚拟地址记进描述。
+fn fa_site_hit(tab: ptr, t: ptr, line: u32, d: u32) {
+    let sp: ptr = fs(tab);
+    let cur: u32 = load32(sp, FS_CUR);
+    if cur >= load32(sp, FS_NSITE) {
+        return;
+    }
+    let se: u32 = FAULT_SITE - M_FAULT + cur * 32;
+    if load32(sp, se + FT_LINE) != line {
+        return;
+    }
+    w64(sp, se + FT_ADDR, (txt_base(tab) + d) as u64);
+    store32(sp, FS_CUR, cur + 1);
+}
+
+/// 发射后：把这条站点展开出来的**机器码长度**记下来（报告只在 `[addr, addr+len)` 里认）。
+fn fa_site_len(tab: ptr, d0: u32, d1: u32) {
+    let sp: ptr = fs(tab);
+    let cur: u32 = load32(sp, FS_CUR);
+    if cur == 0 {
+        return;
+    }
+    let se: u32 = FAULT_SITE - M_FAULT + (cur - 1) * 32;
+    if fa_r64(sp, se + FT_ADDR) != (txt_base(tab) + d0) as u64 {
+        return;
+    }
+    w32(sp, se + FT_LEN, d1 - d0);
+}
+
+/// 发射后：四张表写进 `.data`。地址与参考实现的 `_fault_patch_tables` 同一口径。
+fn fa_fill(tab: ptr, t: ptr, gb: ptr) -> u32 {
+    let sp: ptr = fs(tab);
+    let ns: u32 = load32(sp, FS_NSITE);
+    let nf: u32 = load32(sp, FS_NFN);
+    let nb: u32 = load32(sp, FS_NBLK);
+    let npo: u32 = load32(sp, FS_POOLN);
+    let sa: u32 = lbl_addr(tab, t, load32(sp, FS_SITESO), load32(sp, FS_SITESL), 0, 0);
+    let fa: u32 = lbl_addr(tab, t, load32(sp, FS_FNSO), load32(sp, FS_FNSL), 0, 0);
+    let ba: u32 = lbl_addr(tab, t, load32(sp, FS_BLKSO), load32(sp, FS_BLKSL), 0, 0);
+    let xa: u32 = lbl_addr(tab, t, load32(sp, FS_STRSO), load32(sp, FS_STRSL), 0, 0);
+    if sa == NO || fa == NO || ba == NO || xa == NO {
+        let _f1: u32 = fail("the fault-report tables were not placed in .data");
+        return 1;
+    }
+    let so: u32 = sa - data_base(tab);
+    w32(gb, so, ns);
+    let i: u32 = 0;
+    while i < ns {
+        let se: u32 = FAULT_SITE - M_FAULT + i * 32;
+        let p: u32 = so + 4 + i * 24;
+        w64(gb, p, fa_r64(sp, se + FT_ADDR));
+        w32(gb, p + 8, load32(sp, se + FT_FN));
+        w32(gb, p + 12, load32(sp, se + FT_BLK));
+        w32(gb, p + 16, load32(sp, se + FT_INS));
+        w32(gb, p + 20, load32(sp, se + FT_LEN));
+        i = i + 1;
+    }
+    let fo: u32 = fa - data_base(tab);
+    w32(gb, fo, nf);
+    let tail: u32 = lbl_addr(tab, t, load32(sp, FS_WRHEXO), load32(sp, FS_WRHEXL), 0, 0);
+    i = 0;
+    while i < nf {
+        let fb: u32 = FAULT_FN - M_FAULT + i * 16;
+        let no: u32 = load32(sp, fb + FF_NOFF);
+        let nl: u32 = load32(sp, fb + FF_NLEN);
+        let start: u32 = lbl_addr(tab, t, no, nl, 0, 0);
+        let end: u32 = tail;
+        if i + 1 < nf {
+            let fb2: u32 = FAULT_FN - M_FAULT + (i + 1) * 16;
+            end = lbl_addr(tab, t, load32(sp, fb2 + FF_NOFF), load32(sp, fb2 + FF_NLEN), 0, 0);
+        }
+        let p2: u32 = fo + 4 + i * 24;
+        w64(gb, p2, start as u64);
+        w64(gb, p2 + 8, end as u64);
+        w32(gb, p2 + 16, load32(sp, fb + FF_POOL));
+        w32(gb, p2 + 20, nl);
+        i = i + 1;
+    }
+    let bo: u32 = ba - data_base(tab);
+    w32(gb, bo, nb);
+    i = 0;
+    while i < nb {
+        let bb: u32 = FAULT_BLK - M_FAULT + i * 12;
+        w32(gb, bo + 4 + i * 8, load32(sp, bb + FB_POOL));
+        w32(gb, bo + 4 + i * 8 + 4, load32(sp, bb + FB_NLEN));
+        i = i + 1;
+    }
+    let xo: u32 = xa - data_base(tab);
+    i = 0;
+    while i < npo {
+        store8(gb, xo + i, load8(sp, FAULT_POOL - M_FAULT + i) as u8);
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// 机器码 shim：内核按 SysV 传 rdi/rsi/rdx，栈机 handler 从全局读。
+/// 三个全局的地址用 **abs32 回填（kind 2）** —— bss 的地址要等 `place_bss`，
+/// 发射这一刻还定不下来。
+fn fa_shim(tab: ptr, out: ptr, c: u32, t: ptr) -> u32 {
+    let sp: ptr = fs(tab);
+    let d: u32 = c;
+    let d1: u32 = e1(out, d, 137);
+    let d2: u32 = e1(out, d1, 60);
+    let d3: u32 = e1(out, d2, 37);
+    fix_add(tab, d3, 2, load32(sp, FS_SIGO), load32(sp, FS_SIGL), 0, 0);
+    let d4: u32 = e4(out, d3, 0);
+    let d5: u32 = e1(out, d4, 72);
+    let d6: u32 = e1(out, d5, 137);
+    let d7: u32 = e1(out, d6, 52);
+    let d8: u32 = e1(out, d7, 37);
+    fix_add(tab, d8, 2, load32(sp, FS_INFOO), load32(sp, FS_INFOL), 0, 0);
+    let d9: u32 = e4(out, d8, 0);
+    let d10: u32 = e1(out, d9, 72);
+    let d11: u32 = e1(out, d10, 137);
+    let d12: u32 = e1(out, d11, 20);
+    let d13: u32 = e1(out, d12, 37);
+    fix_add(tab, d13, 2, load32(sp, FS_UCTXO), load32(sp, FS_UCTXL), 0, 0);
+    let d14: u32 = e4(out, d13, 0);
+    let d15: u32 = e1(out, d14, 232);
+    fix_add(tab, d15, 0, load32(sp, FS_HANDO), load32(sp, FS_HANDL), 0, 0);
+    let d16: u32 = e4(out, d15, 0);
+    // 处理器返回 1 = 已修复：补 `add rsp,8` 再 rt_sigreturn（见参考实现同一段）。
+    let d17: u32 = e1(out, d16, 133);
+    let d18: u32 = e1(out, d17, 192);
+    let d19: u32 = e1(out, d18, 116);
+    let d20: u32 = e1(out, d19, 11);
+    let d21: u32 = e1(out, d20, 72);
+    let d22: u32 = e1(out, d21, 131);
+    let d23: u32 = e1(out, d22, 196);
+    let d24: u32 = e1(out, d23, 8);
+    let d25: u32 = e1(out, d24, 184);
+    let d26: u32 = e1(out, d25, 15);
+    let d27: u32 = e1(out, d26, 0);
+    let d28: u32 = e1(out, d27, 0);
+    let d29: u32 = e1(out, d28, 0);
+    let d30: u32 = e1(out, d29, 15);
+    let d31: u32 = e1(out, d30, 5);
+    let d32: u32 = e1(out, d31, 15);
+    let d33: u32 = e1(out, d32, 11);
+    return d33;
 }
 
 // ---------------------------------------------------------------- 主程序
@@ -7316,6 +8178,7 @@ fn merge_inputs(pbuf: ptr, inb: ptr, n0: u64, nmerge: u32, obase: u32) -> u64 {
 }
 
 fn run(mem: ptr) -> u32 {
+    store32(ptr_add(mem, M_FAULT), FS_HEAL, 0);
     let ab: ptr = ptr_add(mem, M_ARGV);
     let mb: ptr = ptr_add(mem, M_META);
     let _m0: u32 = put_cstr(mb, 0, "lomhot 1\n");
@@ -7356,6 +8219,8 @@ fn run(mem: ptr) -> u32 {
     let ap: u32 = 0;
     // 启动器给的 `--diag-out` 路径（0 = 没给）。写不了产物时那一份结构化诊断就写到它里面。
     let dg: u32 = 0;
+    // `--fault-report`（`docs/367` stage 2）：产物自己报段错误。
+    let fr: u32 = 0;
     let obase: u32 = lo32(a1) + 8 + lo32(o1) + 8;   // 与下面的 pout 对齐
     let ok: u32 = 3;
     let go: u32 = 1;
@@ -7455,6 +8320,39 @@ fn run(mem: ptr) -> u32 {
                 store8(pbuf, DIAGB_OFF + lo32(pv), 0 as u8);
                 dg = 1;
                 ok = ok + 2;
+            } else if lo32(av) == 14
+                    && lit_at(ab, hi32(av), hi32(av) + 14, "--fault-report") == 1 {
+                fr = 1;
+                ok = ok + 1;
+            } else if lo32(av) == 12
+                    && lit_at(ab, hi32(av), hi32(av) + 12, "--fault-heal") == 1 {
+                let pv: u64 = argv_n(ab, 8192, ok + 1);
+                if lo32(pv) == 0 {
+                    wstr(2, "loment: --fault-heal needs a count\n");
+                    return die(2);
+                }
+                // 只收十进制非负整数 —— 与参考的 `int(arg, 10)` 同一条口径。
+                let he: u32 = hi32(pv) + lo32(pv);
+                let hd: u32 = skip_sp(ab, hi32(pv), he);
+                let hok: u32 = 1;
+                if hd >= he {
+                    hok = 0;
+                }
+                let hk: u32 = hd;
+                while hk < he {
+                    let hc: u32 = load8(ab, hk);
+                    if hc < 48 || hc > 57 {
+                        hok = 0;
+                    }
+                    hk = hk + 1;
+                }
+                if hok == 0 {
+                    wstr(2, "loment: --fault-heal needs a non-negative decimal count\n");
+                    return die(2);
+                }
+                store32(ptr_add(mem, M_FAULT), FS_HEAL, num_at(ab, hd, he) as u32);
+                fr = 1;
+                ok = ok + 2;
             } else {
                 wstr(2, "loment: unknown option ");
                 write_all(2, ptr_add(ab, hi32(av)), lo32(av) as u64);
@@ -7535,8 +8433,28 @@ fn run(mem: ptr) -> u32 {
         wstr(2, "loment: --hot-meta takes ELF output only\n");
         return die(2);
     }
+    if fr == 1 {
+        if pe == 1 {
+            wstr(2, "loment: --fault-report takes ELF output only
+");
+            return die(2);
+        }
+        if load32(hot_sc(mb), HS_HRUN) == 1 {
+            wstr(2, "loment: --fault-report and the hotswap entry gate do not combine (docs/367 stage 1)
+");
+            return die(2);
+        }
+        let rf: u32 = fa_prepare(tab, inb, n as u32);
+        if rf != 0 {
+            return die(1);
+        }
+        n = load32(fs(tab), FS_NEWN) as u64;
+    }
     // 外部符号名池的游标: 从输入文本的**末尾**开始, 见 copy_name。
     setcell(tab, C_EXTN, n as u32);
+    if fr == 1 {
+        let _fn0: u32 = fa_names(tab, inb);
+    }
     if load32(hot_sc(mb), HS_HRUN) == 1 {
         // 入口闸读的那个 epoch 字：名字先立起来，地址等 `place_bss` 再回填。
         let en: u32 = put_name(inb, cell(tab, C_EXTN), "__loment_hot_epoch");
@@ -7645,6 +8563,13 @@ fn run(mem: ptr) -> u32 {
 ");
         return die(1);
     }
+    // **dismemory**（`docs/373`）：这份 IR 要 LVM 在没有地址的模型上跑；原生档有地址，
+    // 链出来只会静默错编。与 `no_std` / `no_gc` 同一条纪律：点名拒。
+    if mem_has(inb, n as u32, "; loment-memory: dismemory") == 1 {
+        wstr(2, "loment: 这份 IR 要求 LVM 的 dismemory 档（内存里没有地址，docs/373）；原生档有地址，链不出来 
+");
+        return die(1);
+    }
     // **`no_gc` 的带牙检查**（`#538`）：IR 自己声明"不带收集器"，那就核它真的没带。
     // 与参考实现 `tools/lomelf.py` 同一条判断、同一处失败（`docs/227` 判据 B 的镜像）。
     if mem_has(inb, n as u32, "; loment-gc: no_gc") == 1
@@ -7655,6 +8580,12 @@ fn run(mem: ptr) -> u32 {
         return die(1);
     }
     let tlen0: u32 = emit_all(tab, txt, 0, inb, n as u32, tlsn, tls, mb);
+    if fr == 1 {
+        let rf3: u32 = fa_fill(tab, inb, gb);
+        if rf3 != 0 {
+            return die(1);
+        }
+    }
     // **收编面**（`docs/219` §6）：链里带了**任何外部输入**（`.o` 或 `.so`），就把
     // "可闭合"那几个名字提供出来，于是它们不再是未定义符号 —— 从表上划掉。粒度与参考
     // 实现 `tools/lomelf.py` 的 `compile_ll` 同一处判断、同一段字节（`loment_elf_test`

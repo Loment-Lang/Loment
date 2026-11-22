@@ -31,6 +31,10 @@
   逐字节相同 —— 任何"基址 + 字节数"的路径都会在换摆法时露出来。
 * **N 体内没有连续字节数组** —— 分配 1 MiB、只写 2 字节，背后只有 2 个格；
   体对象上没有 `data` 那样的可按下标寻址的缓冲区。
+* **P 语义保留** —— 同一份程序，普通档与 `lvm_dismemory_true` 档（shuffle=0/1/7）
+  rc 与 stdout 逐字节相同：**换表示不是换语言**。排除项写在 `_P_EXCLUDED` 里：
+  那几份把 `str_ptr(...) as u64` 交给内核，按设计就是 F04 —— 它们是 S1 那条
+  类型化指针通道要解决的写法，与本判据无关。
 
 ⚠ **为什么有一半夹具是手写 IR**：ptrtoint / inttoptr / 跨体减法这些操作**在 Loment 源里
 写不出来**（这正是这一档要的）；要证明 LVM 边界拒绝它们，只能直接喂 IR。合法路径
@@ -434,6 +438,51 @@ def test_body_is_sparse_not_a_byte_array() -> None:
     assert m7.get(t7, 4) == m0.get(t0, 4), "换摆法改变了逻辑内容"
     assert set(b7.cells) != set(b0.cells), "换摆法后物理键没变 —— 摆法没生效"
     print("      1 MiB 只写 2 字节 ⇒ 2 个格；换摆法改物理键、不改逻辑内容")
+
+
+#: P 的排除项：这几份例子把 `str_ptr(...) as u64` 递给 syscall4 —— 在 dismemory 下
+#: 那就是 ptrtoint，按设计就该 F04（`docs/375` §3 的 `syscall4p` 才是那条通道）。
+#: **不是**表示层改了语义；把它们排除在外比"顺手改语料"诚实。
+_P_EXCLUDED = {
+    "tour.lomt": "str_ptr(...) as u64 交给 syscall4（F04 是本档的正确答复）",
+    "native_match_full.lomt": "同上",
+    "all_loment.lomt": "同上",
+}
+
+
+def _inject_marker(src: str) -> str:
+    """在 `module` 行之后插 `choose lvm_dismemory_true`（choose 必须在 module 之后）。"""
+    out, done = [], False
+    for line in src.splitlines(True):
+        out.append(line)
+        if not done and line.startswith("module "):
+            out.append("choose lvm_dismemory_true\n")
+            done = True
+    assert done, "源里没有 module 行"
+    return "".join(out)
+
+
+def test_dismemory_preserves_observable_semantics() -> None:
+    """判 P（`docs/375` §2.4）：换表示不是换语言。
+
+    同一份例子，普通档与 dismemory 档各跑一遍 —— rc 与 stdout 必须逐字节相同，
+    而且 dismemory 侧在 shuffle=0/1/7 下也相同。这条比 M 更硬：M 只证明"摆法
+    不影响"，P 证明"整个表示层(稀疏格)不影响程序看到的东西"。
+    """
+    for rel in ("loment/examples/user_hello.lomt", "loment/examples/switch.lomt"):
+        entry = ROOT / rel
+        src = entry.read_text(encoding="utf-8")
+        plain = _run(_ir(src))
+        dis_ir = _ir(_inject_marker(src))
+        got = [_run(dis_ir, shuffle=sh) for sh in (0, 1, 7)]
+        for sh, g in zip((0, 1, 7), got):
+            assert (g[0], g[1]) == (plain[0], plain[1]), (
+                f"{rel} shuffle={sh}: 普通档 rc={plain[0]} out={plain[1][:40]!r} / "
+                f"dismemory rc={g[0]} out={g[1][:40]!r}")
+    for name, why in _P_EXCLUDED.items():
+        assert (ROOT / "loment" / "examples" / name).exists(), name
+        assert why, name
+    print("      普通档 vs dismemory（shuffle=0/1/7）：rc 与 stdout 逐字节相同")
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 

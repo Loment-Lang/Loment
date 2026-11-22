@@ -992,7 +992,110 @@ def test_dismemory_matches_reference() -> None:
             assert rc == ref_rc, (name, rc, ref_rc, merr[-300:])
             assert _fault_line(e.getvalue()) == _fault_line(merr), (
                 name, e.getvalue()[:200], merr[:200])
-    print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同")
+        # 判 O（`docs/375` §2.4）：摆法在 guest 看来不存在 —— 参考与镜像都要同答。
+        for sh in (1, 7):
+            buf = io.BytesIO()
+            ref_rc = lvm.run_ir(ir, buf, shuffle=sh)
+            rc, out, err = _run_mirror_args(mir, ll, [f"shuffle={sh}"])
+            assert ref_rc == 10, (ref_rc, sh)
+            assert (rc, out) == (ref_rc, buf.getvalue()), (
+                sh, rc, ref_rc, out[:80], buf.getvalue()[:80], err[-300:])
+        body = _DIS_FAULTS["oob"]
+        p = td / "oob_sh.ll"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        for sh in (1, 7):
+            e = io.StringIO()
+            with contextlib.redirect_stderr(e):
+                ref_rc = lvm.run_ir(body, io.BytesIO(), shuffle=sh)
+            rc, _out, err = _run_mirror_args(mir, p, [f"shuffle={sh}"])
+            merr = err.decode("utf-8", "replace")
+            assert rc == ref_rc, (sh, rc, ref_rc, merr[-200:])
+            assert _fault_line(e.getvalue()) == _fault_line(merr), (
+                sh, e.getvalue()[:200], merr[:200])
+    print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同；"
+          "shuffle=1/7 也同答")
+
+
+
+def test_dismemory_checkpoint_matches_on_both_sides() -> None:
+    """判 O2（`docs/375` §2.5）：dismemory 的快照**每边各自**存/取，答案与一口气相同。
+
+    这一段的格式不是共同格式：参考的帧是**体**、镜像是**密排区**（两边在这一点上
+    本来就不同，`docs/375` §2.3 写明了）。所以这里只主张"同一侧能续跑、两侧同答"，
+    **不主张**参考的快照能被镜像恢复 —— 跨实现的 dismemory 快照今天不在命题里。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = _ref_ir_text(_DIS_SRC, "dis_ckpt", td)
+        ir = ll.read_text(encoding="utf-8")
+        base = io.BytesIO()
+        base_rc = lvm.run_ir(ir, base, None, ["prog"], "t0")
+        mrc0, mout0, merr0 = _run_mirror_args(mir, ll, [])
+        assert (mrc0, mout0) == (base_rc, base.getvalue()), (
+            "镜像一口气跑就不同答", mrc0, mout0, base_rc, base.getvalue(),
+            merr0[-200:])
+        for at in (0, 12, 30):
+            b1, b2 = io.BytesIO(), io.BytesIO()
+            _rc1, blob = lvm.run_checkpointed(ir, b1, "none", at, None, ["prog"])
+            assert blob is not None, f"参考在 {at} 没有停"
+            rc2, blob2 = lvm.run_checkpointed(ir, b2, "none", None, blob, ["prog"])
+            ref = (rc2, b1.getvalue() + b2.getvalue())
+            assert ref == (base_rc, base.getvalue()), (
+                f"参考自己不一致（at={at}）：{ref} vs {(base_rc, base.getvalue())}")
+            snap = f"/tmp/lvm_dckpt_{os.getpid()}_{at}.snap"
+            subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                           capture_output=True, timeout=60, shell=False)
+            mrc1, mout1, merr1 = _run_mirror_args(
+                mir, ll, [f"ckpt={at}", f"ckpt-out={snap}"])
+            mrc2, mout2, merr2 = _run_mirror_args(mir, ll, [f"resume={snap}"])
+            assert (mrc1, mrc2) == (0, base_rc), (
+                f"镜像存/取退出码不对（at={at}）：{mrc1}/{mrc2}（参考 {base_rc}）"
+                f" err1={merr1[-160:]!r} err2={merr2[-160:]!r}")
+            assert mout1 + mout2 == base.getvalue(), (
+                f"镜像 stdout 不同（at={at}）：{mout1 + mout2!r} vs {base.getvalue()!r}")
+    print("      dismemory：参考与镜像各自存/取（at=0/12/30），rc/stdout 同答")
+
+def test_sw_tag_checkpoint_keeps_the_tags() -> None:
+    """判 M2（`docs/375` 的 S4）：镜像的 `sw_tag` 快照带上对象标签与每帧能力。
+
+    合法程序停在中间再续跑，`rc` 不变；**悬垂**的程序从停点续跑后仍撞同一处
+    F02 —— 标签/能力若没进快照，恢复后要么提前漏、要么晚到别处。
+    """
+    if not (_clang() and (sys.platform != "win32" or _wsl())):
+        print("      SKIP: 没有 clang/WSL（要它把种子编成 stage1）")
+        return
+    mir = _mirror()
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        safe = _ref_ir_text(_TAG_SAFE, "tag_cp_safe", td)
+        base = _run_mirror_args(mir, safe, ["sw_tag"])
+        assert (base[0], base[1]) == (10, b""), (base[0], base[1], base[2][-160:])
+        for at in (2, 6):
+            snap = f"/tmp/lvm_tag_{os.getpid()}_{at}.snap"
+            subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                           capture_output=True, timeout=60, shell=False)
+            m1 = _run_mirror_args(mir, safe, ["sw_tag", f"ckpt={at}",
+                                              f"ckpt-out={snap}"])
+            m2 = _run_mirror_args(mir, safe, ["sw_tag", f"resume={snap}"])
+            assert (m1[0], m2[0]) == (0, 10), (
+                at, m1[0], m2[0], m1[2][-160:], m2[2][-160:])
+            assert m1[1] + m2[1] == b"", (at, m1[1], m2[1])
+        uaf = _ref_ir_text(_TAG_UAF, "tag_cp_uaf", td)
+        one = _run_mirror_args(mir, uaf, ["sw_tag"])
+        snap = f"/tmp/lvm_tag_u_{os.getpid()}.snap"
+        subprocess.run([*_WSLCMD, "bash", "-lc", f"rm -f {snap}"],
+                       capture_output=True, timeout=60, shell=False)
+        m1 = _run_mirror_args(mir, uaf, ["sw_tag", "ckpt=1", f"ckpt-out={snap}"])
+        m2 = _run_mirror_args(mir, uaf, ["sw_tag", f"resume={snap}"])
+        assert m1[0] == 0 and m2[0] == one[0], (m1[0], m2[0], one[0])
+        assert (_fault_line(m2[2].decode("utf-8", "replace"))
+                == _fault_line(one[2].decode("utf-8", "replace"))), (
+            one[2][-160:], m2[2][-160:])
+    print("      sw_tag：at=2/6 续跑 rc 不变；悬垂从停点续跑仍撞同一处 F02")
 
 
 #: 判 M 的夹具：合法程序 + 未复用悬垂 + 碰撞扫描（与 `lvm_cap_test` 判 H/I 同一形状，

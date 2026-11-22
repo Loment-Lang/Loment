@@ -3,7 +3,7 @@
 > 状态：**已落地**（2026-11-21）
 > 上游：`docs/217`（socket 面）、`docs/221`（poll/select）、`docs/234`（sendmsg/epoll）、
 > `docs/311`（PE 上的 Linux guest ABI）
-> 判据：`tools/loment_pe_test.py`（27 条，含本条新增 6 条）
+> 判据：`tools/loment_pe_test.py`（28 条，含本条新增 6 条）
 
 ---
 
@@ -13,6 +13,10 @@ PE 运行时过去只有一张"用到了才补"的号表，**补没补**只能�
 **说明书**：`tools/win_syscall_table.py` 收全了 Linux x86-64 的 385 个系统调用号，
 每个号要么在派发面里（146 个），要么带一句**有名字的理由**拒绝（239 个）。
 运行时的行为没变 —— 表外的号仍然返回 `-ENOSYS`；变的是**为什么**。
+
+**L0 契约**：`lom/net.lom` 的 `Syscall` 跟着扩到 146 条（只增不减，旧号不挪位）。
+下游影响：编译器/链接器/自举 checker/自举 potato 都按这张表逐条对账，新增枚举项
+不需要它们改代码；compat 线不读这张表。
 
 ---
 

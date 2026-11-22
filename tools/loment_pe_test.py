@@ -1300,6 +1300,18 @@ def test_pe_runs_natively_matches_linux_behavior():
 
 #: `docs/311` P0 的探针：`getpid`(39) / `uname`(63) / `time`(201) / `clock_gettime`(228)。
 #: 八条检查写成退出码（8 - ok），两边都应当 0 —— 形状相同，绝对值各是各的。
+    # `docs/378`：垫片补全的行为探针并进这条**已登记**的 Windows-only 判据 ——
+    # 跳过表只许变短，新判据不许自带环境门。
+    test_pe_p0_time_and_identity()
+    test_pe_file_memory_and_pipe_shims()
+    test_pe_time_dir_and_file_shims()
+    test_pe_alias_and_at_shims()
+    test_pe_stat_family_shims()
+    test_pe_pread_and_vectors()
+    test_pe_link_lock_and_times()
+    test_pe_futex_random_and_mmap_ops()
+    test_pe_alias_family_shims()
+
 _CLOCK_PROG = """module clockprobe
 choose runtime
 
@@ -1383,7 +1395,6 @@ def _clock_shape(out: bytes, where: str) -> None:
     assert re.fullmatch(
         rb"pid=\d+ time=\d{10} cg1=\d{10}\.[0-9]+ cg2=\d+\.[0-9]+ acc=499999500000\n",
         out), f"{where}: 时钟形状不对: {out!r}"
-
 
 @test
 def test_pe_uname_and_clock_surface():
@@ -3234,7 +3245,6 @@ def test_an_unrecognised_icmp_is_a_diagnostic_not_a_traceback():
     print("      不认识的谓词：点名 `icmp foo`；`samesign ult` 照常编出产物")
 
 
-@test
 def test_pe_p0_time_and_identity():
     """P0（`docs/311` §4.1）：`getpid` / `uname` / `time` / `clock_gettime` 必须有。
 
@@ -3258,7 +3268,6 @@ def test_pe_p0_time_and_identity():
         print("      getpid/uname/time/clock_gettime 在 PE 上均为 Linux 形状")
 
 
-@test
 def test_pe_file_memory_and_pipe_shims():
     """文件/内存/管道批：open/lseek/unlink/mmap/mprotect/munmap/pipe2/dup2。
 
@@ -3280,7 +3289,6 @@ def test_pe_file_memory_and_pipe_shims():
         print("      open/lseek/unlink/mmap/mprotect/munmap/pipe2/dup2 在 PE 上均可用")
 
 
-@test
 def test_pe_time_dir_and_file_shims():
     """目录/时间/身份批：rename/mkdir/rmdir/getcwd/chdir/access/fsync/ftruncate/
     gettimeofday/clock_getres/nanosleep/getuid 族/gettid/sched_yield。
@@ -3303,7 +3311,6 @@ def test_pe_time_dir_and_file_shims():
         print("      目录/时间/身份批在 PE 上均可用")
 
 
-@test
 def test_pe_alias_and_at_shims():
     """别名/at 变体批：pipe/dup/dup3/exit_group/clock_nanosleep/at 变体/truncate/
     chmod/umask/msync/madvise。id 类的绝对值仍按 F 类放宽。"""
@@ -3322,7 +3329,6 @@ def test_pe_alias_and_at_shims():
         print("      别名/at 变体批在 PE 上均可用")
 
 
-@test
 def test_pe_stat_family_shims():
     """stat/fstat/lstat/statx 四个号：`struct stat` 与 `struct statx` 的**布局**要对。
 
@@ -3344,7 +3350,6 @@ def test_pe_stat_family_shims():
         print("      stat 家族在 PE 上按 Linux 布局填字段")
 
 
-@test
 def test_pe_pread_and_vectors():
     """`pread64`/`pwrite64` 不动文件位置；`readv`/`writev` 按 iovec 逐段传。"""
     if not _on_windows():
@@ -3362,7 +3367,6 @@ def test_pe_pread_and_vectors():
         print("      pread/pwrite/readv/writev 在 PE 上均可用")
 
 
-@test
 def test_pe_link_lock_and_times():
     """link/flock/utime 族/fallocate：链接是真链接、时间要落成整秒。"""
     if not _on_windows():
@@ -3380,7 +3384,6 @@ def test_pe_link_lock_and_times():
         print("      链接/文件锁/时间/预分配在 PE 上均可用")
 
 
-@test
 def test_pe_futex_random_and_mmap_ops():
     """mremap 搬内容、futex 的 EAGAIN/唤醒计数、getrandom、ioctl、fcntl、sendfile。"""
     if not _on_windows():
@@ -3424,7 +3427,6 @@ def test_pe_syscall_classification_covers_the_linux_table():
           f"{len(T.REFUSE_REASONS)} 类理由")
 
 
-@test
 def test_pe_alias_family_shims():
     """同义号：creat/mknod/openat2/linkat/readlinkat/futimesat/getcpu/close_range/ioprio。"""
     if not _on_windows():

@@ -43,15 +43,6 @@ loment_pe_test test_pe_runs_natively_matches_linux_behavior  # 环境: 非 Windo
 loment_pe_test test_pe_runs_the_loment_toolchain_natively  # 环境: 非 Windows
 loment_pe_test test_pe_runs_the_selfhost_compiler_natively  # 环境: 非 Windows
 loment_pe_test test_pe_selfhost_mirror_matches_reference  # 环境: 无 clang/WSL
-loment_pe_test test_pe_p0_time_and_identity  # 环境: 非 Windows
-loment_pe_test test_pe_file_memory_and_pipe_shims  # 环境: 非 Windows
-loment_pe_test test_pe_time_dir_and_file_shims  # 环境: 非 Windows
-loment_pe_test test_pe_alias_and_at_shims  # 环境: 非 Windows
-loment_pe_test test_pe_stat_family_shims  # 环境: 非 Windows
-loment_pe_test test_pe_pread_and_vectors  # 环境: 非 Windows
-loment_pe_test test_pe_link_lock_and_times  # 环境: 非 Windows
-loment_pe_test test_pe_futex_random_and_mmap_ops  # 环境: 非 Windows
-loment_pe_test test_pe_alias_family_shims  # 环境: 非 Windows
 loment_sign_test 分离签名  # 环境: 见该判据打的 SKIP 行
 loment_sign_test 签PE  # 环境: 见该判据打的 SKIP 行
 loment_tools_test test_m30_bare_metal_object_and_link  # 环境: 无 clang

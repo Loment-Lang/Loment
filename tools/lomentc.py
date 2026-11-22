@@ -215,11 +215,11 @@ define internal void @__loment_abort() {
 declare void @llvm.trap()
 '''
 
-#: **LMS fault ABI**（`docs/356` §5.3 / `docs/371`）：`100 + kind`。
+#: **LMS fault ABI**（`docs/356` §5.3 / `docs/363`）：`100 + kind`。
 #: 只在 `choose lms_pangu_true` 时发；默认档一个字节都不加。
 #: 站点由 LVM 的 `sw_cap` 基质报（`<函数>:<块>#<序号>`）；原生侧这一版只报 kind。
 _IR_FAULT = '''
-; ---- LMS fault ABI (docs/371): 100 + kind ----
+; ---- LMS fault ABI (docs/363): 100 + kind ----
 define internal void @__loment_fault(i32 %kind) {
   %c = add i32 %kind, 100
   %c64 = sext i32 %c to i64
@@ -16161,7 +16161,7 @@ class _Ir:
                     join = self.l("lmsjoin")
                     self.w(f"br label %{join}")
                 else:
-                    # **第 5 级**：拒不了就崩。盘古档带 kind（`docs/371`）。
+                    # **第 5 级**：拒不了就崩。盘古档带 kind（`docs/363`）。
                     self.w(self._lms_fatal(1))
                     self.w("unreachable")
                 self.terminated = True

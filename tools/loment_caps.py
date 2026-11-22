@@ -125,6 +125,10 @@ LOOKAHEAD = 8
 #:   * **第二类的局部常量**：字面量上界 / 定长数组是**局部**的（拷贝到定长目的地、
 #:     定宽编码、算法常量），到界即停、不写穿；哪些是"有意截断"逐条写在下面。
 EXPLAINED: dict[tuple[str, str], str] = {
+    ("loment/tools/lvm.lomt", "MAX_PH"):
+        "路径去重表的容量：表满时 `d_path_put` 走 `d_fault(DF_LIMIT)` → guest 看到"
+        " F06（与 MAX_DB/DT/DR/CT 同一口径）。守卫在 `d_path_put` 里，离常量声明"
+        "超过筛子的 8 行（docs/377 §3.2）",
     ("loment/tools/lvm.lomt", "MAX_CT"):
         "格表的容量：越界在 `d_cput` 里走 `d_fault(DF_LIMIT)` → guest 看到 F06"
         "（与参考同一条）。守卫离这条常量声明**超过筛子的 8 行**，所以它读不到 ——"
@@ -400,6 +404,10 @@ EXPLAINED[("loment/tools/update.lomt", "literal:64")] = (
     "SHA-512 的摘要长度（定长 64 B）：`hex_digest` 的入参永远是 `sha512` 写出的 64 B 缓冲。")
 EXPLAINED[("loment/tools/errdata.lomt", "FIX_STRIDE")] = (
     "修法表的平键步长（每码 8 格），**不是上界**；`loment_diag._validate` 钉着每码 <= 8 条。")
+EXPLAINED[("loment/tools/lomlnotary.lomt", "M_CAP")] = (
+    "公证人的整块工作区上限；`sys_alloc(M_CAP)` 失败时 `_start` 打一行 "
+    "`lomlnotary: out of memory` 并以 2 退出 —— 有失败路径，只是 `wstr` 不在 "
+    "`SPEAKS` 认的那几种形状里（同文件 ±8 行筛子的已知局限）。")
 
 #: **编译器前端** —— "用户一份源文件能推动的那些容量"。`#345` 采纳的 (a) 就是先把这一档
 #: 做成 0 静默：它正好是 `#343` 那一类崩溃（嵌套块 / 括号 / 形参表 / 缺逗号）住的地方。

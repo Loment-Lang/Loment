@@ -3,7 +3,7 @@
 > 状态：**已落地**（2026-11-21）
 > 上游：`docs/217`（socket 面）、`docs/221`（poll/select）、`docs/234`（sendmsg/epoll）、
 > `docs/311`（PE 上的 Linux guest ABI）
-> 判据：`tools/loment_pe_test.py`（28 条，含本条新增 6 条）
+> 判据：`tools/loment_pe_test.py`（22 条；新探针并进既是 Windows-only、又已登记的 `test_pe_runs_natively_matches_linux_behavior`）
 
 ---
 
@@ -140,5 +140,6 @@ Linux 号，`lom/*.lom` 那道门也没收它们（`docs/303`）。
 5. `tools/win_syscall_table.py`：重新生成（已实现集由 `PE_SYSCALLS` 派生，不用手抄）；
 6. `loment/tools/lomelf.lomt`：`PE_WS_SIZE` / `PE_IMPORT_DESC`（加 DLL 时）；
 7. `python tools/lomelf.py --dump-win-shim loment/tools/win_shim_data.lomt`；
-8. 判据：在 `loment_pe_test.py` 加一条**行为**判据（不是只看返回 0），并抬
-   `.github/gate-floors.txt`。
+8. 判据：在 `loment_pe_test.py` 加**行为**探针（不是只看返回 0）；Windows-only 的
+   探针并进**已登记**的 `test_pe_runs_natively_matches_linux_behavior` 里（跳过表
+   只许变短），并按新的 `len(TESTS)` 调整 `.github/gate-floors.txt`。

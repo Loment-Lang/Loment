@@ -582,7 +582,7 @@ def cmd_lspe_verify(a) -> int:
 
 
 def cmd_lnotary_verify(a) -> int:
-    """`loment lnotary verify <potato.json>` —— 独立公证（`docs/361`）。
+    """`loment lnotary verify <potato.json>` —— 独立公证（`docs/370`）。
 
     与 `loment lspe verify` 的区别：这一条**不 import lspe**。它只读产物，
     所以它可以核对 LSPE 自己写下的账而不共享那条代码路径。
@@ -666,7 +666,7 @@ def cmd_lnotary_verify(a) -> int:
 
 
 def cmd_lnotary_derive(a) -> int:
-    """`loment lnotary derive <lawspace.json> [--parent U] --caps …`（`docs/361` V5）。
+    """`loment lnotary derive <lawspace.json> [--parent U] --caps …`（`docs/370` V5）。
 
     没有 `--parent` 就造根（根的和绑封印与初始授权）；有父就派生一个**收缩**的子。
     """
@@ -718,7 +718,7 @@ def cmd_lnotary_derive(a) -> int:
 
 
 def cmd_lnotary_seal(a) -> int:
-    """`loment lnotary seal <potato.json> [--out PATH]` —— 派生法域旁挂（`docs/361` V1）。
+    """`loment lnotary seal <potato.json> [--out PATH]` —— 派生法域旁挂（`docs/370` V1）。
 
     先跑 V0；不通过就不出旁挂。`seal` 是内容寻址的，同一份产物派生两次逐字节相同。
     """
@@ -755,7 +755,12 @@ def cmd_lnotary_seal(a) -> int:
             for e in errs:
                 print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
             return 1
-    side = _lawspace.derive_lawspace(doc, raw, side_table)
+    try:
+        side = _lawspace.derive_lawspace(doc, raw, side_table)
+    except ValueError as e:
+        # V3 起 `derive` 也会拒"站点表与开关各说各的"（`LNT-FAULT`）。
+        print(f"[LNOTARY] {e}", file=sys.stderr)
+        return 1
     text = json.dumps(side, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if getattr(a, "out", None):
         Path(a.out).write_text(text, encoding="utf-8")

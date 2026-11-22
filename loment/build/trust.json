@@ -22,7 +22,7 @@
     "entry": "tools/lomentc.py",
     "independent": false,
     "name": "reference-python",
-    "sha256": "ab45503fdd0fb54ab6410efb947d7c09fce26b35faacdeaa312e167d830e6f47"
+    "sha256": "67af59b2910649be7cea97320f7ca38be53fd109e0558d3c52e4ae3ebd6edbba"
    },
    {
     "entry": "loment/selfhost/driver.lomt",
@@ -120,7 +120,7 @@
     },
     {
      "path": "tools/loment_release.py",
-     "sha256": "1a94fc5766720c387ac38be297e55de1891e46b7fafd22af86fe297d033000e3",
+     "sha256": "2aed919b61f1ce9ef57d68a4fc2cf3c92c933e02c51bac575bec08a8761b8f2a",
      "size": 39039
     },
     {
@@ -130,7 +130,7 @@
     },
     {
      "path": "tools/lomentc.py",
-     "sha256": "ab45503fdd0fb54ab6410efb947d7c09fce26b35faacdeaa312e167d830e6f47",
+     "sha256": "67af59b2910649be7cea97320f7ca38be53fd109e0558d3c52e4ae3ebd6edbba",
      "size": 942141
     },
     {
@@ -154,7 +154,7 @@
      "size": 160098
     }
    ],
-   "sha256": "2c23912bef1a73ac92bee4df5458095bccc3642ee87a01540b9dbdc9647afd9e"
+   "sha256": "e4a69b78e5dfe036176d5ef71270206c8bf88e1dbcfffc79fe668dbec3cbb320"
   },
   "seed_env": {
    "host": "windows",
@@ -190,7 +190,7 @@
     },
     {
      "path": "loment/selfhost/codegen.lomt",
-     "sha256": "24569b8ab8af3a66ea61dc4b5bfa1c40df25de492148974507daaafed81dba7d",
+     "sha256": "4979f8de9621d9246ebac3ed05042bc7a924061f84f1cf089f3b8050a52ccf52",
      "size": 634761
     },
     {
@@ -224,7 +224,7 @@
      "size": 36014
     }
    ],
-   "sha256": "027942b9d5c61643b6db3c56714ef0c61d12d8b76f02561cd0f84f0aec793334"
+   "sha256": "ccf11ab3d6387630a208a1d0b370450dba4ecf60864a422ec60a1e9d3d6c77ae"
   },
   "toolchain": {
    "clang": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",
@@ -245,7 +245,7 @@
   "provenance_format": 2,
   "seed": {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "9bdefb2cb35c975af7e3e9ab3dab9364db0611b57417e1a360639128b74fc18f",
+   "sha256": "b439ec092de8affdfd67a4d6f46793314a483dc74ff013f38d85192291dd5456",
    "size": 7501283
   },
   "toolchain": {

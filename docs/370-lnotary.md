@@ -1,6 +1,6 @@
 # 370 · LNotary：产物公证人
 
-> 状态: **V0–V2 + V5 已落地**（2026-11-21，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
+> 状态: **V0–V2 + V5 已落地；V3 第一半 + 原生实现已落地**（2026-11-21/22）· 上游: `docs/358` §4.2（独立验证器）·
 > `docs/357` §4.2 · `docs/262`（LSPE）· `docs/147`（Potato 台阶）· `docs/353`（Dissigsegv）
 > 基准: `origin/main` `a460b90e` + 本分支
 > 一句话: **第三方视角的产物审计器：只读 Potato，零工具链 import，
@@ -171,7 +171,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 
 ---
 
-## 5. 判据（三十四条，`tools/lnotary_test.py`）
+## 5. 判据（三十八条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -209,9 +209,13 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | AE | `proven` 少了 `rule` ⇒ `LNT-SITES` | 同上 |
 | AF | R2：规范循环（`for i in 0..N { a[i] }`） | 同上 |
 | AG | R3：支配分支（`if j < N { a[j] }`） | 同上 |
+| AH | 坏块出口**读**出来：默认 `skip` / 关拒绝器 `abort` / 盘古 `fault(F01)` | `edge` 字段不存在 ⇒ 红 |
+| AI | fault 账与产物开关一致；改一边（表或 Potato）⇒ `LNT-FAULT` | `verify_fault_coverage` 不存在 ⇒ 红 |
+| AJ | 有 `checked` 站点却把 `lms_guard` 关了 ⇒ `LNT-FAULT` | 同上 |
+| AK | **原生公证人**（`loment/tools/lomlnotary.lomt`）与 Python 侧判决逐条一致（12 组正/反例） | 原生文件不存在 ⇒ 红 |
 
-三十四条在本机全绿（`python tools/lnotary_test.py`，34/34，约 14.7s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 34`。
+三十八条在本机全绿（`python tools/lnotary_test.py`，38/38，约 25s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 38`。
 
 ---
 
@@ -221,7 +225,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 |---|---|---|---|
 | **V1** | `lawspace` 旁挂与**封印哈希**（`docs/358` §4.1） | `docs/357` W1 | **已落地** |
 | **V2** | 站点表与旁挂绑定（`docs/363`） | `docs/356` 站点坐标 | **已落地** |
-| **V3** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | 下一档 |
+| **V3** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | **第一半已落地**（坏块出口 `edge`/`kind` 与开关对账；R4 仍未） |
 | **V4** | `proven` 站点的规则引用必须可复查 | 规则表进产物 | **已落地** |
 | **V5** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 | **已落地** |
 
@@ -270,6 +274,55 @@ import）。
 
 ---
 
+## 6.7 fault 账（V3 的第一半）
+
+V3 要的是 `fault_ladder` 与 R1–R4 的复查。2026-11-21 落了第一半：**坏块出口的真相**。
+
+- `lms_sites`（schema 2）不再假定 `checked ⇒ F01`：它把 `lmsbad` 块读出来，
+  记 `edge ∈ {fault, abort, skip}`；只有 `fault` 才带 `F0K`。
+  此前默认档的站点表写 `F01`，而拒绝器其实**跳过那一条访存**——账是假的。
+- LNotary 的 `verify_fault_coverage` 用**产物自己的开关**重算期望出口
+  （`docs/363` §6.5 的 g1 出口表）：盘古开 ⇒ `fault`；否则拒绝器开 ⇒ `skip`；
+  否则 `abort`。表与产物不一致 ⇒ `LNT-FAULT`；有 `checked` 站点而
+  `lms_levels.lms_guard` 为假 ⇒ 同样 `LNT-FAULT`。
+- 这是**两份账的互钉**：表来自 IR，开关来自 Potato。改任何一边都红。
+
+**没做**：R4 —— 逐站点的生命周期层还没有产物（`gc_ladder` 是聚合的四层计数，
+不是站点地图）。这一条要等编译器把"站点 → 层"写进产物，不能在公证人里猜。
+
+---
+
+## 6.8 原生公证人（`loment/tools/lomlnotary.lomt`）
+
+"只信产物"那条链的最后一环，是**公证人自己也得是一件产物**。此前 LNotary 是一个
+Python 包：判得再细，信任面仍然包括 CPython 与它的标准库。
+
+现在有一个**零依赖的 Loment 实现**：
+
+- 源码 `loment/tools/lomlnotary.lomt`（`use json` / `use bytes`，只用 open/read/
+  write/brk/exit 五个系统调用）；
+- 判据 AK 用**种子**编它（`seed → stage1 → IR → lomelf`，不经参考实现），
+  与 Python 侧喂**同一批 JSON**，比**接受/拒绝逐条一致**（12 组：6 个正例/变体 +
+  6 个反例）。文案与错误条数留在 Python 侧 —— 与 `lompotato` 的孪生同一条纪律。
+
+**它覆盖什么**：V0 的版本 / LVM 圈地 / `systems` 六条（含 state、detail、cost 的
+交叉）/ `gc_ladder` 求和 / 七级布尔与预算 / `switches` 去重；以及 V3 第一半的
+站点表结构、计数与 `edge` 对账。
+
+**它不覆盖什么**（写得比覆盖的更重要）：
+
+- **不重算封印**。`lawspace` / 站点表的 `seal` 是 canonical JSON 的 SHA-256；
+  原生侧还没实现 canonical 序列化，所以**不带 `--seal` 时它不核封印**。
+  Python 侧那条判据（`LNT-SEAL`）仍然在。
+- 不做派生链（V5）、不做 R4、不做文案。
+- **它由种子构建**：判据 AK 走 `seed → stage1 → IR → lomelf`，不用参考实现。
+  于是"只信产物"的链条闭在自己的产物上：公证人与被公证的东西出自同一条自举链。
+  （这正是它第一次进 p8 语料时抓出来的：`fn` / `guard` 被当成变量名，自举侧拒收 ——
+  改名之后两边都过得去。参考实现当时**放过了**这两处，所以它是靠**孪生**才暴露的。）
+- 种子与二进制的对应关系仍由 `docs/270` 的地板与 genesis 证明 —— 这一页不重复主张。
+
+---
+
 ## 7. 我不主张
 
 1. **不主张 V0–V2 能证明产物安全。** 它只证明产物内部没有假账；
@@ -285,6 +338,11 @@ import）。
 7. **不主张 `choose lvm` 是运行证明。** 它是声明；真正的运行证明要等 LVM 侧交出运行记录（§2.5）。
 8. **不主张 V4 的证明覆盖 R4。** 落了 R1–R3；R4（生命周期 + `gc_ladder` 交叉）要另一份产物，
    是下一档（§6.6）。
+9. **不主张 V3 的 `edge` 字段证明 IR 本身诚实。** 它证明**站点表与 Potato 两份账一致**；
+   表是 `tools/lms_sites.py` 从 IR 读出来的，一个说谎的 IR 可以让两份账一起说谎
+   （`docs/349` 的三方判据是那只补丁，不在 LNotary 里）。
+10. **不主张原生公证人已经覆盖 Python 侧的全部判据。** 它今天没有 canonical JSON
+    与封印重算；判据 AK 比的是两边**都覆盖到的那批**对象的接受/拒绝。缺口在 §6.8 列着。
 
 ---
 

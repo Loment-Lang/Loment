@@ -69,7 +69,7 @@ class LNotaryTest(unittest.TestCase):
         self.assertTrue(v.ok, v.errors)
         self.assertGreaterEqual(v.version, 20)
 
-    # A' · 没有 `choose lvm` 就不启用（用户 2026-11-21）
+    # A' · 没有 `choose lvm`（旧拼写 `choose vm`）就不启用（用户 2026-11-21）
     def test_refuses_a_no_vm_artifact(self) -> None:
         from lnotary import lawspace
 
@@ -237,27 +237,32 @@ class LNotaryTest(unittest.TestCase):
 
     # ---- V2 · 站点表（docs/363） ------------------------------------------
 
-    def _site_table(self) -> dict:
-        src = self.tmp / "sites.lomt"
-        src.write_text(
-            "module s\nchoose runtime\nchoose close lms_reject\n\n"
-            "fn _start() {\n"
-            "    let p: ptr = alloc(4);\n"
-            "    let x: u32 = load8(p, 4);\n"
-            "    syscall4(60, 0, 0, 0);\n"
-            "}\n", encoding="utf-8")
+    _SITES_SRC = (
+        "module s\nchoose lvm\nchoose runtime\n\n"
+        "fn _start() {\n"
+        "    let p: ptr = alloc(4);\n"
+        "    let x: u32 = load8(p, 4);\n"
+        "    syscall4(60, 0, 0, 0);\n"
+        "}\n")
+
+    def _table_for(self, text: str, name: str) -> tuple[dict, dict]:
+        src = self.tmp / f"{name}.lomt"
+        src.write_text(text, encoding="utf-8")
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
                             str(src), "--print", "llvm"],
                            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
-        ir = self.tmp / "sites.ll"
+        ir = self.tmp / f"{name}.ll"
         ir.write_text(r.stdout, encoding="utf-8")
-        out = self.tmp / "sites.json"
+        out = self.tmp / f"{name}.sites.json"
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "lms_sites.py"),
                             str(ir), "--out", str(out)],
                            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
-        return json.loads(out.read_text(encoding="utf-8"))
+        return json.loads(out.read_text(encoding="utf-8")), _compile(text, f"{name}_doc", self.tmp)
+
+    def _site_table(self) -> dict:
+        return self._table_for(self._SITES_SRC, "sites")[0]
 
     # Q · 真站点表被接受
     def test_site_table_is_accepted(self) -> None:
@@ -280,21 +285,21 @@ class LNotaryTest(unittest.TestCase):
     def test_lawspace_binds_site_table(self) -> None:
         from lnotary import lawspace
 
-        table = self._site_table()
-        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"), table)
+        table, doc = self._table_for(self._SITES_SRC, "sites")
+        side = lawspace.derive_lawspace(doc, self._bytes("sites_doc"), table)
         self.assertIn("sites", side)
         self.assertEqual(lawspace.verify_lawspace(
-            self.plain, side, self._bytes("plain"), table), [])
+            doc, side, self._bytes("sites_doc"), table), [])
 
     # T · 换一张站点表
     def test_lawspace_rejects_a_different_site_table(self) -> None:
         from lnotary import lawspace
 
-        table = self._site_table()
-        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"), table)
+        table, doc = self._table_for(self._SITES_SRC, "sites")
+        side = lawspace.derive_lawspace(doc, self._bytes("sites_doc"), table)
         other = json.loads(json.dumps(table))
         other["seal"] = "0" * 64
-        errs = lawspace.verify_lawspace(self.plain, side, self._bytes("plain"), other)
+        errs = lawspace.verify_lawspace(doc, side, self._bytes("sites_doc"), other)
         self.assertTrue(any(e.code == "LNT-LS" for e in errs), errs)
 
     # U · 站点表自己的封印
@@ -305,6 +310,162 @@ class LNotaryTest(unittest.TestCase):
         table["seal"] = "0" * 64
         errs = sites.verify_sites(table)
         self.assertTrue(any(e.code == "LNT-SEAL" for e in errs), errs)
+
+    # ---- V3 · fault 账（docs/370 §6） --------------------------------------
+
+    _G1 = ("module {name}\nchoose lvm\nchoose runtime\n{switches}\n"
+           "fn _start() {{\n"
+           "    let p: ptr = alloc(4);\n"
+           "    let x: u32 = load8(p, 4);\n"
+           "    syscall4(60, 0, 0, 0);\n"
+           "}}\n")
+
+    def _g1(self, name: str, switches: str = "") -> tuple[dict, dict]:
+        return self._table_for(self._G1.format(name=name, switches=switches), name)
+
+    @staticmethod
+    def _checked_site(table: dict) -> dict:
+        for s in table["sites"]:
+            if s["grade"] == "checked":
+                return s
+        raise AssertionError(f"没有 checked 站点：{table['sites']}")
+
+    # AH · 坏块的出口是**读出来的**：默认 skip / 关拒绝器 abort / 盘古 fault
+    def test_site_edges_are_read_from_the_ir(self) -> None:
+        skip_t, _ = self._g1("e_skip")
+        abort_t, _ = self._g1("e_abort", "choose close lms_reject")
+        fault_t, _ = self._g1("e_fault",
+                              "set choose lms_pangu_true {\n}\nchoose lms_pangu_true")
+        s = self._checked_site(skip_t)
+        self.assertEqual(s.get("edge"), "skip", s)
+        self.assertNotIn("fault", s)
+        s = self._checked_site(abort_t)
+        self.assertEqual(s.get("edge"), "abort", s)
+        self.assertNotIn("fault", s)
+        s = self._checked_site(fault_t)
+        self.assertEqual(s.get("edge"), "fault", s)
+        self.assertEqual(s.get("fault"), "F01", s)
+
+    # AI · fault 账与产物开关一致；改一边就红
+    def test_fault_coverage_matches_the_artifact(self) -> None:
+        from lnotary import sites
+
+        for name, sw in (("c_skip", ""),
+                         ("c_abort", "choose close lms_reject"),
+                         ("c_fault",
+                          "set choose lms_pangu_true {\n}\nchoose lms_pangu_true")):
+            table, doc = self._g1(name, sw)
+            self.assertEqual(sites.verify_fault_coverage(table, doc), [], name)
+            tampered = json.loads(json.dumps(table))
+            site = self._checked_site(tampered)
+            site["edge"] = "abort" if site["edge"] != "abort" else "skip"
+            errs = sites.verify_fault_coverage(tampered, doc)
+            self.assertTrue(any(e.code == "LNT-FAULT" for e in errs), (name, errs))
+
+    # AJ · 说有 checked 站点，产物却把 guard 关了 ⇒ 红
+    def test_checked_sites_require_guard(self) -> None:
+        from lnotary import sites
+
+        table, doc = self._g1("c_guard")
+        doc["lms_levels"]["lms_guard"] = False
+        errs = sites.verify_fault_coverage(table, doc)
+        self.assertTrue(any(e.code == "LNT-FAULT" for e in errs), errs)
+
+    # ---- AK · 原生验证器（`loment/tools/lomlnotary.lomt`）------------------
+    #
+    # **这是 LNotary 的第二个实现**：同一批 JSON，Python 侧与 Loment 侧各自给判决。
+    # 它是"只信产物"的那一半 —— 公证人本身也是一件 Loment 产物。
+    # **由种子构建**（seed → stage1 → IR → lomelf），不是由参考实现构建：
+    # 最初一版里 `fn` / `guard` 被当成变量名，自举侧拒收；改名后两边都过得去。
+    # 比的是**接受/拒绝逐条一致**；文案与错误条数留在 Python 侧
+    # （与 `lompotato` 的孪生同一条纪律）。
+
+    def _native_exe(self) -> Path:
+        import loment_dist
+        import lomelf
+
+        twin = ROOT / "loment" / "tools" / "lomlnotary.lomt"
+        stage1 = loment_dist.build_stage1()
+        ir = loment_dist.emit_ir(stage1, str(twin), ".").read_text(encoding="utf-8")
+        exe = self.tmp / ("lomlnotary.exe" if sys.platform == "win32" else "lomlnotary")
+        exe.write_bytes((lomelf.compile_pe(ir) if sys.platform == "win32"
+                         else lomelf.compile_ll(ir))[0])
+        exe.chmod(0o755)
+        return exe
+
+    @staticmethod
+    def _py_ok(doc: dict, table: dict | None) -> bool:
+        from lnotary import sites, verify
+
+        if not verify.verify_potato(doc).ok:
+            return False
+        if table is not None:
+            if sites.verify_sites(table):
+                return False
+            if sites.verify_fault_coverage(table, doc):
+                return False
+        return True
+
+    def test_native_verifier_matches_python(self) -> None:
+        exe = self._native_exe()
+        table, doc = self._table_for(self._SITES_SRC, "native")
+
+        def clone(x):
+            return json.loads(json.dumps(x))
+
+        cases: list[tuple[str, dict, dict | None]] = [
+            ("valid", clone(doc), clone(table)),
+            ("valid-nosites", clone(doc), None),
+        ]
+        d = clone(doc)
+        d["potato"] = "v999"
+        cases.append(("version", d, clone(table)))
+        d = clone(doc)
+        d.pop("lvm", None)
+        d.pop("vm", None)
+        cases.append(("no-lvm", d, clone(table)))
+        d = clone(doc)
+        d["lms_levels"]["lms_guard"] = False
+        d["systems"]["lms"]["cost"]["levels"] = 6
+        cases.append(("guard-off", d, clone(table)))
+        d = clone(doc)
+        d["systems"]["gc"]["cost"]["sites"] += 1
+        cases.append(("cost", d, clone(table)))
+        d = clone(doc)
+        d["gc_ladder"]["total_sites"] += 1
+        cases.append(("ladder", d, clone(table)))
+        d = clone(doc)
+        d["lms_budgets"]["lms_guard"] = "bogus"
+        cases.append(("budget", d, clone(table)))
+        d = clone(doc)
+        d["switches"] = [{"name": "lms_pangu_true", "on": True},
+                         {"name": "lms_pangu_true", "on": True}]
+        cases.append(("switch-dup", d, clone(table)))
+        t = clone(table)
+        checked = next(s for s in t["sites"] if s["grade"] == "checked")
+        checked["edge"] = "abort"
+        cases.append(("edge", clone(doc), t))
+        t = clone(table)
+        t["schema"] = 1
+        cases.append(("schema", clone(doc), t))
+        t = clone(table)
+        t["counts"]["sites"] += 1
+        cases.append(("counts", clone(doc), t))
+
+        for name, d, t in cases:
+            pp = self.tmp / f"n-{name}.potato.json"
+            pp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            args = [str(exe), str(pp)]
+            if t is not None:
+                tp = self.tmp / f"n-{name}.sites.json"
+                tp.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
+                args += ["--sites", str(tp)]
+            r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+            native_ok = r.returncode == 0
+            self.assertEqual(
+                native_ok, self._py_ok(d, t),
+                f"{name}: Python={self._py_ok(d, t)} 原生={native_ok} "
+                f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
 
 
     # ---- V5 · 同产物派生链（docs/370 §6） ----------------------------------

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lms_sites.py — LMS 站点普查（`docs/363` / `docs/361` V4）。
+"""lms_sites.py — LMS 站点普查（`docs/363` / `docs/370` V4）。
 
 把一份 IR 里的访存站点逐条点名。站点 ID 与 LVM 的 fault 报站点**同一套坐标**：
 
@@ -17,7 +17,7 @@
   且这条访存在 `*lmsok` 块里；
 * `unsafe`：其余。
 
-R4（生命周期 + `gc_ladder` 交叉）要另一份产物，尚未落（`docs/361` §7 第 8 条）。
+R4（生命周期 + `gc_ladder` 交叉）要另一份产物，尚未落（`docs/370` §7 第 8 条）。
 
 用法: python tools/lms_sites.py IN.ll [--out PATH]
 """

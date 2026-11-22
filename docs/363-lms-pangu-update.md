@@ -3,7 +3,7 @@
 > 状态: **V1 已落地（两套实现 + 种子）**（2026-11-20）
 > 上游: `docs/357`（三件增量）· `docs/358`（只信产物）· `docs/359`（本世代的墙）·
 > `docs/360`（LVM-A 与 `sw_cap`）· `docs/356`（fault 类与 ABI）· `docs/253`（LMS 七级）·
-> `docs/361`（LNotary）· `docs/245`（`thread_spawn`）
+> `docs/370`（LNotary）· `docs/245`（`thread_spawn`）
 > 实测: 2026-11-20，本分支 + LVM 线的 `feat/lvm-substrate` 工作树
 > 一句话: **LMS 从"七个布尔 + 一条内联比较"升级成"逐站点账本 + 与 LVM 同一个
 > fault 契约"；同一语义在原生与 `sw_cap` 上得到同一个退出码。**
@@ -73,7 +73,7 @@ LVM 的全量检查属于**基质**的账（`docs/360` §3.3），不塞进这�
 fault（101）。这是刻意的：时间桥梁要的是"同一个语言事件"，跳过会给两侧不同的答案。
 拒绝器本身不变，只是被更强的档覆盖。
 
-两份探针都带 `choose vm`：LNotary 的启用条件是"产物真的声明了 LVM"（`docs/361` §2.5），
+两份探针都带 `choose vm`：LNotary 的启用条件是"产物真的声明了 LVM"（`docs/370` §2.5），
 时间桥梁的两侧必须在同一个基质剖面下比较。
 
 第二条是在 LVM 线的 `feat/lvm-substrate` 工作树上跑的（本分支的 `tools/lvm.py`
@@ -114,7 +114,7 @@ g1 会先 `abort`（132），`sw_cap` 轮不到。两份探针因此各关一侧
 
 * **`proven`**：证明落在站点上（`rule`）：**R1** 常量下标 + 常量长度；**R2** 规范循环；
   **R3** 支配分支；**R4** 未落（要 `gc_ladder`）。`rule` 必填，LNotary 只核
-  **引用是否可复查**（V4，`docs/361` §6.6）；
+  **引用是否可复查**（V4，`docs/370` §6.6）；
 * **`checked`**：同一个 `*lmsok` 块里**第一条**访存 —— g1 检查保护的就是它；
 * **`unsafe`**：其余。块里第二条访存（比如把结果写进局部变量的 `store i32 %t6`）
   不在检查范围内，**不许跟着升级**。
@@ -208,7 +208,7 @@ sha256 `26b69c1afae8b96c7da5d789f88153fea2b5100b22182c4ca7c75cc50a44e628`；
 
 4. **Potato 的 `lms_levels` 也曾漏掉显式开关**：IR 修好之后，`--emit-potato` 仍报七级全真。
    `potato.lomt` 的 `pt_lms_mask` / `pt_lms_levels` / `pt_systems` 现在收同一张
-   `sw_lms_bits` 位图。**这是 LNotary 的输入**（`docs/361` 读 Potato 的 `lms_levels`），
+   `sw_lms_bits` 位图。**这是 LNotary 的输入**（`docs/370` 读 Potato 的 `lms_levels`），
    所以它不能是第二条账。判据 F 把两份 Potato 逐字段对拍。
 
 种子重算：`loment/build/selfhost_driver.ll` → **7,407,754 B**，
@@ -222,7 +222,7 @@ sha256 `b1912a53…`；`docs/270` §4 的地板数同步更新。
    与 `no_runtime` 的 fixed stub 一起做（`docs/356` §5.3）。
 2. **原生的 F02/F03。** 对象代与空指针检查在原生侧还没有；LVM `sw_cap` 有。
    站点账本把它们标 `unsafe`，不冒充。
-3. **`proven` 的 R4。** R1–R3 已落（`docs/361` §6.6：常量下标 / 规范循环 / 支配分支）；
+3. **`proven` 的 R4。** R1–R3 已落（`docs/370` §6.6：常量下标 / 规范循环 / 支配分支）；
    R4（按 GC 层自证）还缺一份"GC 层 → IR 站点"的映射，站点账本不冒充它。
 4. **`race_free`。** `docs/357` §5.1 的候选第四规律，要动线程内存模型。
 
@@ -246,7 +246,7 @@ sha256 `b1912a53…`；`docs/270` §4 的地板数同步更新。
 
 * `docs/360` —— LVM-A 的 `sw_cap` 基质。本文的站点坐标与 fault 码直接沿用它的实现。
 * `docs/356` —— fault 类、`100+kind`、`fault_ladder`。本文落的是 F01 的原生出口与站点表。
-* `docs/358` / `docs/361` —— 只信产物与 LNotary。本文给 LNotary 加了站点表与旁挂绑定（V2）。
+* `docs/358` / `docs/370` —— 只信产物与 LNotary。本文给 LNotary 加了站点表与旁挂绑定（V2）。
 * `docs/253` / `docs/270` —— LMS 七级。本文不改七级的语义，只把第 3/4/5 级的出口
   换成带 kind 的 fault，并把"哪些站点真的被检查"写成账。
 * `docs/245` §10.1 —— 线程的 UB 仍在；`race_free` 是它唯一的落点（§7 第 5 条）。

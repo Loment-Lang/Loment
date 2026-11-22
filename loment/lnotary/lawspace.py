@@ -1,4 +1,4 @@
-"""LNotary · 法域封印（`docs/358` §4.1 / `docs/361` §6 的 V1）。
+"""LNotary · 法域封印（`docs/358` §4.1 / `docs/370` §6 的 V1）。
 
 旁挂的形状：`schema / potato / artifact / dims / dims_hash / laws / seal`。
 `seal` 是对**除它自己以外**全部字段的规范序列化取 SHA-256；`dims_hash` 是
@@ -25,7 +25,7 @@ LAW_LMS_FULL = "lms_full"
 LAW_LIFETIME_AUTO = "lifetime_auto"
 LAWS = (LAW_NO_RUNTIME, LAW_LMS_FULL, LAW_LIFETIME_AUTO)
 
-#: **创世预算**（`docs/358` §3.2 / `docs/361` V5）：递归有界，三个数进封印。
+#: **创世预算**（`docs/358` §3.2 / `docs/370` V5）：递归有界，三个数进封印。
 #: 一份产物派生出的子宇宙总数、深度、每层子数都不许超过它。
 GENESIS_DEFAULTS = {"mode": "same_artifact", "max_depth": 4,
                     "max_children": 8, "max_total": 32}
@@ -79,7 +79,7 @@ def derive_lawspace(doc: dict, artifact_bytes: bytes,
     """从一份**已通过 V0** 的 Potato 派生旁挂。调用方负责先跑 V0。
 
     `sites` 是 `tools/lms_sites.py` 派生的站点表；给了就把它的封印与站点数
-    绑进旁挂（`docs/363`）。`genesis` 是创世预算（`docs/361` V5），缺省用
+    绑进旁挂（`docs/363`）。`genesis` 是创世预算（`docs/370` V5），缺省用
     `GENESIS_DEFAULTS`。不修改 `doc`；输出不含时间戳、路径等不稳定字段。
     """
     if not lvm_enabled(doc):

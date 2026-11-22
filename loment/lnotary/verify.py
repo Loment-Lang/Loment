@@ -1,4 +1,4 @@
-"""LNotary · 产物公证人：独立验证器（`docs/358` §4.2 / `docs/361`）。
+"""LNotary · 产物公证人：独立验证器（`docs/358` §4.2 / `docs/370`）。
 
 **零工具链 import**：只用标准库。不 import `lomentc`、`potato`、`loment.lspe`。
 它核对产物里已经写下的账，不重新计算证据，也不读取源码。

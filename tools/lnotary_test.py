@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""lnotary_test.py — LNotary 独立验证器的判据（`docs/358` §4.2 / `docs/361`）。
+"""lnotary_test.py — LNotary 独立验证器的判据（`docs/358` §4.2 / `docs/370`）。
 
 LNotary（Loment Notary，产物公证人）是**产物侧**的审计器：只读 Potato 与旁挂，
 不 import 编译器、不 import `loment.lspe`、不 import `potato`。
@@ -148,7 +148,7 @@ class LNotaryTest(unittest.TestCase):
         self.assertFalse(v.ok)
         self.assertTrue(any(e.code == "LNT-VER" for e in v.errors), v.errors)
 
-    # ---- V1 · 法域旁挂与封印（docs/361 §6） --------------------------------
+    # ---- V1 · 法域旁挂与封印（docs/370 §6） --------------------------------
 
     def _bytes(self, name: str) -> bytes:
         return (self.tmp / f"{name}.potato.json").read_bytes()
@@ -307,7 +307,7 @@ class LNotaryTest(unittest.TestCase):
         self.assertTrue(any(e.code == "LNT-SEAL" for e in errs), errs)
 
 
-    # ---- V5 · 同产物派生链（docs/361 §6） ----------------------------------
+    # ---- V5 · 同产物派生链（docs/370 §6） ----------------------------------
 
     _SEAL = "a" * 64
     _GEN = {"mode": "same_artifact", "max_depth": 4,
@@ -432,7 +432,7 @@ class LNotaryTest(unittest.TestCase):
                 "--seal", str(law), "--universes", str(forest))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
-    # ---- V4 · proven 站点与规则引用（docs/361 §6） -------------------------
+    # ---- V4 · proven 站点与规则引用（docs/370 §6） -------------------------
 
     def _r1_table(self) -> dict:
         src = self.tmp / "r1.lomt"

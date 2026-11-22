@@ -200,7 +200,7 @@ class LmsBridgeTest(unittest.TestCase):
 
         IR 对齐不代表账对：`apply_switches` 删掉 `choose` 之后，自举侧曾把
         `choose close lms_guard` 当成"没写"，Potato 仍报七级全真 —— 而 LNotary
-        的判决读的就是这份账（`docs/361`）。这条同时挡住两个方向的漂移。
+        的判决读的就是这份账（`docs/370`）。这条同时挡住两个方向的漂移。
         """
         import loment_dist
 

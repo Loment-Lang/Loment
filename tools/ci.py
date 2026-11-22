@@ -132,7 +132,7 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  "loment_grammar_test",
                  # `lmgr`: 38 槽注册表与 19 项能力表，以及二进制如实说出去（docs/303）
                  "lmgr_test",
-                 # 独立公证人（`docs/361`）：只读 Potato，零工具链 import。
+                 # 独立公证人（`docs/370`）：只读 Potato，零工具链 import。
                  "lnotary_test",
                  # LMS × LVM 时间桥梁（`docs/363`）：原生 fault ABI 101、`sw_cap` 101、
                  # 默认无 fault 符号、缓存键看见用户开关。

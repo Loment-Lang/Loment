@@ -92,6 +92,909 @@ fn _start() {
     syscall4(60, 1, 0, 0);
 }
 """
+#: P0（`docs/311` §4.1）：PE shim 上的 `getpid`(39) / `uname`(63) / `time`(201) /
+#: `clock_gettime`(228)。这四个号是"同一份源换宿主，guest 看到的形状不许变"的第一批：
+#: pid 只断言符号，uname 断言 sysname，time 断言落在合理区间，单调钟断言纳秒形状。
+P0_DEMO = """module p0
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn bad(what: str) {
+    print("P0 BAD ");
+    print(what);
+    print("\\n");
+    syscall4(60, 1, 0, 0);
+}
+
+fn main() {
+    let pid: i64 = syscall4(39, 0, 0, 0);
+    if pid <= 0 {
+        bad("pid");
+    }
+    let b: ptr = alloc(390);
+    let r: i64 = syscall4(63, b as u64, 0, 0);
+    if r != 0 {
+        bad("uname-r");
+    }
+    if (load8(b, 0) as u32) != 76 {
+        bad("sysname");
+    }
+    let t: ptr = alloc(8);
+    let tr: i64 = syscall4(201, t as u64, 0, 0);
+    if tr <= 0 {
+        bad("time-r");
+    }
+    let sec: u64 = rd64(t, 0);
+    if sec < (1700000000 as u64) {
+        bad("time-v");
+    }
+    let ts: ptr = alloc(16);
+    let c1: i64 = syscall4(228, 1, ts as u64, 0);
+    let n1: u64 = rd64(ts, 8);
+    let c2: i64 = syscall4(228, 1, ts as u64, 0);
+    let n2: u64 = rd64(ts, 8);
+    if c1 != 0 || c2 != 0 {
+        bad("cgt-r");
+    }
+    if n1 >= (1000000000 as u64) || n2 >= (1000000000 as u64) {
+        bad("cgt-nsec");
+    }
+    print("P0 OK\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+#: 文件/内存/管道批（`docs/311` P0 之后的同一条线）：open/lseek/unlink/mmap/
+#: mprotect/munmap/pipe2/dup2。程序自己建文件、写完读回、映射、清理。
+P2_DEMO = r"""module p2
+
+choose runtime
+
+fn u32at(p: ptr, o: u32) -> u32 {
+    let v: u32 = 0;
+    v = v | (load8(p, o) as u32);
+    v = v | ((load8(p, o + 1) as u32) << 8);
+    v = v | ((load8(p, o + 2) as u32) << 16);
+    v = v | ((load8(p, o + 3) as u32) << 24);
+    return v;
+}
+
+fn bad(w: str) {
+    print("P2 BAD ");
+    print(w);
+    print("\n");
+    syscall4(60, 1, 0, 0);
+}
+
+fn main() {
+    let name: str = "p2_tmp.txt";
+    let fd: i64 = syscall4(2, str_ptr(name) as u64, 577 as u64, 420 as u64);
+    if fd < (0 as i64) {
+        bad("open-w");
+    }
+    let w: i64 = syscall4(1, fd as u64, str_ptr("hello") as u64, 5 as u64);
+    if w != (5 as i64) {
+        bad("write");
+    }
+    let cw: i64 = syscall4(3, fd as u64, 0, 0);
+    if cw != (0 as i64) {
+        bad("close-w");
+    }
+
+    let rfd: i64 = syscall4(2, str_ptr(name) as u64, 0 as u64, 0 as u64);
+    if rfd < (0 as i64) {
+        bad("open-r");
+    }
+    let sk: i64 = syscall4(8, rfd as u64, 0 as u64, 0 as u64);
+    if sk != (0 as i64) {
+        bad("lseek");
+    }
+    let buf: ptr = alloc(16);
+    let n: i64 = syscall4(0, rfd as u64, buf as u64, 5 as u64);
+    if n != (5 as i64) {
+        bad("read");
+    }
+    if (load8(buf, 0) as u32) != 104 {
+        bad("byte");
+    }
+
+    let m: i64 = syscall7(9, 0 as u64, 5 as u64, 1 as u64, 2 as u64, rfd as u64, 0 as u64);
+    if m <= (0 as i64) {
+        bad("mmap-f");
+    }
+    let mp: ptr = m as ptr;
+    if (load8(mp, 0) as u32) != 104 {
+        bad("mmap-byte");
+    }
+    let mu: i64 = syscall4(11, m as u64, 5 as u64, 0);
+    if mu != (0 as i64) {
+        bad("munmap-f");
+    }
+    let cr: i64 = syscall4(3, rfd as u64, 0, 0);
+    if cr != (0 as i64) {
+        bad("close-r");
+    }
+    let un: i64 = syscall4(87, str_ptr(name) as u64, 0, 0);
+    if un != (0 as i64) {
+        bad("unlink");
+    }
+
+    let pfd: ptr = alloc(8);
+    let pr: i64 = syscall4(293, pfd as u64, 0, 0);
+    if pr != (0 as i64) {
+        bad("pipe2");
+    }
+    let r0: u32 = u32at(pfd, 0);
+    let w0: u32 = u32at(pfd, 4);
+    let pw: i64 = syscall4(1, w0 as u64, str_ptr("xy") as u64, 2 as u64);
+    if pw != (2 as i64) {
+        bad("pipe-w");
+    }
+    let pb: ptr = alloc(4);
+    let pn: i64 = syscall4(0, r0 as u64, pb as u64, 2 as u64);
+    if pn != (2 as i64) {
+        bad("pipe-r");
+    }
+    if (load8(pb, 0) as u32) != 120 {
+        bad("pipe-b");
+    }
+    let pcr: i64 = syscall4(3, r0 as u64, 0, 0);
+    if pcr != (0 as i64) {
+        bad("pipe-cr");
+    }
+    let pcw: i64 = syscall4(3, w0 as u64, 0, 0);
+    if pcw != (0 as i64) {
+        bad("pipe-cw");
+    }
+
+    let dn: str = "p2_dup.txt";
+    let fd2: i64 = syscall4(2, str_ptr(dn) as u64, 577 as u64, 420 as u64);
+    if fd2 < (0 as i64) {
+        bad("open-d");
+    }
+    let d2: i64 = syscall4(33, fd2 as u64, 5 as u64, 0);
+    if d2 != (5 as i64) {
+        bad("dup2");
+    }
+    let dw: i64 = syscall4(1, 5 as u64, str_ptr("z") as u64, 1 as u64);
+    if dw != (1 as i64) {
+        bad("dup-w");
+    }
+    syscall4(3, 5 as u64, 0, 0);
+    syscall4(3, fd2 as u64, 0, 0);
+    syscall4(87, str_ptr(dn) as u64, 0, 0);
+
+    let a: i64 = syscall7(9, 0 as u64, 4096 as u64, 3 as u64, 0x22 as u64, 0 as u64, 0 as u64);
+    if a <= (0 as i64) {
+        bad("mmap-a");
+    }
+    let ap: ptr = a as ptr;
+    store8(ap, 0, 42 as u8);
+    if (load8(ap, 0) as u32) != 42 {
+        bad("anon-byte");
+    }
+    let mp2: i64 = syscall4(10, a as u64, 4096 as u64, 1 as u64);
+    if mp2 != (0 as i64) {
+        bad("mprotect");
+    }
+    let mu2: i64 = syscall4(11, a as u64, 4096 as u64, 0);
+    if mu2 != (0 as i64) {
+        bad("munmap-a");
+    }
+
+    print("P2 OK\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+#: 目录/时间/身份批（batch 3）：rename/mkdir/rmdir/getcwd/chdir/access/fsync/
+#: ftruncate/gettimeofday/clock_getres/nanosleep/getuid 族/gettid/sched_yield。
+P3_DEMO = r"""module p3
+
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        v = v | ((load8(p, off + i) as u64) << (8 * i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn wr64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 8;
+}
+
+fn cgt() -> u64 {
+    let ts: ptr = alloc(16);
+    let r: i64 = syscall4(228, 1, ts as u64, 0);
+    return rd64(ts, 0) * (1000000000 as u64) + rd64(ts, 8);
+}
+
+fn bad(w: str) {
+    print("P3 BAD ");
+    print(w);
+    print("\n");
+    syscall4(60, 1, 0, 0);
+}
+
+fn main() {
+    let u: i64 = syscall4(102, 0, 0, 0);
+    let g: i64 = syscall4(104, 0, 0, 0);
+    let eu: i64 = syscall4(107, 0, 0, 0);
+    let eg: i64 = syscall4(108, 0, 0, 0);
+    if u != eu || g != eg || u < (0 as i64) || g < (0 as i64) {
+        bad("ids");
+    }
+    let pp: i64 = syscall4(110, 0, 0, 0);
+    if pp < (0 as i64) {
+        bad("ppid");
+    }
+    let tid: i64 = syscall4(186, 0, 0, 0);
+    if tid <= (0 as i64) {
+        bad("tid");
+    }
+    let y: i64 = syscall4(24, 0, 0, 0);
+    if y != (0 as i64) {
+        bad("yield");
+    }
+
+    let tv: ptr = alloc(16);
+    let gt: i64 = syscall4(96, tv as u64, 0, 0);
+    if gt != (0 as i64) {
+        bad("gettimeofday");
+    }
+    if rd64(tv, 0) < (1700000000 as u64) {
+        bad("gtod-sec");
+    }
+    if rd64(tv, 8) >= (1000000 as u64) {
+        bad("gtod-usec");
+    }
+
+    let res: ptr = alloc(16);
+    let gr: i64 = syscall4(229, 1, res as u64, 0);
+    if gr != (0 as i64) {
+        bad("getres");
+    }
+    if rd64(res, 8) != (1 as u64) {
+        bad("getres-nsec");
+    }
+
+    let req: ptr = alloc(16);
+    wr64(req, 0, 0);
+    wr64(req, 8, 50000000 as u64);
+    let t0: u64 = cgt();
+    let ns: i64 = syscall4(35, req as u64, 0, 0);
+    let t1: u64 = cgt();
+    if ns != (0 as i64) {
+        bad("nanosleep");
+    }
+    if t1 - t0 < (30000000 as u64) {
+        bad("sleep-short");
+    }
+
+    let dn: str = "p3dir";
+    let mk: i64 = syscall4(83, str_ptr(dn) as u64, 511 as u64, 0);
+    if mk != (0 as i64) {
+        bad("mkdir");
+    }
+    let cd: i64 = syscall4(80, str_ptr(dn) as u64, 0, 0);
+    if cd != (0 as i64) {
+        bad("chdir");
+    }
+    let cw: ptr = alloc(256);
+    let cwr: i64 = syscall4(79, cw as u64, 256 as u64, 0);
+    if cwr <= (0 as i64) {
+        bad("getcwd");
+    }
+    let up: str = "..";
+    let cu: i64 = syscall4(80, str_ptr(up) as u64, 0, 0);
+    if cu != (0 as i64) {
+        bad("chdir-up");
+    }
+    let rm: i64 = syscall4(84, str_ptr(dn) as u64, 0, 0);
+    if rm != (0 as i64) {
+        bad("rmdir");
+    }
+
+    let an: str = "p3a.txt";
+    let bn: str = "p3b.txt";
+    let afd: i64 = syscall4(2, str_ptr(an) as u64, 577 as u64, 420 as u64);
+    if afd < (0 as i64) {
+        bad("open-a");
+    }
+    let wr: i64 = syscall4(1, afd as u64, str_ptr("0123456789") as u64, 10 as u64);
+    if wr != (10 as i64) {
+        bad("write-a");
+    }
+    let fs: i64 = syscall4(74, afd as u64, 0, 0);
+    if fs != (0 as i64) {
+        bad("fsync");
+    }
+    let ft: i64 = syscall4(77, afd as u64, 4 as u64, 0);
+    if ft != (0 as i64) {
+        bad("ftruncate");
+    }
+    syscall4(3, afd as u64, 0, 0);
+
+    let rfd: i64 = syscall4(2, str_ptr(an) as u64, 0 as u64, 0 as u64);
+    if rfd < (0 as i64) {
+        bad("open-r");
+    }
+    let rb: ptr = alloc(16);
+    let rn: i64 = syscall4(0, rfd as u64, rb as u64, 8 as u64);
+    if rn != (4 as i64) {
+        bad("trunc-read");
+    }
+    syscall4(3, rfd as u64, 0, 0);
+
+    let mv: i64 = syscall4(82, str_ptr(an) as u64, str_ptr(bn) as u64, 0);
+    if mv != (0 as i64) {
+        bad("rename");
+    }
+    let ac: i64 = syscall4(21, str_ptr(bn) as u64, 0 as u64, 0);
+    if ac != (0 as i64) {
+        bad("access");
+    }
+    let miss: str = "p3missing";
+    let am: i64 = syscall4(21, str_ptr(miss) as u64, 0 as u64, 0);
+    if am != (-2 as i64) {
+        bad("access-miss");
+    }
+    let un: i64 = syscall4(87, str_ptr(bn) as u64, 0, 0);
+    if un != (0 as i64) {
+        bad("unlink-b");
+    }
+
+    print("P3 OK\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+#: 别名/at 变体批（batch 4a）：pipe/dup/dup3/exit_group/clock_nanosleep/at 变体/
+#: truncate/chmod/umask/msync/madvise。
+P4_DEMO = r"""module p4
+
+choose runtime
+
+fn u32at(p: ptr, o: u32) -> u32 {
+    let v: u32 = 0;
+    v = v | (load8(p, o) as u32);
+    v = v | ((load8(p, o + 1) as u32) << 8);
+    v = v | ((load8(p, o + 2) as u32) << 16);
+    v = v | ((load8(p, o + 3) as u32) << 24);
+    return v;
+}
+
+fn wr64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 {
+        store8(p, off + i, ((v >> (8 * i)) & 255) as u8);
+        i = i + 1;
+    }
+    return 8;
+}
+
+fn bad(w: str) {
+    print("P4 BAD ");
+    print(w);
+    print("
+");
+    syscall4(60, 1, 0, 0);
+}
+
+fn main() {
+    let p: ptr = alloc(8);
+    let pr: i64 = syscall4(22, p as u64, 0, 0);
+    let r0: u32 = u32at(p, 0);
+    let w0: u32 = u32at(p, 4);
+    if pr != (0 as i64) { bad("pipe"); }
+    if syscall4(1, w0 as u64, str_ptr("ab") as u64, 2 as u64) != (2 as i64) { bad("pipe-w"); }
+    let pb: ptr = alloc(4);
+    if syscall4(0, r0 as u64, pb as u64, 2 as u64) != (2 as i64) { bad("pipe-r"); }
+    syscall4(3, r0 as u64, 0, 0);
+    syscall4(3, w0 as u64, 0, 0);
+
+    let an: str = "p4a.txt";
+    let bn: str = "p4b.txt";
+    let fd: i64 = syscall4(2, str_ptr(an) as u64, 577 as u64, 420 as u64);
+    if fd < (0 as i64) { bad("open"); }
+    let d1: i64 = syscall4(32, fd as u64, 0, 0);
+    if d1 <= (0 as i64) { bad("dup"); }
+    let d3: i64 = syscall4(292, fd as u64, 7 as u64, 0);
+    if d3 != (7 as i64) { bad("dup3"); }
+    if syscall4(3, d1 as u64, 0, 0) != (0 as i64) { bad("close-dup"); }
+    if syscall4(3, 7 as u64, 0, 0) != (0 as i64) { bad("close-dup3"); }
+    if syscall4(3, fd as u64, 0, 0) != (0 as i64) { bad("close"); }
+
+    let atf: u64 = (0 - 100) as u64;
+    let dn: str = "p4dir";
+    if syscall4(258, atf, str_ptr(dn) as u64, 511 as u64) != (0 as i64) { bad("mkdirat"); }
+    if syscall6(269, atf, str_ptr(dn) as u64, 0 as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("faccessat"); }
+    if syscall6(264, atf, str_ptr(an) as u64, atf, str_ptr(bn) as u64, 0 as u64) != (0 as i64) { bad("renameat"); }
+    if syscall4(263, atf, str_ptr(bn) as u64, 0 as u64) != (0 as i64) { bad("unlinkat"); }
+    if syscall4(263, atf, str_ptr(dn) as u64, 0x200 as u64) != (0 as i64) { bad("unlinkat-dir"); }
+
+    let tn: str = "p4t.txt";
+    let tfd: i64 = syscall4(2, str_ptr(tn) as u64, 577 as u64, 420 as u64);
+    if tfd < (0 as i64) { bad("open-t"); }
+    if syscall4(1, tfd as u64, str_ptr("0123456789") as u64, 10 as u64) != (10 as i64) { bad("write-t"); }
+    syscall4(3, tfd as u64, 0, 0);
+    if syscall4(76, str_ptr(tn) as u64, 4 as u64, 0) != (0 as i64) { bad("truncate"); }
+    let rfd: i64 = syscall4(2, str_ptr(tn) as u64, 0 as u64, 0 as u64);
+    let rb: ptr = alloc(16);
+    if syscall4(0, rfd as u64, rb as u64, 8 as u64) != (4 as i64) { bad("trunc-read"); }
+    syscall4(3, rfd as u64, 0, 0);
+    syscall4(87, str_ptr(tn) as u64, 0, 0);
+
+    let old: i64 = syscall4(95, 63 as u64, 0, 0);
+    let old2: i64 = syscall4(95, 0 as u64, 0, 0);
+    if old < (0 as i64) || old2 != (63 as i64) { bad("umask"); }
+    let cn: str = "p4c.txt";
+    let cfd: i64 = syscall4(2, str_ptr(cn) as u64, 577 as u64, 420 as u64);
+    syscall4(3, cfd as u64, 0, 0);
+    if syscall4(90, str_ptr(cn) as u64, 493 as u64, 0) != (0 as i64) { bad("chmod"); }
+    if syscall4(90, str_ptr("p4none") as u64, 493 as u64, 0) != (-2 as i64) { bad("chmod-miss"); }
+    syscall4(87, str_ptr(cn) as u64, 0, 0);
+
+    let a: i64 = syscall7(9, 0 as u64, 4096 as u64, 3 as u64, 0x22 as u64, 0 as u64, 0 as u64);
+    if a <= (0 as i64) { bad("mmap"); }
+    let ap: ptr = a as ptr;
+    store8(ap, 0, 7 as u8);
+    if syscall4(26, a as u64, 4096 as u64, 0) != (0 as i64) { bad("msync"); }
+    if syscall4(28, a as u64, 4096 as u64, 0) != (0 as i64) { bad("madvise"); }
+    if syscall4(11, a as u64, 4096 as u64, 0) != (0 as i64) { bad("munmap"); }
+
+    let req: ptr = alloc(16);
+    wr64(req, 0, 0);
+    wr64(req, 8, 10000000 as u64);
+    if syscall6(230, 1 as u64, 0 as u64, req as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("clock_nanosleep"); }
+
+    print("P4 OK
+");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+P5_DEMO = r"""module p5
+
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 { v = v | ((load8(p, off + i) as u64) << (8 * i)); i = i + 1; }
+    return v;
+}
+fn rd32(p: ptr, off: u32) -> u32 {
+    let v: u32 = 0;
+    v = v | (load8(p, off) as u32);
+    v = v | ((load8(p, off + 1) as u32) << 8);
+    v = v | ((load8(p, off + 2) as u32) << 16);
+    v = v | ((load8(p, off + 3) as u32) << 24);
+    return v;
+}
+fn bad(w: str) {
+    print("P5 BAD "); print(w); print("\n");
+    syscall4(60, 1, 0, 0);
+}
+fn main() {
+    let name: str = "p5.txt";
+    let fd: i64 = syscall4(2, str_ptr(name) as u64, 577 as u64, 420 as u64);
+    if fd < (0 as i64) { bad("open"); }
+    if syscall4(1, fd as u64, str_ptr("0123456789") as u64, 10 as u64) != (10 as i64) { bad("write"); }
+
+    let st: ptr = alloc(144);
+    let s1: i64 = syscall4(4, str_ptr(name) as u64, st as u64, 0);
+    if s1 != (0 as i64) { bad("stat"); }
+    if rd32(st, 24) != 33188 { bad("stat-mode"); }
+    if rd64(st, 48) != (10 as u64) { bad("stat-size"); }
+    if rd64(st, 88) == (0 as u64) { bad("stat-mtime"); }
+
+    let ls: i64 = syscall4(6, str_ptr(name) as u64, st as u64, 0);
+    if ls != (0 as i64) { bad("lstat"); }
+
+    let fsb: ptr = alloc(144);
+    let f1: i64 = syscall4(5, fd as u64, fsb as u64, 0);
+    if f1 != (0 as i64) { bad("fstat"); }
+    if rd64(fsb, 48) != (10 as u64) { bad("fstat-size"); }
+    if rd32(fsb, 24) != 33188 { bad("fstat-mode"); }
+    syscall4(3, fd as u64, 0, 0);
+
+    let sx: ptr = alloc(256);
+    let atf: u64 = (0 - 100) as u64;
+    let x1: i64 = syscall6(332, atf, str_ptr(name) as u64, 0 as u64, 2047 as u64, sx as u64);
+    if x1 != (0 as i64) { bad("statx"); }
+    if (rd32(sx, 0) & 2047) != 2047 { bad("statx-mask"); }
+    if rd64(sx, 40) != (10 as u64) { bad("statx-size"); }
+    if (load8(sx, 28) as u32) != 164 { bad("statx-mode-lo"); }
+    if (load8(sx, 29) as u32) != 129 { bad("statx-mode-hi"); }
+    if rd64(sx, 112) == (0 as u64) { bad("statx-mtime"); }
+
+    syscall4(87, str_ptr(name) as u64, 0, 0);
+    print("P5 OK\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+PV_DEMO = r'''module pv
+
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 { v = v | ((load8(p, off + i) as u64) << (8 * i)); i = i + 1; }
+    return v;
+}
+fn wr64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 { store8(p, off + i, ((v >> (8 * i)) & 255) as u8); i = i + 1; }
+    return 8;
+}
+fn bad(w: str) {
+    print("PV BAD "); print(w); print("\n");
+    syscall4(60, 1, 0, 0);
+}
+fn main() {
+    let name: str = "pv.txt";
+    let fd: i64 = syscall4(2, str_ptr(name) as u64, 578 as u64, 420 as u64);
+    if fd < (0 as i64) { bad("open"); }
+    if syscall4(1, fd as u64, str_ptr("ABCDEFGH") as u64, 8 as u64) != (8 as i64) { bad("write"); }
+
+    // pwrite at 2, then pread at 0 must not move the position
+    if syscall6(18, fd as u64, str_ptr("xy") as u64, 2 as u64, 2 as u64, 0 as u64) != (2 as i64) { bad("pwrite"); }
+    let b: ptr = alloc(16);
+    if syscall6(17, fd as u64, b as u64, 8 as u64, 0 as u64, 0 as u64) != (8 as i64) { bad("pread"); }
+    if (load8(b, 0) as u32) != 65 { bad("pread-a"); }
+    if (load8(b, 2) as u32) != 120 { bad("pread-x"); }
+    if (load8(b, 3) as u32) != 121 { bad("pread-y"); }
+    syscall4(3, fd as u64, 0, 0);
+
+    let g: i64 = syscall4(2, str_ptr(name) as u64, 0 as u64, 0 as u64);
+    if g < (0 as i64) { bad("reopen"); }
+    if syscall4(8, g as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("seek"); }
+    // readv: two iovecs of 4 + 4
+    let iov: ptr = alloc(32);
+    let b1: ptr = alloc(8);
+    let b2: ptr = alloc(8);
+    wr64(iov, 0, b1 as u64); wr64(iov, 8, 4 as u64);
+    wr64(iov, 16, b2 as u64); wr64(iov, 24, 4 as u64);
+    let rn: i64 = syscall4(19, g as u64, iov as u64, 2 as u64);
+    if rn != (8 as i64) { bad("readv-n"); }
+    if (load8(b1, 0) as u32) != 65 || (load8(b2, 0) as u32) != 69 { bad("readv-b"); }
+    syscall4(3, g as u64, 0, 0);
+
+    let h: i64 = syscall4(2, str_ptr(name) as u64, 577 as u64, 420 as u64);
+    if h < (0 as i64) { bad("reopen2"); }
+    let wb1: ptr = alloc(4);
+    store8(wb1, 0, 49 as u8); store8(wb1, 1, 50 as u8); store8(wb1, 2, 51 as u8); store8(wb1, 3, 52 as u8);
+    let wb2: ptr = alloc(4);
+    store8(wb2, 0, 53 as u8); store8(wb2, 1, 54 as u8); store8(wb2, 2, 55 as u8); store8(wb2, 3, 56 as u8);
+    wr64(iov, 0, wb1 as u64); wr64(iov, 8, 4 as u64);
+    wr64(iov, 16, wb2 as u64); wr64(iov, 24, 4 as u64);
+    if syscall4(20, h as u64, iov as u64, 2 as u64) != (8 as i64) { bad("writev-n"); }
+    syscall4(3, h as u64, 0, 0);
+
+    let k: i64 = syscall4(2, str_ptr(name) as u64, 0 as u64, 0 as u64);
+    let kb: ptr = alloc(8);
+    if syscall4(0, k as u64, kb as u64, 8 as u64) != (8 as i64) { bad("readback"); }
+    if (load8(kb, 0) as u32) != 49 || (load8(kb, 4) as u32) != 53 { bad("writev-b"); }
+    syscall4(3, k as u64, 0, 0);
+    syscall4(87, str_ptr(name) as u64, 0, 0);
+    print("PV OK\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+PB_DEMO = r'''module pb
+
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 { v = v | ((load8(p, off + i) as u64) << (8 * i)); i = i + 1; }
+    return v;
+}
+fn wr64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 { store8(p, off + i, ((v >> (8 * i)) & 255) as u8); i = i + 1; }
+    return 8;
+}
+fn bad(w: str) {
+    print("PB BAD "); print(w); print("\n");
+    syscall4(60, 1, 0, 0);
+}
+fn main() {
+    let name: str = "pb.txt";
+    let fd: i64 = syscall4(2, str_ptr(name) as u64, 578 as u64, 420 as u64);
+    if fd < (0 as i64) { bad("open"); }
+    if syscall4(1, fd as u64, str_ptr("abcd") as u64, 4 as u64) != (4 as i64) { bad("write"); }
+
+    if syscall4(91, fd as u64, 420 as u64, 0) != (0 as i64) { bad("fchmod"); }
+    let fc: i64 = syscall4(93, fd as u64, 0 as u64, 0);
+    if fc != (0 as i64) && fc != (-1 as i64) { bad("fchown"); }
+    if syscall4(221, fd as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("fadvise"); }
+    if syscall6(285, fd as u64, 0 as u64, 0 as u64, 4096 as u64, 0 as u64) != (0 as i64) { bad("fallocate"); }
+    let st: ptr = alloc(144);
+    if syscall4(5, fd as u64, st as u64, 0) != (0 as i64) { bad("fstat1"); }
+    if rd64(st, 48) != (4096 as u64) { bad("fallocate-size"); }
+    if syscall4(73, fd as u64, 2 as u64, 0) != (0 as i64) { bad("flock-ex"); }
+    if syscall4(73, fd as u64, 8 as u64, 0) != (0 as i64) { bad("flock-un"); }
+    syscall4(3, fd as u64, 0, 0);
+
+    let ch: i64 = syscall4(92, str_ptr(name) as u64, 0 as u64, 0 as u64);
+    if ch != (0 as i64) && ch != (-1 as i64) { bad("chown"); }
+    if syscall4(92, str_ptr("pb_missing") as u64, 0 as u64, 0 as u64) != (-2 as i64) { bad("chown-miss"); }
+    let atf: u64 = (0 - 100) as u64;
+    if syscall6(268, atf, str_ptr(name) as u64, 420 as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("fchmodat"); }
+    if syscall4(162, 0 as u64, 0 as u64, 0) != (0 as i64) { bad("sync"); }
+    if syscall4(306, 0 as u64, 0 as u64, 0) != (0 as i64) { bad("syncfs"); }
+    let sfd: i64 = syscall4(2, str_ptr(name) as u64, 0 as u64, 0 as u64);
+    if syscall6(277, sfd as u64, 0 as u64, 4096 as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("syncfr"); }
+    syscall4(3, sfd as u64, 0, 0);
+
+    // 时间：utimensat / utime / utimes 都要落成 stat 能看见的整秒
+    let ts: ptr = alloc(32);
+    wr64(ts, 0, 1200000000 as u64); wr64(ts, 8, 0 as u64);
+    wr64(ts, 16, 1300000000 as u64); wr64(ts, 24, 0 as u64);
+    if syscall6(280, atf, str_ptr(name) as u64, ts as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("utimensat"); }
+    if syscall4(4, str_ptr(name) as u64, st as u64, 0) != (0 as i64) { bad("stat2"); }
+    if rd64(st, 88) != (1300000000 as u64) { bad("utimensat-mtime"); }
+    if rd64(st, 72) != (1200000000 as u64) { bad("utimensat-atime"); }
+
+    let ub: ptr = alloc(16);
+    wr64(ub, 0, 1400000000 as u64); wr64(ub, 8, 1500000000 as u64);
+    if syscall4(132, str_ptr(name) as u64, ub as u64, 0) != (0 as i64) { bad("utime"); }
+    syscall4(4, str_ptr(name) as u64, st as u64, 0);
+    if rd64(st, 88) != (1500000000 as u64) { bad("utime-mtime"); }
+
+    let tv: ptr = alloc(32);
+    wr64(tv, 0, 1600000000 as u64); wr64(tv, 8, 0 as u64);
+    wr64(tv, 16, 1700000000 as u64); wr64(tv, 24, 0 as u64);
+    if syscall4(235, str_ptr(name) as u64, tv as u64, 0) != (0 as i64) { bad("utimes"); }
+    syscall4(4, str_ptr(name) as u64, st as u64, 0);
+    if rd64(st, 88) != (1700000000 as u64) { bad("utimes-mtime"); }
+
+    // 硬链接：两份名字都必须能打开
+    let hard: str = "pb_hard.txt";
+    if syscall4(86, str_ptr(name) as u64, str_ptr(hard) as u64, 0) != (0 as i64) { bad("link"); }
+    let hf: i64 = syscall4(2, str_ptr(hard) as u64, 0 as u64, 0 as u64);
+    if hf < (0 as i64) { bad("link-open"); }
+    syscall4(3, hf as u64, 0, 0);
+
+    // 符号链接：Windows 需要开发者模式/权限；失败按 EPERM 接受
+    let sl: str = "pb_sym.txt";
+    let sr: i64 = syscall4(88, str_ptr(name) as u64, str_ptr(sl) as u64, 0);
+    if sr == (0 as i64) {
+        let rb: ptr = alloc(256);
+        let rl: i64 = syscall4(89, str_ptr(sl) as u64, rb as u64, 256 as u64);
+        if rl <= (0 as i64) { bad("readlink"); }
+        if (load8(rb, 0) as u32) == 0 { bad("readlink-empty"); }
+    } else {
+        if sr != (-1 as i64) { bad("symlink-code"); }
+        print("PB SYMLINK-EPERM\n");
+    }
+
+    syscall4(87, str_ptr(hard) as u64, 0, 0);
+    syscall4(87, str_ptr(name) as u64, 0, 0);
+    print("PB OK\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+PC_DEMO = r'''module pc
+
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 { v = v | ((load8(p, off + i) as u64) << (8 * i)); i = i + 1; }
+    return v;
+}
+fn wr64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 { store8(p, off + i, ((v >> (8 * i)) & 255) as u8); i = i + 1; }
+    return 8;
+}
+fn bad(w: str) {
+    print("PC BAD "); print(w); print("\n");
+    syscall4(60, 1, 0, 0);
+}
+fn main() {
+    // mremap：匿名块搬大，内容跟着走
+    let a: i64 = syscall7(9, 0 as u64, 4096 as u64, 3 as u64, 0x22 as u64, 0 as u64, 0 as u64);
+    if a <= (0 as i64) { bad("mmap"); }
+    store8(a as ptr, 0, 7 as u8);
+    let m: i64 = syscall6(25, a as u64, 4096 as u64, 8192 as u64, 1 as u64, 0 as u64);
+    if m <= (0 as i64) { bad("mremap"); }
+    if (load8(m as ptr, 0) as u32) != 7 { bad("mremap-data"); }
+    syscall4(11, m as u64, 8192 as u64, 0);
+
+    // sched_getaffinity
+    let cm: ptr = alloc(16);
+    if syscall4(204, 0 as u64, 8 as u64, cm as u64) != (8 as i64) { bad("affinity"); }
+    if rd64(cm, 0) == (0 as u64) { bad("affinity-zero"); }
+    if syscall4(203, 0 as u64, 8 as u64, cm as u64) != (0 as i64) { bad("setaffinity"); }
+
+    // getrandom
+    let rb: ptr = alloc(16);
+    if syscall4(318, rb as u64, 16 as u64, 0 as u64) != (16 as i64) { bad("getrandom"); }
+
+    // ioctl TIOCGWINSZ
+    let ws: ptr = alloc(8);
+    let ioc: i64 = syscall4(16, 1 as u64, 0x5413 as u64, ws as u64);
+    if ioc == (0 as i64) {
+        if rd64(ws, 0) == (0 as u64) { bad("winsize-zero"); }
+    } else {
+        if ioc != (-25 as i64) { bad("ioctl-code"); }
+    }
+
+    // fcntl
+    let name: str = "pc.txt";
+    let fd: i64 = syscall4(2, str_ptr(name) as u64, 578 as u64, 420 as u64);
+    if fd < (0 as i64) { bad("open"); }
+    let gf: i64 = syscall4(72, fd as u64, 3 as u64, 0);
+    if (gf & 3) != (2 as i64) { bad("getfl"); }
+    if syscall4(72, fd as u64, 1 as u64, 0) != (0 as i64) { bad("getfd"); }
+    let d: i64 = syscall4(72, fd as u64, 0 as u64, 10 as u64);
+    if d != (10 as i64) { bad("dupfd"); }
+    if syscall4(1, d as u64, str_ptr("xy") as u64, 2 as u64) != (2 as i64) { bad("dupfd-write"); }
+    syscall4(3, d as u64, 0, 0);
+
+    // futex：值不等 → EAGAIN；wake 无等待者仍返回 n
+    let fw: ptr = alloc(8);
+    store8(fw, 0, 5 as u8);
+    let q: i64 = syscall7(202, fw as u64, 0 as u64, 4 as u64, 0 as u64, 0 as u64, 0 as u64);
+    if q != (-11 as i64) { bad("futex-eagain"); }
+    let w: i64 = syscall7(202, fw as u64, 1 as u64, 1 as u64, 0 as u64, 0 as u64, 0 as u64);
+    if w != (0 as i64) { bad("futex-wake"); }
+    syscall4(3, fd as u64, 0, 0);
+
+    // sendfile：8 字节从 src 搬到 dst
+    let srcn: str = "pc_src.txt";
+    let dstn: str = "pc_dst.txt";
+    let sf: i64 = syscall4(2, str_ptr(srcn) as u64, 578 as u64, 420 as u64);
+    syscall4(1, sf as u64, str_ptr("ABCDEFGH") as u64, 8 as u64);
+    syscall4(8, sf as u64, 0 as u64, 0 as u64);
+    let df: i64 = syscall4(2, str_ptr(dstn) as u64, 577 as u64, 420 as u64);
+    let off: ptr = alloc(8);
+    wr64(off, 0, 0 as u64);
+    let sn: i64 = syscall6(40, df as u64, sf as u64, off as u64, 8 as u64, 0 as u64);
+    if sn != (8 as i64) { bad("sendfile"); }
+    if rd64(off, 0) != (8 as u64) { bad("sendfile-off"); }
+    syscall4(3, sf as u64, 0, 0);
+    syscall4(3, df as u64, 0, 0);
+
+    let rfd: i64 = syscall4(2, str_ptr(dstn) as u64, 0 as u64, 0 as u64);
+    let chk: ptr = alloc(8);
+    if syscall4(0, rfd as u64, chk as u64, 8 as u64) != (8 as i64) { bad("sendfile-read"); }
+    if (load8(chk, 0) as u32) != 65 || (load8(chk, 7) as u32) != 72 { bad("sendfile-data"); }
+    syscall4(3, rfd as u64, 0, 0);
+
+    syscall4(87, str_ptr(name) as u64, 0, 0);
+    syscall4(87, str_ptr(srcn) as u64, 0, 0);
+    syscall4(87, str_ptr(dstn) as u64, 0, 0);
+    print("PC OK\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+PE_ALIAS_DEMO = r'''module pe
+
+choose runtime
+
+fn rd64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 { v = v | ((load8(p, off + i) as u64) << (8 * i)); i = i + 1; }
+    return v;
+}
+fn wr64(p: ptr, off: u32, v: u64) -> u32 {
+    let i: u32 = 0;
+    while i < 8 { store8(p, off + i, ((v >> (8 * i)) & 255) as u8); i = i + 1; }
+    return 8;
+}
+fn bad(w: str) {
+    print("PE BAD "); print(w); print("\n");
+    syscall4(60, 1, 0, 0);
+}
+fn main() {
+    let n1: str = "pe1.txt";
+    let fd: i64 = syscall4(85, str_ptr(n1) as u64, 420 as u64, 0);
+    if fd < (0 as i64) { bad("creat"); }
+    if syscall4(1, fd as u64, str_ptr("hi") as u64, 2 as u64) != (2 as i64) { bad("creat-write"); }
+    syscall4(3, fd as u64, 0, 0);
+
+    let n2: str = "pe2.txt";
+    if syscall6(133, str_ptr(n2) as u64, 0x81A4 as u64, 0 as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("mknod"); }
+    let f2: i64 = syscall4(2, str_ptr(n2) as u64, 0 as u64, 0 as u64);
+    if f2 < (0 as i64) { bad("mknod-open"); }
+    syscall4(3, f2 as u64, 0, 0);
+
+    let n3: str = "pe3.txt";
+    let how: ptr = alloc(24);
+    wr64(how, 0, 0x242 as u64); wr64(how, 8, 420 as u64); wr64(how, 16, 0 as u64);
+    let f3: i64 = syscall6(437, (0 - 100) as u64, str_ptr(n3) as u64, how as u64, 24 as u64, 0 as u64);
+    if f3 < (0 as i64) { bad("openat2"); }
+    syscall4(3, f3 as u64, 0, 0);
+    if syscall6(439, (0 - 100) as u64, str_ptr(n3) as u64, 0 as u64, 0 as u64, 0 as u64) != (0 as i64) { bad("faccessat2"); }
+
+    let n4: str = "pe4.txt";
+    if syscall6(265, (0 - 100) as u64, str_ptr(n1) as u64, (0 - 100) as u64, str_ptr(n4) as u64, 0 as u64) != (0 as i64) { bad("linkat"); }
+    let f4: i64 = syscall4(2, str_ptr(n4) as u64, 0 as u64, 0 as u64);
+    if f4 < (0 as i64) { bad("linkat-open"); }
+    syscall4(3, f4 as u64, 0, 0);
+
+    let n5: str = "pe5.txt";
+    let sr: i64 = syscall4(266, str_ptr(n1) as u64, (0 - 100) as u64, str_ptr(n5) as u64);
+    if sr == (0 as i64) {
+        let rb: ptr = alloc(256);
+        if syscall6(267, (0 - 100) as u64, str_ptr(n5) as u64, rb as u64, 256 as u64, 0 as u64) <= (0 as i64) { bad("readlinkat"); }
+    } else {
+        if sr != (-1 as i64) { bad("symlinkat-code"); }
+    }
+
+    let ch: i64 = syscall6(260, (0 - 100) as u64, str_ptr(n3) as u64, 0 as u64, 0 as u64, 0 as u64);
+    if ch != (0 as i64) && ch != (-1 as i64) { bad("fchownat"); }
+
+    let tv: ptr = alloc(32);
+    wr64(tv, 0, 1600000000 as u64); wr64(tv, 8, 0 as u64);
+    wr64(tv, 16, 1700000000 as u64); wr64(tv, 24, 0 as u64);
+    if syscall4(261, (0 - 100) as u64, str_ptr(n3) as u64, tv as u64) != (0 as i64) { bad("futimesat"); }
+    let st: ptr = alloc(144);
+    syscall4(4, str_ptr(n3) as u64, st as u64, 0);
+    if rd64(st, 88) != (1700000000 as u64) { bad("futimesat-mtime"); }
+
+    let cpu: ptr = alloc(8);
+    let node: ptr = alloc(8);
+    if syscall4(309, cpu as u64, node as u64, 0 as u64) != (0 as i64) { bad("getcpu"); }
+    if rd64(cpu, 0) >= (4096 as u64) { bad("getcpu-v"); }
+    if syscall4(218, 0 as u64, 0 as u64, 0) <= (0 as i64) { bad("settid"); }
+    let ip: i64 = syscall4(251, 1 as u64, 0 as u64, 16388 as u64);
+    if ip != (0 as i64) && ip != (-1 as i64) { bad("ioprio-set"); }
+    let ig: i64 = syscall4(252, 1 as u64, 0 as u64, 0);
+    if ig < (0 as i64) { bad("ioprio-get"); }
+
+    let ep: i64 = syscall4(213, 8 as u64, 0 as u64, 0);
+    if ep < (0 as i64) { bad("epoll_create"); }
+    syscall4(3, ep as u64, 0, 0);
+
+    // close_range：关掉 3..63 后，下一次 open 必须拿回 3
+    let fa: i64 = syscall4(2, str_ptr(n1) as u64, 0 as u64, 0 as u64);
+    let fb: i64 = syscall4(2, str_ptr(n2) as u64, 0 as u64, 0 as u64);
+    if fa != (3 as i64) || fb != (4 as i64) { bad("fd-seq"); }
+    if syscall4(436, 3 as u64, 63 as u64, 0) != (0 as i64) { bad("close_range"); }
+    let fc: i64 = syscall4(2, str_ptr(n3) as u64, 0 as u64, 0 as u64);
+    if fc != (3 as i64) { bad("close_range-reuse"); }
+    syscall4(3, fc as u64, 0, 0);
+
+    syscall4(87, str_ptr(n1) as u64, 0, 0);
+    syscall4(87, str_ptr(n2) as u64, 0, 0);
+    syscall4(87, str_ptr(n3) as u64, 0, 0);
+    syscall4(87, str_ptr(n4) as u64, 0, 0);
+    print("PE ALIAS OK\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
 TESTS: list[tuple[str, object]] = []
 
 
@@ -139,9 +1042,9 @@ def _ir(src: Path, td: Path) -> Path:
     return ll
 
 
-def _run_native(exe: Path, timeout: int = 20) -> tuple[int, bytes]:
+def _run_native(exe: Path, timeout: int = 20, cwd: Path | None = None) -> tuple[int, bytes]:
     """在本机直接跑 PE（不经 WSL）。退出码与 stdout 分开拿，不混在一个流里。"""
-    r = subprocess.run([str(exe)], capture_output=True, timeout=timeout, shell=False)
+    r = subprocess.run([str(exe)], capture_output=True, timeout=timeout, cwd=cwd, shell=False)
     return r.returncode, r.stdout
 
 
@@ -1212,6 +2115,8 @@ fn _start() -> u32 {
     let a: i64 = syscall4(9999, 0, 0, 0);
     let b: i64 = syscall6(9998, 0, 0, 0, 0, 0);
     let _c: i64 = syscall7(9997, 0, 0, 0, 0, 0, 0);
+    let d: i64 = syscall4(174, 0, 0, 0);
+    let e: i64 = syscall4(180, 0, 0, 0);
     if a != want {
         w(1, "ENOSYS BAD a\\n");
         return 1;
@@ -1219,6 +2124,14 @@ fn _start() -> u32 {
     if b != want {
         w(1, "ENOSYS BAD b\\n");
         return 2;
+    }
+    if d != want {
+        w(1, "ENOSYS BAD d\\n");
+        return 3;
+    }
+    if e != want {
+        w(1, "ENOSYS BAD e\\n");
+        return 4;
     }
     w(1, "ENOSYS OK\\n");
     return 0;
@@ -2030,6 +2943,214 @@ def test_an_unrecognised_icmp_is_a_diagnostic_not_a_traceback():
     blob, _info = lomelf.compile_pe(ir.replace("PRED", "samesign ult"))
     assert blob, "带 samesign 的标志被拒了 —— 它是优化提示，不是新语义"
     print("      不认识的谓词：点名 `icmp foo`；`samesign ult` 照常编出产物")
+
+
+@test
+def test_pe_p0_time_and_identity():
+    """P0（`docs/311` §4.1）：`getpid` / `uname` / `time` / `clock_gettime` 必须有。
+
+    这四个号原先在 PE 上是 `-ENOSYS`：`uname` 拿不到 sysname，`time`/`clock_gettime`
+    拿不到时间，`lgc` 的预算因此**永不收紧**（`docs/309` §2.5）。这里在原生 PE 上跑一个
+    自检程序：pid 只断言符号（绝对值天然不可比），uname 断言 sysname 是 `L`，time
+    断言落在 2023 年以后，单调钟断言纳秒字段的形状（两次都 < 1e9）。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "p0.lomt"
+        src.write_text(P0_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "p0.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe)
+        assert (rc, out) == (0, b"P0 OK\n"), (rc, out[:200])
+        print("      getpid/uname/time/clock_gettime 在 PE 上均为 Linux 形状")
+
+
+@test
+def test_pe_file_memory_and_pipe_shims():
+    """文件/内存/管道批：open/lseek/unlink/mmap/mprotect/munmap/pipe2/dup2。
+
+    这些都是 `hotswap`、`lib/proc`、`lomelf.lomt` 真正调用过的号；原先在 PE 上全是
+    `-ENOSYS`。判据在原生 PE 上跑一个自建文件、映射、管道、dup2 的自检程序。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "p2.lomt"
+        src.write_text(P2_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "p2.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=30, cwd=td)
+        assert (rc, out) == (0, b"P2 OK\n"), (rc, out[:200])
+        print("      open/lseek/unlink/mmap/mprotect/munmap/pipe2/dup2 在 PE 上均可用")
+
+
+@test
+def test_pe_time_dir_and_file_shims():
+    """目录/时间/身份批：rename/mkdir/rmdir/getcwd/chdir/access/fsync/ftruncate/
+    gettimeofday/clock_getres/nanosleep/getuid 族/gettid/sched_yield。
+
+    id 与 ppid 只断言符号/关系（绝对值的宿主事实允许漂移，`docs/311` §2 F 类）；
+    其余全部断言具体行为。程序自己在临时目录里建/改名/截断/删除。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "p3.lomt"
+        src.write_text(P3_DEMO, encoding="utf-8", newline=chr(10))
+        ll = _ir(src, td)
+        exe = td / "p3.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=40, cwd=td)
+        assert (rc, out) == (0, b"P3 OK" + bytes([10])), (rc, out[:200])
+        print("      目录/时间/身份批在 PE 上均可用")
+
+
+@test
+def test_pe_alias_and_at_shims():
+    """别名/at 变体批：pipe/dup/dup3/exit_group/clock_nanosleep/at 变体/truncate/
+    chmod/umask/msync/madvise。id 类的绝对值仍按 F 类放宽。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "p4.lomt"
+        src.write_text(P4_DEMO, encoding="utf-8", newline=chr(10))
+        ll = _ir(src, td)
+        exe = td / "p4.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=40, cwd=td)
+        assert (rc, out) == (0, b"P4 OK" + bytes([10])), (rc, out[:200])
+        print("      别名/at 变体批在 PE 上均可用")
+
+
+@test
+def test_pe_stat_family_shims():
+    """stat/fstat/lstat/statx 四个号：`struct stat` 与 `struct statx` 的**布局**要对。
+
+    这条盯的不是"返回 0"，而是**偏移**：`st_size@48`、`st_mode@24`、`stx_size@40`、
+    `stx_mtime@112`。布局写错的形态是"调用成功、字段是垃圾"，只看返回值抓不到。
+    """
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "p5.lomt"
+        src.write_text(P5_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "p5.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=40, cwd=td)
+        assert (rc, out) == (0, b"P5 OK\n"), (rc, out[:200])
+        print("      stat 家族在 PE 上按 Linux 布局填字段")
+
+
+@test
+def test_pe_pread_and_vectors():
+    """`pread64`/`pwrite64` 不动文件位置；`readv`/`writev` 按 iovec 逐段传。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "pv.lomt"
+        src.write_text(PV_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "pv.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=40, cwd=td)
+        assert (rc, out) == (0, b"PV OK\n"), (rc, out[:200])
+        print("      pread/pwrite/readv/writev 在 PE 上均可用")
+
+
+@test
+def test_pe_link_lock_and_times():
+    """link/flock/utime 族/fallocate：链接是真链接、时间要落成整秒。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "pb.lomt"
+        src.write_text(PB_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "pb.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=60, cwd=td)
+        assert rc == 0 and out.endswith(b"PB OK\n"), (rc, out[:300])
+        print("      链接/文件锁/时间/预分配在 PE 上均可用")
+
+
+@test
+def test_pe_futex_random_and_mmap_ops():
+    """mremap 搬内容、futex 的 EAGAIN/唤醒计数、getrandom、ioctl、fcntl、sendfile。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "pc.lomt"
+        src.write_text(PC_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "pc.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=60, cwd=td)
+        assert (rc, out) == (0, b"PC OK\n"), (rc, out[:300])
+        print("      mremap/futex/getrandom/ioctl/fcntl/sendfile 在 PE 上均可用")
+
+
+@test
+def test_pe_syscall_classification_covers_the_linux_table():
+    """`tools/win_syscall_table.py`：385 个 Linux 号**逐个**有处置，且与派发面不矛盾。
+
+    三件事必须同时真：① 表是**划分**（每个号恰好一边）；② 派发面里的号全在"已实现"里，
+    且每个都有面名；③ 每个拒绝理由都是 `REFUSE_REASONS` 里定义过的键 —— 于是"为什么
+    不做"不是一句随手写的散文，而是一个有名字的类别。
+    """
+    import win_syscall_table as T
+
+    names = set(T.LINUX_X86_64)
+    impl = set(T.IMPLEMENTED_MODE)
+    ref = set(T.REFUSED)
+    assert names == impl | ref, (names - (impl | ref), (impl | ref) - names)
+    assert not (impl & ref), impl & ref
+    for n, mode in T.IMPLEMENTED_MODE.items():
+        assert mode in ("forward", "emulate", "synth"), (n, mode)
+        assert lomelf.PE_SURFACE_BY_NUMBER.get(n), f"{n} 已实现却没有面名"
+    for n, key in T.REFUSED.items():
+        assert key in T.REFUSE_REASONS, (n, key)
+    dispatch = {n for n, _s, _l in lomelf.PE_SYSCALLS if n < 4096}
+    assert dispatch == impl, (dispatch - impl, impl - dispatch)
+    print(f"      {len(names)} 个 Linux 号：{len(impl)} 已实现 / {len(ref)} 显式拒绝，"
+          f"{len(T.REFUSE_REASONS)} 类理由")
+
+
+@test
+def test_pe_alias_family_shims():
+    """同义号：creat/mknod/openat2/linkat/readlinkat/futimesat/getcpu/close_range/ioprio。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "pe.lomt"
+        src.write_text(PE_ALIAS_DEMO, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "pe.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe, timeout=60, cwd=td)
+        assert (rc, out) == (0, b"PE ALIAS OK\n"), (rc, out[:300])
+        print("      同义号在 PE 上均可用")
 
 
 def main() -> int:

@@ -941,19 +941,46 @@ fn pt_cnt_boundary_extcalls(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 
 /// 号 → 面代号：0=other 1=file 2=mem 3=net 4=proc。**代号只为分桶**，名字在发射处。
 fn pt_surf_code(num: u32) -> u32 {
-    if num == 0 || num == 1 || num == 3 || num == 217 || num == 257 || num == 262 {
+    if num == 0 || num == 1 || num == 3 || num == 217 || num == 257 || num == 262
+            || num == 2 || num == 8 || num == 87 || num == 33 || num == 293
+            || num == 82 || num == 83 || num == 84 || num == 79 || num == 80
+            || num == 21 || num == 74 || num == 75 || num == 77
+            || num == 22 || num == 32 || num == 292 || num == 263 || num == 258
+            || num == 264 || num == 269 || num == 76 || num == 90 || num == 95
+            || num == 4 || num == 5 || num == 6 || num == 332
+            || num == 17 || num == 18 || num == 19 || num == 20 || num == 72
+            || num == 73 || num == 86 || num == 88 || num == 89
+            || num == 91 || num == 268 || num == 92 || num == 93 || num == 94
+            || num == 132 || num == 235 || num == 280
+            || num == 285 || num == 221 || num == 40
+            || num == 162 || num == 306 || num == 277 || num == 452 || num == 316
+            || num == 85 || num == 133 || num == 259 || num == 260 || num == 261
+            || num == 265 || num == 266 || num == 267 || num == 436 || num == 437
+            || num == 439 {
         return 1;                                   // file
     }
-    if num == 12 {
+    if num == 12 || num == 9 || num == 10 || num == 11 || num == 26 || num == 28
+            || num == 25 {
         return 2;                                   // mem
     }
     if num == 7 || num == 23 || num == 41 || num == 42 || num == 43 || num == 44 || num == 45
             || num == 48 || num == 49 || num == 50 || num == 51 || num == 52
             || num == 54 || num == 55 || num == 288
-            || num == 46 || num == 47 || num == 53 || num == 232 || num == 233 || num == 291 {
+            || num == 46 || num == 47 || num == 53 || num == 232 || num == 233 || num == 291
+            || num == 270 || num == 271 || num == 281 || num == 441 || num == 213 {
         return 3;                                   // net
     }
-    if num == 60 || num == 4096 || num == 4097 {
+    if num == 60 || num == 39 || num == 63 || num == 201 || num == 228
+            || num == 96 || num == 229 || num == 35 || num == 102 || num == 104
+            || num == 107 || num == 108 || num == 110 || num == 186 || num == 24
+            || num == 231 || num == 230
+            || num == 204 || num == 203 || num == 202 || num == 318 || num == 16
+            || num == 218 || num == 251 || num == 252 || num == 309
+            || num == 105 || num == 106 || num == 109 || num == 111 || num == 112
+            || num == 113 || num == 114 || num == 115 || num == 116 || num == 117
+            || num == 118 || num == 119 || num == 120 || num == 121 || num == 122
+            || num == 123 || num == 124
+            || num == 4096 || num == 4097 {
         return 4;                                   // proc（4096 = lmgr 的 PDH）
     }
     return 0;                                       // other（含"号不是字面量"）

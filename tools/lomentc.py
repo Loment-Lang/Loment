@@ -11499,6 +11499,35 @@ SURFACE_NUMBERS = {
     46: "net", 47: "net", 53: "net", 232: "net", 233: "net", 291: "net",
     288: "net", 44: "net", 45: "net", 48: "net", 49: "net", 50: "net",
     51: "net", 52: "net", 54: "net", 55: "net",
+    # P0（`docs/311` §4.1）：时间与进程身份。PE shim 已实现（39/63/201/228）。
+    39: "proc", 63: "proc", 201: "proc", 228: "proc",
+    # 文件/内存/管道一批。
+    2: "file", 8: "file", 87: "file", 33: "file", 293: "file",
+    9: "mem", 10: "mem", 11: "mem",
+    82: "file", 83: "file", 84: "file", 79: "file", 80: "file", 21: "file",
+    74: "file", 75: "file", 77: "file",
+    96: "proc", 229: "proc", 35: "proc", 102: "proc", 104: "proc", 107: "proc",
+    108: "proc", 110: "proc", 186: "proc", 24: "proc",
+    22: "file", 32: "file", 292: "file", 231: "proc", 230: "proc",
+    263: "file", 258: "file", 264: "file", 269: "file", 76: "file",
+    90: "file", 95: "file", 26: "mem", 28: "mem",
+    4: "file", 5: "file", 6: "file", 332: "file",
+    # 位置读写、链接/锁/属性、预分配、散列聚集一批（PE shim 已实现）。
+    17: "file", 18: "file", 19: "file", 20: "file", 72: "file",
+    73: "file", 86: "file", 88: "file", 89: "file",
+    91: "file", 268: "file", 92: "file", 93: "file", 94: "file",
+    132: "file", 235: "file", 280: "file",
+    285: "file", 221: "file", 40: "file",
+    162: "file", 306: "file", 277: "file",
+    25: "mem", 204: "proc", 203: "proc", 202: "proc", 318: "proc", 16: "proc",
+    270: "net", 271: "net", 281: "net", 441: "net", 452: "file", 316: "file",
+    85: "file", 133: "file", 259: "file", 260: "file", 261: "file",
+    265: "file", 266: "file", 267: "file", 436: "file", 437: "file", 439: "file",
+    213: "net", 218: "proc", 251: "proc", 252: "proc", 309: "proc",
+    105: "proc", 106: "proc", 109: "proc", 111: "proc", 112: "proc",
+    113: "proc", 114: "proc", 115: "proc", 116: "proc", 117: "proc",
+    118: "proc", 119: "proc", 120: "proc", 121: "proc", 122: "proc",
+    123: "proc", 124: "proc",
     # lmgr 的性能计数器（私有段）。归 `proc` 面：面是粗分桶，新开一面会改 Potato 的
     # `surfaces` 键与全部孪生夹具。
     4096: "proc",
@@ -11530,6 +11559,7 @@ NET_WIDTH_RUNGS = {
     41: "w1", 42: "w1", 44: "w1", 45: "w1", 46: "w1",    # socket/connect/收发
     47: "w1", 48: "w1", 51: "w1", 52: "w1", 54: "w1", 55: "w1",
     7: "w2", 23: "w2", 232: "w2", 233: "w2", 291: "w2",  # poll/select/epoll_*
+    213: "w2", 270: "w2", 271: "w2", 281: "w2", 441: "w2",  # 旧拼法 / 带 sigmask 的同义号
     49: "w3", 50: "w3", 43: "w3", 288: "w3",             # bind/listen/accept*
 }
 #: `net_ladder` 的四个**分量**键 = 四档的名字，**从窄到宽**（`docs/237`）。

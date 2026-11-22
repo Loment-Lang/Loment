@@ -6,7 +6,7 @@
 > 判据：`loment_pe_test::test_pe_uname_and_clock_surface`（P0 的四个号：形状 PE 与 ELF 同）·
 > 其余三层见 §5（尚未落地）
 > **2026-11-21 补记**：§1 那张"29 个号"的表已经过时 —— PE 派发面扩到 146 个号，
-> 385 个 Linux 号逐个有处置，见 `docs/374`。
+> 385 个 Linux 号逐个有处置，见 `docs/375`。
 
 ---
 

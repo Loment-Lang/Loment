@@ -59,7 +59,7 @@ v12 = v11 + **必填**对象 `surfaces`
 ## 3. 号 → 面：一张表（本文那一轮 22 个号；今天 **29** —— `select` 与联网那一族后来陆续进了表，见 `docs/231` / `docs/234`）
 
 > **2026-11-21 补记**：`lom/net.lom` 的 `Syscall` 已扩到 **146** 个号
-> （file 70 / proc 43 / net 26 / mem 7），见 `docs/374`。本文下面那张表是最初那一轮，
+> （file 70 / proc 43 / net 26 / mem 7），见 `docs/375`。本文下面那张表是最初那一轮，
 > 逐条的权威清单以 `lom/net.lom` 为准。
 
 `tools/lomentc.py::SURFACE_NUMBERS` 是**单一真源**（自举侧没有第二份 —— 它数的是

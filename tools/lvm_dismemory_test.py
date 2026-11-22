@@ -142,11 +142,11 @@ def test_real_frontend_runs_under_every_relocation_schedule() -> None:
 def test_out_of_body_is_f01_with_3d_detail() -> None:
     rc, _out, err = _run(_HAND)
     assert rc == 101, (rc, err[:400])
-    for want in ("error[F01]:", "令牌：0x", "体：", "访问：令牌内偏移 4", "这一档没有"):
+    for want in ("error[F01]:", "令牌：0x", "体：", "index=4", "count=4"):
         assert want in err, (want, err[:800])
-    for banned in ("体 #", "位形：(", "体素 ("):
+    for banned in ("体 #", "位形：(", "体素 (", "offset="):
         assert banned not in err, (banned, err[:800])
-    print("      越出体表：rc=101；详细块只报令牌相对事实（无体号/坐标/体素）")
+    print("      越出数组（GEP 时）：rc=101；详细块只报路径事实（无体号/坐标/字节偏移）")
 
 
 def test_tokens_are_not_numbers() -> None:
@@ -189,11 +189,12 @@ entry:
 }
 """
     rc, _out, err = _run(MARK + "\n" + body)
-    assert rc == 105 and "error[F05]:" in err and "相减" in err, (rc, err[:500])
+    assert rc == 105 and "error[F05]:" in err, (rc, err[:500])
     body2 = body.replace("sub i64 @x, @y", "icmp ult i64 @x, @y")
     rc2, _o2, err2 = _run(MARK + "\n" + body2)
-    assert rc2 == 105 and "比大小" in err2, (rc2, err2[:500])
-    print("      跨体相减 / 排序：rc=105（没有地址空间）")
+    assert rc2 == 105 and "error[F05]:" in err2, (rc2, err2[:500])
+    assert "没有全局空间" in err and "没有全局空间" in err2
+    print("      引用相减 / 排序：rc=105（没有地址空间，也就没有序）")
 
 
 def test_retired_and_null_tokens() -> None:
@@ -225,9 +226,9 @@ entry:
 def test_identity_budget_and_placement() -> None:
     m = lvm.Dismem()
     t = m.alloc(8, kind="global")
-    t2 = m.add_off(t, 4)
-    assert m.add_off(t, 4) == t2, "同一个 (体,偏移) 派生出了不同的令牌"
-    assert m.tokens[t2][1] == 4
+    t2 = m.elem(t, 4, 8, 1)
+    assert m.elem(t, 4, 8, 1) == t2, "同一个 (体,路径) 派生出了不同的令牌"
+    assert m.tokens[t2][1] == ((0, 4, 8, 1),), m.tokens[t2][1]
     m.retire(t)
     assert t not in m.tokens and t2 not in m.tokens, "退休后令牌还在表里"
     try:
@@ -416,28 +417,29 @@ def test_representation_is_invariant_under_shuffle() -> None:
 
 
 def test_body_is_sparse_not_a_byte_array() -> None:
-    """判 N（`docs/375` §2.3）：体背后**没有连续字节数组**。
+    """判 N（`docs/375` §2.3 + `docs/377` §2.4）：体背后**没有连续字节数组**，
+    而且**没有物理键可摆**。
 
-    分配 1 MiB 只写 2 字节时，背后应当只有 2 个格 —— 一块可按下标寻址的缓冲区会
-    立刻铺满 1 MiB，而且访问路径一定写成 `base + k`。这条判据在换表示之前是红的：
-    那时的 `_DismBody` 有 `data = bytearray(size)`。
+    分配 1 MiB 只写 2 个字节元素时，背后只有 2 个格（键是路径）。深度 4 里
+    `--dismemory-shuffle` 是空操作：没有字节号可换，内容当然一样。
     """
     m0 = lvm.Dismem()
     t0 = m0.alloc(1 << 20, kind="heap")
-    b0, off0 = m0.decode(t0, 1)
-    assert off0 == 0, off0
+    b0, path0, leaf0 = m0.decode(t0, 1)
+    assert path0 == () and leaf0 == (1 << 20), (path0, leaf0)
     assert not hasattr(b0, "data"), "体上仍挂着可按下标寻址的连续缓冲区"
-    m0.put(t0, b"AB")
+    m0.put_run(t0, b"AB")
     assert len(b0.cells) <= 2, f"写 2 字节却落了 {len(b0.cells)} 个格"
-    assert m0.get(t0, 4) == b"AB\0\0"
-    assert all(0 <= k < b0.size for k in b0.cells), "格号越出了体的逻辑尺寸"
+    assert m0.get_run(t0, 4) == b"AB\0\0"
+    assert all(isinstance(k, tuple) for k in b0.cells), "格的键不是路径"
     m7 = lvm.Dismem(shuffle=7)
     t7 = m7.alloc(1 << 20, kind="heap")
-    b7, _o7 = m7.decode(t7, 1)
-    m7.put(t7, b"AB")
-    assert m7.get(t7, 4) == m0.get(t0, 4), "换摆法改变了逻辑内容"
-    assert set(b7.cells) != set(b0.cells), "换摆法后物理键没变 —— 摆法没生效"
-    print("      1 MiB 只写 2 字节 ⇒ 2 个格；换摆法改物理键、不改逻辑内容")
+    b7, _p7, _l7 = m7.decode(t7, 1)
+    m7.put_run(t7, b"AB")
+    assert m7.get_run(t7, 4) == m0.get_run(t0, 4), "换摆法改变了逻辑内容"
+    assert set(b7.cells) == set(b0.cells), (
+        "深度 4 的摆法应当是空操作（没有物理键可换）")
+    print("      1 MiB 只写 2 字节 ⇒ 2 个格；摆法在深度 4 是空操作")
 
 
 #: P 的排除项：这几份例子把 `str_ptr(...) as u64` 递给 syscall4 —— 在 dismemory 下
@@ -484,12 +486,85 @@ def test_dismemory_preserves_observable_semantics() -> None:
         assert why, name
     print("      普通档 vs dismemory（shuffle=0/1/7）：rc 与 stdout 逐字节相同")
 
-TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-
 
 def main() -> int:
     return loment_suite.run(TESTS, "lvm_dismemory_test")
 
+
+
+
+def test_path_derivation_is_structural() -> None:
+    """判 Q（`docs/377` §2.2）：`getelementptr` 产生的是**结构步骤**。
+
+    * 数组第 k 个元素与结构第 f 个字段是两种步骤；
+    * 越界在**派生时**就是 F01（不是等到 load）；
+    * 同一个 `(体, 路径)` 只发一个令牌。
+    """
+    m = lvm.Dismem()
+    t = m.alloc(16, kind="heap")
+    e = m.gep(t, 0, "[4 x i32]", [3])
+    _b, path, leaf = m.decode(e, 4)
+    assert path == ((0, 3, 4, 4),) and leaf == 4, (path, leaf)
+    assert m.gep(t, 0, "[4 x i32]", [3]) == e, "同一路径发了两个令牌"
+    try:
+        m.gep(t, 0, "[4 x i32]", [4])
+    except lvm._Fault as x:
+        assert x.kind == lvm.FAULT_BOUNDS, x.kind
+    else:
+        raise AssertionError("越界下标没在派生时被拒")
+    s = m.gep(t, 0, "{i32, i32}", [1])
+    _b2, spath, _leaf2 = m.decode(s, 4)
+    assert spath == ((1, 1, 0, 4),), spath
+    print("      数组/字段两类步骤；越界在派生时 F01；同一路径只发一个令牌")
+
+
+def test_pointer_arithmetic_is_refused() -> None:
+    """判 R（`docs/377` §2.2）：引用上没有可加的整数。
+
+    `ptr_add` 在源里走 GEP（那是有结构的下标）；而 IR 层的 `add i64 %tok, k`
+    是"把引用当数用" —— F04。两个引用相减 / 排序是 F05。两者都只能手写 IR 才到得了。
+    """
+    add = """; loment-memory: dismemory
+@x = global [8 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %n = add i64 @x, 4
+  ret void
+}
+"""
+    rc, _o, err = _run(MARK + "\n" + add)
+    assert rc == 104 and "error[F04]:" in err, (rc, err[:300])
+    cmp_ = """; loment-memory: dismemory
+@x = global [8 x i8] zeroinitializer
+define void @_start() {
+entry:
+  %d = icmp ult i64 @x, @x
+  ret void
+}
+"""
+    rc2, _o2, err2 = _run(MARK + "\n" + cmp_)
+    assert rc2 == 105 and "error[F05]:" in err2, (rc2, err2[:300])
+    print("      add i64 %tok -> F04；icmp %tok -> F05")
+
+
+def test_byte_reinterpretation_of_an_element_is_refused() -> None:
+    """判 S（`docs/377` §2.2）：把一个**更宽的元素**用更窄的类型去指 = 字节重解释。
+
+    体根仍是字节序列（`alloc` 的产物就是字节），所以根上的 `i8` 指针合法；
+    但已经落在 `i32` 元素上的引用再用 `i8` 去指它，这一档不主张 —— F04。
+    """
+    m = lvm.Dismem()
+    t = m.alloc(16, kind="heap")
+    e = m.gep(t, 0, "[4 x i32]", [2])
+    try:
+        m.gep(e, 0, "i8", [])
+    except lvm._Fault as x:
+        assert x.kind == lvm.FAULT_NOADDR, x.kind
+    else:
+        raise AssertionError("把 i32 元素当字节串重新解释了")
+    print("      i32 元素上用 i8 去指：F04；根上的字节指针仍合法")
+
+TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":
     sys.exit(main())

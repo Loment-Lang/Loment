@@ -869,7 +869,8 @@ class Frame:
         a = (self.next + SLOT - 1) // SLOT * SLOT
         self.next = a + SLOT
         if isinstance(self.mem, Dismem):
-            return self.mem.add_off(self.base, a)
+            # 帧体是 `[u8; FRAME_SIZE]`；槽 = 这个数组的元素（`docs/377` §2.3）。
+            return self.mem.elem(self.base, a, FRAME_SIZE, 1)
         return a
 
 
@@ -995,7 +996,10 @@ class Vm:
             align = max(1, min(8, lomelf.size_of(g.ty) or 1))
             g.addr = (self.mem.alloc(len(data), align, kind="global")
                       if self.dismemory else self.mem.alloc(len(data), align))
-            self.mem.put(g.addr, data)
+            if self.dismemory:
+                self.mem.put(g.addr, data, g.ty)
+            else:
+                self.mem.put(g.addr, data)
             if self.sub is not None:
                 oid = self.sub.new_obj(g.addr, len(data), "global")
                 self.global_caps[g.name] = self.sub.cap_of(oid)
@@ -1029,7 +1033,9 @@ class Vm:
         n = lomelf.size_of(ty)
         if self.dismemory:
             self.mem.site = self.site
-        raw = self.mem.get(addr, n)
+            raw = self.mem.get(addr, n, ty)
+        else:
+            raw = self.mem.get(addr, n)
         if _is_agg(ty):
             return raw
         return int.from_bytes(raw, "little")
@@ -1038,10 +1044,18 @@ class Vm:
         if self.dismemory:
             self.mem.site = self.site
         if _is_agg(ty):
-            self.mem.put(addr, val if isinstance(val, bytes) else bytes(val))
+            blob = val if isinstance(val, bytes) else bytes(val)
+            if self.dismemory:
+                self.mem.put(addr, blob, ty)
+            else:
+                self.mem.put(addr, blob)
             return
         n = lomelf.size_of(ty)
-        self.mem.put(addr, (int(val) & ((1 << (n * 8)) - 1)).to_bytes(n, "little"))
+        blob = (int(val) & ((1 << (n * 8)) - 1)).to_bytes(n, "little")
+        if self.dismemory:
+            self.mem.put(addr, blob, ty)
+        else:
+            self.mem.put(addr, blob)
 
 
 
@@ -1102,11 +1116,11 @@ class _DismBody:
         self.dy = d
         self.dz = max(1, (self.size + d * d - 1) // (d * d))
         self.x = self.y = self.z = 0
-        #: `docs/375` §2：体**没有连续字节数组** —— 内容是一张稀疏映射（逻辑下标 -> 字节）。
-        #: `shift` 只改物理键的写法（同一个逻辑下标在不同摆法下落到不同的桶），访问路径
-        #: 从不出现"基址 + 字节数"。`--dismemory-shuffle N` 只动它。
-        self.cells: dict[int, int] = {}
-        self.shift = (shift % self.size) if self.size else 0
+        #: `docs/377` §2：体是一张 `路径 -> 叶字节` 的映射。路径是**结构位置**
+        #: （数组第 i 个元素 / 结构第 f 个字段），不是体内字节偏移。
+        self.cells: dict[tuple, bytes] = {}
+        #: 深度 3 的摆法在深度 4 没有物理键可换；保留字段只为快照字段对齐。
+        self.shift = 0
         self.alive = True
         self.tokens: set[int] = set()
 
@@ -1127,11 +1141,10 @@ class Dismem:
         #: 2000 次 store32 要 57s，`docs/375` §6）。
         self.live: dict[int, _DismBody] = {}
         self.next_bid = 1
-        #: 令牌 -> (体编号, 体内偏移)。**永不外露**。
-        self.tokens: dict[int, tuple[int, int]] = {}
-        #: (体编号, 偏移) -> 令牌。同一个引用点只有**一个**令牌：a[i] 取一万次
-        #: 也只烧一个序号（`docs/368` §1.7）。
-        self.rev: dict[tuple[int, int], int] = {}
+        #: 令牌 -> (体编号, 路径, 叶宽)。**永不外露**；表里没有 offset。
+        self.tokens: dict[int, tuple[int, tuple, int]] = {}
+        #: (体编号, 路径) -> 令牌。同一个引用点只有**一个**令牌（`docs/377` §2）。
+        self.rev: dict[tuple[int, tuple], int] = {}
         self.next_serial = 1
         #: 退休令牌的墓碑（只为诊断；令牌永不复用，所以它只增不减，按容量截断）。
         self.tomb: dict[int, tuple[int, str]] = {}
@@ -1177,8 +1190,8 @@ class Dismem:
             self._place(b)
 
     # ------------------------------------------------------------ 令牌
-    def _new_token(self, b: "_DismBody", off: int) -> int:
-        key = (b.id, off)
+    def _new_token(self, b: "_DismBody", path: tuple, leaf: int) -> int:
+        key = (b.id, path)
         got = self.rev.get(key)
         if got is not None:
             return got
@@ -1188,7 +1201,7 @@ class Dismem:
                         {"dismem": True, "reason": "tokens", "width": 8})
         self.next_serial = serial + 1
         t = (DISM_TAG << 56) | serial
-        self.tokens[t] = key
+        self.tokens[t] = (b.id, path, leaf)
         self.rev[key] = t
         b.tokens.add(t)
         return t
@@ -1203,9 +1216,11 @@ class Dismem:
             if dead is not None:
                 d.update({"body_kind": dead[1], "dead": True})
             return d
-        _bid, off = key
+        _bid, path, leaf = key
         b = self.bodies.get(_bid)
-        d.update({"offset": off})
+        d.update({"path_len": len(path), "leaf": leaf})
+        if path:
+            d.update({"step": path[-1][1], "steps": [s[1] for s in path]})
         if b is not None:
             d.update({"body_kind": b.kind, "size": b.size})
         return d
@@ -1214,7 +1229,7 @@ class Dismem:
         raise _Fault(kind, self.site or ("?", "?", 0), witness, detail)
 
     def decode(self, h, width: int):
-        """令牌 -> (体, 偏移)。**表里没有 = 身份不存在**（F02），没有代号可以比对。"""
+        """令牌 -> (体, 路径, 叶宽)。**表里没有 = 身份不存在**（F02）。"""
         if not isinstance(h, int) or h == 0:
             self._fault(FAULT_NULL, "size=%d" % width,
                         self.map_detail(0, width, "null"))
@@ -1230,15 +1245,16 @@ class Dismem:
         if key is None:
             self._fault(FAULT_DANGLING, "token=%#x not live" % h,
                         self.map_detail(h, width, "retired"))
-        bid, off = key
+        bid, path, leaf = key
         b = self.bodies.get(bid)
         if b is None or not b.alive:
             self._fault(FAULT_DANGLING, "token=%#x retired" % h,
                         self.map_detail(h, width, "retired"))
-        if off + width > b.size:
-            self._fault(FAULT_BOUNDS, "offset=%d size=%d limit=%d" % (off, width, b.size),
+        if width > leaf:
+            self._fault(FAULT_BOUNDS,
+                        "width=%d leaf=%d path_steps=%d" % (width, leaf, len(path)),
                         self.map_detail(h, width, "over"))
-        return b, off
+        return b, path, leaf
 
     # ------------------------------------------------------------ Mem 接口
     def alloc(self, n: int, align: int = 8, kind: str = "heap") -> int:
@@ -1251,17 +1267,17 @@ class Dismem:
         # 摆法（`docs/375` §2.3）：只改物理键的写法，逻辑格号与令牌不动。
         shift = 0 if self.shuffle == 0 else (
             (self.shuffle * 2654435761 + bid * 40503) & 0x7FFFFFFF)
-        b = _DismBody(bid, kind, size, shift)
+        b = _DismBody(bid, kind, size, 0)
         self.bodies[bid] = b
         self._place(b)
         self.live[bid] = b
-        return self._new_token(b, 0)
+        return self._new_token(b, (), size)
 
     def retire(self, h: int) -> None:
         key = self.tokens.get(h) if isinstance(h, int) else None
         if key is None:
             return
-        bid, off = key
+        bid, _path, _leaf = key
         b = self.bodies.get(bid)
         if b is None or not b.alive:
             return
@@ -1279,43 +1295,197 @@ class Dismem:
         b.cells.clear()
         self.live.pop(bid, None)
 
-    def put(self, h, data) -> None:
-        b, off = self.decode(h, len(data))
+    # ------------------------------------------------------------ 叶访问
+    def put(self, h, data, ty: str | None = None) -> None:
+        b, path, leaf = self.decode(h, len(data))
+        if ty is not None and _is_agg(ty):
+            self._put_agg(b, path, ty, bytes(data))
+            return
+        if any(data):
+            b.cells[path] = bytes(data)
+        else:
+            b.cells.pop(path, None)
+
+    def get(self, h, n: int, ty: str | None = None) -> bytes:
+        b, path, leaf = self.decode(h, n if ty is None else 0)
+        if ty is not None and _is_agg(ty):
+            return self._get_agg(b, path, ty)
+        return bytes(b.cells.get(path, b"\0" * n)[:n]).ljust(n, b"\0")
+
+    # ------------------------------------------------------------ 路径派生
+    def gep(self, h: int, delta: int, ty: str, rest: list[int]) -> int:
+        """`getelementptr ty, ptr %p, delta, rest...` -> 新令牌（`docs/377` §2.2）。
+
+        第 0 个下标是"沿指针的元素推进"：若当前路径末尾就是一个数组元素，
+        就在**同一根数组轴**上前进；否则从体根起算（体尺寸 / sizeof(ty) 个元素）。
+        越界在**派生时**就是 F01 —— 不是等到 load。"""
+        b, path, _leaf = self.decode(h, 0)
+        width = lomelf.size_of(ty)
+        scalar = not (ty.startswith("[") or ty.startswith("{"))
+        if delta == 0 and scalar and not (
+                path and path[-1][3] == width):
+            # `gep T, p, 0`：指针停在同一根数组的**第 0 个元素**上；但若 p 已经指向
+            # 一个**更宽**的元素（字段/数组元素），用更窄的 T 去指它是**字节重解释**
+            # —— 深度 4 不主张这件事（`docs/377` §2.2，F04）。
+            if path:
+                d = self.map_detail(h, width, "gep")
+                d["want"] = width
+                self._fault(FAULT_NOADDR, "reinterpret a wider element",
+                            d)
+            cnt = (b.size // width) if width > 0 else 0
+            if cnt <= 0:
+                d = self.map_detail(h, width, "gep")
+                d["index"] = 0
+                d["count"] = cnt
+                self._fault(FAULT_BOUNDS, "index=0 count=0", d)
+            path = ((0, 0, cnt, width),)
+        elif delta != 0:
+            if path and path[-1][0] == 0 and path[-1][3] == width:
+                kind, idx, cnt, w = path[-1]
+                nidx = idx + delta
+                if nidx < 0 or nidx >= cnt:
+                    d = self.map_detail(h, width, "gep")
+                    d["index"] = nidx
+                    d["count"] = cnt
+                    self._fault(FAULT_BOUNDS, "index=%d count=%d" % (nidx, cnt), d)
+                path = path[:-1] + ((0, nidx, cnt, w),)
+            else:
+                cnt = (b.size // width) if width > 0 else 0
+                if delta < 0 or delta >= cnt:
+                    d = self.map_detail(h, width, "gep")
+                    d["index"] = delta
+                    d["count"] = cnt
+                    self._fault(FAULT_BOUNDS, "index=%d count=%d" % (delta, cnt), d)
+                path = path + ((0, delta, cnt, width),)
+        cur, leaf = ty, width
+        for idx in rest:
+            if cur.startswith("["):
+                n, elem = lomelf.array_parts(cur)
+                w = lomelf.size_of(elem)
+                if idx < 0 or idx >= n:
+                    d = self.map_detail(h, w, "gep")
+                    d["index"] = idx
+                    d["count"] = n
+                    self._fault(FAULT_BOUNDS, "index=%d count=%d" % (idx, n), d)
+                path = path + ((0, idx, n, w),)
+                cur, leaf = elem, w
+            elif cur.startswith("{"):
+                _off, fty = lomelf.field_offset(cur, idx)
+                w = lomelf.size_of(fty)
+                path = path + ((1, idx, 0, w),)
+                cur, leaf = fty, w
+            else:
+                raise LvmError(f"GEP 的这一步 T0 没实现: {cur!r}")
+        return self._new_token(b, path, leaf)
+
+    def elem(self, h: int, index: int, count: int, width: int) -> int:
+        """帧里的字节槽：`ELEM(index, count, width)`（`docs/377` §2.3）。"""
+        b, path, _leaf = self.decode(h, 0)
+        if index < 0 or index >= count:
+            d = self.map_detail(h, width, "slot")
+            d["index"] = index
+            d["count"] = count
+            self._fault(FAULT_BOUNDS, "index=%d count=%d" % (index, count), d)
+        return self._new_token(b, path + ((0, index, count, width),), width)
+
+    # ------------------------------------------------------------ 聚合（逐叶，没有 blob）
+    def _get_agg(self, b, path: tuple, ty: str) -> bytes:
+        size = lomelf.size_of(ty)
+        out = bytearray(size)
+        if ty.startswith("["):
+            n, elem = lomelf.array_parts(ty)
+            w = lomelf.size_of(elem)
+            for i in range(n):
+                out[i * w:(i + 1) * w] = self._get_agg(
+                    b, path + ((0, i, n, w),), elem)
+            return bytes(out)
+        if ty.startswith("{"):
+            k = _struct_arity(ty)
+            for i in range(k):
+                off, fty = lomelf.field_offset(ty, i)
+                w = lomelf.size_of(fty)
+                out[off:off + w] = self._get_agg(b, path + ((1, i, 0, w),), fty)
+            return bytes(out)
+        return bytes(b.cells.get(path, b"\0" * size))[:size].ljust(size, b"\0")
+
+    def _put_agg(self, b, path: tuple, ty: str, data: bytes) -> None:
+        if ty.startswith("["):
+            n, elem = lomelf.array_parts(ty)
+            w = lomelf.size_of(elem)
+            for i in range(n):
+                self._put_agg(b, path + ((0, i, n, w),), elem,
+                              data[i * w:(i + 1) * w])
+            return
+        if ty.startswith("{"):
+            k = _struct_arity(ty)
+            for i in range(k):
+                off, fty = lomelf.field_offset(ty, i)
+                w = lomelf.size_of(fty)
+                self._put_agg(b, path + ((1, i, 0, w),), fty,
+                              data[off:off + w])
+            return
+        if any(data):
+            b.cells[path] = bytes(data)
+        else:
+            b.cells.pop(path, None)
+
+    # ------------------------------------------------------------ 字节串：沿 u8 数组轴
+    def _run_base(self, h: int, n: int):
+        b, path, leaf = self.decode(h, 0)
+        if path and path[-1][0] == 0 and path[-1][3] == 1:
+            _k, start, cnt, _w = path[-1]
+            if start + n > cnt:
+                d = self.map_detail(h, 1, "run")
+                d["index"] = start + n - 1
+                d["count"] = cnt
+                self._fault(FAULT_BOUNDS, "run index=%d count=%d" % (start + n, cnt), d)
+            return b, path[:-1], start, cnt
+        if not path and b.size >= n:
+            return b, (), 0, b.size
+        self._fault(FAULT_NOADDR, "byte run over a non-u8-element reference",
+                    {"dismem": True, "reason": "run", "token": h, "width": n})
+        return None, (), 0, 0
+
+    def get_run(self, h, n: int) -> bytes:
+        b, base, start, cnt = self._run_base(h, n)
+        return bytes(_cell_byte(b.cells.get(base + ((0, start + k, cnt, 1),)))
+                     for k in range(n))
+
+    def put_run(self, h, data) -> None:
+        b, base, start, cnt = self._run_base(h, len(data))
         for k, byte in enumerate(data):
-            key = (off + k + b.shift) % b.size
+            key = base + ((0, start + k, cnt, 1),)
             if byte:
-                b.cells[key] = byte
+                b.cells[key] = bytes([byte])
             else:
                 b.cells.pop(key, None)
 
-    def get(self, h, n: int) -> bytes:
-        b, off = self.decode(h, n)
-        return bytes(b.cells.get((off + k + b.shift) % b.size, 0) for k in range(n))
-
     def cstr(self, h, limit: int = 4096) -> bytes:
-        b, off = self.decode(h, 1)
+        b, path, _leaf = self.decode(h, 0)
+        if not (path and path[-1][0] == 0 and path[-1][3] == 1):
+            if path:
+                self._fault(FAULT_NOADDR, "cstr over a non-u8-element reference",
+                            {"dismem": True, "reason": "cstr", "token": h, "width": 1})
+            base, start, cnt = (), 0, b.size
+        else:
+            base, start, cnt = path[:-1], path[-1][1], path[-1][2]
         out = bytearray()
-        i = off
-        while i < b.size and len(out) < limit:
-            c = b.cells.get((i + b.shift) % b.size, 0)
+        i = start
+        while i < cnt and len(out) < limit:
+            c = _cell_byte(b.cells.get(base + ((0, i, cnt, 1),)))
             if c == 0:
                 break
             out.append(c)
             i += 1
         return bytes(out)
 
-    # ------------------------------------------------------------ 令牌算术（在表里派生）
-    def off_of(self, h: int):
-        return self.decode(h, 0)
 
-    def add_off(self, h: int, delta: int) -> int:
-        b, off = self.decode(h, 0)
-        n = off + delta
-        if n < 0 or n > b.size:
-            d = self.map_detail(h, 1, "walk")
-            d["new_offset"] = n
-            self._fault(FAULT_BOUNDS, "offset=%d -> %d limit=%d" % (off, n, b.size), d)
-        return self._new_token(b, n)
+def _cell_byte(cell) -> int:
+    return cell[0] if cell else 0
+
+
+def _struct_arity(ty: str) -> int:
+    return len(lomelf._fields(ty))
 
 
 def _d_num(v) -> bool:
@@ -1381,11 +1551,14 @@ class Executor(Vm):
                                "（`docs/243` §3.4）")
             data = v[0][v[1]:v[1] + a[2]]
             v[1] += len(data)
-            self.mem.put(a[1], data)
+            if self.dismemory:
+                self.mem.put_run(a[1], data)
+            else:
+                self.mem.put(a[1], data)
             return len(data)
         if nr == 1:                                    # write(fd, buf, count)
             fd, buf, n = a[0], a[1], a[2]
-            data = self.mem.get(buf, n)
+            data = self.mem.get_run(buf, n) if self.dismemory else self.mem.get(buf, n)
             if fd in (1, 2):
                 self.out.write(data)
                 self.out.flush()
@@ -1395,23 +1568,19 @@ class Executor(Vm):
                 raise LvmError(f"close: fd {a[0]} 不是 VM 合成的那一个"
                                "（`docs/243` §3.4）")
             return 0
-        if nr == 12 and self.dismemory:                 # brk —— 只认堆体
+        if nr == 12 and self.dismemory:                 # brk —— 只认堆体的**根**
             want = a[0]
-            heap_body, _h = self.mem.off_of(self.mem.heap)
+            heap_body, _hp, _hl = self.mem.decode(self.mem.heap, 0)
             if want == 0:
                 return self.mem.heap
             if not d_is_handle(want):
                 raise _Fault(FAULT_NOORDER, self.site, "brk on a number",
                              {"dismem": True, "reason": "brk-number", "width": 8})
-            b, off = self.mem.off_of(want)
-            if b is not heap_body:
+            b, path, _leaf = self.mem.decode(want, 0)
+            if b is not heap_body or path:
                 raise _Fault(FAULT_NOORDER, self.site,
-                             "brk on a non-heap body",
+                             "brk on a non-root reference",
                              {"dismem": True, "reason": "brk-body", "width": 8})
-            if off > b.size:
-                raise _Fault(FAULT_BOUNDS, self.site,
-                             "brk offset=%d limit=%d" % (off, b.size),
-                             self.mem.map_detail(want, 1, "over"))
             return want
         if nr == 12:                                   # brk(addr)
             # `_IR_HEAP` 的分配器用它向 OS 要页。解释器的堆本来就在地址空间里，
@@ -1432,7 +1601,11 @@ class Executor(Vm):
             # 判据 A 比的是"这份产物在目标平台上会打印什么"，所以这里必须给 Linux：
             # 宿主是 Windows 也照样给 Linux（`docs/243` §3.4 那条规矩）。
             fields = [b"Linux", b"loment", b"0.1.5", b"#1 LVM T0", b"x86_64", b"(none)"]
-            self.mem.put(a[0], b"".join(f[:64].ljust(65, b"\0") for f in fields))
+            blob = b"".join(f[:64].ljust(65, b"\0") for f in fields)
+            if self.dismemory:
+                self.mem.put_run(a[0], blob)
+            else:
+                self.mem.put(a[0], blob)
             return 0
         if nr == 201:                                  # time(NULL)
             if self.dismemory:
@@ -1449,8 +1622,12 @@ class Executor(Vm):
                 ns = self.executed * 1_000_000
             else:
                 ns = time.time_ns() if a[0] == 0 else time.monotonic_ns()
-            self.mem.put(a[1], (ns // 1_000_000_000).to_bytes(8, "little", signed=True)
-                         + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
+            blob = ((ns // 1_000_000_000).to_bytes(8, "little", signed=True)
+                    + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
+            if self.dismemory:
+                self.mem.put_run(a[1], blob)
+            else:
+                self.mem.put(a[1], blob)
             return 0
         # ⚠ **317 不是 getrandom** —— 我一开始照 `selfcheck` 的名字猜它是，写了个
         # `os.urandom` 分支。**判据 A 当场把这个臆造纠了出来**：原生产物在 Linux 上拿到
@@ -1700,30 +1877,12 @@ class Executor(Vm):
         """句柄参与的算术（`docs/368` §1.4）。**只有 `add`/`sub` 的体内偏移是允许的。**
         体内偏移有顺序（数组下标），所以同体相减/比较照常；跨体一律 F05。"""
         ha, hb = d_is_handle(a), d_is_handle(b)
-        if op == "add":
-            if ha and hb:
-                raise _Fault(FAULT_NOORDER, self.site, "add two bodies",
-                             {"dismem": True, "reason": "add-bodies",
-                              "width": 8})
-            if ha:
-                return self.mem.add_off(a, int(b))
-            if hb:
-                return self.mem.add_off(b, int(a))
-        if op == "sub":
-            if ha and hb:
-                ba, oa = self.mem.off_of(a)
-                bb, ob = self.mem.off_of(b)
-                if ba is not bb:
-                    raise _Fault(FAULT_NOORDER, self.site,
-                                 "subtract two bodies",
-                                 {"dismem": True, "reason": "sub-bodies", "width": 8})
-                return mask(oa - ob, ty)
-            if ha:
-                return self.mem.add_off(a, -int(b))
-            if hb:
-                raise _Fault(FAULT_NOORDER, self.site, "integer - body",
-                             {"dismem": True, "reason": "int-sub-body", "width": 8})
         if ha or hb:
+            # 深度 4：引用没有可加减的整数（F04）；两个引用的差是"序"（F05）。
+            if op == "sub" and ha and hb:
+                raise _Fault(FAULT_NOORDER, self.site, op,
+                             {"dismem": True, "reason": "order", "op": op,
+                              "width": 8})
             raise _Fault(FAULT_NOADDR, self.site, op,
                          {"dismem": True, "reason": "arith", "op": op,
                           "width": 8})
@@ -1896,9 +2055,11 @@ class Executor(Vm):
         parts = lomelf.split_top(body[i:].lstrip(", "))
         _bty, base = self.operand(fr, parts[0])
         idxs = [self.operand(fr, s)[1] for s in parts[1:]]
-        off = gep_offset(ty, idxs, text)
         if self.dismemory and d_is_handle(base):
-            return self.mem.add_off(base, off)
+            # 深度 4：下标变**结构步骤**，不是字节偏移（`docs/377` §2.2）。
+            self.mem.site = self.site
+            return self.mem.gep(base, int(idxs[0]), ty, [int(i) for i in idxs[1:]])
+        off = gep_offset(ty, idxs, text)
         return base + off
 
     def _extractvalue(self, fr: Frame, text: str):
@@ -1938,16 +2099,8 @@ class Executor(Vm):
             if pred in ("eq", "ne"):
                 same = (a == b) if (d_is_handle(a) and d_is_handle(b)) else False
                 return 1 if (same == (pred == "eq")) else 0
-            if d_is_handle(a) and d_is_handle(b):
-                ba, oa = self.mem.off_of(a)
-                bb, ob = self.mem.off_of(b)
-                if ba is not bb:
-                    raise _Fault(FAULT_NOORDER, self.site,
-                                 "compare two bodies",
-                                 {"dismem": True, "reason": "order-bodies", "width": 8})
-            else:
-                raise _Fault(FAULT_NOORDER, self.site, "order handle vs number",
-                             {"dismem": True, "reason": "order-handle", "width": 8})
+            raise _Fault(FAULT_NOORDER, self.site, "compare references",
+                         {"dismem": True, "reason": "order", "width": 8})
         if pred in _SIGNED_CMP:
             a, b = signed(a, ty), signed(b, ty)
         return 1 if _ICMP[pred](a, b) else 0
@@ -2053,7 +2206,7 @@ class Executor(Vm):
 #: 共同快照格式（`docs/365`）：与自举镜像**同一套布局**。
 #: 头 16 B + ctx 256 B + 全局表 + 对象表 + 续延栈 2112 B + 4 MiB 内存 + 参考侧扩展。
 CP_MAGIC = b"LVMC"
-CP_VERSION = 1
+CP_VERSION = 2
 CP_HEADER = 16
 CTX_SIZE = 256
 CONT_REC = 16          # u32 / 帧
@@ -2526,21 +2679,24 @@ class ExplicitExecutor(Executor):
         return pending
 
     def _place_value_d(self, fr, val) -> tuple[int, int]:
-        """dismemory 的宿主值 -> `(lo, hi)`；聚合按**帧体内偏移**记成 `(off, size)`。"""
+        """dismemory 的宿主值 -> `(lo, hi)`；聚合按**帧体里的字节 run** 记 `(off, size)`。"""
         if isinstance(val, bytes):
             fr.next = self._align8(fr.next)
             off = fr.next
-            self.mem.put(self.mem.add_off(fr.base, off), bytes(val))
+            self._frame_put(fr, off, bytes(val))
             fr.next = off + len(val)
             return off, len(val)
         v = int(val) & 0xFFFFFFFFFFFFFFFF
         return v & 0xFFFFFFFF, v >> 32
 
+    def _frame_elem(self, fr, off: int) -> int:
+        return self.mem.elem(fr.base, off, FRAME_SIZE, 1)
+
     def _frame_put(self, fr, off: int, data: bytes) -> None:
-        self.mem.put(self.mem.add_off(fr.base, off), data)
+        self.mem.put_run(self._frame_elem(fr, off), data)
 
     def _frame_get(self, fr, off: int, n: int) -> bytes:
-        return self.mem.get(self.mem.add_off(fr.base, off), n)
+        return self.mem.get_run(self._frame_elem(fr, off), n)
 
     def _sub_code(self) -> int:
         if self.sub is None:
@@ -2684,20 +2840,21 @@ class ExplicitExecutor(Executor):
             m.bodies[bid] = b
             m._place(b)
             m.live[bid] = b
-        for bid, k, v in cells:
+        for bid, path, blob in cells:
             b = m.bodies.get(bid)
             if b is not None:
-                b.cells[k] = v
-        for tok, bid, off in toks:
-            m.tokens[tok] = (bid, off)
-            m.rev[(bid, off)] = tok
+                b.cells[path] = blob
+        for tok, bid, path, leaf in toks:
+            m.tokens[tok] = (bid, path, leaf)
+            m.rev[(bid, path)] = tok
             b = m.bodies.get(bid)
             if b is not None:
                 b.tokens.add(tok)
         m.next_bid = next_bid
         m.next_serial = next_serial
-        for tok, (bid, off) in m.tokens.items():
-            if off == 0 and m.bodies.get(bid) is not None and m.bodies[bid].kind == "heapspan":
+        for tok, (bid, path, _leaf) in m.tokens.items():
+            if path == () and m.bodies.get(bid) is not None \
+                    and m.bodies[bid].kind == "heapspan":
                 m.heap = tok
                 break
 
@@ -2736,14 +2893,20 @@ class ExplicitExecutor(Executor):
                 out += _u64(h)
         bodies = sorted((b for b in self.mem.bodies.values() if b.alive),
                         key=lambda q: q.id)
-        cells = [(b.id, k, v) for b in bodies for k, v in sorted(b.cells.items())]
+        cells = [(b.id, path, blob) for b in bodies
+                 for path, blob in sorted(b.cells.items())]
         out += _u32(len(cells))
-        for bid, k, v in cells:
-            out += _u32(bid) + _u32(k) + _u32(v)
+        for bid, path, blob in cells:
+            out += _u32(bid) + _u32(len(path))
+            for kind, idx, cnt, w in path:
+                out += _u32(kind) + _u32(idx) + _u32(cnt) + _u32(w)
+            out += _u32(len(blob)) + blob
         toks = sorted(self.mem.tokens.items())
         out += _u32(len(toks))
-        for tok, (bid, off) in toks:
-            out += _u64(tok) + _u32(bid) + _u32(off)
+        for tok, (bid, path, leaf) in toks:
+            out += _u64(tok) + _u32(bid) + _u32(leaf) + _u32(len(path))
+            for kind, idx, cnt, w in path:
+                out += _u32(kind) + _u32(idx) + _u32(cnt) + _u32(w)
         out += _u32(len(bodies))
         for b in bodies:
             nb = b.kind.encode("utf-8")
@@ -2801,9 +2964,25 @@ class ExplicitExecutor(Executor):
                 objs_h = [r.u64() for _ in range(na)]
                 dis_frames.append((base_tok, fr_next, objs_h))
             nc = r.u32()
-            dis_cells = [(r.u32(), r.u32(), r.u32()) for _ in range(nc)]
+            dis_cells = []
+            for _ in range(nc):
+                bid = r.u32()
+                plen = r.u32()
+                path = tuple((r.u32(), r.u32(), r.u32(), r.u32())
+                             for _ in range(plen))
+                blen = r.u32()
+                blob = r.take(blen)
+                dis_cells.append((bid, path, blob))
             nt = r.u32()
-            dis_toks = [(r.u64(), r.u32(), r.u32()) for _ in range(nt)]
+            dis_toks = []
+            for _ in range(nt):
+                tok = r.u64()
+                bid = r.u32()
+                leaf = r.u32()
+                plen = r.u32()
+                path = tuple((r.u32(), r.u32(), r.u32(), r.u32())
+                             for _ in range(plen))
+                dis_toks.append((tok, bid, path, leaf))
             nb = r.u32()
             dis_bodies = []
             for _ in range(nb):
@@ -2915,20 +3094,20 @@ class ExplicitExecutor(Executor):
             fr.prev = prev_label
             fr.steps = steps
             if flags == 3:
-                headers = self.mem.get(self.mem.add_off(fr.base, 0), 8)
+                headers = self.mem.get_run(self.mem.elem(fr.base, 0, FRAME_SIZE, 1), 8)
                 n, fr.next = struct.unpack("<II", headers)
                 if n > 1024:
                     raise LvmError("checkpoint：一帧里的值超过 1024 格")
                 fr.vals = {}
                 for k in range(n):
-                    blob16 = self.mem.get(self.mem.add_off(
-                        fr.base, FRAME_VALS + k * VAL_REC), VAL_REC)
+                    blob16 = self.mem.get_run(self.mem.elem(
+                        fr.base, FRAME_VALS + k * VAL_REC, FRAME_SIZE, 1), VAL_REC)
                     no, nl, lo, hi = struct.unpack("<IIII", blob16)
                     name = self._span_name(no, nl)
                     ty = self.value_types.get((fn.name, name))
                     if ty is not None and lomelf.is_agg(ty):
-                        fr.vals[name] = self.mem.get(
-                            self.mem.add_off(fr.base, lo), hi)
+                        fr.vals[name] = self.mem.get_run(
+                            self.mem.elem(fr.base, lo, FRAME_SIZE, 1), hi)
                     else:
                         fr.vals[name] = lo | (hi << 32)
             else:
@@ -2969,7 +3148,8 @@ class ExplicitExecutor(Executor):
                     continue
                 ty = self.value_types.get((fn.name, name))
                 if ty is not None and lomelf.is_agg(ty):
-                    val = (self.mem.get(self.mem.add_off(fr.base, lo), hi)
+                    val = (self.mem.get_run(
+                               self.mem.elem(fr.base, lo, FRAME_SIZE, 1), hi)
                            if flags == 3 else bytes(self.mem.buf[lo:lo + hi]))
                 else:
                     val = lo | (hi << 32)

@@ -4396,7 +4396,7 @@ fn chk_builtin_arg(src: ptr, t: ptr, i: u32, k: u32) -> u32 {
     }
     if (chk_tok_is(src, t, i, "syscall4p") || chk_tok_is(src, t, i, "syscall6p"))
             && k == 2 {
-        return (1 << TY_KIND_SHIFT) + 11;          // ptr：类型化指针槽（`docs/374` §3）
+        return (1 << TY_KIND_SHIFT) + 11;          // ptr：类型化指针槽（`docs/375` §3）
     }
     if chk_tok_is(src, t, i, "syscall4") || chk_tok_is(src, t, i, "syscall6")
         || chk_tok_is(src, t, i, "syscall7") || chk_tok_is(src, t, i, "syscall4p")

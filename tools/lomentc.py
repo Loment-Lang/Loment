@@ -69,7 +69,7 @@ BUILTINS = {
     "ptr_add": (("ptr", "u32"), "ptr"),              # M73: 指针字节偏移
     "ptr_sub": (("ptr", "u32"), "ptr"),
     "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
-    # `docs/374` §3：带**类型化指针槽**的 syscall。第三个实参声明成 `ptr`，lowering **不**
+    # `docs/375` §3：带**类型化指针槽**的 syscall。第三个实参声明成 `ptr`，lowering **不**
     # 做 ptrtoint —— dismemory 下令牌原样进寄存器，运行期按号解码。普通档里它就是一个
     # 地址，语义与 syscall4 同。
     "syscall4p": (("u64", "u64", "ptr", "u64"), "i64"),
@@ -11430,7 +11430,7 @@ def _expr_rs(e) -> str:
                     "in(\"rsi\") (" + a[2] + ") as i64, "
                     "in(\"rdx\") (" + a[3] + ") as i64, "
                     "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
-        if e.name == "syscall4p":  # docs/374：第三槽是 ptr（Rust 这一档只做语义等价）
+        if e.name == "syscall4p":  # docs/375：第三槽是 ptr（Rust 这一档只做语义等价）
             return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
                     "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
                     "in(\"rdi\") (" + a[1] + ") as i64, "
@@ -14165,7 +14165,7 @@ def _syscall_borrow_ok(toks: list, i: int) -> bool:
 
 
 def _syscall_ptr_borrow_ok(toks: list, i: int) -> bool:
-    """`docs/374` §3：`NAME` 是 `syscall4p/6p` 的**第三个实参**（类型化指针槽）。
+    """`docs/375` §3：`NAME` 是 `syscall4p/6p` 的**第三个实参**（类型化指针槽）。
 
     与 `_syscall_borrow_ok` 同一套"借"的判据，只是形状不同：这里没有 `as`，指针本身就是
     该槽的值（dismemory 下是令牌）。号仍必须在白名单里，否则按外逃算。
@@ -14774,7 +14774,7 @@ class _Ir:
                  caps: list | None = None, fn_clos: set | None = None,
                  dismemory: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
-        #: `docs/374` §3：这一档下 `print` / `syscall4p` 的指针实参**不做 ptrtoint**。
+        #: `docs/375` §3：这一档下 `print` / `syscall4p` 的指针实参**不做 ptrtoint**。
         self.dismemory = dismemory
         #: 顶层能力表（撤销位的查找要用；块域的撤销位在 `dom_rev` 里）。
         self.caps = caps or []
@@ -16289,7 +16289,7 @@ class _Ir:
             ln = self.t()
             self.w(f"{ln} = extractvalue {{ ptr, i64 }} {sv}, 1")
             if self.dismemory:
-                # `docs/374` §3：dismemory 下令牌不能 ptrtoint —— 直接把 `ptr` 交给 asm。
+                # `docs/375` §3：dismemory 下令牌不能 ptrtoint —— 直接把 `ptr` 交给 asm。
                 r = self.t()
                 self.w(f'{r} = call i64 asm sideeffect "syscall", '
                        f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
@@ -16322,7 +16322,7 @@ class _Ir:
                    f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
                    f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]})")
             return "i64", r
-        if e.name == "syscall4p":  # docs/374：第三槽是 ptr，**没有 ptrtoint**
+        if e.name == "syscall4p":  # docs/375：第三槽是 ptr，**没有 ptrtoint**
             v0 = self.expr(e.args[0], "u64")[1]
             v1 = self.expr(e.args[1], "u64")[1]
             _pt, vp = self.expr(e.args[2], "ptr")

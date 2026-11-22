@@ -1567,7 +1567,7 @@ the user's declarations is E002.
 `syscall4p` / `syscall6p` exist so an artifact can hand a pointer to the kernel **without**
 `ptrtoint`: under the address-free LVM mode (`lvm_dismemory_true`) that conversion is a fault,
 and the typed slot is the only channel by which such a program can perform I/O. In an ordinary
-artifact the slot carries an address, exactly like the integer form (`docs/374` section 3).
+artifact the slot carries an address, exactly like the integer form (`docs/375` section 3).
 
 `print_num` is a **Tur 2026.2+ built-in** (`(i64) -> u32`), not part of the Tur 1 table.
 `inb` / `outb` are available only on the translation backend that maps them.

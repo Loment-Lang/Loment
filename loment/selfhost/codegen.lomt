@@ -1725,7 +1725,7 @@ fn syscall_borrow_ok(src: ptr, toks: ptr, v: u32) -> bool {
     return syscall_short(tok_int(src, toks, j + 1)) == 1;
 }
 
-/// `docs/374` §3：`v` 是 `syscall4p/6p` 的**第三个实参**（类型化指针槽，没有 `as`）。
+/// `docs/375` §3：`v` 是 `syscall4p/6p` 的**第三个实参**（类型化指针槽，没有 `as`）。
 fn syscall_ptr_borrow_ok(src: ptr, toks: ptr, v: u32) -> bool {
     if !(tok_kind(toks, v) == 0 && tok_kind(toks, v + 1) != 2
             && (tok_is(src, toks, v + 1, ",") || tok_is(src, toks, v + 1, ")"))) {
@@ -4974,7 +4974,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
             emit_str(s, out, ", 1\n  ");
             let rr: u32 = 0;
             if contains_ident(src, toks, "lvm_dismemory_true") == 1 {
-                // `docs/374` §3：dismemory 下令牌不能 ptrtoint —— 直接把 `ptr` 交给 asm。
+                // `docs/375` §3：dismemory 下令牌不能 ptrtoint —— 直接把 `ptr` 交给 asm。
                 // **临时值顺序要与参考逐字节同**：这一支没有 ptrtoint 那条，所以 `rr`
                 // 是紧随 `el` 的下一个临时值；普通支先 `ip` 后 `rr`（见下）。
                 rr = new_temp(s, out);
@@ -5533,7 +5533,7 @@ fn expr_atom(s: ptr, out: ptr, src: ptr, toks: ptr, j: u32, lvl: u32, want: u32)
                     emit_str(s, out, ", ");
                 }
                 if np == 1 && b0 == 2 {
-                    emit_str(s, out, "ptr ");      // `docs/374` §3：类型化指针槽，不 ptrtoint
+                    emit_str(s, out, "ptr ");      // `docs/375` §3：类型化指针槽，不 ptrtoint
                 } else {
                     emit_str(s, out, "i64 ");
                 }

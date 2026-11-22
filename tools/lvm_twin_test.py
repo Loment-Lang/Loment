@@ -992,7 +992,28 @@ def test_dismemory_matches_reference() -> None:
             assert rc == ref_rc, (name, rc, ref_rc, merr[-300:])
             assert _fault_line(e.getvalue()) == _fault_line(merr), (
                 name, e.getvalue()[:200], merr[:200])
-    print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同")
+        # 判 O（`docs/375` §2.4）：摆法在 guest 看来不存在 —— 参考与镜像都要同答。
+        for sh in (1, 7):
+            buf = io.BytesIO()
+            ref_rc = lvm.run_ir(ir, buf, shuffle=sh)
+            rc, out, err = _run_mirror_args(mir, ll, [f"shuffle={sh}"])
+            assert ref_rc == 10, (ref_rc, sh)
+            assert (rc, out) == (ref_rc, buf.getvalue()), (
+                sh, rc, ref_rc, out[:80], buf.getvalue()[:80], err[-300:])
+        body = _DIS_FAULTS["oob"]
+        p = td / "oob_sh.ll"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        for sh in (1, 7):
+            e = io.StringIO()
+            with contextlib.redirect_stderr(e):
+                ref_rc = lvm.run_ir(body, io.BytesIO(), shuffle=sh)
+            rc, _out, err = _run_mirror_args(mir, p, [f"shuffle={sh}"])
+            merr = err.decode("utf-8", "replace")
+            assert rc == ref_rc, (sh, rc, ref_rc, merr[-200:])
+            assert _fault_line(e.getvalue()) == _fault_line(merr), (
+                sh, e.getvalue()[:200], merr[:200])
+    print("      dismemory：合法程序 K=0/1/7 同答；五条故障的码 + 站点两边同；"
+          "shuffle=1/7 也同答")
 
 
 #: 判 M 的夹具：合法程序 + 未复用悬垂 + 碰撞扫描（与 `lvm_cap_test` 判 H/I 同一形状，

@@ -224,13 +224,12 @@ def boundary_cases() -> dict[str, str]:
     # 抬到 8000，真撞上转成 E023），参考实现不再炸 `RecursionError`。账**只许变短**，所以
     # 修好的那一格必须在同一个 PR 里删掉 —— 否则这条判据会点名"这一格已经绿了"。
 #: 已知成员（棘轮：只许变短）。`(用例, 实现)`。
-KNOWN_GAPS: set[tuple[str, str]] = {
-    # `#719`（2026-10-18）：自举侧**接受**了 `std` 门面（符号表 5200 条够用），但编不动 ——
-    # 127 个模块的单元按模块数超线性涨，实测远过 `PER_RUN_TIMEOUT`。参考实现编同一份是
-    # 秒级。这条**不是"无声失败"**（超时桶单独记），是那道容量缺口换成了一道时间缺口；
-    # 门面自己的头注（`lompi/store/std/0.1.0/std.lomt`）从 0.1.4.5 起就量着这件事。
-    ("use-std", "stage1"),
-}
+KNOWN_GAPS: set[tuple[str, str]] = set()
+# `("use-std", "stage1")` **已划掉**（2026-11-21）：`#719` 那道时间墙是检查器的 O(n²)
+# 撑出来的（`docs/350` §12.7 拆掉之后，127 个模块的单元跑得完）。自举侧现在**立刻**
+# 出声，报的是合并流上的 E0208（依赖的 `alloc` 撞 `no_runtime`）—— 与参考实现的
+# "依赖要求 runtime"（`docs/227` §5 记的已知不对称）不是同一句话，但**不再无声、
+# 不再超时**，所以这一格按不变量算合格。
 
 
 @test
@@ -304,9 +303,11 @@ def test_each_member_names_the_construct_and_stays_inside_the_file():
        文件的行数之内 —— `use std` 那 130 条曾经把**依赖**的行号挂在**入口**文件上
        （7 行文件里报第 14..97 行，`#31` 那个形状）。
 
-    `use std` 在自举驱动上仍撞 `#719` 的容量/时间墙（`KNOWN_GAPS` 里那格，会超时）——
-    那一半在超时时**跳过**，参考侧照判。这不是放宽：超时本身已经由上面那条判据记成
-    一个数，`#702` 管的是"说得出来"。
+    `use std` 的自举那一半（2026-11-21 起）：`#719` 的时间墙随检查器 O(n²) 一起拆掉后，
+    它**跑得完**并报合并流上的 E0208（依赖里的 `alloc` 撞 `no_runtime`）—— 这是
+    `docs/227` §5 记的已知不对称（自举侧不判"依赖要求 X、根必须 X"），所以这一格要求的是
+    "点名**一个**构造"，不要求点名 `std`；若在慢机器上仍撞超时（rc=124），照旧跳过。
+    `#702` 管的是"说得出来"，而不再是"一个字也不说"。
     """
     import json
 
@@ -355,9 +356,12 @@ def test_each_member_names_the_construct_and_stays_inside_the_file():
             f"{name}: 自举侧正文没点名 {needle!r} —— 还是只有那一格 token: {err[:200]!r}")
     rc, _out, err = _run_stage1(CORPUS / "use-std.lomt")
     if rc != 124:
-        assert "`std`" in err or "std" in err, f"use-std 没点名 std: {err[:200]!r}"
+        # 参考侧点名 `std`；自举侧点名的是合并流里真正撞上的那个构造（`alloc`）。
+        # 两边话不同，但都必须**说得出来** —— 见 docstring 与 `docs/227` §5。
+        assert ("`std`" in err or "std" in err or "alloc" in err
+                or "运行期" in err), f"use-std 没点名构造: {err[:200]!r}"
     print(f"      三份语料都点名构造、没有越过 EOF 的位置；自举侧两快一慢"
-          f"（use-std rc={rc}，超时即 #719 账上那格）")
+          f"（use-std rc={rc}，124 即仍撞 #719 的墙）")
 
 
 def main() -> int:

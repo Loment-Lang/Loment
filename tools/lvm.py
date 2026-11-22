@@ -944,11 +944,12 @@ class Vm:
     def __init__(self, globals_: list, funcs: list, externs: list, out,
                  profile: Profile | None = None, argv: list[str] | None = None,
                  counters: "Counters | None" = None, sub: "SwCap | None" = None,
-                 dismemory: bool = False, relocate_every: int = 0) -> None:
+                 dismemory: bool = False, relocate_every: int = 0,
+                 shuffle: int = 0) -> None:
         #: `docs/368`：没有地址的那一档。关着时 `mem` 仍是 `Mem`，一个字节都不多走。
         self.dismemory = dismemory
         self.relocate_every = relocate_every
-        self.mem = Dismem() if dismemory else Mem()
+        self.mem = Dismem(shuffle) if dismemory else Mem()
         if dismemory:
             self.mem.site = ("?", "?", 0)
         #: 基质（`docs/362`）。`None` = 今天的 LVM，**一个字节都不写**。
@@ -1089,9 +1090,9 @@ class _DismBody:
     """运行期内部的**体**。编号与坐标**不进 guest 值** —— 只活在令牌表后面。"""
 
     __slots__ = ("id", "kind", "size", "dx", "dy", "dz", "x", "y", "z",
-                 "data", "alive", "tokens")
+                 "cells", "shift", "alive", "tokens")
 
-    def __init__(self, bid: int, kind: str, n: int) -> None:
+    def __init__(self, bid: int, kind: str, n: int, shift: int = 0) -> None:
         self.id, self.kind = bid, kind
         self.size = max(0, int(n))
         d = 1
@@ -1101,7 +1102,11 @@ class _DismBody:
         self.dy = d
         self.dz = max(1, (self.size + d * d - 1) // (d * d))
         self.x = self.y = self.z = 0
-        self.data = bytearray(self.size)
+        #: `docs/375` §2：体**没有连续字节数组** —— 内容是一张稀疏映射（逻辑下标 -> 字节）。
+        #: `shift` 只改物理键的写法（同一个逻辑下标在不同摆法下落到不同的桶），访问路径
+        #: 从不出现"基址 + 字节数"。`--dismemory-shuffle N` 只动它。
+        self.cells: dict[int, int] = {}
+        self.shift = (shift % self.size) if self.size else 0
         self.alive = True
         self.tokens: set[int] = set()
 
@@ -1113,7 +1118,9 @@ class Dismem:
 
     HEAP_VOLUME = STACK_LIMIT - GLOBAL_BASE
 
-    def __init__(self) -> None:
+    def __init__(self, shuffle: int = 0) -> None:
+        #: 表示层摆法（`docs/375` §2.3）：0 = 规范；非 0 给每颗体一个确定性的移位。
+        self.shuffle = int(shuffle)
         self.bodies: dict[int, _DismBody] = {}
         self.next_bid = 1
         #: 令牌 -> (体编号, 体内偏移)。**永不外露**。
@@ -1238,7 +1245,10 @@ class Dismem:
                         {"dismem": True, "reason": "size", "width": 0})
         bid = self.next_bid
         self.next_bid += 1
-        b = _DismBody(bid, kind, size)
+        # 摆法（`docs/375` §2.3）：只改物理键的写法，逻辑格号与令牌不动。
+        shift = 0 if self.shuffle == 0 else (
+            (self.shuffle * 2654435761 + bid * 40503) & 0x7FFFFFFF)
+        b = _DismBody(bid, kind, size, shift)
         self.bodies[bid] = b
         self._place(b)
         return self._new_token(b, 0)
@@ -1262,22 +1272,30 @@ class Dismem:
                 self.tomb.pop(t, None)
         b.tokens.clear()
         b.alive = False
-        b.data = bytearray()
+        b.cells.clear()
 
     def put(self, h, data) -> None:
         b, off = self.decode(h, len(data))
-        b.data[off:off + len(data)] = data
+        for k, byte in enumerate(data):
+            key = (off + k + b.shift) % b.size
+            if byte:
+                b.cells[key] = byte
+            else:
+                b.cells.pop(key, None)
 
     def get(self, h, n: int) -> bytes:
         b, off = self.decode(h, n)
-        return bytes(b.data[off:off + n])
+        return bytes(b.cells.get((off + k + b.shift) % b.size, 0) for k in range(n))
 
     def cstr(self, h, limit: int = 4096) -> bytes:
         b, off = self.decode(h, 1)
         out = bytearray()
         i = off
-        while i < b.size and len(out) < limit and b.data[i] != 0:
-            out.append(b.data[i])
+        while i < b.size and len(out) < limit:
+            c = b.cells.get((i + b.shift) % b.size, 0)
+            if c == 0:
+                break
+            out.append(c)
             i += 1
         return bytes(out)
 
@@ -2832,7 +2850,8 @@ def run_checkpointed(text: str, out, substrate: str = "none",
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
            values=None, deopts=None, counters: "Counters | None" = None,
-           substrate: str = "none", relocate_every: int = 0) -> int:
+           substrate: str = "none", relocate_every: int = 0,
+           shuffle: int = 0) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -2880,7 +2899,7 @@ def run_ir(text: str, out, profile: Profile | None = None,
            else SwCap("tag") if substrate == "sw_tag" else None)
     vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub,
                   dismemory=dismemory,
-                  relocate_every=relocate_every)
+                  relocate_every=relocate_every, shuffle=shuffle)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
         raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
@@ -2904,13 +2923,14 @@ def run_ir(text: str, out, profile: Profile | None = None,
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
                values=None, deopts=None, counters: "Counters | None" = None,
-               substrate: str = "none", relocate_every: int = 0) -> int:
+               substrate: str = "none", relocate_every: int = 0,
+               shuffle: int = 0) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts, counters, substrate, relocate_every)
+                  values, deopts, counters, substrate, relocate_every, shuffle)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -2958,6 +2978,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cache", nargs="?", const="", metavar="PATH", default=None,
                     help="编译产物缓存（docs/265，#646）：缺省放在入口旁边（<entry>.lvmc），"
                          "给 PATH 就放那儿。只在 --tier t2 下有效；过期会**点名拒绝**并重编")
+    ap.add_argument("--dismemory-shuffle", type=int, default=0, metavar="N",
+                    help="dismemory（docs/375 §2.3）：表示层摆法。0 = 规范；非 0 给每颗体"
+                         "一个确定性的移位，逻辑下标不变、物理桶不同 —— stdout/stderr 必须一样")
     ap.add_argument("--dismemory-relocate-every", type=int, default=0, metavar="K",
                     help="dismemory（docs/368）：每 K 条指令把全部活体重排一次（0 = 关；"
                          "句柄不变，所以两次的 stdout/rc 必须一样）")
@@ -3099,7 +3122,8 @@ def main(argv: list[str] | None = None) -> int:
                                       fusion, hot, counters=counters)
             else:
                 rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters,
-                            a.substrate, a.dismemory_relocate_every)
+                            a.substrate, a.dismemory_relocate_every,
+                            a.dismemory_shuffle)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
@@ -3110,7 +3134,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
                                 a.tier, values, deopts, counters, a.substrate,
-                                a.dismemory_relocate_every)
+                                a.dismemory_relocate_every, a.dismemory_shuffle)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())

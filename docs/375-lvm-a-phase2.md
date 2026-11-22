@@ -1,6 +1,6 @@
 # 375 · LVM-A 第二期：补全与“地址的最后一层”
 
-> 状态: **计划 + 分阶段实装中**（2026-11-22）
+> 状态: **计划 + 分阶段实装中**（2026-11-22） · S1 已落（PR #2140）· S2 参考侧已落
 > 上游: `docs/373`（dismemory）· `docs/372`（快照）· `docs/371`（P5/封印）· `docs/364`（sw_tag）·
 > `docs/311`（PE 的 Linux 仿真，另一条并行线）· `docs/367`（原生故障）· issue #2135
 > 判据: `lvm_dismemory_test`（I/O 与表示不变性）· `lvm_twin_test`（镜像同答）·
@@ -84,21 +84,26 @@ A 是“让这一档能写程序、能续跑”；B 是“把命题再推一层�
 
 ### 2.3 表示怎么落
 
-* **参考 T0**：`_DismBody.data: bytearray` → `cells: dict[int, int]`（格号 → 字节），
-  或按类型分槽（`u32` 一格存 4 字节）。`Dismem.put/get` 从 `data[off+k]` 改为
-  `cells[cell_id]`；`alloc` 只建空映射，不再预分配 3 MiB `heapspan`。
-* **镜像**：体表从“arena 里的平坦字节 + `data+off` 下标”改为**固定哈希表**
+* **参考 T0**（**S2 已落**）：`_DismBody.data: bytearray` → `cells: dict[int, int]`
+  （逻辑格号 → 字节）。`Dismem.put/get` 从 `data[off+k]` 改为 `cells[key]`；
+  `alloc` 只建空映射，**不再按 size 铺缓冲区** —— 分配 1 MiB 不会产生 1 MiB 的存储。
+  逻辑格号仍是整数（§2.2 那条诚实的边界），但它在代码里只作为**这一颗体的格号**
+  参与运算；解释器没有任何"体基址 + 字节数"的量。
+* **镜像**（S3）：体表从“arena 里的平坦字节 + `data+off` 下标”改为**固定哈希表**
   （开放寻址，键 = `(body<<32)|cell`，值 = 字节）；帧与聚合也改成体（各一映射），
   不再用 `MEM_SIZE-d*FRAME_SIZE`。`MAX_*` 满了 → F06（与参考对齐）。
-* **L3 摆法**：保留一个**不参与寻址**的 `arrangement`（体的顺序/编号），
-  `--dismemory-shuffle N`（镜像 `shuffle=N`）只改它，改不了任何格号或令牌。
+* **L3 摆法**（参考侧 S2 已落）：每颗体带一个**不参与寻址**的 `shift`
+  （`(shuffle·2654435761 + bid·40503) & 0x7FFFFFFF`，再对体尺寸取模），物理键是
+  `(逻辑格号 + shift) % size`。`--dismemory-shuffle N`（镜像 `shuffle=N`）只换 shift：
+  逻辑格号、令牌、可观察量都不动。
 
 ### 2.4 判据（B）
 
 * **M 表示不变性**：同一程序在 `shuffle=0/1/7` 下 stdout/stderr/退出码逐字节相同；
   随机 100 次摆法也同样（用固定种子，判据可复现）。
-* **N 没有字节位移**：源码里 `ptr + n` / `getelementptr` 的 IR 在 dismemory 下
-  不生成 `add` 到地址；反例（手写 IR 把格号当数做运算）→ F04。
+* **N 体内没有连续字节数组**（**S2 已落**）：分配 1 MiB 只写 2 字节时，体背后只有
+  2 个格，体对象上没有可按下标寻址的 `data`；换摆法只改物理键、不改逻辑内容。
+  至于"把格号当数做运算"，仍归 D 那一类（ptrtoint / inttoptr / 位运算 → F04）。
 * **O 镜像同答**：参考与镜像在 `shuffle` 下同答；快照带上体映射与令牌表。
 * **P 语义保留**：语料里所有合法程序（数组、结构体、alloc/free、字符串）在深度 3 下
   仍逐字节同答 —— 这是“换表示不是换语言”的证据。

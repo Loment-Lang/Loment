@@ -581,6 +581,190 @@ def cmd_lspe_verify(a) -> int:
     return 0
 
 
+def cmd_lnotary_verify(a) -> int:
+    """`loment lnotary verify <potato.json>` —— 独立公证（`docs/361`）。
+
+    与 `loment lspe verify` 的区别：这一条**不 import lspe**。它只读产物，
+    所以它可以核对 LSPE 自己写下的账而不共享那条代码路径。
+    """
+    import json
+    import lnotary.lawspace as _lawspace
+    import lnotary.sites as _sites
+    import lnotary.verify as _lnotary
+    try:
+        raw = Path(a.artifact).read_bytes()
+        doc = json.loads(raw.decode("utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了：{e}", file=sys.stderr)
+        return 2
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        print(f"[ERR] 不是 JSON：{e}", file=sys.stderr)
+        return 2
+    v = _lnotary.verify_potato(doc)
+    errs = list(v.errors)
+    side = None
+    side_table = None
+    if getattr(a, "sites", None):
+        try:
+            side_table = json.loads(Path(a.sites).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了站点表：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 站点表不是 JSON：{e}", file=sys.stderr)
+            return 2
+        errs += _sites.verify_sites(side_table)
+        if not getattr(a, "seal", None):
+            errs.append(_lawspace.Error("LNT-LS", "--sites 必须与 --seal 一起给"))
+    if getattr(a, "seal", None):
+        try:
+            side = json.loads(Path(a.seal).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了旁挂：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 旁挂不是 JSON：{e}", file=sys.stderr)
+            return 2
+        errs += _lawspace.verify_lawspace(doc, side, raw, side_table)
+    elif _lnotary.CLAIM_SWITCH in v.claimed_switches:
+        errs.append(_lawspace.Error(
+            "LNT-CLAIM", f"产物声明了 {_lnotary.CLAIM_SWITCH}，但没有给 --seal"))
+    if getattr(a, "universes", None):
+        import lnotary.derive as _derive
+        try:
+            ut = json.loads(Path(a.universes).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了派生树：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 派生树不是 JSON：{e}", file=sys.stderr)
+            return 2
+        if isinstance(ut, dict):
+            ut = ut.get("universes")
+        if side is None:
+            errs.append(_lawspace.Error("LNT-GEN", "--universes 必须与 --seal 一起给"))
+        elif not isinstance(ut, list):
+            errs.append(_lawspace.Error(
+                "LNT-GEN", "派生树必须是数组或 {universes: [...]}"))
+        else:
+            errs += _derive.verify_forest(side.get("seal"), side.get("genesis"), ut)
+    if getattr(a, "json", False):
+        print(json.dumps({
+            "ok": not errs,
+            "version": v.version,
+            "claimed_switches": sorted(v.claimed_switches),
+            "lawspace": bool(side),
+            "errors": [{"code": e.code, "message": e.message} for e in errs],
+        }, ensure_ascii=False))
+    elif not errs:
+        extra = " + lawspace" if side else ""
+        print(f"[LNOTARY] ok: {a.artifact} (potato v{v.version}{extra})")
+    else:
+        for e in errs:
+            print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
+    return 0 if not errs else 1
+
+
+def cmd_lnotary_derive(a) -> int:
+    """`loment lnotary derive <lawspace.json> [--parent U] --caps …`（`docs/361` V5）。
+
+    没有 `--parent` 就造根（根的和绑封印与初始授权）；有父就派生一个**收缩**的子。
+    """
+    import json
+    import lnotary.derive as _derive
+    try:
+        side = json.loads(Path(a.lawspace).read_text(encoding="utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了旁挂：{e}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as e:
+        print(f"[ERR] 旁挂不是 JSON：{e}", file=sys.stderr)
+        return 2
+    seal, genesis = side.get("seal"), side.get("genesis")
+    if not isinstance(seal, str) or not isinstance(genesis, dict):
+        print("[LNOTARY] LNT-GEN: 旁挂缺少 seal 或 genesis", file=sys.stderr)
+        return 1
+    caps = [c for c in (getattr(a, "caps", "") or "").split(",") if c]
+    budget = {}
+    if getattr(a, "heap", None) is not None:
+        budget["heap"] = a.heap
+    if getattr(a, "steps", None) is not None:
+        budget["steps"] = a.steps
+    if getattr(a, "parent", None):
+        try:
+            parent = json.loads(Path(a.parent).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了父宇宙：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 父宇宙不是 JSON：{e}", file=sys.stderr)
+            return 2
+        try:
+            u = _derive.derive_universe(parent, caps, budget, genesis,
+                                        uid=getattr(a, "uid", None))
+        except ValueError as e:
+            print(f"[LNOTARY] LNT-GEN: {e}", file=sys.stderr)
+            return 1
+    else:
+        u = _derive.root_universe(seal, caps, budget,
+                                  uid=getattr(a, "uid", None) or "root")
+    text = json.dumps(u, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if getattr(a, "out", None):
+        Path(a.out).write_text(text, encoding="utf-8")
+        print(f"[LNOTARY] universe -> {a.out} (sum {u['sum'][:16]}…)")
+    else:
+        print(text, end="")
+    return 0
+
+
+def cmd_lnotary_seal(a) -> int:
+    """`loment lnotary seal <potato.json> [--out PATH]` —— 派生法域旁挂（`docs/361` V1）。
+
+    先跑 V0；不通过就不出旁挂。`seal` 是内容寻址的，同一份产物派生两次逐字节相同。
+    """
+    import json
+    import lnotary.lawspace as _lawspace
+    import lnotary.sites as _sites
+    import lnotary.verify as _lnotary
+    try:
+        raw = Path(a.artifact).read_bytes()
+        doc = json.loads(raw.decode("utf-8"))
+    except OSError as e:
+        print(f"[ERR] 读不了：{e}", file=sys.stderr)
+        return 2
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        print(f"[ERR] 不是 JSON：{e}", file=sys.stderr)
+        return 2
+    v = _lnotary.verify_potato(doc)
+    if not v.ok:
+        for e in v.errors:
+            print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
+        return 1
+    side_table = None
+    if getattr(a, "sites", None):
+        try:
+            side_table = json.loads(Path(a.sites).read_text(encoding="utf-8"))
+        except OSError as e:
+            print(f"[ERR] 读不了站点表：{e}", file=sys.stderr)
+            return 2
+        except json.JSONDecodeError as e:
+            print(f"[ERR] 站点表不是 JSON：{e}", file=sys.stderr)
+            return 2
+        errs = _sites.verify_sites(side_table)
+        if errs:
+            for e in errs:
+                print(f"[LNOTARY] {e.code}: {e.message}", file=sys.stderr)
+            return 1
+    side = _lawspace.derive_lawspace(doc, raw, side_table)
+    text = json.dumps(side, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if getattr(a, "out", None):
+        Path(a.out).write_text(text, encoding="utf-8")
+        print(f"[LNOTARY] sealed -> {a.out} (seal {side['seal'][:16]}…)")
+    else:
+        print(text, end="")
+    return 0
+
+
 def _ai_ingest(path_or_obj, sites, unit):
     """把一份回答（路径或已解析的 dict）变成 Q014；出错返回 `None` 并打印原因。"""
     import json
@@ -923,6 +1107,33 @@ def main(argv: list[str] | None = None) -> int:
     lpe.add_argument("--strict", action="store_true",
                      help="有硬发现时退出码 1（报告面，不影响编译）")
     lpe.set_defaults(fn=cmd_lspe_effects)
+    ln = sub.add_parser("lnotary")
+    lnsub = ln.add_subparsers(dest="lnotary_cmd", required=True)
+    lnv = lnsub.add_parser("verify")
+    lnv.add_argument("artifact")
+    lnv.add_argument("--seal", default=None, metavar="PATH",
+                     help="法域旁挂（不给则只跑 V0；产物声明 lnotary_true 时必须给）")
+    lnv.add_argument("--sites", default=None, metavar="PATH",
+                     help="站点表（tools/lms_sites.py 的产物；与 --seal 一起给）")
+    lnv.add_argument("--universes", default=None, metavar="PATH",
+                     help="派生树（数组或 {universes: [...]}；与 --seal 一起给）")
+    lnv.add_argument("--json", action="store_true")
+    lnv.set_defaults(fn=cmd_lnotary_verify)
+    lns = lnsub.add_parser("seal")
+    lns.add_argument("artifact")
+    lns.add_argument("--out", default=None, metavar="PATH")
+    lns.add_argument("--sites", default=None, metavar="PATH",
+                     help="站点表（tools/lms_sites.py 的产物）")
+    lns.set_defaults(fn=cmd_lnotary_seal)
+    lnd = lnsub.add_parser("derive")
+    lnd.add_argument("lawspace")
+    lnd.add_argument("--parent", default=None, metavar="PATH")
+    lnd.add_argument("--caps", default="", metavar="A,B")
+    lnd.add_argument("--heap", type=int, default=None)
+    lnd.add_argument("--steps", type=int, default=None)
+    lnd.add_argument("--uid", default=None)
+    lnd.add_argument("--out", default=None, metavar="PATH")
+    lnd.set_defaults(fn=cmd_lnotary_derive)
     lc = sub.add_parser("lspc")
     lcsub = lc.add_subparsers(dest="lspc_cmd", required=True)
     lcc = lcsub.add_parser("check")

@@ -2401,7 +2401,7 @@ fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 ///
 /// 位序就是 `LMS_TOGGLES` 的次序：check / manage / guard / reject / crash /
 /// restart / seed。默认满档 = 127。
-fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32, bits: u32) -> u32 {
     let v: u32 = pt_lms_val(unit, t, lo, hi);
     // 满档 127；法医 1+2+3+4 = 15；日常 1+3+4 = 13；只要管理器 = 2。
     let m: u32 = 127;
@@ -2479,12 +2479,26 @@ fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
         }
         i = i + 1;
     }
+    // 显式开关由驱动器预扫后传进来（`sw_lms_bits`）：`apply_switches` 已经把
+    // `choose` 从 token 流里删掉，按 token 的那一趟看不见它们。与 `emit_module`
+    // 同一张位图（低 7 位开、7..13 关、128 盘古）。
+    let q: u32 = 0;
+    while q < 7 {
+        let b2: u32 = (1 as u32) << q;
+        if bits & b2 != 0 {
+            m = m | b2;
+        }
+        if bits & ((1 as u32) << (q + 7)) != 0 {
+            m = m & (127 - b2);
+        }
+        q = q + 1;
+    }
     return m;
 }
 
 /// 把 `lms_mask` 逐个印成**布尔**，键序 = 七级的次序（参考实现是同一张 `LMS_TOGGLES`）。
-fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
-    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, bits: u32) -> u32 {
+    let m: u32 = pt_lms_mask(unit, t, lo, hi, bits);
     o = pt_str(out, o, "{\n");
     let names: u32 = 0;
     while names < 7 {
@@ -3673,7 +3687,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
 /// `lspe` 是台账的 `sites`（`pt_lspe` 回填在 `PT_GLSCR`）。没有明细的那三个
 /// （`runtime` / `port` / `vm`）`detail` 与 `cost` 都写 `null`。
 fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
-              gl_tot: u32) -> u32 {
+              gl_tot: u32, lms_bits: u32) -> u32 {
     o = pt_str(out, o, "{\n");
     // ---- gc
     o = pt_key(out, o, 2, "gc");
@@ -3733,7 +3747,7 @@ fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_ind(out, o, 2);
     o = pt_str(out, o, "},\n");
     // ---- lms：cost 是**开着的级数**（`lms_levels` 里为真的那七格）
-    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+    let m: u32 = pt_lms_mask(unit, t, lo, hi, lms_bits);
     let cnt: u32 = 0;
     let b: u32 = 0;
     while b < 7 {
@@ -6884,7 +6898,7 @@ fn pt_layouts(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) ->
 /// 键的顺序与参考实现**逐字对齐**(`emit_potato` 那个字面量 dict 的顺序): 对象是拿
 /// 字节比的, 顺序也在比较面里。
 pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
-                   lvl: u32, prof: u32, effc: ptr) -> u32 {
+                   lvl: u32, prof: u32, effc: ptr, lms_bits: u32) -> u32 {
     let rr: u64 = pt_root_range(unit, t, nt);
     if rr == PT_NONE as u64 {
         return pt_wfail("--emit-potato: the unit declares no `module` at all (the reference implementation's front door has the same rule)");
@@ -6933,7 +6947,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // 不能在一半对象已经写出去之后再说。
     // `docs/361`：调度器是 SDK 的（`lspe_sched`），主检查器是唯一入口
     // （`lspe_main`）；编译器不再直接调子检查器。
-    let lmsk: u32 = pt_lms_mask(unit, t, lo, hi);
+    let lmsk: u32 = pt_lms_mask(unit, t, lo, hi, lms_bits);
     let lplan: u32 = lspe_sched(unit, t, lo, hi);
     let lrc: u32 = lspe_main(unit, t, lo, hi, lmsk,
                              ptr_add(sc, PT_GLSAFE),
@@ -7133,7 +7147,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // 覆盖它 —— 于是两者**可以不一致**，而这一格记的是**最后**的结果。
     // ⚠ **次序是判据**：参考实现那边 `"lms_levels"` 紧跟在 `"lms"` 之后。
     o = pt_key(out, o, 1, "lms_levels");
-    o = pt_lms_levels(out, o, unit, t, lo, hi);
+    o = pt_lms_levels(out, o, unit, t, lo, hi, lms_bits);
     o = pt_str(out, o, ",\n");
     // v18（`docs/253` §11.2.1，#1023）：七级的**运行期预算**。紧跟在 `lms_levels` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lms_budgets"` 紧跟在 `"lms_levels"` 之后。
@@ -7160,7 +7174,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // v20（`docs/147` §5 / `#1022`）：**系统索引**，紧跟在 `lspe` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"systems"` 紧跟在 `"lspe"` 之后。
     o = pt_key(out, o, 1, "systems");
-    o = pt_systems(out, o, sc, unit, t, lo, hi, ngl_tot);
+    o = pt_systems(out, o, sc, unit, t, lo, hi, ngl_tot, lms_bits);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "switches");
     o = pt_aopen(out, o, ndf);

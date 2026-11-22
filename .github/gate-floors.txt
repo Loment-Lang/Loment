@@ -54,11 +54,11 @@ loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 27
 loment_elf_test 93
-loment_pe_test 18
+loment_pe_test 21
 loment_genesis_test 9
 loment_trust_test 9
 loment_status_test 4
-lvm_test 10
+lvm_test 14
 lvm_twin_test 16
 lvm_mirror_t2_test 6
 loment_net_test 3

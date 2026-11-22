@@ -58,6 +58,131 @@ VFD_BASE = 1000
 #: `/proc/self/cmdline` 的字段分隔符（也是内核给的那个字节）。
 B_NUL = bytes([0])
 
+# ---------------------------------------------------------------- guest ABI（`docs/311`）
+#
+# **guest 看不到宿主。** 这张表说的是"guest 该看到什么"：固定是 Linux，与解释器自己
+# 编成什么、跑在哪台机器上无关。四类（`docs/311` §2）：
+#
+#   S 合成   —— 答案由 guest 的身份/目标平台决定（`uname` 永远是 `Linux`）
+#   E 模拟   —— 答案只由 guest 状态决定（`brk`、合成 fd 的 `read`/`close`）
+#   F 转发   —— 答案里有一部分是"这台机器"的事实（`getpid`/`time`/`clock_gettime`）
+#   R 拒绝   —— 这条 ABI 在 VM 里没有实现（网络族、`poll`/`select`、真实文件系统）
+#
+# 宿主能给什么**不在**这张表里 —— 那是 `HostProfile`（§3.1）。两张表分开，才有
+# "同一份 IR、宿主换一份、guest 的行为不变"这句话。
+GUEST_SYNTH, GUEST_EMULATE = "S", "E"
+GUEST_FORWARD, GUEST_REFUSE = "F", "R"
+
+#: 未知/未实现号的答案。Linux 对不认得的系统调用就是 `-ENOSYS`（`-38`）；guest 里
+#: `if syscall(...) == -38 { … }` 是合法程序，所以这里**不 die** —— `die` 留给
+#: "调用本身是坏的"（越界指针、非合成 fd），`-ENOSYS` 留给"这个号没有"（`docs/311` §4.2）。
+ENOSYS = -38
+
+GUEST_ABI = (
+    (0, "read", GUEST_EMULATE),
+    (1, "write", GUEST_EMULATE),
+    (3, "close", GUEST_EMULATE),
+    (12, "brk", GUEST_EMULATE),
+    (39, "getpid", GUEST_FORWARD),
+    (60, "exit", GUEST_EMULATE),
+    (63, "uname", GUEST_SYNTH),
+    (201, "time", GUEST_FORWARD),
+    (228, "clock_gettime", GUEST_FORWARD),
+    (257, "openat", GUEST_SYNTH),          # 只认 `/proc/self/cmdline`
+    (41, "socket", GUEST_REFUSE),          # 网络族：VM 不做
+    (7, "poll", GUEST_REFUSE),
+)
+GUEST_ABI_BY_NR = {nr: (name, kind) for nr, name, kind in GUEST_ABI}
+
+
+class HostProfile:
+    """宿主能给什么（`docs/311` §3.1）。**唯一允许随平台变的东西。**
+
+    `elf` 无限制（内核就是 Linux ABI 的实现）；`pe` 只放行 `lomelf.PE_DISPATCH`
+    里的号 —— 其余照 `__win_syscall` 的兜底回 `-ENOSYS`。于是"VM 转发了一个 PE
+    没有的号"这件事，在**不用 Windows** 的前提下也能跑出来（§5 L2）。
+    """
+
+    __slots__ = ("name", "allow")
+
+    def __init__(self, name: str, allow: frozenset | None = None) -> None:
+        self.name = name
+        self.allow = allow
+
+    def can(self, nr: int) -> bool:
+        return self.allow is None or nr in self.allow
+
+    def __repr__(self) -> str:
+        return f"HostProfile({self.name!r})"
+
+
+def host_profile(name: str) -> HostProfile:
+    if name == "elf":
+        return HostProfile("elf")
+    if name == "pe":
+        return HostProfile("pe", frozenset(lomelf.PE_DISPATCH))
+    raise LvmError(f"没有这一档宿主剖面: {name!r}（只有 elf / pe，`docs/311` §5 L2）")
+
+
+class SyscallReport:
+    """`--syscall-report`（`docs/311` §4.2）：把"这一条没实现"变成**可数的产物**。
+
+    每条第一次出现的 `(号, 程序, 站点)` 一行，制表符分隔：
+    `nr<TAB>类<TAB>program<TAB>fn/blk/idx`。同一站点重复命中只记一次 —— 循环里
+    探测一个号不该把报告撑成程序长度的函数。
+    """
+
+    __slots__ = ("hits", "_seen")
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[int, str, str, tuple[str, str, int]]] = []
+        self._seen: set = set()
+
+    def hit(self, nr: int, program: str, site, kind: str) -> None:
+        key = (nr, program, tuple(site))
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.hits.append((nr, kind, program, tuple(site)))
+
+    def text(self) -> str:
+        out = []
+        for nr, kind, program, (fn, blk, idx) in self.hits:
+            out.append(f"{nr}\t{kind}\t{program}\t{fn}/{blk}/{idx}\n")
+        return "".join(out)
+
+
+def forwarded_host_numbers(source: Path | None = None) -> frozenset[int]:
+    """`loment/tools/lvm.lomt` 的 `vm_syscall` 直接转给宿主的号（`docs/311` §4.3）。
+
+    这是**静态**判据：LVM 编成 PE 时，内层转发出去的每一个号都必须在外层的
+    `PE_DISPATCH` 里 —— 缺一个，guest 拿到的是 `-ENOSYS`，与"Linux 上本来就没有
+    这个号"**从 guest 侧分不出来**。等运行时才发现已经晚了，所以这里读源码。
+    """
+    path = source or (Path(__file__).resolve().parent.parent
+                      / "loment" / "tools" / "lvm.lomt")
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        # 去掉行注释：`//` 里的花括号与 `syscall4(` 不算数。
+        k = raw.find("//")
+        lines.append(raw if k < 0 else raw[:k])
+    text = "\n".join(lines)
+    start = text.find("fn vm_syscall(")
+    if start < 0:
+        raise LvmError(f"{path}: 找不到 `vm_syscall`")
+    brace = text.find("{", start)
+    depth, i = 0, brace
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = text[brace:i]
+    return frozenset(int(m) for m in re.findall(r"\bsyscall[467]\s*\(\s*(\d+)", body))
+
 
 class Counters:
     """一次跑的**确定性**工作量计数（issue #1028）。
@@ -945,7 +1070,14 @@ class Vm:
                  profile: Profile | None = None, argv: list[str] | None = None,
                  counters: "Counters | None" = None, sub: "SwCap | None" = None,
                  dismemory: bool = False, relocate_every: int = 0,
-                 shuffle: int = 0) -> None:
+                 shuffle: int = 0,
+                 host: HostProfile | None = None,
+                 report: "SyscallReport | None" = None) -> None:
+        #: 宿主剖面（`docs/311` §3.1）：`elf` 什么都给，`pe` 只给 `PE_DISPATCH` 里的号。
+        #: 只影响 F 类（转发）—— S/E 类按定义不碰宿主，R 类永远是同一个答案。
+        self.host = host if host is not None else host_profile("elf")
+        #: `--syscall-report`：`None` = 不记（关掉时一个字节都不写，与剖面同一条纪律）。
+        self.syscall_report = report
         #: `docs/368`：没有地址的那一档。关着时 `mem` 仍是 `Mem`，一个字节都不多走。
         self.dismemory = dismemory
         self.relocate_every = relocate_every
@@ -1371,8 +1503,25 @@ def trap_exit(site, detail: dict | None = None) -> int:
 
 class Executor(Vm):
     # ------------------------------------------------------------ 系统调用
+    def refuse(self, nr: int, kind: str = "") -> int:
+        """guest 拿到 `-ENOSYS`；"这一条没实现"记进覆盖报告（`docs/311` §4.2）。
+
+        `die` 留给"调用本身是坏的"（越界指针、非合成 fd）；"这个号没有"是 Linux
+        也会给的答案，不是一次崩溃 —— 两者要分开。
+        """
+        if self.syscall_report is not None:
+            name = GUEST_ABI_BY_NR.get(nr, ("", ""))[1]
+            self.syscall_report.hit(nr, self.argv[0] if self.argv else "?",
+                                    self.site or ("?", "?", 0), kind or name or "?")
+        return ENOSYS
+
     def syscall(self, nr: int, a: list[int]) -> int:
-        """**唯一**的对外通道（`docs/243` §3.4）。表里没有的就点名拒。"""
+        """**唯一**的对外通道（`docs/243` §3.4）。表里没有的回 `-ENOSYS`。
+
+        `docs/311` §4.2 之前这里是 `raise LvmError`（= 工具的响亮）。那是把
+        "工具该说话"与"guest 该像 Linux"写成了同一件事。现在分开：**guest 拿到
+        `-ENOSYS`**，响亮度挪到 `--syscall-report` 那份可数的产物上。
+        """
         if nr == 0:                                    # read(fd, buf, count)
             # 解释器没有真的文件描述符 —— 只认识 257 开的那个合成文件。
             v = self.vfds.get(a[0])
@@ -1426,6 +1575,9 @@ class Executor(Vm):
             return self.mem.heap
         if nr == 39:                                   # getpid
             # 如实转出去：这是**这台机器的事实**，被解释程序问的就是"我"是谁。
+            # F 类：宿主给不了（例如 PE 上那条 shim 没有这个号）⇒ guest 仍然拿 -ENOSYS。
+            if not self.host.can(nr):
+                return self.refuse(nr, GUEST_FORWARD)
             return os.getpid()
         if nr == 63:                                   # uname(struct utsname *p)
             # ⚠ **合成，不转宿主** —— 它描述的是**目标平台**，不是解释器跑在哪台机器上。
@@ -1435,6 +1587,8 @@ class Executor(Vm):
             self.mem.put(a[0], b"".join(f[:64].ljust(65, b"\0") for f in fields))
             return 0
         if nr == 201:                                  # time(NULL)
+            if not self.dismemory and not self.host.can(nr):
+                return self.refuse(nr, GUEST_FORWARD)
             if self.dismemory:
                 # 时间也在观察代数里（`docs/371`）：dismemory 下宿主墙钟会被 guest 用来
                 # 量重排效应，所以按**已执行指令数**给一台确定性虚拟钟（1 条 = 1 ms）。
@@ -1445,6 +1599,8 @@ class Executor(Vm):
             # 其余是单调钟 —— 实测 ELF 侧两者差一个数量级，拿单调钟回答 realtime 会让
             # "同一份源在 PE 与 ELF 上"的形状不同（`docs/311` §2 的 F 类）。
             # 按 Linux x86-64 的 `timespec`（两个 i64：秒、纳秒）写进 guest 内存。
+            if not self.dismemory and not self.host.can(nr):
+                return self.refuse(nr, GUEST_FORWARD)
             if self.dismemory:
                 ns = self.executed * 1_000_000
             else:
@@ -1471,7 +1627,8 @@ class Executor(Vm):
             return fd
         if nr == 60:                                   # exit(code)
             raise _Exit(a[0] & 0xFF)
-        raise LvmError(f"系统调用表里没有 {nr}（`docs/243` §3.4）")
+        # 表外的号：Linux 给 `-ENOSYS`，不是"进程死掉"。`docs/311` §4.2。
+        return self.refuse(nr)
 
     # ------------------------------------------------------------ 调用
     def call(self, fr: Frame, text: str):
@@ -3055,8 +3212,9 @@ def run_checkpointed(text: str, out, substrate: str = "none",
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
            values=None, deopts=None, counters: "Counters | None" = None,
-           substrate: str = "none", relocate_every: int = 0,
-           shuffle: int = 0) -> int:
+           substrate: str = "none", relocate_every: int = 0, shuffle: int = 0,
+           host: HostProfile | None = None,
+           report: "SyscallReport | None" = None) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -3071,6 +3229,10 @@ def run_ir(text: str, out, profile: Profile | None = None,
     就不编一个像路径的东西出来；要真名字的调用方自己传（`lvm_test` 传的就是它
     喂给原生产物的同一个名字，好让两边逐字节可比）。
     """
+    if host is not None or report is not None:
+        if tier != "t0":
+            raise LvmError("宿主剖面与覆盖报告只在 t0 落地（`docs/311` §5）")
+        host = host or host_profile("elf")
     if tier == "t2":
         if substrate != "none":
             raise LvmError("基质（sw_cap / sw_tag）只在 t0 落地（`docs/362`/`docs/364`）；t2/t3 还没有它")
@@ -3104,7 +3266,8 @@ def run_ir(text: str, out, profile: Profile | None = None,
            else SwCap("tag") if substrate == "sw_tag" else None)
     vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub,
                   dismemory=dismemory,
-                  relocate_every=relocate_every, shuffle=shuffle)
+                  relocate_every=relocate_every, shuffle=shuffle,
+                  host=host, report=report)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
         raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
@@ -3128,14 +3291,16 @@ def run_ir(text: str, out, profile: Profile | None = None,
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
                values=None, deopts=None, counters: "Counters | None" = None,
-               substrate: str = "none", relocate_every: int = 0,
-               shuffle: int = 0) -> int:
+               substrate: str = "none", relocate_every: int = 0, shuffle: int = 0,
+               host: HostProfile | None = None,
+               report: "SyscallReport | None" = None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts, counters, substrate, relocate_every, shuffle)
+                  values, deopts, counters, substrate, relocate_every, shuffle,
+                  host=host, report=report)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -3193,6 +3358,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="LVM-A 的执行基质（docs/362/364）：none（默认，今天的行为）、"
                          "sw_cap（对象表 + 边界 + 对象代）、sw_tag（4 位标签，概率检测）；"
                          "只在 --tier t0")
+    ap.add_argument("--host-profile", choices=("elf", "pe"), default="elf",
+                    help="宿主能给什么（docs/311 §5 L2）：elf（默认，内核全给）、"
+                         "pe（只放行 PE_DISPATCH 里的号，其余回 -ENOSYS）；只在 --tier t0")
+    ap.add_argument("--syscall-report", metavar="PATH", default=None,
+                    help="把表外的号写成一份可数的报告（docs/311 §4.2）："
+                         "每行 `nr<TAB>类<TAB>程序<TAB>fn/blk/idx`；只在 --tier t0")
     ap.add_argument("--checkpoint-at", type=int, default=None, metavar="N",
                     help="P5（docs/363）：在第 N 条指令之前停住，把 guest 状态写进 "
                          "--checkpoint-out（只走显式栈引擎）")
@@ -3221,6 +3392,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if a.compact_out is not None or a.compact is not None:
             print("lvm: --cache 与 --compact/--compact-out 不能同时给", file=sys.stderr)
+            return 2
+    if (a.host_profile != "elf" or a.syscall_report is not None):
+        if a.tier != "t0":
+            print("lvm: --host-profile / --syscall-report 只在 --tier t0 下有效"
+                  "（docs/311 §5）", file=sys.stderr)
+            return 2
+        if a.compact is not None or a.compact_out is not None or a.cache is not None:
+            print("lvm: --host-profile / --syscall-report 与紧凑形/缓存不能同时给"
+                  "（它们是另一个引擎）", file=sys.stderr)
+            return 2
+        if a.checkpoint_at is not None or a.resume is not None:
+            print("lvm: --host-profile / --syscall-report 不进快照（它们是解释器的账，"
+                  "不是 guest 状态）", file=sys.stderr)
             return 2
     if a.substrate != "none":
         if a.tier != "t0":
@@ -3259,6 +3443,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     root = Path(a.root).resolve()
     buf = io.BytesIO()
+    host = host_profile(a.host_profile)
+    sreport = SyscallReport() if a.syscall_report is not None else None
+
+    def _write_syscall_report() -> None:
+        if sreport is not None:
+            with Path(a.syscall_report).open("w", encoding="utf-8", newline="\n") as f:
+                f.write(sreport.text())
     prof = Profile() if a.profile_out else None
     counters = Counters() if a.counters_out else None
     fusion = None
@@ -3328,7 +3519,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters,
                             a.substrate, a.dismemory_relocate_every,
-                            a.dismemory_shuffle)
+                            a.dismemory_shuffle, host=host, report=sreport)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
@@ -3339,13 +3530,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
                                 a.tier, values, deopts, counters, a.substrate,
-                                a.dismemory_relocate_every, a.dismemory_shuffle)
+                                a.dismemory_relocate_every, a.dismemory_shuffle,
+                                host=host, report=sreport)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())
+        _write_syscall_report()
         print(f"lvm: {e}", file=sys.stderr)
         return 2
     sys.stdout.buffer.write(buf.getvalue())
+    _write_syscall_report()
     if values is not None and a.values_out is not None:
         with Path(a.values_out).open("w", encoding="utf-8", newline="\n") as f:
             f.write(values.text())

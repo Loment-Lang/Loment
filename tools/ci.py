@@ -156,7 +156,8 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "lspe_test", "potato_
                  # 发行版驱动器与 dev 都收 `choose lvm`（判据留着、期望在 2026-10-17 反转）；要 clang + WSL，没有就 SKIP。
                  "loment_channel_test",
                  "loment_json_test", "loment_pkg_test", "loment_lomc_test", "loment_lsp_test",
-                 "loment_elf_test", "loment_pe_test", "loment_genesis_test", "loment_status_test",
+                 "loment_elf_test", "loment_pe_test", "loment_genesis_test",
+                 "loment_trust_test", "loment_status_test",
                  # 热更新的准入判据（`#1147`）：五个等式 + 签名 + 单调 + 重放。
                  "loment_update_test",
                  # 发布侧的热更新清单（`#1153`）：字段全部由树算出来，稳定版也带、准入拒绝。
@@ -432,6 +433,9 @@ SHARD_COST = {
     "loment_gc_surface_test": 90.9,
     "loment_gc_why_test": 0.8,
     "loment_genesis_test": 0.4,
+    # 9 条判据: 闭包解析 + provenance 核对 + 一次 WSL bootstrap 漂移检查。
+    # 2026-11-22 本机实测 40.9s（与 genesis 自举并发时量的）。
+    "loment_trust_test": 41.0,
     "loment_gotrans_test": 5.8,
     "loment_grammar_test": 2.1,
     "loment_hosted_test": 3.6,

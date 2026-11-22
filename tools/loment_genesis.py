@@ -49,6 +49,7 @@ import argparse
 import hashlib
 import itertools
 import json
+import platform
 import shlex
 import shutil
 import subprocess
@@ -56,6 +57,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 #: WSL 侧临时路径前缀 —— **每个进程一份**。WSL 的 `/tmp` 是所有 `wsl -e` 调用
@@ -73,16 +75,19 @@ _WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
 
 
 SEED = ROOT / "loment" / "build" / "selfhost_driver.ll"
+ENTRY = ROOT / "loment" / "selfhost" / "driver.lomt"
 MIRROR = ROOT / "loment" / "tools" / "lomelf.lomt"
 GEN_DIR = ROOT / "loment" / "build" / "genesis"
 GEN_NAME = "lomelf-linux-x64.elf"
 GEN = GEN_DIR / GEN_NAME
 SUMS = GEN_DIR / "SHA256SUMS"
+SEED_SUMS = GEN_DIR / "seed.sha256"
 PROV = GEN_DIR / "provenance.json"
 TARGET = "x86_64-unknown-linux-gnu"
 
 #: 记录格式版本。改记录结构就加一 —— 旧记录会被点名拒，而不是静默按新结构读。
-PROV_FORMAT = 1
+#: 2 = 加 `source_closure` / `genesis_source_closure` / `seed_env`（docs/376）。
+PROV_FORMAT = 2
 
 
 def _clang() -> str | None:
@@ -125,6 +130,62 @@ def _sha256(p: Path) -> str:
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def _rel(p: Path) -> str:
+    try:
+        return p.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return p.as_posix()
+
+
+def _text_bytes(p: Path) -> bytes:
+    """文本按通用换行归一后哈希 —— 与 `loment_release.sha` 同一条口径。"""
+    return p.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _sha256_text(p: Path) -> str:
+    return _sha256_bytes(_text_bytes(p))
+
+
+def _text_size(p: Path) -> int:
+    return len(_text_bytes(p))
+
+
+@lru_cache(maxsize=8)
+def _closure(entry: Path) -> tuple[dict, ...]:
+    """入口源 + 它的 `use` 闭包，按 posix 路径排序。
+
+    用参考实现的 `load_unit` 解析，不复制模块搜索规则。闭包里的每个文件都按
+    通用换行哈希；`seed_env` 记录发射种子时的宿主与 Python。解析一次很贵
+    （7.4 MB 种子的驱动闭包），进程内按入口缓存。
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import lomentc  # noqa: E402
+
+    _mod, deps = lomentc.load_unit(entry, ROOT)
+    files = [entry] + [Path(d.src) for d in deps]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for p in files:
+        key = _rel(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        b = _text_bytes(p)
+        out.append({"path": key, "sha256": _sha256_bytes(b), "size": len(b)})
+    out.sort(key=lambda e: e["path"])
+    return tuple(out)
+
+
+def _closure_sha(entries: list[dict]) -> str:
+    h = hashlib.sha256()
+    for e in entries:
+        h.update(e["path"].encode("utf-8"))
+        h.update(b"\0")
+        h.update(bytes.fromhex(e["sha256"]))
+        h.update(b"\0")
+    return h.hexdigest()
 
 
 def _clang_version() -> str:
@@ -231,6 +292,8 @@ def rebuild(work: Path) -> Rebuild:
 
 
 def _provenance(rb: Rebuild) -> dict:
+    src = _closure(ENTRY)
+    mirror = _closure(MIRROR)
     return {
         "format": PROV_FORMAT,
         "genesis": {"name": GEN_NAME, "sha256": _sha256_bytes(rb.genesis),
@@ -242,6 +305,13 @@ def _provenance(rb: Rebuild) -> dict:
                        "sha256": _sha256(MIRROR), "size": MIRROR.stat().st_size},
         },
         "mirror_ir": {"sha256": _sha256_bytes(rb.mirror_ir), "size": len(rb.mirror_ir)},
+        "source_closure": {"sha256": _closure_sha(src), "files": src},
+        "genesis_source_closure": {"sha256": _closure_sha(mirror), "files": mirror},
+        "seed_env": {
+            "host": platform.system().lower(),
+            "python": sys.version.split()[0],
+            "implementation": platform.python_implementation(),
+        },
         "toolchain": {"clang": rb.clang_version, "target": TARGET},
         "chain": ["clang(seed) -> stage1",
                   "stage1(mirror) -> mirror.ll",
@@ -273,12 +343,15 @@ def emit() -> int:
     if not sys.platform.startswith("win"):
         GEN.chmod(0o755)
     SUMS.write_text(f"{_sha256_bytes(rb.genesis)}  {GEN_NAME}\n", encoding="utf-8", newline="\n")
+    SEED_SUMS.write_text(f"{_sha256_text(SEED)}  {SEED.relative_to(ROOT).as_posix()}\n",
+                         encoding="utf-8", newline="\n")
     prov = _provenance(rb)
     PROV.write_text(json.dumps(prov, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8", newline="\n")
     print(f"[OK] {GEN.relative_to(ROOT)} ({GEN.stat().st_size} B)  "
           f"sha256 {_sha256_bytes(rb.genesis)[:16]}…")
     print(f"[OK] {SUMS.relative_to(ROOT)}")
+    print(f"[OK] {SEED_SUMS.relative_to(ROOT)} (种子 {_sha256_text(SEED)[:16]}…)")
     print(f"[OK] {PROV.relative_to(ROOT)}  (种子 {prov['inputs']['seed']['sha256'][:16]}…, "
           f"镜像 {prov['inputs']['mirror']['sha256'][:16]}…, "
           f"镜像 IR {prov['mirror_ir']['sha256'][:16]}…)")
@@ -341,6 +414,21 @@ def check() -> int:
         tc = prov.get("toolchain") or {}
         note(bool(tc.get("clang")), "工具链版本已记录" if tc.get("clang") else
              "[ERR] 记录里没有 clang 版本")
+        for key, entry in (("source_closure", ENTRY),
+                           ("genesis_source_closure", MIRROR)):
+            rec = prov.get(key) or {}
+            files = _closure(entry)
+            got_closure = _closure_sha(files)
+            note(rec.get("sha256") == got_closure,
+                 f"{key} 与盘上一致 ({len(files)} 文件)" if rec.get("sha256") == got_closure
+                 else f"[ERR] {key} 漂移 —— 改了源就重跑 --emit")
+        if SEED_SUMS.exists():
+            first = SEED_SUMS.read_text(encoding="utf-8").split()
+            ok_seed = bool(first) and first[0] == _sha256_text(SEED)
+            note(ok_seed, "seed.sha256 与当前种子一致" if ok_seed else
+                 "[ERR] seed.sha256 与当前种子不符 —— 重跑 --emit")
+        else:
+            note(False, f"[ERR] 缺 {SEED_SUMS.relative_to(ROOT)} (用 --emit 生成)")
 
     for good, text in notes:
         print(f"  {'[OK]' if good else ''} {text}".rstrip())

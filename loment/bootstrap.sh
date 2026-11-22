@@ -27,7 +27,7 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
-seed=loment/build/selfhost_driver.ll
+seed=${LOMENT_SEED:-loment/build/selfhost_driver.ll}
 genesis=loment/build/genesis/lomelf-linux-x64.elf
 entry=loment/selfhost/driver.lomt
 target=x86_64-unknown-linux-gnu
@@ -36,6 +36,27 @@ cross=0
 if [ ! -f "$seed" ]; then
     echo "FAIL: 缺种子 $seed (用 python tools/loment_seed.py --emit 固化)" >&2
     exit 1
+fi
+
+# ---- 可重演链 (docs/376): 种子与 genesis 记录不符时拒绝启动。
+# `seed.sha256` 由 `tools/loment_genesis.py --emit` 写；旧树没有它时只告警，
+# 权威判据是 `loment_genesis --check` 的 provenance/闭包核对。
+seed_sums=loment/build/genesis/seed.sha256
+if [ -f "$seed_sums" ]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        if [ "${LOMENT_ALLOW_DRIFT:-0}" != 1 ]; then
+            echo "FAIL: 需要 sha256sum 来核种子 (docs/376)" >&2
+            exit 1
+        fi
+    else
+        want_seed=$(cut -d' ' -f1 "$seed_sums")
+        got_seed=$(tr -d '\r' < "$seed" | sha256sum | cut -d' ' -f1)
+        if [ "$want_seed" != "$got_seed" ] && [ "${LOMENT_ALLOW_DRIFT:-0}" != 1 ]; then
+            echo "FAIL: 种子漂移 (record $want_seed, actual $got_seed)" >&2
+            echo "      运行 python tools/loment_genesis.py --emit (docs/376)" >&2
+            exit 1
+        fi
+    fi
 fi
 
 # ---- 起点: genesis (无 clang) 优先

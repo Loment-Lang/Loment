@@ -374,20 +374,19 @@ class LNotaryTest(unittest.TestCase):
     # ---- AK · 原生验证器（`loment/tools/lomlnotary.lomt`）------------------
     #
     # **这是 LNotary 的第二个实现**：同一批 JSON，Python 侧与 Loment 侧各自给判决。
-    # 它是"只信产物"的那一半 —— 公证人本身也是一件 Loment 产物（IR → ELF/PE，
-    # 不是 Python 包）。比的是**接受/拒绝逐条一致**；文案与错误条数留在 Python 侧
+    # 它是"只信产物"的那一半 —— 公证人本身也是一件 Loment 产物。
+    # **由种子构建**（seed → stage1 → IR → lomelf），不是由参考实现构建：
+    # 最初一版里 `fn` / `guard` 被当成变量名，自举侧拒收；改名后两边都过得去。
+    # 比的是**接受/拒绝逐条一致**；文案与错误条数留在 Python 侧
     # （与 `lompotato` 的孪生同一条纪律）。
 
     def _native_exe(self) -> Path:
-        import lomentc
+        import loment_dist
         import lomelf
 
         twin = ROOT / "loment" / "tools" / "lomlnotary.lomt"
-        mod = lomentc.load(twin)
-        deps = lomentc.resolve_deps(mod, ROOT, twin.parent, entry=twin)
-        errs = lomentc.check(mod, deps=deps)
-        self.assertFalse(errs, errs[:3])
-        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        stage1 = loment_dist.build_stage1()
+        ir = loment_dist.emit_ir(stage1, str(twin), ".").read_text(encoding="utf-8")
         exe = self.tmp / ("lomlnotary.exe" if sys.platform == "win32" else "lomlnotary")
         exe.write_bytes((lomelf.compile_pe(ir) if sys.platform == "win32"
                          else lomelf.compile_ll(ir))[0])

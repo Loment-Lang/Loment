@@ -264,8 +264,8 @@ const CAP_END: u32 = 15260676;       // CAP_OFF + CAP_SLOTS * 8
 const SH_OFF: u32 = 15260676;        // = CAP_END
 const SH_CAP: u32 = 4096;
 const SH_END: u32 = 15309828;        // SH_OFF + SH_CAP * 12
-const C_TAGSEQ: u32 = 288;           // 标签轮转序列（1 + seq % 15）
-const C_SHN: u32 = 292;              // 影子表写了几条（环形下标 = 它 % SH_CAP）
+const C_TAGSEQ: u32 = 64;           // 标签轮转序列（1 + seq % 15）
+const C_SHN: u32 = 68;              // 影子表写了几条（环形下标 = 它 % SH_CAP）
 
 const OBJ_GLOBAL: u32 = 1;
 const OBJ_BRK: u32 = 2;
@@ -1700,7 +1700,9 @@ fn vputc(a: ptr, m: ptr, fr: u32, no: u32, nl: u32, v: u64, cb: u32, ct: u32) {
     store32(m, fr + FR_VALS + n * VAL_REC + 4, nl);
     store32(m, fr + FR_VALS + n * VAL_REC + 8, lo32(v));
     store32(m, fr + FR_VALS + n * VAL_REC + 12, hi32(v));
-    cap_put(a, fr, n, cb, ct);
+    if ctx_get(a, C_SUB) == 2 {
+        cap_put(a, fr, n, cb, ct);   // 只有 sw_tag 才花这一笔；T2/普通档一个字节都不写
+    }
     wr(m, fr, 0, n + 1);
 }
 
@@ -1712,7 +1714,9 @@ fn vset(a: ptr, m: ptr, fr: u32, i: u32, v: u64) {
 fn vsetc(a: ptr, m: ptr, fr: u32, i: u32, v: u64, cb: u32, ct: u32) {
     store32(m, fr + FR_VALS + i * VAL_REC + 8, lo32(v));
     store32(m, fr + FR_VALS + i * VAL_REC + 12, hi32(v));
-    cap_put(a, fr, i, cb, ct);
+    if ctx_get(a, C_SUB) == 2 {
+        cap_put(a, fr, i, cb, ct);
+    }
 }
 
 /// 帧里第 i 条记录的**值**（低位在 +8，高位在 +12）。
@@ -3071,14 +3075,16 @@ fn do_asm(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
 //
 // 这一档与 sw_cap 互斥；只在 T0 落地（T2 的折叠表里没有令牌那一层）。
 
-const C_DIS: u32 = 256;              // 1 = dismemory 开着
-const C_DTSLO: u32 = 260;            // 下一个令牌序号（u64 拆两半）
-const C_DTSHI: u32 = 264;
-const C_DNB: u32 = 268;              // 体条数
-const C_DNT: u32 = 272;              // 令牌表条数（按令牌有序）
-const C_DNR: u32 = 276;              // 反向表条数（按 (体,偏移) 有序）
-const C_DROUND: u32 = 280;           // 重定位轮次（排版的起点偏移）
-const C_DREL: u32 = 284;             // 每 K 条指令重定位一次（0 = 关）
+//: ⚠ 这一族与 `sw_tag` 的格子都**必须 < 256**：T2 的编译表 `CC_OFF` 从
+//: `CTX_OFF + 256` 起，越过 255 就会被编译期写穿（2026-11-21 实测 T2 全线红）。
+const C_DIS: u32 = 32;              // 1 = dismemory 开着
+const C_DTSLO: u32 = 36;            // 下一个令牌序号（u64 拆两半）
+const C_DTSHI: u32 = 40;
+const C_DNB: u32 = 44;              // 体条数
+const C_DNT: u32 = 48;              // 令牌表条数（按令牌有序）
+const C_DNR: u32 = 52;              // 反向表条数（按 (体,偏移) 有序）
+const C_DROUND: u32 = 56;           // 重定位轮次（排版的起点偏移）
+const C_DREL: u32 = 60;             // 每 K 条指令重定位一次（0 = 关）
 
 const DB_OFF: u32 = 14258948;        // 体表 stride 12 u32
 const MAX_DB: u32 = 4096;

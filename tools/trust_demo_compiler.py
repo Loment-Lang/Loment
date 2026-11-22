@@ -64,7 +64,9 @@ def container(unit_bytes: list[bytes]) -> bytes:
 
 def build_program(sources: list[str], seed: str = "seed-0",
                   recipe: str = "toy-compiler/1",
-                  allowed: list[str] | None = None) -> tuple[bytes, dict, dict]:
+                  allowed: list[str] | None = None,
+                  l0_root: str | None = None,
+                  provenance: str = "loment/build/genesis/provenance.json") -> tuple[bytes, dict, dict]:
     if allowed is None:
         allowed = ["print"]
     nodes: list[dict] = []
@@ -133,6 +135,30 @@ def build_program(sources: list[str], seed: str = "seed-0",
         "recipe_sha256": K._sha(recipe.encode("utf-8")),
         "artifact_sha256": art_sha,
     }
+    if l0_root is not None:
+        try:
+            base = Path(l0_root).resolve()
+            raw = (base / provenance).read_bytes()
+            doc = json.loads(raw.decode("utf-8"))
+            g = doc["genesis"]
+            s = doc["inputs"]["seed"]
+            m = doc["inputs"]["mirror"]
+            ir = doc["mirror_ir"]
+            sc = doc["source_closure"]
+            gs = doc["genesis_source_closure"]
+            prov["l0"] = {
+                "root": str(base),
+                "provenance": provenance,
+                "provenance_sha256": K._sha(raw),
+                "genesis_sha256": g["sha256"], "genesis_size": g["size"],
+                "seed_sha256": s["sha256"], "seed_size": s["size"],
+                "mirror_sha256": m["sha256"], "mirror_size": m["size"],
+                "mirror_ir_sha256": ir["sha256"], "mirror_ir_size": ir["size"],
+                "source_closure_sha256": sc["sha256"],
+                "genesis_source_closure_sha256": gs["sha256"],
+            }
+        except (OSError, KeyError, TypeError, ValueError, UnicodeError) as e:
+            raise SystemExit(f"bad L0 provenance: {e}") from None
     add("prov", "PROV", ["compose"], prov)
     root = {"kind": "Repro", "artifact_sha256": art_sha, "twice": art_sha}
     add("repro", "REPRO", ["prov"], root)
@@ -151,8 +177,11 @@ def decode_unit(b: bytes) -> list[dict]:
 
 
 def write_program(out: Path, sources: list[str], seed: str = "seed-0",
-                  recipe: str = "toy-compiler/1", allowed: list[str] | None = None) -> dict:
-    art, deriv, conc = build_program(sources, seed=seed, recipe=recipe, allowed=allowed)
+                  recipe: str = "toy-compiler/1", allowed: list[str] | None = None,
+                  l0_root: str | None = None,
+                  provenance: str = "loment/build/genesis/provenance.json") -> dict:
+    art, deriv, conc = build_program(sources, seed=seed, recipe=recipe, allowed=allowed,
+                                     l0_root=l0_root, provenance=provenance)
     out.mkdir(parents=True, exist_ok=True)
     (out / "program.toy").write_bytes(art)
     (out / "program.deriv").write_text(
@@ -188,10 +217,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--seed", default="seed-0")
     b.add_argument("--recipe", default="toy-compiler/1")
     b.add_argument("--allow", action="append", default=None)
+    b.add_argument("--l0-root", default=None,
+                   help="把该根下的 loment/build/genesis/provenance.json 接成 PROV 前提")
+    b.add_argument("--provenance", default="loment/build/genesis/provenance.json")
     a = ap.parse_args(argv)
     sources = [Path(p).read_text(encoding="utf-8") for p in a.source]
     budget = write_program(Path(a.out), sources, seed=a.seed, recipe=a.recipe,
-                           allowed=a.allow)
+                           allowed=a.allow, l0_root=a.l0_root,
+                           provenance=a.provenance)
     print(f"[OK] {a.out}/program.toy  proof {budget['proof_bytes']} B  "
           f"rules {budget['rules']}")
     return 0

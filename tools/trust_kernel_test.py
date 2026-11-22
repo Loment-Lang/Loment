@@ -216,6 +216,91 @@ def test_budget_is_recorded():
               f"check {ms:.2f} ms (10 次平均), rule_lines {b['rule_lines']}")
 
 
+REPO = Path(__file__).resolve().parent.parent
+
+
+@test
+def test_tv_output_node_mutation_is_rejected():
+    """R1/C9: 逐节点翻译验证 —— 改一个输出节点或一条映射必须红。"""
+    art, d, c = _build()
+    bad = json.loads(json.dumps(d))
+    for n in bad["nodes"]:
+        if n["rule"] == "TV-L2":
+            n["judgment"]["bytes_hex"] = "01030103020004000500"
+    assert not K.verify(art, bad, c)[0], "改了输出字节仍然被接受"
+    bad2 = json.loads(json.dumps(d))
+    for n in bad2["nodes"]:
+        if n["rule"] == "TV-L1":
+            n["judgment"]["map"][0]["arg"] = 9
+    assert not K.verify(art, bad2, c)[0], "改了翻译映射仍然被接受"
+    print("      改 TV 输出字节 / 翻译映射 -> 拒绝")
+
+
+@test
+def test_real_l0_provenance_is_accepted():
+    """R2: 真实 docs/376 provenance 作为 PROV 的可选前提，零工具链 import 也能核。"""
+    art, d, c = _build(l0_root=str(REPO))
+    ok, why = K.verify(art, d, c)
+    assert ok, why
+    prov = [n["judgment"] for n in d["nodes"] if n["rule"] == "PROV"][0]
+    l0 = prov["l0"]
+    assert l0["genesis_sha256"] == json.loads(
+        (REPO / "loment/build/genesis/provenance.json").read_text(encoding="utf-8")
+    )["genesis"]["sha256"]
+    print(f"      L0 provenance 被接受 (genesis {l0['genesis_sha256'][:16]}…, "
+          f"seed {l0['seed_sha256'][:16]}…)")
+
+
+@test
+def test_tampered_l0_record_is_rejected():
+    art, d, c = _build(l0_root=str(REPO))
+    bad = json.loads(json.dumps(d))
+    for n in bad["nodes"]:
+        if n["rule"] == "PROV":
+            n["judgment"]["l0"]["seed_sha256"] = "0" * 64
+    assert not K.verify(art, bad, c)[0], "改 L0 记录的种子哈希仍然被接受"
+    print("      改 L0 记录 -> 拒绝")
+
+
+@test
+def test_l0_path_escape_is_rejected():
+    art, d, c = _build(l0_root=str(REPO))
+    bad = json.loads(json.dumps(d))
+    for n in bad["nodes"]:
+        if n["rule"] == "PROV":
+            n["judgment"]["l0"]["provenance"] = "../outside.json"
+    assert not K.verify(art, bad, c)[0], "路径逃逸仍然被接受"
+    print("      L0 路径逃逸 -> 拒绝")
+
+
+@test
+def test_l0_file_mismatch_is_rejected():
+    """把 provenance 与文件复制到临时根，改一个闭包文件；记录还在，文件对不上。"""
+    prov_path = REPO / "loment/build/genesis/provenance.json"
+    prov = json.loads(prov_path.read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory(prefix="trust-l0-") as td:
+        tr = Path(td)
+        rels = [prov["inputs"]["seed"]["path"], prov["inputs"]["mirror"]["path"],
+                f"loment/build/genesis/{prov['genesis']['name']}",
+                "loment/build/genesis/provenance.json"]
+        for key in ("source_closure", "genesis_source_closure"):
+            rels += [e["path"] for e in prov[key]["files"]]
+        for rel in rels:
+            src = REPO / rel
+            dst = tr / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+        victim = tr / prov["source_closure"]["files"][0]["path"]
+        victim.write_bytes(victim.read_bytes() + b"\n")
+        art, d, c = _build(l0_root=str(REPO))
+        bad = json.loads(json.dumps(d))
+        for n in bad["nodes"]:
+            if n["rule"] == "PROV":
+                n["judgment"]["l0"]["root"] = str(tr)
+        assert not K.verify(art, bad, c)[0], "闭包文件被改仍然被接受"
+    print("      L0 闭包文件对不上 -> 拒绝")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:

@@ -1,6 +1,6 @@
 # 377 · 信任商团：推导、独立内核与 K-of-N 根
 
-> 状态: **R0 已落地**（2026-11-22）；R1–R5 未实装。
+> 状态: **R0–R2 已落地**（2026-11-22）；R3–R5 未实装。
 > 上游: `docs/358`（只信产物）· `docs/370`（LNotary）· `docs/344`（LSPE）·
 > `docs/349`（语义 oracle）· `docs/356`（Dissigsegv）· `docs/368`/`docs/369`（工具链代际）·
 > `docs/373`（Dismemory）· `docs/376`（可重演链 V0）· `standard/LLS.md`
@@ -415,8 +415,8 @@ C5 与 C6 是「独立」的生死线；C12 是「可定价」的生死线；C14
 | 步 | 内容 | 出口判据 |
 |---|---|---|
 | **R0** | 12 条规则的判断语言 + 玩具内核；只验玩具推导 | **已落地**：C1 / C2 / C3 / C4 / C5（14 条判据） |
-| **R1** | 玩具编译器逐步骤发 TV 证书；删编译器仍可验 | C2 / C9 |
-| **R2** | 把 `docs/376` 的 provenance 接成 `PROV` 前提 | C3 / C10 |
+| **R1** | 玩具编译器逐步骤发 TV 证书；删编译器仍可验 | **已落地**：C2 / C9（TV 输出节点/映射变异被拒） |
+| **R2** | 把 `docs/376` 的 provenance 接成 `PROV` 前提 | **已落地**：C3 / C10（真实 L0 provenance 的文件核对） |
 | **R3** | 把 LNotary/LSPE/站点表接成 `SAFE` 前提 | C5 / C9 |
 | **R4** | 第二个独立内核 + 商团；一个坏内核不能放行 | C6 / C7 |
 | **R5** | 代际 refinement 边；热更新带推导 | C11 / C14 |
@@ -429,31 +429,39 @@ R0 是唯一现在就能做的：一个玩具内核 + 一批有效/无效推导�
 
 ---
 
-## 11. R0 实装（2026-11-22）
+## 11. R0–R2 实装（2026-11-22）
 
 | 文件 | 作用 |
 |---|---|
 | `tools/trust_kernel.py` | 12 条规则；自带玩具解析器、栈机解释器、静态栈检查；零工具链 import |
 | `tools/trust_demo_compiler.py` | 玩具源 → 链接容器 + 推导 + 结论；它可以撒谎，内核按规则拒 |
-| `tools/trust_kernel_test.py` | 14 条判据；登记进 `ci.py`、`gate-floors.txt`、发布口径与自举 `lomrel.lomt` |
+| `tools/trust_kernel_test.py` | 19 条判据；登记进 `ci.py`、`gate-floors.txt`、发布口径与自举 `lomrel.lomt` |
 
 实测（本机，2026-11-22）：
 
-| 项 | R0 |
+| 项 | R0 → R1/R2 |
 |---|---|
 | `rules` | 12 |
-| `rule_lines` | 531 |
-| `proof_bytes` | 3,263（单单元示例） |
-| `check_ms` | 0.09（10 次平均） |
+| `rule_lines` | 531 → 613 |
+| `proof_bytes` | 3,263 → 4,084（含 L0） |
+| `check_ms` | 0.09 → 15.0（含约 10 MB L0 读取） |
 | `n / k` | 1 / 1 |
 | `diversity_axes` | 0 |
 
+R1 增量：`TV-L1` 的 `map` 与 `TV-L2` 的 `bytes` 逐节点复核；改输出字节或翻译映射即拒（C9）。
+
+R2 增量：`PROV` 增加可选 `l0`。它把 `docs/376` 的 `provenance.json`（format 2）与
+genesis/seed/mirror/mirror_ir/两份闭包逐项对到盘上文件；路径逃逸与闭包文件不一致都拒。
+内核仍零工具链 import，只读文件与哈希。真实 L0 provenance 已被接受（genesis `059b342b…`，
+seed `7d75a74f…`）。
+
 覆盖的判据：有效推导、两单元组合、改产物、改规则名、改前提、改 SEM 期望输出、提权、
 两粒不同种子、删掉 `AX-S`、确定性、零工具链 import、**删掉编译器后仍接受**、四类畸形推导、
-预算记录。§3.5 的 `null` 是「未测」；R0 的实测在上表。
+预算记录、TV 输出节点/映射变异、真实 L0 provenance、L0 记录/路径逃逸/闭包文件篡改。
+§3.5 的 `null` 是「未测」；实测在上表。
 
-未落地：第二个独立内核与商团（R4）、真实 Loment 产物的翻译验证（R1/R3）、
-`seed : Compiler` 的真实证明（R5）。R0 的内核是 Python 参考实现；R4 的第二个内核应当用
+未落地：R3 的真实 LSPE/LNotary 前提、R4 的第二个独立内核与商团、R5 的
+`seed : Compiler` 与代际 refinement。R0 的内核是 Python 参考实现；R4 的第二个内核应当用
 Loment/C/Coq 之一重写，不能与它共享代码。
 
 ---

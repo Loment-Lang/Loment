@@ -415,6 +415,86 @@ def _collect(node: dict, kind: str, ctx: dict) -> list[dict]:
     return out
 
 
+def _safe_join(root: str, rel) -> Path:
+    if not isinstance(rel, str) or not rel:
+        raise Reject("L0: empty path")
+    if Path(rel).is_absolute() or ".." in Path(rel).parts:
+        raise Reject(f"L0: path is not relative: {rel!r}")
+    base = Path(root).resolve()
+    p = (base / rel).resolve()
+    try:
+        p.relative_to(base)
+    except ValueError:
+        raise Reject(f"L0: path escapes the root: {rel!r}") from None
+    return p
+
+
+def _file_meta(p: Path) -> tuple[str, int]:
+    try:
+        b = p.read_bytes()
+    except OSError as e:
+        raise Reject(f"L0: cannot read {p}: {e}") from None
+    return _sha(b), len(b)
+
+
+def _check_l0(j) -> None:
+    """R2: 把 docs/376 的 provenance 接成 PROV 的可选前提。
+
+    它只读文件与哈希，不 import 工具链。记录里的每个文件都要与盘上一致；
+    `provenance_sha256` 把这条记录钉在具体那份 provenance 上。
+    """
+    if not isinstance(j, dict):
+        raise Reject("L0: record is not an object")
+    root = j.get("root", ".")
+    prov_rel = j.get("provenance", "loment/build/genesis/provenance.json")
+    prov_path = _safe_join(root, prov_rel)
+    prov_sha, _size = _file_meta(prov_path)
+    if j.get("provenance_sha256") != prov_sha:
+        raise Reject("L0: provenance hash mismatch")
+    try:
+        prov = json.loads(prov_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
+        raise Reject(f"L0: provenance is not readable JSON: {e}") from None
+    if prov.get("format") != 2:
+        raise Reject("L0: provenance format is not 2")
+    g = prov.get("genesis") or {}
+    if j.get("genesis_sha256") != g.get("sha256") or j.get("genesis_size") != g.get("size"):
+        raise Reject("L0: genesis record mismatch")
+    gname = g.get("name")
+    if not isinstance(gname, str):
+        raise Reject("L0: genesis name is missing")
+    gsha, gsize = _file_meta(_safe_join(root, f"loment/build/genesis/{gname}"))
+    if gsha != g.get("sha256") or gsize != g.get("size"):
+        raise Reject("L0: genesis file mismatch")
+    for key in ("seed", "mirror"):
+        rec = (prov.get("inputs") or {}).get(key) or {}
+        if j.get(f"{key}_sha256") != rec.get("sha256") or \
+                j.get(f"{key}_size") != rec.get("size"):
+            raise Reject(f"L0: {key} record mismatch")
+        sha, size = _file_meta(_safe_join(root, rec.get("path", "")))
+        if sha != rec.get("sha256") or size != rec.get("size"):
+            raise Reject(f"L0: {key} file mismatch")
+    ir = prov.get("mirror_ir") or {}
+    if not _hex64(ir.get("sha256")) or not isinstance(ir.get("size"), int):
+        raise Reject("L0: mirror_ir record is malformed")
+    if j.get("mirror_ir_sha256") != ir.get("sha256") or \
+            j.get("mirror_ir_size") != ir.get("size"):
+        raise Reject("L0: mirror_ir record mismatch")
+    for key in ("source_closure", "genesis_source_closure"):
+        rec = prov.get(key) or {}
+        if j.get(f"{key}_sha256") != rec.get("sha256"):
+            raise Reject(f"L0: {key} record mismatch")
+        files = rec.get("files")
+        if not isinstance(files, list) or not files:
+            raise Reject(f"L0: {key} has no files")
+        for e in files:
+            if not isinstance(e, dict):
+                raise Reject(f"L0: {key} entry is not an object")
+            sha, size = _file_meta(_safe_join(root, e.get("path", "")))
+            if sha != e.get("sha256") or size != e.get("size"):
+                raise Reject(f"L0: closure file mismatch: {e.get('path')!r}")
+
+
 def _r_prov(node, pre, ctx):
     if len(pre) != 1 or pre[0].get("kind") != "Program":
         raise Reject("PROV: needs one Program premise")
@@ -433,6 +513,8 @@ def _r_prov(node, pre, ctx):
         raise Reject("PROV: recipe_sha256 is not a sha256")
     if j.get("artifact_sha256") != ctx["artifact_sha"]:
         raise Reject("PROV: artifact hash mismatch")
+    if j.get("l0") is not None:
+        _check_l0(j["l0"])
     return j
 
 

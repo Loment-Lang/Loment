@@ -253,6 +253,44 @@ def census_reclaim(toks: list, sid, sites: list[dict],
             }, cover, i))
 
 
+def site_id_factory(unit: str):
+    """内容寻址的站点 id 生成器（`docs/262` §5.9）。
+
+    主检查器与旧 `census()` 共用同一份：`seen` 的序数顺序决定重复表达式的 id，
+    两条路必须逐字节相同。
+    """
+    _ensure_compiler_facts()
+    seen: dict[str, int] = {}
+
+    def sid(kind: str, key: str) -> str:
+        occ = seen.get(key, 0)
+        seen[key] = occ + 1
+        return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
+
+    return sid
+
+
+def census_frame(toks: list, sid):
+    """`lspe pass` 块的跨度与覆盖函数。
+
+    必须在建任何站点之前调用：`pass_spans` 会先在 `sid` 的序数表里占位，
+    顺序一变重复表达式的 id 就会漂。
+    """
+    spans = pass_spans(toks, sid)
+
+    def cover(i: int) -> str | None:
+        return _covered(spans, i)
+
+    return spans, cover
+
+
+def census_constant(toks: list, sid, sites: list[dict], unsourced: list[int],
+                    cover=lambda _i: None) -> None:
+    """E1/E2/E5 共用的词法遍（主检查器的一个阶段）。"""
+    census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks),
+                _array_lens(toks))
+
+
 def census(toks: list, unit: str,
            lms=frozenset(),
            instances: list[dict] | tuple = (),
@@ -277,19 +315,8 @@ def census(toks: list, unit: str,
     _run = None if plan is None else set(plan.run)
     sites: list[dict] = []
     unsourced: list[int] = []
-    seen: dict[str, int] = {}
-
-    def sid(kind: str, key: str) -> str:
-        # 内容寻址：键是站点的 token 文本，重复序数只区分**完全相同**的表达式。
-        # 不用行号（会漂），也不用全局序号（在前面插一个站点会把后面全部重编号）。
-        occ = seen.get(key, 0)
-        seen[key] = occ + 1
-        return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
-
-    spans = pass_spans(toks, sid)
-
-    def cover(i: int) -> str | None:
-        return _covered(spans, i)
+    sid = site_id_factory(unit)
+    spans, cover = census_frame(toks, sid)
 
     if _run is None or (_run & {"E1Constant", "E2Typed", "E5GlobalInvariant"}):
         census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks), _array_lens(toks))

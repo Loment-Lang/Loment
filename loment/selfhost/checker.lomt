@@ -3261,7 +3261,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     if chk_tok_is(src, t, lo, "*") {
         let inner0: u32 = chk_tex(src, t, syms, n, env, envc,
                                   chk_lh(lo + 1, hi), tyt, p, oc);
-        if chk_life_mode(src, t, load32(oc, 8)) == 0 {
+        if chk_life_mode_c(src, t, tyt, oc) == 0 {
             return 0;                       // 旧版次：参考实现在解析期就拒，这里不重复报
         }
         if inner0 == 0 {
@@ -3302,7 +3302,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         // —— 再借不改元素类型，只改可写位。但 `lifetime_no` 里参考实现的 `_walk_expr`
         // 仍报"只能作用于数组"，所以这一格要按档走。
         if chk_ty_is_slc(tyt, inner) == 1 {
-            if chk_life_mode(src, t, load32(oc, 8)) != 0 {
+            if chk_life_mode_c(src, t, tyt, oc) != 0 {
                 return chk_ty_slc(tyt, chk_ty_a(tyt, inner), mutf);
             }
             chk_pub(src, t, oc, p, 143, lo);
@@ -3310,7 +3310,7 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         }
         // 既不是数组也不是切片的借用（`docs/299`）：`lifetime_auto` / `lifetime_manual`
         // 下是 `&T`；`no` 档仍报"只能作用于数组"。
-        if chk_life_mode(src, t, load32(oc, 8)) != 0 {
+        if chk_life_mode_c(src, t, tyt, oc) != 0 {
             if inner == 0 {
                 return 0;                   // 类型未知 -> 保守跳过
             }
@@ -4699,7 +4699,7 @@ fn chk_lms_c(src: ptr, t: ptr, tyt: ptr) -> u32 {
         if chk_lms_on(src, t) == 1 {
             v = 1;
         }
-        store32(tyt, CHK_FR_ON, v);
+        store32(tyt, CHK_LMS_ON, v);
     }
     if v == 1 {
         return 1;
@@ -4948,6 +4948,21 @@ const CHK_LV_CAP: u32 = 92;
 const CHK_LR_CAP: u32 = 120;
 /// 本单元里有没有"返回借用"的函数 —— 没有就**不查调用摘要**（语料上零代价）。
 const CHK_HASRET: u32 = 3500;
+/// 生命周期生效档的**整单元**缓存：0 = 还没算，1..3 = 档值 + 1。
+/// 与 `CHK_LMS_ON` 同一条理由：`chk_life_mode` 是整条流的深度扫描，而它每个函数
+/// （以及 `chk_tex` 每个 `*` / 切片再借）都要问一次 —— 不缓存就是 O(n²)。
+/// 3504 是 `CHK_HASRET` 与 `moved` 表（3520 起）之间的空槽。
+const CHK_LIFE_MODE: u32 = 3504;
+
+fn chk_life_mode_c(src: ptr, t: ptr, tyt: ptr, oc: ptr) -> u32 {
+    let v: u32 = load32(tyt, CHK_LIFE_MODE);
+    if v != 0 {
+        return v - 1;
+    }
+    let m: u32 = chk_life_mode(src, t, load32(oc, 8));
+    store32(tyt, CHK_LIFE_MODE, m + 1);
+    return m;
+}
 
 /// 类型 token 是**借用类**吗（参考实现 `_is_borrowish` 的 token 版）：`&T`、切片、
 /// 或带借用字段的结构体。**数组不算**（它是值）。
@@ -5067,74 +5082,75 @@ fn chk_marker_of(src: ptr, t: ptr, rt: u32) -> u32 {
 /// 被调函数的**摘要**：高 32 位 = 1 表示"返回借用"，低 32 位 = 来源形参的位掩码。
 /// 0 = 不返回借用（或查不到）。
 fn chk_sum(src: ptr, t: ptr, syms: ptr, n: u32, name_tok: u32) -> u64 {
-    let i: u32 = 0;
+    // **走符号表**，不再从头扫 token 流找 `fn <名字>`：那是 O(单元)，而这里每个
+    // 借用表达式都问一次 —— 带借用返回函数的单元因此是 O(n²)。K_FN 的 aux 就是
+    // 形参表的 `(`（见 `chk_ret_ty` 上的注释），拿到之后形状与原来逐字相同。
+    let slot: u32 = chk_lookup_slot(src, t, syms, n, name_tok);
+    if slot == 0 || load32(syms, (slot - 1) * 20 + 4) != K_FN {
+        return 0;
+    }
+    let lp: u32 = load32(syms, (slot - 1) * 20 + 16);
     let r: u64 = 0;
-    let done: u32 = 0;
-    while chk_tok_kind(t, i) != 4 && done == 0 {
-        if chk_tok_is(src, t, i, "fn") && same(src, t, i + 1, name_tok) == 1 {
-            let lp: u32 = chk_find_paren(src, t, i + 2);
-            let rp: u32 = chk_match_paren(src, t, lp);
-            if chk_tok_is(src, t, rp + 1, "-") && chk_tok_is(src, t, rp + 2, ">") {
-                let rt: u32 = rp + 3;
-                if chk_ty_borrowish(src, t, syms, n, rt) == 1 {
-                    done = 1;
-                    let bits: u32 = 0;
-                    let nref: u32 = 0;
-                    let only: u32 = 0;
-                    let k: u32 = 0;
-                    let j: u32 = lp + 1;
-                    while j < rp && k < 31 {
-                        let tt2: u32 = j + 2;
-                        let isr: u32 = 0;
-                        if chk_tok_is(src, t, tt2, "&") {
-                            isr = 1;
-                        } else if chk_tok_is(src, t, tt2, "[")
-                                && !chk_tok_is(src, t, tt2 + 2, ";") {
-                            isr = 1;
-                        } else if chk_tok_is(src, t, tt2, "mut")
-                                && chk_tok_is(src, t, tt2 + 1, "[") {
-                            isr = 1;
-                        }
-                        if isr == 1 {
-                            bits = bits | (1 << k);
-                            nref = nref + 1;
-                            only = k;
-                        }
-                        k = k + 1;
-                        j = chk_skip_type(src, t, tt2);
-                        if chk_tok_is(src, t, j, ",") {
-                            j = j + 1;
-                        }
+    if chk_tok_is(src, t, lp, "(") {
+        let rp: u32 = chk_match_paren(src, t, lp);
+        if chk_tok_is(src, t, rp + 1, "-") && chk_tok_is(src, t, rp + 2, ">") {
+            let rt: u32 = rp + 3;
+            if chk_ty_borrowish(src, t, syms, n, rt) == 1 {
+                let bits: u32 = 0;
+                let nref: u32 = 0;
+                let only: u32 = 0;
+                let k: u32 = 0;
+                let j: u32 = lp + 1;
+                while j < rp && k < 31 {
+                    let tt2: u32 = j + 2;
+                    let isr: u32 = 0;
+                    if chk_tok_is(src, t, tt2, "&") {
+                        isr = 1;
+                    } else if chk_tok_is(src, t, tt2, "[")
+                            && !chk_tok_is(src, t, tt2 + 2, ";") {
+                        isr = 1;
+                    } else if chk_tok_is(src, t, tt2, "mut")
+                            && chk_tok_is(src, t, tt2 + 1, "[") {
+                        isr = 1;
                     }
-                    let mk: u32 = chk_marker_of(src, t, rt);
-                    let fb: u32 = 0;
-                    if mk != 0 {
-                        // 标记指向的形参（按名字找下标）
-                        let k2: u32 = 0;
-                        let j2: u32 = lp + 1;
-                        while j2 < rp && k2 < 31 {
-                            if same(src, t, j2, mk) == 1 {
-                                fb = fb | (1 << k2);
-                            }
-                            k2 = k2 + 1;
-                            j2 = chk_skip_type(src, t, j2 + 2);
-                            if chk_tok_is(src, t, j2, ",") {
-                                j2 = j2 + 1;
-                            }
-                        }
-                        if fb == 0 {
-                            fb = bits;          // 坏标记已由 marker 检查报过
-                        }
-                    } else if nref == 1 {
-                        fb = 1 << only;
-                    } else {
-                        fb = bits;              // 多个 -> 全部（"最短"）
+                    if isr == 1 {
+                        bits = bits | (1 << k);
+                        nref = nref + 1;
+                        only = k;
                     }
-                    r = 4294967296 + (fb as u64);
+                    k = k + 1;
+                    j = chk_skip_type(src, t, tt2);
+                    if chk_tok_is(src, t, j, ",") {
+                        j = j + 1;
+                    }
                 }
+                let mk: u32 = chk_marker_of(src, t, rt);
+                let fb: u32 = 0;
+                if mk != 0 {
+                    // 标记指向的形参（按名字找下标）
+                    let k2: u32 = 0;
+                    let j2: u32 = lp + 1;
+                    while j2 < rp && k2 < 31 {
+                        if same(src, t, j2, mk) == 1 {
+                            fb = fb | (1 << k2);
+                        }
+                        k2 = k2 + 1;
+                        j2 = chk_skip_type(src, t, j2 + 2);
+                        if chk_tok_is(src, t, j2, ",") {
+                            j2 = j2 + 1;
+                        }
+                    }
+                    if fb == 0 {
+                        fb = bits;          // 坏标记已由 marker 检查报过
+                    }
+                } else if nref == 1 {
+                    fb = 1 << only;
+                } else {
+                    fb = bits;              // 多个 -> 全部（"最短"）
+                }
+                r = 4294967296 + (fb as u64);
             }
         }
-        i = i + 1;
     }
     return r;
 }
@@ -5276,7 +5292,7 @@ fn chk_life_scan(src: ptr, t: ptr, tyt: ptr, lo: u32, hi: u32, p: ptr, oc: ptr) 
 fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             lh: u64, fi: u32, p: ptr, oc: ptr) {
     let tyt: ptr = chk_tyt_of(oc);
-    let mode: u32 = chk_life_mode(src, t, load32(oc, 8));
+    let mode: u32 = chk_life_mode_c(src, t, tyt, oc);
     if mode != 0 {
         let b: u32 = chk_lhlo(lh);
         let e: u32 = chk_lhhi(lh);
@@ -5451,11 +5467,15 @@ fn chk_life(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 fn chk_mark_call_moves(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                        tyt: ptr, lo: u32, hi: u32) {
     let slot: u32 = 0;
+    let got: u32 = 0;
+    // ⚠ `chk_count_args` **只认 `(` 起点**：不先判形状就拿 `lo + 1` 去喂，它在非调用
+    // 形状（`return y;` / `let x: u32 = 1;`）上会从那里一路数到单元末尾 —— 每个
+    // 语句一次，整单元就是 O(n²)（2026-11-21 实测 `chk_moves` 90→180 是 4×）。
     if chk_tok_kind(t, lo) == 0 && chk_tok_is(src, t, lo + 1, "(")
             && chk_match_paren(src, t, lo + 1) == hi - 1 {
         slot = chk_lookup_slot(src, t, syms, n, lo);
+        got = chk_count_args(src, t, lo + 1);
     }
-    let got: u32 = chk_count_args(src, t, lo + 1);
     let k: u32 = 0;
     while k < got && slot != 0 {
         let er: u64 = chk_arr_elem(src, t, lo + 1, k);
@@ -6719,7 +6739,7 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                     }
                 } else if is_index == 0 {
                     if is_field == 1 || is_deref == 1 {
-                        if chk_life_mode(src, t, load32(oc, 8)) == 0 {
+                        if chk_life_mode_c(src, t, tyt, oc) == 0 {
                             chk_pub(src, t, oc, p, 137, j);
                         }
                     } else {
@@ -7158,6 +7178,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     store32(nc, 0, 0);
     store32(tyt, 0, 0);                 // 复合类型表: 条数清零
     store32(tyt, CHK_LMS_ON, 0);        // `lms` 档缓存: 整单元只算一次
+    store32(tyt, CHK_LIFE_MODE, 0);     // 生命周期档缓存（同上）
     store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;

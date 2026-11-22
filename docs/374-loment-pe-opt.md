@@ -1,4 +1,4 @@
-# 366 · PE 的 `--opt`：用户代码交给 clang，容器与运行期仍是 lomelf 的
+# 374 · PE 的 `--opt`：用户代码交给 clang，容器与运行期仍是 lomelf 的
 
 > 2026-11-21 · 上游：`docs/212` §5（把 IR 交给 clang）、`docs/365`（两档的口径）。
 > 一句话：Windows 的优化档落在**参考链接器**里（`tools/lomelf.py --target pe --opt`），

@@ -133,7 +133,7 @@ def test(fn):
 #: 同日 main 的两条线又加了：原生更新器 `update.lomt` 三处（`SCR_CAP` / `NAME_CAP`
 #: 两处沉默、`PAYLOAD_CAP` 有话）与 LSPE SDK 的一处字面量。合并后条数 **290**、
 #: 沉默 **183**（以本机 `loment_caps.scan()` 实测为准）。
-CAPACITY_SITES = 290
+CAPACITY_SITES = 292
 SILENT_SITES = 183
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
@@ -151,7 +151,6 @@ SILENT_NAMES = frozenset((
     "FILE_CAP",
     "FIX_STRIDE",
     "PAT_CAP",
-    "SH_CAP",
     "TXT_CAP",
     "CHK_ENV_MAX",
     "CASES_CAP",
@@ -167,7 +166,6 @@ SILENT_NAMES = frozenset((
     "CACHE_DIR_CAP",
     "CACHE_PATH_CAP",
     "CW",
-    "CAP_SLOTS",
     "C_CAND",
     "DECL_KW",
     "DELIM_CAP",
@@ -227,6 +225,8 @@ SILENT_NAMES = frozenset((
     "MAX_DIALECT",
     "MAX_LANG",
     "MAX_RET",
+    "MAX_CT",
+    "IOS_CAP",
     "MEM_CAP",
     "MIN_RECLEN",
     "MMAX",

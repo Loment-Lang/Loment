@@ -49,8 +49,8 @@
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",
-      "sha256": "b439ec092de8affdfd67a4d6f46793314a483dc74ff013f38d85192291dd5456",
-      "size": 7501283
+      "sha256": "a42282be7765bfa19ca8bca3cc7c734f72d63ea555e0df8713428f341bf3bb70",
+      "size": 7510820
     }
   },
   "mirror_ir": {
@@ -91,8 +91,8 @@
       },
       {
         "path": "loment/selfhost/codegen.lomt",
-        "sha256": "4979f8de9621d9246ebac3ed05042bc7a924061f84f1cf089f3b8050a52ccf52",
-        "size": 634761
+        "sha256": "0b6ac30f9c0319fd6d4037e9cd89d554f0ca3fc89c662a45c0c3250fec45736e",
+        "size": 637752
       },
       {
         "path": "loment/selfhost/comefor.lomt",
@@ -125,7 +125,7 @@
         "size": 36014
       }
     ],
-    "sha256": "ccf11ab3d6387630a208a1d0b370450dba4ecf60864a422ec60a1e9d3d6c77ae"
+    "sha256": "8dfa2a120f29c9a9b7e6035f07423cf91ee64b82fb751686c1be5127c6e47c05"
   },
   "toolchain": {
     "clang": "clang version 22.1.8 (https://github.com/llvm/llvm-project ca7933e47d3a3451d81e72ac174dcb5aa28b59d1)",

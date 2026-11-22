@@ -8,6 +8,10 @@
 //   loment/selfhost/potato.lomt   pt_surf_code     (自举侧的 `surfaces`)
 // 校验: python tools/lom_audit.py + python tools/loment_net_test.py
 //
+// 2026-11-21.1: **契约升版** —— PE 垫片补全（`docs/374`）：`Syscall` 从 29 个号扩到
+//   146 个（file 70 / proc 43 / net 26 / mem 7），新增 117 条全部是本仓 PE 运行时
+//   **真的派发**的号。下游影响：**只增不减** —— 依赖方（编译器/链接器/自举 checker/
+//   自举 potato）按本表逐条对账，新增枚举项不会让旧号挪位；compat 线不读这张表。
 // 2026-10-12.1: 联网面补完 —— `sendmsg`(46)/`recvmsg`(47)/`socketpair`(53)/
 //   `epoll_wait`(232)/`epoll_ctl`(233)/`epoll_create1`(291) 一起从 NotDispatched 移进
 //   `Syscall`，于是那一族**空了**（`docs/234`）。`select` 那一笔见 2026-10-11.2。
@@ -21,7 +25,7 @@ module net
 meta {
   schema = "fujo-net-spec/v1"
   title = "network surface contract: Linux syscall number -> surface"
-  version = "2026-10-12.1"
+  version = "2026-11-21.1"
   authority = "docs/224 §3（面进 Potato）+ docs/227（收口账）：本文件是那张表的单源，两边实现由它校验"
   layers {
     surface = "号 → 面的划分。**面名由用的人定** —— file/mem/net/proc 只是本仓库自己的划法，other 是兜底"
@@ -40,9 +44,9 @@ meta {
 enum Surface : u8 {
   other = 0 { title = "兜底：本表没点名的号，或首参不是整数字面量的站点" }
   file  = 1 { title = "文件与目录" }
-  mem   = 2 { title = "内存（brk）" }
+  mem   = 2 { title = "内存（brk / mmap / mprotect / munmap / mremap）" }
   net   = 3 { title = "联网：socket 那一族 + poll" }
-  proc  = 4 { title = "进程（exit）" }
+  proc  = 4 { title = "进程、时间与身份（exit / time / getpid / futex …）" }
 }
 
 //: 号 → 面。**数值是 Linux x86-64 的系统调用号** —— 不是内核 FUAI 原语号（那是 lom/fuai.lom 那张，
@@ -79,6 +83,123 @@ enum Syscall : u32 {
   epoll_wait   = 232 { surface = "net"  }
   epoll_ctl    = 233 { surface = "net"  }
   epoll_create1 = 291 { surface = "net"  }
+  open              = 2    { surface = "file" }
+  stat              = 4    { surface = "file" }
+  fstat             = 5    { surface = "file" }
+  lstat             = 6    { surface = "file" }
+  lseek             = 8    { surface = "file" }
+  mmap              = 9    { surface = "mem" }
+  mprotect          = 10   { surface = "mem" }
+  munmap            = 11   { surface = "mem" }
+  ioctl             = 16   { surface = "proc" }
+  pread64           = 17   { surface = "file" }
+  pwrite64          = 18   { surface = "file" }
+  readv             = 19   { surface = "file" }
+  writev            = 20   { surface = "file" }
+  access            = 21   { surface = "file" }
+  pipe              = 22   { surface = "file" }
+  sched_yield       = 24   { surface = "proc" }
+  mremap            = 25   { surface = "mem" }
+  msync             = 26   { surface = "mem" }
+  madvise           = 28   { surface = "mem" }
+  dup               = 32   { surface = "file" }
+  dup2              = 33   { surface = "file" }
+  nanosleep         = 35   { surface = "proc" }
+  getpid            = 39   { surface = "proc" }
+  sendfile          = 40   { surface = "file" }
+  uname             = 63   { surface = "proc" }
+  fcntl             = 72   { surface = "file" }
+  flock             = 73   { surface = "file" }
+  fsync             = 74   { surface = "file" }
+  fdatasync         = 75   { surface = "file" }
+  truncate          = 76   { surface = "file" }
+  ftruncate         = 77   { surface = "file" }
+  getcwd            = 79   { surface = "file" }
+  chdir             = 80   { surface = "file" }
+  rename            = 82   { surface = "file" }
+  mkdir             = 83   { surface = "file" }
+  rmdir             = 84   { surface = "file" }
+  creat             = 85   { surface = "file" }
+  link              = 86   { surface = "file" }
+  unlink            = 87   { surface = "file" }
+  symlink           = 88   { surface = "file" }
+  readlink          = 89   { surface = "file" }
+  chmod             = 90   { surface = "file" }
+  fchmod            = 91   { surface = "file" }
+  chown             = 92   { surface = "file" }
+  fchown            = 93   { surface = "file" }
+  lchown            = 94   { surface = "file" }
+  umask             = 95   { surface = "file" }
+  gettimeofday      = 96   { surface = "proc" }
+  getuid            = 102  { surface = "proc" }
+  getgid            = 104  { surface = "proc" }
+  setuid            = 105  { surface = "proc" }
+  setgid            = 106  { surface = "proc" }
+  geteuid           = 107  { surface = "proc" }
+  getegid           = 108  { surface = "proc" }
+  setpgid           = 109  { surface = "proc" }
+  getppid           = 110  { surface = "proc" }
+  getpgrp           = 111  { surface = "proc" }
+  setsid            = 112  { surface = "proc" }
+  setreuid          = 113  { surface = "proc" }
+  setregid          = 114  { surface = "proc" }
+  getgroups         = 115  { surface = "proc" }
+  setgroups         = 116  { surface = "proc" }
+  setresuid         = 117  { surface = "proc" }
+  getresuid         = 118  { surface = "proc" }
+  setresgid         = 119  { surface = "proc" }
+  getresgid         = 120  { surface = "proc" }
+  getpgid           = 121  { surface = "proc" }
+  setfsuid          = 122  { surface = "proc" }
+  setfsgid          = 123  { surface = "proc" }
+  getsid            = 124  { surface = "proc" }
+  utime             = 132  { surface = "file" }
+  mknod             = 133  { surface = "file" }
+  sync              = 162  { surface = "file" }
+  gettid            = 186  { surface = "proc" }
+  time              = 201  { surface = "proc" }
+  futex             = 202  { surface = "proc" }
+  sched_setaffinity = 203  { surface = "proc" }
+  sched_getaffinity = 204  { surface = "proc" }
+  epoll_create      = 213  { surface = "net" }
+  set_tid_address   = 218  { surface = "proc" }
+  fadvise64         = 221  { surface = "file" }
+  clock_gettime     = 228  { surface = "proc" }
+  clock_getres      = 229  { surface = "proc" }
+  clock_nanosleep   = 230  { surface = "proc" }
+  exit_group        = 231  { surface = "proc" }
+  utimes            = 235  { surface = "file" }
+  ioprio_set        = 251  { surface = "proc" }
+  ioprio_get        = 252  { surface = "proc" }
+  mkdirat           = 258  { surface = "file" }
+  mknodat           = 259  { surface = "file" }
+  fchownat          = 260  { surface = "file" }
+  futimesat         = 261  { surface = "file" }
+  unlinkat          = 263  { surface = "file" }
+  renameat          = 264  { surface = "file" }
+  linkat            = 265  { surface = "file" }
+  symlinkat         = 266  { surface = "file" }
+  readlinkat        = 267  { surface = "file" }
+  fchmodat          = 268  { surface = "file" }
+  faccessat         = 269  { surface = "file" }
+  pselect6          = 270  { surface = "net" }
+  ppoll             = 271  { surface = "net" }
+  sync_file_range   = 277  { surface = "file" }
+  utimensat         = 280  { surface = "file" }
+  epoll_pwait       = 281  { surface = "net" }
+  fallocate         = 285  { surface = "file" }
+  dup3              = 292  { surface = "file" }
+  pipe2             = 293  { surface = "file" }
+  syncfs            = 306  { surface = "file" }
+  getcpu            = 309  { surface = "proc" }
+  renameat2         = 316  { surface = "file" }
+  getrandom         = 318  { surface = "proc" }
+  statx             = 332  { surface = "file" }
+  close_range       = 436  { surface = "file" }
+  openat2           = 437  { surface = "file" }
+  faccessat2        = 439  { surface = "file" }
+  epoll_pwait2      = 441  { surface = "net" }
+  fchmodat2         = 452  { surface = "file" }
 }
 
 //: **点名不做**（`docs/221` §7 / `docs/234`）：**2026-10-12 起联网面没有这一族了** ——

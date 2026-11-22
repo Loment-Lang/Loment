@@ -110,7 +110,9 @@ Linux 号，`lom/*.lom` 那道门也没收它们（`docs/303`）。
 4. `sched_getaffinity` 只模拟当前进程，返回 8；`getcpu` 固定写 0；
 5. `mremap` 只在匿名映射上做，且**总是可能换地址**（按 `MREMAP_MAYMOVE` 的语义实现）；
 6. `futex` 的等待者计数表有 64 个槽；表满时仍会等待/唤醒，只是唤醒数会少报；
-7. `mknod` 只建普通文件；`openat2` 只认 `resolve = 0`；`renameat2` 只认 `flags = 0`。
+7. `mknod` 只建普通文件；`openat2` 只认 `resolve = 0`；`renameat2` 只认 `flags = 0`；
+   所有 `*at` 变体都**忽略 dirfd**（Windows 没有"目录 fd 作基准"这条命名空间）；
+   `mremap` 忽略 `MREMAP_FIXED`（总是按"可以搬家"实现）。
 
 ---
 

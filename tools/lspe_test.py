@@ -46,8 +46,8 @@ def test(fn):
 
 
 @test
-def test_registry_has_19_obligations_and_8_evidence_kinds():
-    assert len(lspe.LSPE_OBLIGATIONS) == 19
+def test_registry_has_20_obligations_and_8_evidence_kinds():
+    assert len(lspe.LSPE_OBLIGATIONS) == 20
     assert len(lspe.LSPE_EVIDENCE_KINDS) == 8
     for name, spec in lspe.LSPE_OBLIGATIONS.items():
         assert spec["owner"], name
@@ -351,10 +351,12 @@ def test_ledger_i1_fails_on_an_unregistered_site_kind():
 def test_selfhost_half_lives_under_loment_lspe():
     mod = (ROOT / "loment" / "lspe" / "lspe.lomt").read_text(encoding="utf-8")
     assert "module lspe" in mod
-    assert "pub fn lspe_engine" in mod
+    assert "\nfn lspe_engine(" in mod, "引擎子检查器必须留在 lspe 模块里"
+    assert "pub fn lspe_main(" in mod, "主检查器必须留在 lspe 模块里"
     potato = (ROOT / "loment" / "selfhost" / "potato.lomt").read_text(encoding="utf-8")
     assert "use lspe" in potato
-    assert "pub fn lspe_engine" not in potato, "普查引擎不该还留在发射器里"
+    code = "\n".join(line.split("//", 1)[0] for line in potato.splitlines())
+    assert "lspe_engine(" not in code, "普查引擎不该还留在发射器里"
 
 
 def _unit(src: str, **kw):
@@ -1259,7 +1261,7 @@ def test_effect_registry_entries_are_complete():
     obs = {"EffectAllowed", "HandlerExhaustive", "ResumeLinear",
            "EffectBounded", "CaptureReclaim"}
     assert obs <= set(lspe.LSPE_OBLIGATIONS), sorted(lspe.LSPE_OBLIGATIONS)
-    assert len(lspe.LSPE_OBLIGATIONS) == 19
+    assert len(lspe.LSPE_OBLIGATIONS) == 20
     sites = {"effect_decl", "row", "perform", "handle", "resume", "row_call",
              "effect_foreign", "handler_capture"}
     assert sites <= set(lspe.LSPE_SITE_KINDS), sorted(lspe.LSPE_SITE_KINDS)
@@ -1540,19 +1542,19 @@ def test_effects_cli_is_a_report_not_a_verdict():
 
 @test
 def test_framework_registry_covers_every_engine_in_fixed_order():
-    """V0：描述符覆盖 E1–E11，登记顺序按 `(phase, id)`，不靠哈希序。"""
-    host = lspe.default_host()
-    ids = [c.desc.id for c in host.checker.checkers()]
-    need = {"P0Producer", "E1Constant", "E2Typed", "E2bBounds", "E3LocalFlow",
+    """V0：描述符覆盖 E1–E12，登记顺序按 `(phase, id)`，不靠哈希序。"""
+    main = lspe.main_checker()
+    ids = [c.desc.id for c in main.checker.checkers()]
+    need = {"E1Constant", "E2Typed", "E2bBounds", "E3LocalFlow",
             "E4Interproc", "E5GlobalInvariant", "E6Substitution", "E7Differential",
-            "E8Falsification", "E9Domain", "E10Loans", "E11Effects", "A1Advisory"}
+            "E8Falsification", "E9Domain", "E10Loans", "E11Effects", "E12GC", "A1Advisory"}
     assert set(ids) == need, sorted(ids)
     assert ids == sorted(ids, key=lambda x: next(
-        (c.desc.phase, c.desc.id) for c in host.checker.checkers()
+        (c.desc.phase, c.desc.id) for c in main.checker.checkers()
         if c.desc.id == x))
-    for c in host.checker.checkers():
+    for c in main.checker.checkers():
         assert c.desc.role in lspe.ROLES, c.desc
-    assert lspe.LSPE_SDK_VERSION == "lspe-sdk/0"
+    assert lspe.LSPE_SDK_VERSION == "lspe-sdk/1.0"
 
 
 @test
@@ -1574,7 +1576,7 @@ def test_plan_is_deterministic_and_hash_is_content_addressed():
 def test_scheduler_skips_with_reasons_and_never_skips_mandatory():
     """V1：跳过必须有原因；E6 与 InBounds 这类强制集永远在 run 里。"""
     facts = lspe.UnitFacts()
-    plan = lspe.default_host().plan(facts)
+    plan = lspe.LspeSdk().plan(facts)
     assert "E1Constant" not in plan.run
     assert plan.skip_reason("E1Constant") == "not_applicable"
     assert plan.skip_reason("A1Advisory") == "profile"
@@ -1588,7 +1590,7 @@ def test_scheduler_skips_with_reasons_and_never_skips_mandatory():
 @test
 def test_differential_skips_when_the_twin_is_missing():
     facts = lspe.UnitFacts(twin_available=False)
-    plan = lspe.default_host().plan(facts)
+    plan = lspe.LspeSdk().plan(facts)
     assert plan.skip_reason("E7Differential") == "twin_missing"
     assert "E7Differential" not in plan.run
 
@@ -1602,9 +1604,9 @@ def test_skipped_checker_is_not_called_and_cannot_contribute_a_claim():
         return []
 
     facts = lspe.UnitFacts()
-    host = lspe.default_host()
+    sdk = lspe.LspeSdk()
     ctx = lspe.Ctx([], "m", facts, engines={"E1Constant": never})
-    result = host.run(ctx)
+    result = sdk.run(ctx)
     assert called == [], "被跳过的检查器仍然被调用了"
     assert not result.claims
     assert result.plan.skip_reason("E1Constant") == "not_applicable"
@@ -1623,9 +1625,9 @@ def test_advisory_can_only_ask_and_its_claims_are_rejected():
         plugin_id="x", plugin_version=1)
     facts = lspe.UnitFacts(flags=frozenset({"advisory"}))
     ctx = lspe.Ctx([], "m", facts)
-    ok = lspe.LspeHost((good,)).run(ctx)
+    ok = lspe.LspeSdk((good,)).run(ctx)
     assert len(ok.questions) == 1 and not ok.errors, ok
-    no = lspe.LspeHost((bad,)).run(ctx)
+    no = lspe.LspeSdk((bad,)).run(ctx)
     assert any(e["code"] == "E_FRAMEWORK_ADVISORY_CLAIM" for e in no.errors), no.errors
 
 
@@ -1640,7 +1642,7 @@ def test_evidence_plugin_needs_an_opt_in_obligation():
                                 (lspe.EvidenceNode("Typed", "plugin"),))],
         plugin_id="demo", plugin_version=1, plugin_hash="h")
     facts = lspe.UnitFacts(flags=frozenset({"calls"}))
-    result = lspe.LspeHost((checker,)).run(lspe.Ctx([], "m", facts))
+    result = lspe.LspeSdk((checker,)).run(lspe.Ctx([], "m", facts))
     assert any(e["code"] == "E_FRAMEWORK_PLUGIN_NOT_OPT_IN"
                for e in result.errors), result.errors
 
@@ -1710,8 +1712,193 @@ def test_engine_budget_exhaustion_is_q005_and_never_silent():
         lspe.EngineDesc("XB1", 2, "Advisory", triggers=("calls",), budget=4),
         burn, plugin_id="x", plugin_version=1)
     facts = lspe.UnitFacts(flags=frozenset({"calls"}))
-    result = lspe.LspeHost((checker,)).run(lspe.Ctx([], "m", facts))
+    result = lspe.LspeSdk((checker,)).run(lspe.Ctx([], "m", facts))
     assert any(q.code == "Q005" for q in result.questions), result.questions
+
+
+# ---------------------------------------------------------------- LSPE SDK 1.0
+# `docs/361`：SDK 持有调度器；顶层只有一个主检查器，域/借用/效应等都是它的
+# 子检查器。编译器只调 `lspe.audit(...)`，不再自己拼计划与普查。
+
+
+@test
+def test_sdk_has_exactly_one_main_checker_and_no_top_level_engines():
+    """SDK 1.0：SDK 持有调度器，检查器只有一个主检查器。"""
+    sdk = lspe.LspeSdk()
+    main = sdk.checker
+    assert isinstance(main, lspe.MainChecker)
+    assert isinstance(sdk.scheduler, lspe.Scheduler)
+    assert main.desc.id == "MainChecker"
+    assert main.role() == "Producer"
+    assert not hasattr(main, "scheduler"), "调度器不能在主检查器里"
+    assert not hasattr(main, "plan"), "主检查器不能自己算计划"
+    assert lspe.LSPE_SDK_VERSION == "lspe-sdk/1.0"
+    # 内置引擎不能再出现在顶层（`MacroChecker` 基类留给插件）。
+    for name in ("E1Constant", "E2Typed", "E9Domain", "E10Loans", "E11Effects",
+                 "ProducerChecker", "LspeHost", "default_host"):
+        assert not hasattr(lspe, name), f"顶层仍然导出 {name}"
+    ids = [c.desc.id for c in main.checker.checkers()]
+    assert "MainChecker" not in ids, "主检查器不能登记成自己的子检查器"
+    assert ids == sorted(ids, key=lambda x: next(
+        (c.desc.phase, c.desc.id) for c in main.checker.checkers()
+        if c.desc.id == x))
+    need = {"E1Constant", "E2Typed", "E2bBounds", "E3LocalFlow", "E4Interproc",
+            "E5GlobalInvariant", "E6Substitution", "E7Differential",
+            "E8Falsification", "E9Domain", "E10Loans", "E11Effects",
+            "E12GC", "A1Advisory"}
+    assert set(ids) == need, sorted(ids)
+
+
+@test
+def test_main_checker_owns_the_domain_and_borrow_checkers():
+    """域检查器与借用检查器是主检查器的子检查器，不是平级入口。"""
+    sdk = lspe.LspeSdk()
+    main = sdk.checker
+    dom = main.sub("E9Domain")
+    bor = main.sub("E10Loans")
+    assert type(dom).__name__ == "DomainChecker", type(dom).__name__
+    assert type(bor).__name__ == "BorrowChecker", type(bor).__name__
+    assert main.domain_checker is dom and main.borrow_checker is bor
+    assert dom in main.subcheckers and bor in main.subcheckers
+    facts = lspe.UnitFacts(flags=frozenset({"domains", "borrows"}),
+                           dims=(("lifetime", "lifetime_auto"),))
+    plan = sdk.plan(facts)
+    assert plan.runs("E9Domain") and plan.runs("E10Loans"), plan
+    off = lspe.UnitFacts(flags=frozenset({"domains", "borrows"}),
+                         dims=(("lifetime", "lifetime_no"),))
+    assert sdk.plan(off).skip_reason("E10Loans") == "profile"
+
+
+@test
+def test_sdk_audit_preserves_the_census_site_order_and_ids():
+    """SDK 算计划、主检查器执行；站点顺序与内容寻址 id 与旧普查逐字节相同。"""
+    src = ("module m\n"
+           "capability blk : disk[0..3]\n"
+           "fn f(a: [u32; 4], i: u32) -> u32 {\n"
+           "    guard blk(i);\n"
+           "    return a[i];\n"
+           "}\n")
+    toks = lomc.lex(src)
+    sdk = lspe.LspeSdk()
+    res = sdk.audit(toks, "m")
+    assert [s["kind"] for s in res.sites] == ["guard", "index", "domain",
+                                              "domain_access"]
+    assert [s["id"] for s in res.sites] == [
+        "m:guard:28314938", "m:index:5102de16",
+        "m:domain:53a62187", "m:domain_access:d7cdfc55"]
+    assert res.unsourced == [5]
+    assert "P0Producer" not in res.plan.run, "主检查器就是生产器"
+    assert res.plan == sdk.plan(lspe.UnitFacts.from_tokens(toks))
+    try:
+        sdk.checker.audit(toks, "m")
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("主检查器没有 Plan 也能审计（调度器越界）")
+
+
+@test
+def test_borrow_checker_runs_under_the_main_checker_and_respects_lifetime_no():
+    """借用检查器由主检查器执行；`lifetime_no` 时 SDK 的调度器跳过它。"""
+    src = ("module m\nfn f(xs: &[u32]) -> u32 {\n"
+           "    let r: &u32 = &xs[0];\n    return *r;\n}\n")
+    toks = lomc.lex(src)
+    sdk = lspe.LspeSdk()
+    auto = sdk.audit(toks, "m", dims={"lifetime": "lifetime_auto"},
+                     borrows=True)
+    assert auto.loans and auto.loans["summary"]["loans"] == 1, auto.loans
+    assert [s["kind"] for s in auto.loans["sites"]] == ["loan", "loan_kill",
+                                                        "loan_use"]
+    off = sdk.audit(toks, "m", dims={"lifetime": "lifetime_no"}, borrows=True)
+    assert off.plan.skip_reason("E10Loans") == "profile"
+    assert off.loans is None
+
+
+@test
+def test_effect_checker_runs_under_the_main_checker_only_when_asked():
+    """E11 的站点由主检查器在最后一段追加；没打开时一条都不加。"""
+    src = _EFFECTS_DECL + (
+        "fn run(x: u32) -> u32 {\n"
+        "    perform Log.write(x);\n"
+        "    return x;\n}\n")
+    toks = lomc.lex(src)
+    sdk = lspe.LspeSdk()
+    off = sdk.audit(toks, "m")
+    assert not any(s["kind"] in {"effect_decl", "perform"} for s in off.sites)
+    on = sdk.audit(toks, "m", effects=True)
+    kinds = [s["kind"] for s in on.sites]
+    assert "effect_decl" in kinds and "perform" in kinds, kinds
+    assert on.effects and on.sites[-len(on.effects["sites"]):] == on.effects["sites"]
+
+
+@test
+def test_main_checker_check_dispatches_to_its_subcheckers():
+    """`MainChecker.check()` 走统一接口，但真正干活的是子检查器。"""
+    seen: list[str] = []
+
+    class Sub(lspe.MacroChecker):
+        desc = lspe.EngineDesc("XS1", 2, "Evidence", triggers=("calls",))
+
+        def check(self, ctx):
+            seen.append("XS1")
+            return [lspe.Claim("s1", "InBounds",
+                               (lspe.EvidenceNode("Syntactic", "x"),))]
+
+    sdk = lspe.LspeSdk((Sub(),))
+    facts = lspe.UnitFacts(flags=frozenset({"calls"}))
+    out = sdk.check(lspe.Ctx([], "m", facts))
+    assert seen == ["XS1"], seen
+    assert any(isinstance(x, lspe.Claim) for x in out), out
+
+
+@test
+def test_sdk_surface_is_frozen_and_narrow():
+    """公开面固定为 `lspe-sdk/1.0`；内置引擎不在这个面上。"""
+    assert lspe.LSPE_SDK_VERSION == "lspe-sdk/1.0"
+    for name in ("LspeSdk", "Scheduler", "MainChecker", "main_checker",
+                 "MacroChecker", "EngineDesc", "Claim", "EvidenceNode",
+                 "AdvisoryQuestion", "Ctx", "UnitFacts", "Plan", "HostResult",
+                 "PluginChecker", "audit", "AuditResult", "plan_for_tokens",
+                 "plan_lines"):
+        assert name in lspe.SDK_SURFACE, name
+        assert hasattr(lspe, name), name
+    assert "E9Domain" not in lspe.SDK_SURFACE
+    assert "LspeHost" not in lspe.SDK_SURFACE
+
+
+@test
+def test_compiler_reaches_lspe_only_through_the_sdk():
+    """编译器只有一条 LSPE 入口：SDK 的 `audit()`；不再自己拼计划与普查。"""
+    src = (ROOT / "tools" / "lomentc.py").read_text(encoding="utf-8")
+    assert "lspe.audit(" in src
+    assert "lspe.main_checker().audit(" not in src
+    assert "lspe.plan_for_tokens(" not in src
+    assert "lspe.census(" not in src
+    assert "lspe.effects_analyze(" not in src
+
+
+@test
+def test_selfhost_has_the_same_scheduler_outside_the_main_checker():
+    """自举侧：`lspe_sched` 是 SDK 的调度器，`lspe_main` 是唯一主检查器。"""
+    src = (ROOT / "loment" / "lspe" / "lspe.lomt").read_text(encoding="utf-8")
+    assert "pub fn lspe_sched(" in src, "自举侧没有 SDK 调度器"
+    assert "pub fn lspe_main(" in src, "自举侧没有主检查器"
+    assert "\nfn lspe_engine(" in src, "引擎子检查器仍然从模块外可见"
+    assert "\nfn lspe_domain(" in src, "域子检查器仍然从模块外可见"
+    sched = src[src.index("pub fn lspe_sched("):src.index("pub fn lspe_main(")]
+    main = src[src.index("pub fn lspe_main("):]
+    assert "lspe_engine(" not in sched and "lspe_domain(" not in sched, \
+        "调度器自己跑了子检查器"
+    assert "lspe_engine(" in main and "lspe_domain(" in main, \
+        "主检查器没有派发子检查器"
+    # 编译器只调 SDK 调度器与主检查器；注释里的旧名字不算。
+    pot = (ROOT / "loment" / "selfhost" / "potato.lomt").read_text(encoding="utf-8")
+    code = "\n".join(line.split("//", 1)[0] for line in pot.splitlines())
+    assert "lspe_sched(" in code and "lspe_main(" in code
+    assert "lspe_engine(" not in code and "lspe_domain(" not in code, \
+        "编译器仍然绕过主检查器直接调子检查器"
+    assert code.index("lspe_sched(") < code.index("lspe_main("), \
+        "调度器必须在主检查器之前算计划"
 
 
 def main() -> int:

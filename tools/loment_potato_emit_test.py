@@ -380,6 +380,58 @@ def test_flomtc_true_changes_nothing_but_the_path():
 
 
 @test
+def test_flomtc_true_leaves_every_covered_example_byte_identical():
+    """**全部覆盖语料**上，`flomtc_true` 的 Potato 与 IR 与默认档逐字节相同。
+
+    前一条只钉一份小探针；这一条把 `COVERED` 的每一份单文件示例都过一遍 ——
+    泛型、能力域、聚合、字符串、命令单元都在里面，快路径的每一处分支都会碰到。
+
+    开关写在 **`module` 那一行**、不新增行：IR 的临时名带行号，插一行会让它们整体
+    位移（那是 IR 的既有性质，与 flomtc 无关）。所以这一条比较的是"路径不同、字节
+    相同"，不带探针自身的扰动。
+    """
+    import re
+
+    import potato_from
+
+    orig = potato_from.front_door
+
+    def emit_one(rel: str, on: bool):
+        path = (ROOT / rel).resolve()
+
+        def patched(p):
+            fu = orig(p)
+            if on and Path(p).resolve() == path:
+                m = re.search(r"^(module[^\n]*)\n", fu.source, re.M)
+                if m:
+                    fu.source = (fu.source[:m.start()] + m.group(1)
+                                 + " choose flomtc_true\n" + fu.source[m.end():])
+            return fu
+
+        potato_from.front_door = patched
+        try:
+            mod, deps = lomentc.load_unit(path, ROOT)
+            if lomentc.check(mod, deps=deps):
+                return None
+            return (lomentc.emit_potato(mod, ROOT, deps),
+                    lomentc.emit_llvm(mod, ROOT, deps))
+        finally:
+            potato_from.front_door = orig
+
+    same = 0
+    for name in COVERED:
+        rel = f"loment/examples/{name}"
+        a = emit_one(rel, False)
+        if a is None:
+            continue
+        b = emit_one(rel, True)
+        assert b == a, f"{name}: flomtc_true 改变了产物"
+        same += 1
+    assert same >= 30, f"只比到 {same} 份示例 —— COVERED 缩水了，先解释再改这条"
+    print(f"      {same} 份示例：flomtc_false / flomtc_true 的 Potato 与 IR 逐字节相同")
+
+
+@test
 def test_every_example_is_decided():
     """`loment/examples` 下**每一份**都得有一个说法：覆盖 / 拒绝 / 跳过。
 
@@ -619,6 +671,33 @@ def test_capacity_bounds_fail_closed_by_name():
         assert "16 fields" in r.stderr, \
             f"拒绝了，但没点名是哪张表: {r.stderr[-300:]}"
     print("      PT_EMAX / PT_GLRMX / PT_FMAX：越界三份都点名拒")
+
+
+@test
+def test_alpha_block_scope_potato_matches_reference():
+    """`docs/353`：alpha 语料的 Potato 与参考逐字节同（含 E12 `ReclaimScoped`）。
+
+    这一条走**整条自举链**：驱动认 `choose write grammar tur2027.1Alpha`、checker 过、
+    codegen 发 IR、`potato.lomt` 的 `pt_reclaim_census` 数站点。参考侧是
+    `lomentc.load_unit` + `emit_potato`。
+    """
+    stage1 = _stage1()
+    if stage1 is None:
+        return
+    for rel in ("loment/selfhost/ir_scope.lomt",
+                "loment/selfhost/ir_scope_gc.lomt"):
+        want = _want(rel)
+        r = _run(stage1, rel)
+        assert r.returncode == 0, f"{rel}: stage1 退出码 {r.returncode}，stderr={r.stderr[-400:]}"
+        got = r.stdout
+        if got != want:
+            g, w = got.splitlines(), want.splitlines()
+            i = next((k for k in range(min(len(g), len(w))) if g[k] != w[k]),
+                     min(len(g), len(w)))
+            raise AssertionError(
+                f"{rel}: 第 {i + 1} 行不同\n  盘: {g[i] if i < len(g) else '<eof>'!r}\n"
+                f"  参考: {w[i] if i < len(w) else '<eof>'!r}")
+    print("      alpha 语料：自举 Potato 与参考逐字节一致（含 E12 站点）")
 
 
 def main() -> int:

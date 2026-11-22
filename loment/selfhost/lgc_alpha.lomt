@@ -1,0 +1,27 @@
+choose write grammar tur2027.1Alpha
+module lgc_alpha
+choose runtime
+
+// `docs/353` §4 + `docs/309`：块作用域版次里 `lgc` 的三种窗口各自是一层词法作用域。
+// 三个同名 `total` 分属三层，外层那个在窗口结束后必须还是 0 号线上的槽。
+// 这一份同时钉住自举侧的一处版本判据：`lgc` 从 Tur 2026.3 起是关键字，alpha（3）
+// 不是"旧版次"，三处 `== 2` 都曾把 alpha 漏成普通标识符。
+
+fn make(n: u32) -> u32 {
+    let total: u32 = 0;
+    lgc start(10ms) {
+        let total: u32 = 1;
+        total = total + 1;
+        lgc start {
+            let total: u32 = 2;
+            total = total + 2;
+        }
+        total = total + 4;
+    }
+    lgc end {
+        let total: u32 = 3;
+        total = total + 3;
+    }
+    total = total + 8;
+    return total + n;
+}

@@ -39,6 +39,7 @@ import contextlib
 import importlib
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -1193,6 +1194,40 @@ def test_class_languages_report_unrecognised_toplevel_content():
         left4 = [x for x in rep4.skipped if "没有对应的规则" in x["why"]]
         assert not left4, f"{lang}: shell rows were reported as leftovers: {left4}"
     print("      Java / C#：use 与写坏的成员都报得出来；正常的类与枚举不误报")
+
+
+@test
+def test_class_language_out_of_subset_constructs_are_named():
+    """`#844/#846/#847/#848/#849/#853/#854/#859/#860`：九种要**点名**，不能只说"不收"。
+
+    这一批共同的形状：拒绝是对的，**话不对**。顶层 `interface` 原先说"只认 class / enum"
+    （没说是 interface），`package` / `import` 原先**静默收下**（依赖包的单元照样编得过），
+    重载原先在下游报一句没有位置的"函数 f 重复"。判据逐一钉住**那一句里有没有那个词**。
+    """
+    NL = chr(10)
+    cases = [
+        ("public interface I { int g(); }", "顶层`interface`"),
+        ("public record R(int x) { }", "顶层`record`"),
+        ("public sealed class S permits T { }", "顶层`sealed`"),
+        ("package p;" + NL + NL + "public class C { }", "不支持`package`"),
+        ("import java.util.List;" + NL + NL + "public class C { }", "不支持`import`"),
+        ("public class C {" + NL + "    static { }" + NL + "}", "静态初始化块"),
+        ("public class C {" + NL + "    @Deprecated int x;" + NL + "}", "注解"),
+        ("public class C {" + NL + "    record R(int x) { }" + NL + "}", "`record` 类型"),
+        # `#852`：`int... xs` 是可变参数，不是"类型无映射"
+        ("public class C {" + NL + "    static int f(int... xs) { return 0; }" + NL + "}",
+         "可变参数"),
+        ("public class C {" + NL + "    static int f() { return 1; }" + NL
+         + "    static int f(int a) { return a; }" + NL + "}", "与前面同名的函数重复"),
+    ]
+    for src, needle in cases:
+        _doc, rep = potato_from.from_java(src, "t.x", "strict")
+        hit = [x for x in rep.skipped if needle in x["why"]]
+        assert hit, f"`{needle}` 没有点名: {rep.skipped}"
+        # 重载那条要带**行号**（原先下游那句没有文件 / 行 / 列）
+        if "重复" in needle:
+            assert re.search(r"第 \d+ 行", hit[0]["why"]), hit[0]["why"]
+    print(f"      {len(cases)} 种子集外构造各自点名（重载那条还带行号）")
 
 
 @test

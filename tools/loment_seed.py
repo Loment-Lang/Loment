@@ -185,12 +185,12 @@ def bootstrap() -> int:
     else:
         print("[ERR] 既无 wsl 也无 sh")
         return 2
-    # 900 -> 1800（2026-11-09）：种子到 5.63 MB 之后，三阶段定点在 CI 的
-    # ubuntu runner 上撞了 15 分钟。这里有**两个**慢步骤（stage1 与 stage2 各编一遍
-    # driver.lomt），而它们是定点判据本身，不能抽掉。1800 是**存活护栏**，不是性能
-    # 指标：真挂死仍然会在半小时内报出来。本机同树实测 5.71 MB / 7 分 14 秒（434s），
-    # 与"CI 比本机慢一倍多"对得上 —— 抬上限是修那个过时的数，不是掩盖变慢。
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800,
+    # 900 -> 1800（2026-11-09）-> 3600（2026-11-20）：种子到 5.63 MB 之后三阶段定点
+    # 在 CI 上撞了 15 分钟；现在 7.21 MB，负载高时单次超过 1800 秒（PR #1693 实测
+    # 1830.7s 超时；半小时前 main 同一判据 16 分钟过）。这里有**两个**慢步骤
+    # （stage1 与 stage2 各编一遍 driver.lomt），而它们是定点判据本身，不能抽掉。
+    # 3600 是**存活护栏**，不是性能指标：真挂死仍会在一小时内报出来。
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
                        shell=False, cwd=str(ROOT))
     sys.stdout.write(r.stdout)
     if r.returncode:

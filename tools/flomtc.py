@@ -27,11 +27,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+#: **冷启动口径**（`docs/350` §2）：IR 缓存打开时第二遍起 IR 只花 ~10 ms，
+#: best-of-3 会把它当成常态。默认关掉；`bench --cache` 才量热构建。
+os.environ.setdefault("LOMENT_CACHE", "off")
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "tools") not in sys.path:
@@ -133,6 +138,8 @@ def print_table(result: dict) -> None:
     print(f"target {result['target_ms']:.0f} ms  gap {result['gap']:.2f}x")
     print(f"IR {b['ir_bytes']} B  ELF {b['elf_bytes']} B  "
           f"Potato {b['potato_bytes']} B  errors {b['errors']}")
+    cache = os.environ.get("LOMENT_CACHE", "").strip().lower()
+    print(f"cold: {'no (IR cache on)' if cache not in ('off', '0', 'no') else 'yes (IR cache off)'}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--runs", type=int, default=3)
     b.add_argument("--target-ms", type=float, default=1000.0)
     b.add_argument("--flomtc", choices=("off", "on", "both"), default="both")
+    b.add_argument("--cache", action="store_true",
+                   help="allow the IR cache (default: cold, LOMENT_CACHE=off)")
     b.add_argument("--json", action="store_true")
     b.add_argument("--keep", action="store_true")
 
@@ -154,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--flomtc", action="store_true")
 
     args = ap.parse_args(argv)
+    if getattr(args, "cache", False):
+        os.environ["LOMENT_CACHE"] = "on"
 
     if args.cmd == "gen":
         lines = gen_corpus(args.out, args.functions, args.flomtc)

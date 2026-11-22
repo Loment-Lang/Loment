@@ -1,6 +1,6 @@
 # 341 · 代数效应与效应处理器：把"向谁求助"变成可检查的行
 
-> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账 + A3a 参考侧尾续处理器已落地**（2026-11-17）· 上游: `docs/262`（LSPE）·
+> 状态: **A0/A1 报告面 + A2a 参考前端 + A2b 自举镜像 + A2c Potato 台账 + A3a 参考侧尾续处理器 + A3b-1 臂捕获 + A3b-2 abort 已落地**（2026-11-19）· 上游: `docs/262`（LSPE）·
 > `docs/306`–`308`（E9 域检查器）· `docs/317`（E10 借用检查器）· `docs/286`（六点一空间）·
 > `docs/219`（链接边界）· `standard/LLS.md` §21–§25
 > 一句话: 在 LSPE 里加**第十一个引擎**，把"这段代码会向谁求助"变成函数签名上的
@@ -471,28 +471,57 @@ effect MultiShot requires copy;   // 捕获集必须全部 Copy
 * 行写进产物元数据（Potato 的字段，A3 定名），链接期比较有限集合；
 * `lom/*.lom` 一个字节都不动 —— 这与 `docs/306` §10 的"第一阶段不需要动 L0"同形。
 
-### 7.7 A3a 的降级：内联，而不是运行期机制
+### 7.7 A3a/A3b 的降级：内联，而不是运行期机制
 
-A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的那一读法：
+A3 的第一刀（2026-11-17）只做**参考侧**，语义取 §7.3 最窄的那一读法；A3b 把臂对
+外层局部的**只读捕获**接上（2026-11-19）：
 
-| 维度 | A3a 的取值 |
+| 维度 | 取值 |
 |---|---|
 | 处理器的作用域 | **词法**：`perform` 必须被同一函数里外层的 `handle` 覆盖 |
-| 续延 | **无**：每个臂恰好一次 `resume`，且在块尾（尾续） |
-| abort | 暂不支持（A3b） |
-| 捕获 | **闭臂**：臂只许引用形参与模块级名字，不捕获处理器外的局部（A3b） |
+| 续延 | **无**：`resume` 臂恰好一次、在块尾（尾续） |
+| abort | 臂以 `return e;` 收尾：整个 `handle` 取 `e`，体里剩下的语句跳过 |
+| 捕获 | **只读、直接引用**：臂引用的外层局部按名字直接用；新鲜性约束挡住遮蔽 |
 | 位置 | `handle` 只作 `let` 初值；`perform` 只作整条语句或 `let` 初值 |
 | 臂的形状 | 平铺语句（`let` / 赋值 / 表达式），不钻进 if/while/match |
 
-降级就是**内联**：`perform E.op(a…)` 换成 `let p… = a…; <臂体>; let r = <resume
-的值>;`，`handle` 换成它的体。`resume(e)` 不是运行期对象，它就是"臂的值"。
-降级发生在 `check()` 里、`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
+降级就是**内联**：`perform E.op(a…)` 换成 `let <臂形参> = 实参…; <臂体>`，resume
+的值直接落到绑定目标上，`handle` 换成它的体。`resume(e)` 不是运行期对象，它就是
+"臂的值"。**不造合成名**（§7.8）：臂用自己的形参名，捕获就是直接引用外层局部；
+代价是**新鲜性约束** —— 臂的形参 / 局部不能与函数里的局部同名，臂引用的外层局部
+也不能被 handle 体里的同名局部遮住，违反就点名拒。有 abort 臂时，整个 handle 体
+包一层 `while true { … n = 尾值; break; }`：abort 臂在 perform 处写
+`n = 返回值` 再 `break`，体里剩下的语句被跳过。降级发生在 `check()` 里、
+`prepare()` **之前** —— 检查、单态化、两只发射器都看不见
 `Handle` / `Perform` / `Resume`。这与 `IfExpr` / `MatchExpr` 的反糖同一条路数。
 
 这条路径在 `no_runtime` + `gc_manual` 下可用：没有闭包、没有堆、没有证据记录。
-代价写在明面上：跨函数的 `perform`（需要证据向量）、abort 的非局部退出、臂对局部
-变量的捕获，都要 A3b/A4。**A3b 还要做自举侧的 token 级镜像**，在那之前自举编译器
-对任何 `perform` / `handle` / `resume` 仍报 E0217。
+代价写在明面上：跨函数的 `perform`（需要证据向量）留给 A4；捕获是**只读**的
+（写回原变量没有意义），写捕获会点名拒。**A3b 还要做自举侧的 token 级镜像**，
+在那之前自举编译器对任何 `perform` / `handle` / `resume` 仍报 E0217。
+
+### 7.8 A3b-3 的自举镜像：先把降级改成"无合成名"
+
+自举侧的代码生成是 **token 驱动**的：标识符就是源里的字节，不能凭空造一个
+`__eff_p1_0`（没有源文本可指）。所以镜像的第一步**不在自举侧**，而是把参考侧的
+降级改成一种"只用源里已有的 token"的形状：
+
+1. **去掉 `__eff_r` 临时量**：`let x: T = perform …` 直接 `x = <resume 的值>;`，
+   语句位置的 perform 直接 `<resume 的值>;`。类型检查由 `x` 的标注承担。
+2. **不重命名臂形参与臂内 `let`**：直接用源里的名字。代价是一条**新鲜性约束**：
+   臂的形参 / `let` 名不能与 handle 外的局部同名（否则内联会改绑）。
+3. **不复制捕获**：臂直接引用外层名字。代价是同样一条约束 —— handle 体里声明的
+   局部不能与臂的**自由名**同名（否则遮蔽会改绑），比 A3b-1 的"按值副本"更严。
+4. abort 的 `while true` / `break` / 赋值都是现成的 token。
+
+这样整个降级就只剩**删除 + 拼接源 token**（`copy_tok` 那种），自举侧不需要文本
+生成器、不需要把合成名写进单元缓冲；两侧仍能逐字节同产物。代价是捕获从"按值副本"
+退成"新鲜性约束下的直接引用"——语义更窄，但不再有遮蔽歧义。
+
+**参考侧的这一刀已经落地**（2026-11-19）：IR 里的 `__eff_*` 临时名整片消失，
+A3a/A3b 的判据改成"与手写的无临时量版本逐字节相同"。剩下的是自举侧的重写器与
+种子（issue #1691）。**在它完成之前，自举编译器对 `perform` / `handle` / `resume`
+仍报 E0217。**
 
 ---
 
@@ -701,10 +730,29 @@ A2c 接上（见 §10.6）。
 | 内容 | 位置 | 判据 |
 |---|---|---|
 | 尾续处理器的降级（内联；无续延对象） | `tools/lomentc.py` 的 `_lower_effects` / `_eff_lower_stmts` | `test_tail_resumptive_handle_lowers_to_plain_statements` |
-| A3a 的边界逐条点名（闭臂 / 尾续 / 平铺 / 词法覆盖） | 同上；诊断落 `loment_diag.RULES`（E023 / E002 / E013 / E001） | `test_perform_parses_and_needs_a_lexical_handler`、`test_a3a_rejects_captures_and_non_tail_arms` |
+| A3a 的边界逐条点名（尾续 / 平铺 / 词法覆盖） | 同上；诊断落 `loment_diag`（E0228–E0231） | `test_perform_parses_and_needs_a_lexical_handler`、`test_a3a_rejects_non_tail_and_incomplete_arms` |
 | **运行**判据：perform 的两种语句位置、参数绑定、resume 的值 | `loment_elf_test` 的 `test_a_tail_resumptive_handle_runs`（参考 IR + 两只链接器） | 程序算出 82 并打印；镜像产物逐字节相同 |
 | 规则对拍不再把 `perform` 当 E0217 | `loment_rule_parity` 的 `_AHEAD`（自举侧仍是 E0217，参考侧不再是） | 预算 149 -> 148，AHEAD 关系变了就红 |
 | **自举侧** | 未做（A3b）：仍报 E0217 | 对拍里那一条 AHEAD 就是它的提醒 |
+
+### 10.8 A3b 捕获落地记录（2026-11-19，参考侧）
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| 臂捕获外层局部：**只读、直接引用**（2026-11-19 起无合成名，§7.8） | `tools/lomentc.py` 的 `_eff_arm_free` / `_eff_check_arm` | `test_arm_capture_is_direct_and_shadowing_is_rejected` |
+| 写捕获点名拒（含 `a[i] = …` 经捕获）；同名遮蔽与新鲜性冲突点名拒 | `_eff_check_arm` | 同上 |
+| **运行**判据：臂直接读外层 `base` | `loment_elf_test` 的 `test_a_tail_resumptive_handle_runs` 的 `capture` 例 | 程序打印 42；镜像产物逐字节相同 |
+| abort / 自举镜像 / 行元数据 | 未做 | 见 §11 的 A3b 余项 |
+
+### 10.9 A3b-2 abort 落地记录（2026-11-19，参考侧）
+
+| 内容 | 位置 | 判据 |
+|---|---|---|
+| 不 `resume` 的臂：以 `return e;` 收尾，整个 `handle` 取 `e` | `_eff_check_arm`（返回 `"abort"`）、`_eff_arm_inline` | `test_abort_arm_skips_the_rest_of_the_handle_body` |
+| 非局部退出：handle 体包 `while true`，abort 写 `n` 后 `break` | `_eff_lower_handle` | 同上（结构断言） |
+| **运行**判据：`get` resume、`stop` abort、abort 臂读捕获的 `k` | `loment_elf_test` 的 `abort` 例 | 打印 9；两只链接器产物相同 |
+| 裸 `return;` 不能当 abort | `_eff_check_arm` | 同上 |
+| 自举镜像 / 行元数据 | 未做（A3b-3） | — |
 
 ---
 
@@ -720,7 +768,9 @@ A2c 接上（见 §10.6）。
 | **A2b**（已完成） | **自举侧镜像**（`switches` / `checker` + 种子），并与参考逐字节对拍 | 同一份源两侧同判 | 两侧同语法面 |
 | **A2c**（已完成） | E11 站点进 Potato 台账（两侧同计数） | `test_lspe_effect_sites_match_on_both_implementations` | `lspe state` 列得出 |
 | **A3a**（已完成） | **参考侧**尾续处理器：闭臂、恰好一次尾 `resume`、词法处理器；内联降级（§7.7） | `test_a_tail_resumptive_handle_runs`（跑出 82）；反例点名拒 | `no_runtime` 下可用 |
-| **A3b** | 自举侧镜像 + 臂捕获 + abort + 行与产物元数据 | 同一份效应源两侧同产物 | 两侧同语义 |
+| **A3b-1**（已完成） | 臂捕获（只读、按值、handle 入口） | `test_arm_capture_is_direct_and_shadowing_is_rejected` + 运行例 | 真实处理器可读外层状态 |
+| **A3b-2**（已完成） | abort（不 resume 的臂）：`return e;` + `while true`/`break` | `test_abort_arm_skips_the_rest_of_the_handle_body` + 运行例 | 非局部退出可用 |
+| **A3b-3** | 自举侧镜像 + 行与产物元数据 | 同一份效应源两侧同产物 | 两侧同语义 |
 | **A4** | 一般处理器的 CPS + 捕获回收 | `no_gc` 反例 / `gc_auto` 正例 | Q022 有答案 |
 | **A5** | `MultiShot` + `Copy` 捕获集 | 多射反例在 A4 下红、A5 下按规则收/拒 | 默认仍是 one-shot |
 

@@ -711,6 +711,20 @@ class Parser:
         if t[1] in self.d.kw:
             raise Unsupported(f"第 {t[2]} 行: 这里不支持 `{t[1]}`")
         name, line = self.ident()
+        # `#836`：`List<Integer> xs = …` —— 别名后面紧跟 `<` 时，原先报
+        # "`List` 后面期望 `=` 或 `(`"，而真正的原因是**泛型类型**（类级别的 `class C<T>`
+        # 会被收下，用户在这之前没收到过任何警告）。
+        # 只在真有尖括号泛型的那两门里说这句：C 的 `x < y;` 是合法语句（比较结果丢掉），
+        # 那样报"泛型类型"是**指错原因**。
+        if self.at("<") and self.d.name in ("java", "csharp"):
+            raise Unsupported(
+                f"第 {line} 行: 不支持泛型类型 `{name}<…>` —— Stage A 只做整数标量，"
+                f"泛型参数没有对应的表示")
+        # `#835`：`outer: for (…)` —— 标签不是赋值。原先报 "`outer` 后面期望 `=` 或 `(`"，
+        # 指不到"这一门没有 label / 带标签的 break/continue"。
+        if self.at(":"):
+            raise Unsupported(
+                f"第 {line} 行: 不支持标签语句（`{name}:`）与带标签的 `break` / `continue`")
         if self.at("="):
             self.i += 1
             e = self.expr()

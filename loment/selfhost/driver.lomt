@@ -902,13 +902,22 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                           + streq(ptr_add(buf, al), ae - al, "tur2")
                           + streq(ptr_add(buf, al), ae - al, "tur2026.2")
                           + streq(ptr_add(buf, al), ae - al, "tur3")
-                          + streq(ptr_add(buf, al), ae - al, "tur2026.3");
+                          + streq(ptr_add(buf, al), ae - al, "tur2026.3")
+                          + streq(ptr_add(buf, al), ae - al, "tur2027.1Alpha")
+                          + streq(ptr_add(buf, al), ae - al, "tur2027.1alpha")
+                          + streq(ptr_add(buf, al), ae - al, "2027.1Alpha")
+                          + streq(ptr_add(buf, al), ae - al, "2027.1alpha");
             if saw_module == 0 && seen == 0 && nat != 0 {
                 // **先读版次与拼法，再抹**：抹成空白之后别名就没了。
                 let is2: u32 = streq(ptr_add(buf, al), ae - al, "tur2")
                              + streq(ptr_add(buf, al), ae - al, "tur2026.2");
                 let is3: u32 = streq(ptr_add(buf, al), ae - al, "tur3")
                              + streq(ptr_add(buf, al), ae - al, "tur2026.3");
+                // `tur2027.1Alpha`（块作用域，显式选用的 alpha 版次）。
+                let is4: u32 = streq(ptr_add(buf, al), ae - al, "tur2027.1Alpha")
+                             + streq(ptr_add(buf, al), ae - al, "tur2027.1alpha");
+                let is4b: u32 = streq(ptr_add(buf, al), ae - al, "2027.1Alpha")
+                              + streq(ptr_add(buf, al), ae - al, "2027.1alpha");
                 let isl: u32 = streq(ptr_add(buf, al), ae - al, "loment");
                 let ist: u32 = streq(ptr_add(buf, al), ae - al, "tur");
                 let is1a: u32 = streq(ptr_add(buf, al), ae - al, "tur1");
@@ -926,7 +935,9 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                 seen = 1;
                 // **这份文件声明的版次**（含 `loment` = 默认）。先记下来，
                 // 碰撞闸之后要拿它跟生效版次比（`load_file`）。
-                if is3 != 0 {
+                if (is4 + is4b) != 0 {
+                    store32(scr, FPROF_OFF, 3);
+                } else if is3 != 0 {
                     store32(scr, FPROF_OFF, 2);
                 } else if is2 != 0 {
                     store32(scr, FPROF_OFF, 1);
@@ -940,7 +951,9 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                     // `loment` 与没声明都不写 PROF，留在初值上。显式写了旧版次的
                     // 才往下压 —— `tur` / `tur1` / `tur2026.1` 必须显式压回 0，
                     // 因为缺省已经不是 Tur 1 了。
-                    if is3 != 0 {
+                    if (is4 + is4b) != 0 {
+                        store32(scr, PROF_OFF, 3);      // tur2027.1Alpha
+                    } else if is3 != 0 {
                         store32(scr, PROF_OFF, 2);      // tur3 / tur2026.3
                     } else if is2 != 0 {
                         store32(scr, PROF_OFF, 1);      // tur2 / tur2026.2
@@ -948,7 +961,11 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                         store32(scr, PROF_OFF, 0);      // tur / tur1 / tur2026.1
                     }
                     // 拼法代号：编译期提示要把它展开成规范名（docs/296 §1.1）。
-                    if isl != 0 {
+                    if is4 != 0 {
+                        store32(scr, DECLK_OFF, 9);     // tur2027.1Alpha
+                    } else if is4b != 0 {
+                        store32(scr, DECLK_OFF, 10);    // 2027.1Alpha
+                    } else if isl != 0 {
                         store32(scr, DECLK_OFF, 1);
                     } else if ist != 0 {
                         store32(scr, DECLK_OFF, 2);
@@ -967,7 +984,7 @@ fn strip_grammar_decl(buf: ptr, n: u32, scr: ptr, file: ptr, fnam: u32, root: u3
                     }
                 }
             } else {
-                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`, `tur3`, `tur2026.3`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
+                let dm: str = "this source's `choose write grammar` is one the self-hosted compiler does not take -- it takes `choose write grammar loment` (or `tur`, `tur1`, `tur2`, `tur2026.1`, `tur2026.2`, `tur3`, `tur2026.3`, `tur2027.1Alpha`) only, written before `module` and once. Other spellings wait on the translator having a Loment twin. Run `loment skill --print` for the grammar rules, or compile this file with a toolchain that has the translator.";
                 wdiag_file(diagfd(scr), scr, file, fnam, 23, str_ptr(dm), str_len(dm));
                 return fail(dm);
             }
@@ -3080,7 +3097,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     }
     // **字符串插值**（`docs/341`）：也是"读法"，也**在 lex 之前**在字节上改
     // （`f"a{x}b"` 不是语法构造）。版次同样是**整程序**属性：根单元写 2026.3 就都改。
-    if load32(scr, PROF_OFF) == 2 {
+    if load32(scr, PROF_OFF) >= 2 {
         nb = interp_rewrite(slot, nb, scr, path, n);
     }
     // 先把本文件的 `use` 全收下来 (递归会复用 toks, 不能一边扫一边递归)
@@ -3880,6 +3897,10 @@ fn _start() -> u32 {
             wstr(2, "loment: grammar tur2026.2 -> tur2026.2 (Tur 2)\n");
         } else if pk == 7 {
             wstr(2, "loment: grammar tur3 -> tur2026.3 (Tur 2026.3)\n");
+        } else if pk == 9 {
+            wstr(2, "loment: grammar tur2027.1Alpha -> tur2027.1Alpha (Tur 2027.1Alpha)\n");
+        } else if pk == 10 {
+            wstr(2, "loment: grammar 2027.1Alpha -> tur2027.1Alpha (Tur 2027.1Alpha)\n");
         } else {
             wstr(2, "loment: grammar tur2026.3 -> tur2026.3 (Tur 2026.3)\n");
         }
@@ -4075,7 +4096,8 @@ fn _start() -> u32 {
             return fail(dm);
         }
         ctoks = dv as ptr;
-        let _nc: u32 = desugar_lspe_pass(unit, toks2, 0, nt, ctoks, 0);
+        let _nc: u32 = desugar_lspe_pass(unit, toks2, 0, nt, ctoks, 0,
+                                         load32(scr, PROF_OFF));
     }
     // 先检查再发射: 有诊断就报到 stderr 并以 1 退出, 否则才发 IR。
     // 诊断格式与 p8 的 C 夹具同源: `<码>@<token>:<行> <片段>` 一行一条。
@@ -4289,7 +4311,8 @@ fn _start() -> u32 {
             return fail(dm);
         }
         let pn: u32 = potato_emit(unit, toks2, nt, sw, ir, lvl,
-                                  load32(scr, PROF_OFF), effc);
+                                  load32(scr, PROF_OFF), effc,
+                                  sw_lms_bits(unit, sw));
         if pn == 0 {
             return die(1);
         }
@@ -4320,7 +4343,8 @@ fn _start() -> u32 {
     let cg: ptr = cgv as ptr;
     // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
     let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
-                             sw_state_named(unit, sw, "domain_clock_explicit"));
+                             sw_state_named(unit, sw, "domain_clock_explicit"),
+                             sw_lms_bits(unit, sw));
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。

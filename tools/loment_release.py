@@ -66,8 +66,8 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # **工具链本身一个字没动**（那八个二进制与 0.1.4.5 逐字节相同），所以这是补丁不是新版。
 # tag = `v0.1.4.5-quickfix`（`release.yml` 只对 `-pre` 结尾的 tag 整条跳过；这一版带产物，
 # 与那种"只发通知"的宣告版不是一回事）。
-RELEASE = "0.1.5.1"
-RELEASE_NAME = "0.1.5.1"  # 人读显示名 (发行包/文档用同一个真源)
+RELEASE = "0.1.6"
+RELEASE_NAME = "0.1.6"  # 人读显示名 (发行包/文档用同一个真源)
 
 # 报错器 (`lomenterr`) **自己的版本号** —— 与语言版本是**两条线** (2026-10-13 用户定)。
 #
@@ -99,7 +99,8 @@ GLOBS = [
     "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",
     "tools/potato_llm_arm.py",
-    "tools/potato_assert.py", "tools/loment.py", "tools/flomtc.py", "tools/lomfmt.py",
+    "tools/potato_assert.py", "tools/loment.py", "tools/flomtc.py",
+    "tools/loment_race.py", "tools/lomfmt.py",
     # 修改件 (`.lomf`, docs/257): 套用器 + 树里那些补丁。**补丁本身也进清单** ——
     # 它是"这一笔改了什么"的记录, 丢了就等于那一笔无从复核 (docs/179 §7.3 那条)。
     "tools/lomf.py", "loment/patches/*.lomf", "tools/lomdoc.py",
@@ -208,6 +209,9 @@ GLOBS = [
     # `lms` 这一维与七级的判据（`docs/253` §9 / `docs/270`）。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
     "tools/loment_lms_test.py",
+    # 产物公证人（`docs/361`）：独立验证器 + 判据；LMS 站点普查与桥梁判据（`docs/363`）。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/lnotary_test.py", "tools/lms_sites.py", "tools/lms_bridge_test.py",
     # 渠道常量（`docs/231` §2.2）：参考实现侧那份恒为 dev；**自举侧那一份在
     # `loment/selfhost/checker.lomt` 里**（一个常量一行），打包期由 `loment_dist.py` 换掉。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
@@ -435,6 +439,9 @@ GLOBS = [
     "tools/loment_hotline_test.py",
     # 投影树 → 热更新件（`#1155`）：编两份 hotswap 档，拼装载件。**同位置**。
     "tools/loment_hotart.py", "tools/loment_hotart_test.py",
+    # 工具链代际载荷（原生更新器）：从投影树编全部工具，裸 Ed25519 签名。**同位置**。
+    "tools/loment_hotpack.py", "tools/loment_hotpack_test.py",
+    "loment/hotswap/release-key.ed25519",
     # 稳定性模拟（`#1152` 追加）：一个进程连着换六次、两槽轮流。**同位置**。
     "tools/loment_hotstress_test.py",
     # 命令行与模拟器（`#1155`）：`loment hotupdate` 与假 Pre-Release 的搭建。**同位置**。
@@ -509,6 +516,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--checksums", metavar="PATH", help="写 SHA256SUMS 风格清单 (M88)")
     a = ap.parse_args(argv)
+    # `#1784`：写与核对是两件事 —— 一起给就**拒掉**。原先两个写分支先返回，
+    # `--check` 被接受却从没跑过，调用方以为核过了（与自举侧 `lomrel.lomt` 同一句）。
+    if a.check and (a.emit is not None or a.checksums):
+        print("[ERR] --check is exclusive with --emit / --checksums "
+              "(a write is not a verification)", file=sys.stderr)
+        return 2
     want = build()
     if a.checksums:
         # 显式 LF: 校验清单会被 sha256sum -c 之类逐行解析, CRLF 会让文件名带上 \r

@@ -348,11 +348,18 @@ def _st(s) -> str:
     if n == "While":
         body = "".join(" " + _st(x) for x in s.body)
         return f"(while {_ex(s.cond)} ({body}))"
+    if n == "Block":
+        body = "".join(" " + _st(x) for x in s.body)
+        return f"(block ({body}))"
     if n == "For":
         body = "".join(" " + _st(x) for x in s.body)
         return f"(for {s.var} {_ex(s.lo)} {_ex(s.hi)} ({body}))"
     if n == "Guard":
         return f"(guard {s.cap} {_ex(s.expr)})"
+    if n == "Break":
+        return "(break)"
+    if n == "Continue":
+        return "(continue)"
     if n == "Match":
         # `if let` 也走这里 (参考实现把它反糖成两臂 Match: 命中臂 + 通配臂)
         return (f"(match {_ex(s.subject)}"
@@ -815,7 +822,8 @@ def _prof_of_text(text: str) -> int:
     2 = tur2026.3）。**与 driver.strip_grammar_decl 同一张别名表**：夹具绕过了装载器，
     所以它得自己把版次交给 `emit_module` / `check_arena` 的最后一个实参。"""
     prof = {"tur3": 2, "tur2026.3": 2, "tur2": 1, "tur2026.2": 1,
-            "tur": 0, "tur1": 0, "tur2026.1": 0, "loment": 2}
+            "tur": 0, "tur1": 0, "tur2026.1": 0, "loment": 2,
+            "tur2027.1alpha": 3, "2027.1alpha": 3}
     for line in text.split("\n"):
         h = line.strip().rstrip(";").split()
         if len(h) == 4 and h[0] == "choose" and h[1] == "write" and h[2] == "grammar":
@@ -953,7 +961,7 @@ CODEGEN_DRIVER = """#include <stdio.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
 extern unsigned int cg_arena_bytes(void);
 extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st,
-                                unsigned int prof, unsigned int tickx);
+                                unsigned int prof, unsigned int tickx, unsigned int lmsbits);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -974,7 +982,8 @@ int main(int argc, char **argv) {
     unsigned int prof = (argc > 2) ? (unsigned int)atoi(argv[2]) : 0;
     /* `docs/315`：第三个实参 = `domain_clock_explicit`（1 = 关掉"回边即 tick"）。 */
     unsigned int tickx = (argc > 3) ? (unsigned int)atoi(argv[3]) : 0;
-    unsigned int m = emit_module(buf, toks, out, st, prof, tickx);
+    /* 第七参 = 用户开关位图；夹具直接喂 token 流，没有预扫，给 0。 */
+    unsigned int m = emit_module(buf, toks, out, st, prof, tickx, 0);
     printf("%.*s", (int)m, out);
     return 0;
 }
@@ -1023,11 +1032,7 @@ def test_m85_checker_accepts_corpus_units():
     if not _clang():
         print("      SKIP: 无 clang")
         return
-    gaps = {
-        # 非目标: 参考实现的 IR 后端自己也发不出来 (native: inb 未实现), 它本就不是单元的
-        # 合法形状 —— 所以这条不是"checker 的缺口", 而是"这份文件不进单元语料"。
-        "native_raii.lomt",
-    }
+    gaps = set()
     with tempfile.TemporaryDirectory() as td:
         exe = _build_checker(td)
         ok = []
@@ -1074,7 +1079,13 @@ def test_m82_loment_codegen_byte_identical():
                        # `#538`：`choose no_gc` 的那行 IR 标记两份实现必须逐字节同。
                        ROOT / "loment" / "selfhost" / "ir_no_gc.lomt",
                        # `docs/299`：借用类型（`&T` / `&mut T` / `*r` / 写穿字段 / 借用字段）。
-                       ROOT / "loment" / "selfhost" / "ir_borrow.lomt"):
+                       ROOT / "loment" / "selfhost" / "ir_borrow.lomt",
+                       # `docs/353`：块作用域（独立块 / 遮蔽 / for / match / if let）。
+                       ROOT / "loment" / "selfhost" / "ir_scope.lomt",
+                       # `docs/353` §4：GC alpha + 遮蔽（按名字保守退出，E12 站点）。
+                       ROOT / "loment" / "selfhost" / "ir_scope_gc.lomt",
+                       # `docs/353` §4 + `docs/309`：alpha 里的 `lgc` 三种窗口各一层作用域。
+                       ROOT / "loment" / "selfhost" / "lgc_alpha.lomt"):
             want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:
@@ -1083,6 +1094,40 @@ def test_m82_loment_codegen_byte_identical():
                 raise AssertionError(
                     f"{target.name} 首个差异 @{i}:\n"
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+
+
+@test
+def test_class_c4a_selfhost_nonvirtual_twin():
+    """C4a：自举侧的非虚类（字段布局 + 静态方法）与参考实现**逐字节**同。
+
+    这一条只覆盖 `class` 的 C1 子集：类体字段、`fn m(self: &C)`、类字面量、
+    方法调用。vtable / `super` / abstract（C2）留给 C4b；两者的分界与
+    `docs/345` §10.4 一致。参考实现把类方法追加在普通函数之后，自举侧也照同一
+    发射序（函数表仍按源码序）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    targets = (ROOT / "loment" / "selfhost" / "class" / "ir_class.lomt",
+               ROOT / "loment" / "selfhost" / "class" / "ir_class_parent.lomt",
+               ROOT / "loment" / "selfhost" / "class" / "ir_class_inherit.lomt")
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        chk = _build_checker(td)
+        for target in targets:
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 80)
+                raise AssertionError(
+                    f"{target.name} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 100]!r}\n python {want[a:(i or 0) + 100]!r}")
+            unit = Path(td) / f"u_{target.stem}.lomt"
+            unit.write_text(_unit_text(target), encoding="utf-8", newline="\n")
+            codes, det = _loment_codes(
+                chk, unit, _prof_of_text(target.read_text(encoding="utf-8")))
+            assert not codes, f"{target.name}: 自举 checker 假报 {codes} {det[:120]}"
 
 
 @test
@@ -1644,7 +1689,8 @@ def _unit_text(target: Path) -> str:
     #   * 声明行要抹 —— `Parser.parse` 要求第一个 token 是 `module`；
     #   * 版次要传 —— 抹掉之后 `Parser` 只看得到缺省的 Tur 1。
     raw_full = target.read_text(encoding="utf-8")
-    _pname = {2: "tur2026.3", 1: "tur2026.2"}.get(_prof_of_text(raw_full), "tur2026.1")
+    _pname = {3: "tur2027.1Alpha", 2: "tur2026.3", 1: "tur2026.2"}.get(
+        _prof_of_text(raw_full), "tur2026.1")
     raw = _blank_grammar_decl(raw_full)
     have = {e.name for e in lomentc.Parser(
         lomentc._apply_switches(lomc.lex(raw), lomentc.SwitchTable()), raw,

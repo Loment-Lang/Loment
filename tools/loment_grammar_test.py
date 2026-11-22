@@ -69,6 +69,10 @@ LOCKED_ALIASES = {
     "tur": "tur2026.1", "tur1": "tur2026.1", "tur2": "tur2026.2",
     "tur3": "tur2026.3",
     "tur2026.1": "tur2026.1", "tur2026.2": "tur2026.2", "tur2026.3": "tur2026.3",
+    # 2026-11-18: `tur2027.1Alpha`（块作用域）。**显式选用**的 alpha 版次，
+    # 默认仍是 `tur2026.3`。这一笔是"改锁"。
+    "tur2027.1Alpha": "tur2027.1Alpha", "2027.1Alpha": "tur2027.1Alpha",
+    "tur2027.1alpha": "tur2027.1Alpha", "2027.1alpha": "tur2027.1Alpha",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -199,6 +203,8 @@ def test_bad_declarations_are_loud():
         ("choose write grammar py\nchoose write grammar c\n", "一次"),  # 写两次
         ("choose write grammar rustc\n", "出厂锁"),                # 拼法不在表里
         ("choose write grammar\n", "语法名"),                      # 后面没写
+        # `#861`：别名之后多写的词原先被**静默删掉**，文件照样按 `java` 编
+        ("choose write grammar java version 21\n", "后面还有别的词"),
     ]
     for src, want in cases:
         g, err, declared = potato_from.read_grammar_decl(src)
@@ -292,6 +298,11 @@ def test_the_declaration_word_order_is_the_shared_contract():
         ("choose write grammar python \n", "python"),     # 行尾空白
         ("choose write grammar c#\n", "csharp"),          # `#` 不是注释头
         ("choose write grammar python // 说明\n", "python"),
+        # `#861`：别名之后到行尾只许空白 / `;` / 注释 —— 两种注释都收
+        ("choose write grammar python /* 说明 */\n", "python"),
+        ("choose write grammar python; // 注释\n", "python"),
+        # `#862`：声明**前面**的行内块注释不改读法
+        ("/* license */ choose write grammar python\n", "python"),
     ):
         g, err, declared = potato_from.read_grammar_decl(src)
         assert (g, err, declared) == (want, None, True), (src, g, err, declared)
@@ -326,6 +337,32 @@ def test_the_declaration_word_order_is_the_shared_contract():
         arm = f'    if i == {i} {{ return "{w}"; }}'
         assert arm in surface, f"导出里没有这一条（顺序也要对）: {arm!r}"
     print("      词序/别名边界/词边界 == 共享契约，且产物里就是这三个词、按这个顺序")
+
+
+@test
+def test_a_block_comment_before_the_declaration_does_not_change_the_reading():
+    """`#862`：`/* license */ choose write grammar java` 与不写注释等价。
+
+    声明是**文件头的第一句话**；注释不是"这一行说了什么"，它不该改变读法。原先行首那一格
+    只收空白与 BOM，于是带行内注释的声明**整条找不到**，文件落到"缺声明 = 原生 Loment"，
+    用户拿到的是 `1:28: 期望 module ... 得到 'grammar'` —— 指不到"是你那行没生效"。
+
+    跨行的块注释**不在**这一格：两边（`_GRAMMAR_LEAD` 与报错器 `decl_at`）都只收行内，
+    同一条线；否则"文件头第一行"这句话就没边了。
+    """
+    src = ("/* license */ choose write grammar java\n"
+           "\n"
+           "public class C { public static int f() { return 42; } }\n")
+    g, err, declared = potato_from.read_grammar_decl(src)
+    assert (g, err, declared) == ("java", None, True), (g, err, declared)
+    stripped = potato_from.strip_grammar_decl(src)
+    assert len(stripped) == len(src), "抹白必须等长（行号/偏移不能动）"
+    assert stripped.splitlines()[0].strip() == "", repr(stripped.splitlines()[0])
+
+    multi = "/* license\n   block */ choose write grammar java\n"
+    g2, _err2, d2 = potato_from.read_grammar_decl(multi)
+    assert (g2, d2) == ("loment", False), (g2, d2)
+    print("      行内块注释不改变读法，且抹白等长；跨行注释不认（与报错器同一刀）")
 
 
 @test
@@ -1845,8 +1882,10 @@ def test_the_default_edition_is_the_newest_open_one():
     `break` / `orelse` / `defer` / `lgc` 都在最新版里。显式钉旧版次仍然可以
     （`tur` / `tur1` / `tur2026.1`）—— 那是**作者明确要的**，不是默认。
     """
-    assert potato_from.DEFAULT_EDITION == potato_from.TUR_EDITIONS[-1], (
-        "默认版次不是最新那一版 —— 用户 2026-11-06 的口径是「永远用最新」")
+    _stable = [e for e in potato_from.TUR_EDITIONS
+               if e not in potato_from.ALPHA_EDITIONS]
+    assert potato_from.DEFAULT_EDITION == _stable[-1], (
+        "默认版次不是最新那个**稳定**版次 —— alpha 只做显式选用（2026-11-18 裁定）")
     body = "module m\n\ndef f() -> u32 { return 1 and 1; }\n"
     with tempfile.TemporaryDirectory() as t:
         td = Path(t)
@@ -1946,13 +1985,14 @@ def test_tur2026_2_is_frozen():
     """
     assert potato_from.FROZEN_EDITIONS == ("tur2026.1", "tur2026.2"), (
         "封版清单被改了；开新版次不应该改这里")
-    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS + ("tur2026.3",), (
-        "TUR_EDITIONS 应当是「两个封版 + 一个开的 2026.3」—— 开新版次要显式改这条判据")
+    assert potato_from.TUR_EDITIONS == potato_from.FROZEN_EDITIONS + (
+        "tur2026.3", "tur2027.1Alpha"), (
+        "TUR_EDITIONS 应当是「两个封版 + 2026.3 + alpha」—— 开新版次要显式改这条判据")
     digest = hashlib.sha256(
         chr(10).join(potato_from.TUR2026_2_FEATURES).encode()).hexdigest()
     assert digest == FROZEN_TUR2026_2_SHA256, (
         "tur2026.2 的特性面变了 —— 加语法请开 tur2026.3，不是改这一版")
-    for future in ("tur2027.1",):
+    for future in ("tur2028.1",):
         assert future not in potato_from.GRAMMAR_ALIASES, (
             f"{future} 还没开；开的时候要同时改锁表、NATIVE_GRAMMARS、docs/304 与这条判据")
     print("      tur2026.2 封版：特性面哈希一致，且没有未封版的新版次混进来")

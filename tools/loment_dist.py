@@ -39,6 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import loment_release  # noqa: E402  (版本名单一真源: RELEASE / RELEASE_NAME)
+import loment_hotpack as _hotpack  # noqa: E402  (基线清单与固定核的单一算法)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "loment" / "dist"
@@ -93,6 +94,9 @@ TOOLS: list[tuple] = [
     # 命令面（help/codes/stat/grep/ls/tree/...）—— 用 Loment 自己写的 CLI 前端。
     # 为什么不在启动器里写: 启动器有两份 (bash + batch), 命令写在那边就得写两遍并保持同步。
     ("loment-cli", "loment/tools/lomcli.lomt", "."),
+    # 热更新的原生安装器（工具链代际）。它**永远从 bin/ 起**，不进代际 —— 它是信任根，
+    # 载荷不能替换它。验签用随包发的 std ed25519/sha512，不需要 Python/openssl/gpg。
+    ("loment-hotupdate", "loment/tools/update.lomt", "."),
     # 报错器 (docs/182 §6): 吃编译器 --diag-out 吐的 JSONL, 查 surface_data 补中文标题与
     # 修复建议, 渲染成 "error[E0NN]: ... / --> 文件:行 / 源行 / 插入符 / 建议"。
     # **名字没有 `loment-` 前缀**, 与 lompi 一样是个独立命令 —— 它由启动器起, 不是 `loment`
@@ -178,6 +182,21 @@ to_posix() {
 # 2026-09-15: "does not include loment-driver" while loment-driver.exe sits in bin/).
 # Resolve once here so both flavours of bash work.
 tool() {
+    # Hot-update generations win over the base package. `loment-hotupdate` is the
+    # trust root and always comes from bin/ -- a payload may not replace it.
+    if [ "$1" != loment-hotupdate ]; then
+        _cur=$(cat "$share/hot/current" 2>/dev/null || true)
+        case "$_cur" in
+            a|b)
+                if [ -x "$share/hot/gen/$_cur/bin/$1" ]; then
+                    printf '%s' "$share/hot/gen/$_cur/bin/$1"; return 0
+                fi
+                if [ -x "$share/hot/gen/$_cur/bin/$1.exe" ]; then
+                    printf '%s' "$share/hot/gen/$_cur/bin/$1.exe"; return 0
+                fi
+                ;;
+        esac
+    fi
     if [ -x "$here/$1" ]; then printf '%s' "$here/$1"
     elif [ -x "$here/$1.exe" ]; then printf '%s' "$here/$1.exe"
     else return 1
@@ -429,6 +448,11 @@ case "${1:-help}" in
     lsp)
         shift; need loment-lsp loment-lsp
         exec "$(tool loment-lsp)" "$@" ;;
+    # Hot-update installer: a native tool (ed25519 + sha512 from the shipped std store).
+    # `--prefix` is the install root; a user-supplied later flag wins.
+    hotupdate)
+        shift; need loment-hotupdate loment-hotupdate
+        exec "$(tool loment-hotupdate)" --prefix "$here/.." "$@" ;;
     # The guide for AI agents, reachable WITHOUT any tool-specific directory convention:
     # an agent that meets a new language runs its CLI first, so this is the universal hook.
     # `--print` needs no file access at all.
@@ -783,6 +807,14 @@ rem Loment @DISPLAY@ launcher (Windows, native toolchain).
 setlocal
 set "here=%~dp0"
 set "share=%here%..\share\loment"
+rem Hot-update generations win over the base package. loment-hotupdate itself is the
+rem trust root and always runs from bin\, so it is never taken from a generation.
+set "GH="
+set "GC="
+if exist "%share%\hot\current" set /p GC=<"%share%\hot\current"
+if /I "%GC%"=="a" if exist "%share%\hot\gen\a\bin\loment-driver.exe" set "GH=%share%\hot\gen\a\bin\"
+if /I "%GC%"=="b" if exist "%share%\hot\gen\b\bin\loment-driver.exe" set "GH=%share%\hot\gen\b\bin\"
+if not defined GH set "GH=%here%"
 set "cmd=%~1"
 if "%cmd%"=="" goto usage
 if "%cmd%"=="help" goto help
@@ -796,6 +828,7 @@ if "%cmd%"=="check" goto check
 if "%cmd%"=="fmt" goto fmt
 if "%cmd%"=="doc" goto doc
 if "%cmd%"=="lsp" goto lsp
+if "%cmd%"=="hotupdate" goto hotupdate
 if "%cmd%"=="skill" goto skill
 if "%cmd%"=="build" goto build
 if "%cmd%"=="run" goto run
@@ -848,10 +881,10 @@ set "dpath=%dtmp%\d.jsonl"
 if defined cdout set "dpath=%cdout%"
 if defined cdout type nul > "%dpath%"
 if "%cmode%"=="i" goto compile_only_ir
-"%here%loment-driver.exe" "%csrc%" --diag-out "%dpath%" >nul 2>"%dtmp%\e.txt"
+"%GH%loment-driver.exe" "%csrc%" --diag-out "%dpath%" >nul 2>"%dtmp%\e.txt"
 goto compile_only_done
 :compile_only_ir
-"%here%loment-driver.exe" "%csrc%" --diag-out "%dpath%" 2>"%dtmp%\e.txt"
+"%GH%loment-driver.exe" "%csrc%" --diag-out "%dpath%" 2>"%dtmp%\e.txt"
 :compile_only_done
 set "crc=%ERRORLEVEL%"
 if not "%crc%"=="0" call :report_diags "%dpath%" "%dtmp%\e.txt" "%cnc% %com%" "%crc%" "loment-driver"
@@ -863,16 +896,24 @@ exit /b %crc%
 
 :fmt
 if "%~2"=="" goto usage
-"%here%loment-fmt.exe" "%~2"
+"%GH%loment-fmt.exe" "%~2"
 exit /b %ERRORLEVEL%
 
 :doc
 if "%~2"=="" goto usage
-"%here%loment-doc.exe" "%~2"
+"%GH%loment-doc.exe" "%~2"
 exit /b %ERRORLEVEL%
 
 :lsp
-"%here%loment-lsp.exe" %2 %3 %4 %5 %6 %7 %8 %9
+"%GH%loment-lsp.exe" %2 %3 %4 %5 %6 %7 %8 %9
+exit /b %ERRORLEVEL%
+
+:hotupdate
+if not exist "%here%loment-hotupdate.exe" (
+    echo loment: this package does not include loment-hotupdate 1>&2
+    exit /b 3
+)
+"%here%loment-hotupdate.exe" --prefix "%here%.." %2 %3 %4 %5 %6 %7 %8 %9
 exit /b %ERRORLEVEL%
 
 rem The guide for AI agents, reachable WITHOUT any tool-specific directory convention: an
@@ -959,6 +1000,20 @@ shift
 shift
 goto barg_loop
 :barg_max_eq
+rem #1789: the `--max=N` spelling was forwarded without the check the two-word form gets,
+rem so `--max=abc` reached the renderer and printed its usage (the symptom of #659).
+set "bmaxeq=%~1"
+set "bmaxeq=%bmaxeq:--max=%"
+if "%bmaxeq%"=="" (
+    echo loment: --max needs a number 1>&2
+    exit /b 2
+)
+set "bmaxbad="
+for /f "delims=0123456789" %%A in ("%bmaxeq%") do set "bmaxbad=1"
+if defined bmaxbad (
+    echo loment: --max needs a number, got '%~1' 1>&2
+    exit /b 2
+)
 set "com=%com% %~1"
 shift
 goto barg_loop
@@ -1024,7 +1079,7 @@ rem which is what the launcher's git-style lookup looks for. Ask the driver -- i
 rem declaration. No answer (not a command) => the old rule, the source file's own name.
 if not "%out%"=="" goto have_out
 set "cname="
-for /f "delims=" %%A in ('"%here%loment-driver.exe" "%src%" --print-command 2^>nul') do if not defined cname set "cname=%%A"
+for /f "delims=" %%A in ('"%GH%loment-driver.exe" "%src%" --print-command 2^>nul') do if not defined cname set "cname=%%A"
 if not defined cname goto no_cname
 set "out=loment-%cname%"
 goto have_out
@@ -1033,7 +1088,7 @@ set "out=%src:.lomt=%"
 :have_out
 set "tmp=%TEMP%\loment-b%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
-"%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
+"%GH%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%" "%drc%" "loment-driver"
 if not "%drc%"=="0" goto fail
@@ -1048,7 +1103,7 @@ rem The linker gets its OWN --diag-out, into the same file (on success the drive
 rem nothing into it). When it can put a code on - the `-o` directory not existing is the
 rem common one - :report_diags renders it with the title, the why and the fixes; when it
 rem writes no record its plain line is shown as is, never silently lost.
-"%here%loment-lomelf.exe" "%linkll%" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% %profarg% 2>"%tmp%\e2.txt"
+"%GH%loment-lomelf.exe" "%linkll%" "%out%.exe" --diag-out "%tmp%\d.jsonl" %portarg% %profarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
@@ -1057,7 +1112,7 @@ goto done
 :run_go
 set "tmp=%TEMP%\loment-r%RANDOM%%RANDOM%"
 mkdir "%tmp%" >nul 2>nul
-"%here%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
+"%GH%loment-driver.exe" "%src%" --diag-out "%tmp%\d.jsonl" > "%tmp%\a.ll" 2>"%tmp%\e.txt"
 set "drc=%ERRORLEVEL%"
 if not "%drc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e.txt" "%cnc% %com%" "%drc%" "loment-driver"
 if not "%drc%"=="0" goto fail
@@ -1066,7 +1121,7 @@ findstr /b /l /c:"; loment-port: hosted" "%tmp%\a.ll" >nul 2>nul
 if "%ERRORLEVEL%"=="0" goto hosted_unit
 call :make_merged
 if defined derror goto fail
-"%here%loment-lomelf.exe" "%linkll%" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% %profarg% 2>"%tmp%\e2.txt"
+"%GH%loment-lomelf.exe" "%linkll%" "%tmp%\a.exe" --diag-out "%tmp%\d.jsonl" %portarg% %profarg% 2>"%tmp%\e2.txt"
 set "lrc=%ERRORLEVEL%"
 if not "%lrc%"=="0" call :report_diags "%tmp%\d.jsonl" "%tmp%\e2.txt" "%cnc% %com%" "%lrc%" "loment-lomelf"
 if not "%lrc%"=="0" goto fail
@@ -1247,8 +1302,8 @@ exit /b 1
 :help
 rem Forward the whole command line, not just `help`: `loment help build` must reach
 rem loment-cli's per-command page (the usage text advertises `loment help [COMMAND]`).
-if not exist "%here%loment-cli.exe" goto usage
-"%here%loment-cli.exe" %*
+if not exist "%GH%loment-cli.exe" goto usage
+"%GH%loment-cli.exe" %*
 exit /b %ERRORLEVEL%
 
 :forward
@@ -1267,8 +1322,8 @@ if not defined ucmd goto loment_forward_cli
 exit /b %ERRORLEVEL%
 
 :loment_forward_cli
-if not exist "%here%loment-cli.exe" goto usage
-"%here%loment-cli.exe" %*
+if not exist "%GH%loment-cli.exe" goto usage
+"%GH%loment-cli.exe" %*
 exit /b %ERRORLEVEL%
 
 :usage
@@ -1319,17 +1374,17 @@ if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
 if "%rf%"=="1" call :crash_note "%~1" "%~2" "%~5" "%~4"
 set "rf=0"
 if exist "%~1" for %%A in ("%~1") do if %%~zA GTR 0 set "rf=1"
-if "%rf%"=="1" if exist "%here%lomenterr.exe" goto report_render
+if "%rf%"=="1" if exist "%GH%lomenterr.exe" goto report_render
 if exist "%~2" type "%~2" 1>&2
 if "%rf%"=="1" echo loment: no lomenterr in this package - showing the compiler's plain diagnostics 1>&2
 exit /b 0
 
 :report_render
 if "%~3"=="" goto report_render_plain
-"%here%lomenterr.exe" %~3 "%~1"
+"%GH%lomenterr.exe" %~3 "%~1"
 goto report_render_done
 :report_render_plain
-"%here%lomenterr.exe" "%~1"
+"%GH%lomenterr.exe" "%~1"
 :report_render_done
 set "rrc=%ERRORLEVEL%"
 if "%rrc%"=="0" exit /b 0
@@ -1431,7 +1486,7 @@ if /I "%~1"=="--json" goto scan_om
 if /I "%~1"=="--max" goto scan_max
 if /I "%~1"=="--diag-out" goto scan_dout
 set "ss=%~1"
-if "%ss:~0,6%"=="--max=" goto scan_om
+if "%ss:~0,6%"=="--max=" goto scan_max_eq
 if "%ss:~0,11%"=="--diag-out=" goto scan_out_v
 rem An option that is not one of the above is REJECTED, not taken for the source file.
 rem This path scans the WHOLE command line (both `check FILE --no-color` and
@@ -1461,6 +1516,23 @@ exit /b 0
 set "cskip=1"
 set "cwantmax=1"
 :scan_om
+set "com=%com% %~1"
+exit /b 0
+:scan_max_eq
+rem #1789: `--max=N` must get the same check as `--max N` (see :barg_max_eq).
+set "cmaxeq=%ss:~6%"
+if "%cmaxeq%"=="" (
+    echo loment: --max needs a number 1>&2
+    set "cbad=1"
+    exit /b 0
+)
+set "cmaxbad="
+for /f "delims=0123456789" %%A in ("%cmaxeq%") do set "cmaxbad=1"
+if defined cmaxbad (
+    echo loment: --max needs a number, got '%ss%' 1>&2
+    set "cbad=1"
+    exit /b 0
+)
 set "com=%com% %~1"
 exit /b 0
 :scan_dout
@@ -1691,6 +1763,9 @@ fi
 
 mkdir -p "$prefix/bin" "$prefix/share/loment" "$prefix/share/lompi"
 copy_verified_payload || exit 1
+# Hot-update generation slots: the updater only ever writes the INACTIVE one, and the
+# directories must exist before it runs -- a payload may not create them.
+mkdir -p "$prefix/share/loment/hot/gen/a/bin" "$prefix/share/loment/hot/gen/b/bin"
 chmod 755 "$prefix/bin/"*
 
 "$prefix/bin/loment" version || {
@@ -2191,7 +2266,13 @@ New-Item -ItemType Directory -Path (Join-Path $shareDir 'skill') -Force | Out-Nu
 # EXIST before Copy-Item writes into it (the same bug bit share\loment\skill in v1).
 $lompiShareDir = Join-Path $Prefix 'share\lompi'
 New-Item -ItemType Directory -Path (Join-Path $lompiShareDir 'skill') -Force | Out-Null
+# Hot-update generation slots: the updater only writes into the empty one.
+foreach ($g in @('a', 'b')) {
+    New-Item -ItemType Directory -Path (Join-Path $shareDir "hot\gen\$g\bin") -Force | Out-Null
+}
 foreach ($rel in @('share/loment/version', 'share/loment/seed.ll',
+                   'share/loment/hot/release-key.ed25519',
+                   'share/loment/hot/baseline.txt',
                    'share/loment/examples/user_hello.lomt',
                    'share/loment/examples/tour.lomt',
                    'share/loment/skill/SKILL.md',
@@ -3528,6 +3609,13 @@ def payload(kind: str, bins: dict[str, tuple[bytes, bytes]]) -> dict[str, tuple[
         # Windows 用原生 .cmd 启动器：包里全是 PE，直接调本机 exe，不再往 WSL 转发
         files["bin/loment.cmd"] = (_crlf(_subst(LAUNCHER_CMD, "release")).encode("ascii"), 0o755)
     files["share/loment/version"] = (version_text().encode(), 0o644)
+    # 热更新的信任锚与准入对照面。`bin/loment-hotupdate` 从这两份文件判候选：
+    # 公钥必须是 `fixed_core` 摘要的那个；基线里的 language/contract/capability 必须与
+    # 候选清单相同。代际目录由安装器建（空目录不进归档）。
+    files["share/loment/hot/release-key.ed25519"] = (
+        _read("loment/hotswap/release-key.ed25519"), 0o644)
+    files["share/loment/hot/baseline.txt"] = (
+        _hotpack.baseline_text(ROOT).encode("utf-8"), 0o644)
     files["share/loment/seed.ll"] = (_read("loment/build/selfhost_driver.ll"), 0o644)
     for ex in EXAMPLES:
         files[f"share/loment/examples/{Path(ex).name}"] = (_read(ex), 0o644)

@@ -39,14 +39,15 @@ from pathlib import Path
 #: **同一个数** —— 那边就是代码缓冲的大小。数据段钉在它后面（见 `ELF_DATA_VADDR`），
 #: 所以这个数一旦被文本超过，数据段就会被压住（**不报错**，产物一启动就段错误）。
 #: 越过它的情形由 `compile_ll` 末尾那条判据点名拒 —— 原先没有这条，地板是**没标注的**。
-TEXT_CAP = 4194304                 # 4 MiB = 0x400000
+TEXT_CAP = 8388608                 # 8 MiB = 0x800000
 #: 热更新档（`#1150`）：槽表排在文本段最前面，每槽一条 `jmp rel32` + NOP 填到定长。
 #: 槽号按**函数名排序**分配，所以同一份 IR 每一次都落在同一个地址；函数集合一变，
 #: 表形就变（准入侧拿 `slots` 与 `tramp` 逐条比，见 `#1152`）。
 HOT_STRIDE = 16
 ELF_TEXT_VADDR = 0x400000
-#: 数据段在**代码缓冲之后**：文本段可用 `0x400000..0x800000`，正好是 `TEXT_CAP`。
-#: 原先钉 `0x600000`（2 MiB 窗口），实测 2026-10-15 `main` 自己已占 99.4%。
+#: 数据段在**代码缓冲之后**：文本段可用 `0x400000..0xC00000`，正好是 `TEXT_CAP`。
+#: 原先钉 `0x600000`（2 MiB 窗口），2026-10-16 抬到 4 MiB，2026-11-21 抬到 8 MiB ——
+#: 自举侧编出来的 `lomenterr` / 正则驱动器那份代码已到 4,228,966 B（CI 实测）。
 ELF_DATA_VADDR = ELF_TEXT_VADDR + TEXT_CAP
 TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # 当前目标的活动值, PE 目标会改
 SCALAR_SIZE = {"i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8, "ptr": 8}
@@ -898,7 +899,20 @@ class Emitter:
         _pty, pval = parse_operand(parts[0])
         self.get_ptr(pval, RAX)
         cur = ty
-        for p in parts[1:]:
+        idxs = parts[1:]
+        # LLVM 的**第一个**下标按**指针指向的类型**整块步进，类型停在 pointee；之后的下标
+        # 才进入数组/结构体。把数组规则也套在首下标上，`[64 x i64], i64 cap` 就只走 8 字节
+        # 而不是一整行 512 —— 每个有状态能力的行因此互相重叠（`#1830`）。
+        if idxs:
+            ity, ival = parse_operand(idxs[0])
+            self.get_signed(ity, ival, RCX)
+            step = size_of(ty)
+            if step != 1:
+                self.asm.emit(mov_ri(RDX, step))
+                self.asm.emit(imul_rr(RCX, RDX))
+            self.asm.emit(alu_rr(0x01, RAX, RCX))
+            idxs = idxs[1:]
+        for p in idxs:
             ity, ival = parse_operand(p)
             # **GEP 的下标是**符号扩展的（LLVM LangRef）—— `get` 按设计零扩展，所以这里
             # 必须走 `get_signed`：`getelementptr i8, ptr %p, i32 -4` 要的是 `%p - 4`，
@@ -911,7 +925,7 @@ class Emitter:
                 cur = et
             elif cur.startswith("{"):
                 if not re.match(r"^-?[0-9]+$", ival):
-                    raise Unsupported("v0 只支持常量下标的结构体 GEP（动态下标请用 extractvalue）")
+                    raise Unsupported("v0 只支持常量**字段**下标的结构体 GEP（动态下标请用 extractvalue）")
                 off, cur = field_offset(cur, int(ival))
                 if off:
                     self.asm.emit(alu_ri(ADD, RAX, off))

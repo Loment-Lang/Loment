@@ -22,67 +22,75 @@ pub fn decl_word(i: u32) -> str {
     return "";
 }
 
-pub fn alias_count() -> u32 { return 26; }
+pub fn alias_count() -> u32 { return 30; }
 
 /// 第 `i` 个语法别名（报错器按**小写**比 —— 作者写 `C#` 还是 `c#` 都该认）。
 pub fn alias_word(i: u32) -> str {
-    if i == 0 { return "c"; }
-    if i == 1 { return "c#"; }
-    if i == 2 { return "c++"; }
-    if i == 3 { return "cc"; }
-    if i == 4 { return "cpp"; }
-    if i == 5 { return "cs"; }
-    if i == 6 { return "csharp"; }
-    if i == 7 { return "cxx"; }
-    if i == 8 { return "go"; }
-    if i == 9 { return "golang"; }
-    if i == 10 { return "java"; }
-    if i == 11 { return "loment"; }
-    if i == 12 { return "lument"; }
-    if i == 13 { return "natural"; }
-    if i == 14 { return "nl"; }
-    if i == 15 { return "py"; }
-    if i == 16 { return "python"; }
-    if i == 17 { return "rs"; }
-    if i == 18 { return "rust"; }
-    if i == 19 { return "tur"; }
-    if i == 20 { return "tur1"; }
-    if i == 21 { return "tur2"; }
-    if i == 22 { return "tur2026.1"; }
-    if i == 23 { return "tur2026.2"; }
-    if i == 24 { return "tur2026.3"; }
-    if i == 25 { return "tur3"; }
+    if i == 0 { return "2027.1alpha"; }
+    if i == 1 { return "2027.1alpha"; }
+    if i == 2 { return "c"; }
+    if i == 3 { return "c#"; }
+    if i == 4 { return "c++"; }
+    if i == 5 { return "cc"; }
+    if i == 6 { return "cpp"; }
+    if i == 7 { return "cs"; }
+    if i == 8 { return "csharp"; }
+    if i == 9 { return "cxx"; }
+    if i == 10 { return "go"; }
+    if i == 11 { return "golang"; }
+    if i == 12 { return "java"; }
+    if i == 13 { return "loment"; }
+    if i == 14 { return "lument"; }
+    if i == 15 { return "natural"; }
+    if i == 16 { return "nl"; }
+    if i == 17 { return "py"; }
+    if i == 18 { return "python"; }
+    if i == 19 { return "rs"; }
+    if i == 20 { return "rust"; }
+    if i == 21 { return "tur"; }
+    if i == 22 { return "tur1"; }
+    if i == 23 { return "tur2"; }
+    if i == 24 { return "tur2026.1"; }
+    if i == 25 { return "tur2026.2"; }
+    if i == 26 { return "tur2026.3"; }
+    if i == 27 { return "tur2027.1alpha"; }
+    if i == 28 { return "tur2027.1alpha"; }
+    if i == 29 { return "tur3"; }
     return "";
 }
 
 /// 该别名对应的语言（= `LANG_CARDS` 的键 / `potato_from.LANGS` 的键）。
 pub fn alias_lang(i: u32) -> str {
-    if i == 0 { return "c"; }
-    if i == 1 { return "csharp"; }
-    if i == 2 { return "cpp"; }
-    if i == 3 { return "cpp"; }
+    if i == 0 { return "tur2027.1Alpha"; }
+    if i == 1 { return "tur2027.1Alpha"; }
+    if i == 2 { return "c"; }
+    if i == 3 { return "csharp"; }
     if i == 4 { return "cpp"; }
-    if i == 5 { return "csharp"; }
-    if i == 6 { return "csharp"; }
-    if i == 7 { return "cpp"; }
-    if i == 8 { return "go"; }
-    if i == 9 { return "go"; }
-    if i == 10 { return "java"; }
-    if i == 11 { return "loment"; }
-    if i == 12 { return "natural"; }
-    if i == 13 { return "natural"; }
+    if i == 5 { return "cpp"; }
+    if i == 6 { return "cpp"; }
+    if i == 7 { return "csharp"; }
+    if i == 8 { return "csharp"; }
+    if i == 9 { return "cpp"; }
+    if i == 10 { return "go"; }
+    if i == 11 { return "go"; }
+    if i == 12 { return "java"; }
+    if i == 13 { return "loment"; }
     if i == 14 { return "natural"; }
-    if i == 15 { return "python"; }
-    if i == 16 { return "python"; }
-    if i == 17 { return "rust"; }
-    if i == 18 { return "rust"; }
-    if i == 19 { return "tur2026.1"; }
-    if i == 20 { return "tur2026.1"; }
-    if i == 21 { return "tur2026.2"; }
+    if i == 15 { return "natural"; }
+    if i == 16 { return "natural"; }
+    if i == 17 { return "python"; }
+    if i == 18 { return "python"; }
+    if i == 19 { return "rust"; }
+    if i == 20 { return "rust"; }
+    if i == 21 { return "tur2026.1"; }
     if i == 22 { return "tur2026.1"; }
     if i == 23 { return "tur2026.2"; }
-    if i == 24 { return "tur2026.3"; }
-    if i == 25 { return "tur2026.3"; }
+    if i == 24 { return "tur2026.1"; }
+    if i == 25 { return "tur2026.2"; }
+    if i == 26 { return "tur2026.3"; }
+    if i == 27 { return "tur2027.1Alpha"; }
+    if i == 28 { return "tur2027.1Alpha"; }
+    if i == 29 { return "tur2026.3"; }
     return "";
 }
 

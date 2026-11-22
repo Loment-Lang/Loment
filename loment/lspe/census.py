@@ -204,10 +204,98 @@ def _mark(site: dict, cover, i: int) -> dict:
     return site
 
 
+def census_reclaim(toks: list, sid, sites: list[dict],
+                   cover=lambda _i: None,
+                   shadowed: dict[str, frozenset[str]] | None = None) -> None:
+    """E12 GC 检查器（`docs/353` §5）：每个 `alloc` 一个 `ReclaimScoped` 站点。
+
+    `shadowed` 是**函数名 -> 该函数里出现两次以上的声明名**（编译器在 AST 上算，
+    自举侧按 token 数同名声明）。分配名不在那张表里 ⇒ 证据是 `Syntactic`（回收判决
+    唯一指到一个声明）；在表里 ⇒ `Assumed`，L0/L1/L2 在那一格**保守退出**。
+    少回收是安全的，free 错一格不是。
+
+    这一层只做**作用域归属**，不重新判 L0/L1/L2 的梯级（那是编译器的 Producer 面）。
+    """
+    shadowed = shadowed or {}
+    for name_i, _p_i, at, end in _lspe_functions(toks):
+        fname = toks[name_i].val
+        dups = shadowed.get(fname, frozenset())
+        for i in range(at, end):
+            t = toks[i]
+            if not (t.kind == "ident" and t.val == "alloc"):
+                continue
+            if i > 0 and toks[i - 1].kind == "punct" and toks[i - 1].val in (".", ":"):
+                continue
+            if i + 1 >= end or not (toks[i + 1].kind == "punct"
+                                    and toks[i + 1].val == "("):
+                continue
+            # 往回找这条分配的声明名：最近的 `let NAME :`（中间不跨 `;`）。
+            name = None
+            j = i - 1
+            while j >= at:
+                if toks[j].kind == "punct" and toks[j].val == ";":
+                    break
+                if (toks[j].kind == "ident" and toks[j].val == "let"
+                        and j + 2 < i and toks[j + 1].kind == "ident"
+                        and toks[j + 2].kind == "punct" and toks[j + 2].val == ":"):
+                    name = toks[j + 1].val
+                    break
+                j -= 1
+            ambiguous = name is not None and name in dups
+            sites.append(_mark({
+                "id": sid("reclaim", f"alloc:{fname}:{i - at}"),
+                "kind": "reclaim", "claim": "allow",
+                "obligation": "ReclaimScoped",
+                "evidence": ("Assumed" if ambiguous else "Syntactic"),
+                "source": (None if ambiguous else "scope-table"),
+                "line": t.line, "span": _sp(t),
+                "proved": not ambiguous,
+            }, cover, i))
+
+
+def site_id_factory(unit: str):
+    """内容寻址的站点 id 生成器（`docs/262` §5.9）。
+
+    主检查器与旧 `census()` 共用同一份：`seen` 的序数顺序决定重复表达式的 id，
+    两条路必须逐字节相同。
+    """
+    _ensure_compiler_facts()
+    seen: dict[str, int] = {}
+
+    def sid(kind: str, key: str) -> str:
+        occ = seen.get(key, 0)
+        seen[key] = occ + 1
+        return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
+
+    return sid
+
+
+def census_frame(toks: list, sid):
+    """`lspe pass` 块的跨度与覆盖函数。
+
+    必须在建任何站点之前调用：`pass_spans` 会先在 `sid` 的序数表里占位，
+    顺序一变重复表达式的 id 就会漂。
+    """
+    spans = pass_spans(toks, sid)
+
+    def cover(i: int) -> str | None:
+        return _covered(spans, i)
+
+    return spans, cover
+
+
+def census_constant(toks: list, sid, sites: list[dict], unsourced: list[int],
+                    cover=lambda _i: None) -> None:
+    """E1/E2/E5 共用的词法遍（主检查器的一个阶段）。"""
+    census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks),
+                _array_lens(toks))
+
+
 def census(toks: list, unit: str,
            lms=frozenset(),
            instances: list[dict] | tuple = (),
-           plan=None) -> tuple[list[dict], list[int], list[dict]]:
+           plan=None, shadowed: dict[str, frozenset[str]] | None = None,
+           scoped: bool = False) -> tuple[list[dict], list[int], list[dict]]:
     """站点普查（`docs/262` §5.1）：E1/E2（guard + 下标）、E3、E4、E5、pass 块。
 
     口径是**词法的**，且两套实现用**同一条规则** —— 参考侧吃 `lomc.lex` 的 token，
@@ -227,19 +315,8 @@ def census(toks: list, unit: str,
     _run = None if plan is None else set(plan.run)
     sites: list[dict] = []
     unsourced: list[int] = []
-    seen: dict[str, int] = {}
-
-    def sid(kind: str, key: str) -> str:
-        # 内容寻址：键是站点的 token 文本，重复序数只区分**完全相同**的表达式。
-        # 不用行号（会漂），也不用全局序号（在前面插一个站点会把后面全部重编号）。
-        occ = seen.get(key, 0)
-        seen[key] = occ + 1
-        return f"{unit}:{kind}:{_fnv1a32(key + '#' + str(occ)):08x}"
-
-    spans = pass_spans(toks, sid)
-
-    def cover(i: int) -> str | None:
-        return _covered(spans, i)
+    sid = site_id_factory(unit)
+    spans, cover = census_frame(toks, sid)
 
     if _run is None or (_run & {"E1Constant", "E2Typed", "E5GlobalInvariant"}):
         census_e1e2(toks, sid, sites, unsourced, cover, _loops(toks), _array_lens(toks))
@@ -254,6 +331,8 @@ def census(toks: list, unit: str,
     if _run is None or "E6Substitution" in _run:
         census_drop(toks, sid, sites)
         census_wf(instances, sid, sites)
+    if scoped and (_run is None or "E12GC" in _run):
+        census_reclaim(toks, sid, sites, cover, shadowed)
     for s in sites:
         cid = s.get("covered_by")
         if cid:

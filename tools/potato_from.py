@@ -369,6 +369,46 @@ class ClassLang:
 _SHELL_LINE = re.compile(r"^\s*(?:namespace|using|package|import)(?:[^A-Za-z0-9_]|$)"
                            r"|^\s*[{}]\s*$")
 
+#: 类体里**点名**的几种"不是常量 / 字段 / 方法"的东西（`#848/#853/#854`）。
+#: 原先它们统一掉进"类 C 里这一条不是常量 / 字段 / 方法" —— 对一个 `@Override` 或
+#: `static { … }` 来说，那句话既没说是什么，也没说为什么。顺序即优先级。
+_MEMBER_NAMED = (
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract|strictfp|default)\s+)*"
+     r"static\s*\{",
+     "静态初始化块", "它在类加载时执行一段代码，Stage A 没有对应的表示；写成显式的初始化函数", None),
+    # `@` 只在 Java 是注解；C# 里 `@class` 是**逐字标识符**，不是注解。
+    (r"^\s*@",
+     "注解", "注解不是声明，这一门不处理 `@…`；删掉它再翻", "java"),
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*interface\b",
+     "嵌套 `interface`", "接口不是 `class` / `enum`，这一门只收那两种", None),
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*record\b",
+     "`record` 类型", "`record`（Java 16+）是类型声明，不是方法；这一门只收 `class` / `enum`", None),
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*class\b",
+     "嵌套类", "嵌套类不是常量 / 字段 / 方法；把它提到顶层", None),
+)
+
+#: 顶层**点名**的三种（`#844/#846/#847`）：形状与类体那几条一致，但话说的是"顶层"。
+_TOP_NAMED = (
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*interface\b",
+     "`interface`", "接口不是 `class` / `enum`，这一门只收那两种"),
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract|sealed|non-sealed)\s+)*record\b",
+     "`record` 类型（Java 16+）", "这一门只收 `class` / `enum`"),
+    (r"^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*sealed\b",
+     "`sealed` / `permits`", "密封类继承模型不在子集里"),
+)
+
+
+def _named_row(table, text: str, grammar: str | None = None) -> tuple[str, str] | None:
+    """表里第一个命中的 `(标签, 为什么)`；条目的第 4 格是**限定语法**（`None` = 都收）。"""
+    for row in table:
+        pat, label, why = row[0], row[1], row[2]
+        only = row[3] if len(row) > 3 else None
+        if only is not None and only != grammar:
+            continue
+        if re.match(pat, text):
+            return label, why
+    return None
+
 
 def _from_class_lang(src: str, name: str, mode: str,
                      lang: ClassLang) -> tuple[dict, Report]:
@@ -461,6 +501,16 @@ def _from_class_lang(src: str, name: str, mode: str,
             # (`public native int j_native(int a);`)。按"以分号结尾 = 字段"先判的话,
             # 它们会掉进字段那一支然后被丢掉 —— 静默丢, 而且丢的恰好是**唯一那类
             # 与外部实现对接的方法**(2026-09-17 实测: Java 的 j_native 一直抽不出来)。
+            # `#848/#853/#854`：这几种**点名**报，别掉进下面那句"不是常量 / 字段 / 方法"。
+            named = _named_row(_MEMBER_NAMED, mem, lang.grammar)
+            if named is not None:
+                _lead = len(mem_raw) - len(mem_raw.lstrip())
+                _line = src[:open_idx + 1 + mem_off + _lead].count("\n") + 1
+                label, why = named
+                rep.skip("member", (mem.split() or ["?"])[0][:24],
+                         f"第 {_line} 行: 类 {cname} 里的{label}不收 —— {why}；"
+                         f"原文：{mem[:60]!r}")
+                continue
             mm = lang.method.match(mem)
             if mm and "(" in mem and IDENT_RE.match(mm.group(2)):
                 methods.append((mm.group(1), mm.group(2), mm.group(3), mem_raw,
@@ -508,16 +558,33 @@ def _from_class_lang(src: str, name: str, mode: str,
             # 而那正好挡住了"转写期的 skip 要报给用户"那一道（见 `front_door`）。
             rep.skip("type", cname, "无可用字段")
         # ---- 方法 -> 函数 (abi=java)
+        seen_fn: set[str] = set()
         for rty, mname, params, mem_raw, mem_off in methods:
             if mname == cname:
                 rep.skip("fn", mname, "构造器")
                 continue
+            # `#849`：重载在 Loment 里没有对应（按名字解析）。原先这一条留给下游，
+            # 报出来的是编译器对**翻译后**那份源的 "函数 f 重复"，没有文件 / 行 / 列，
+            # 也没说原因是**重载**。
+            if mname in seen_fn:
+                _lead = len(mem_raw) - len(mem_raw.lstrip())
+                _line = src[:open_idx + 1 + mem_off + _lead].count("\n") + 1
+                rep.skip("fn", mname,
+                         f"第 {_line} 行: 与前面同名的函数重复 —— Loment 按名字解析，"
+                         f"没有重载（Java 的 overload）；换一个名字")
+                continue
+            seen_fn.add(mname)
             rt = _lang_type(rty, mode, known, lang.types)
             if rt is None:
                 rep.skip("fn", mname, f"返回类型 {rty!r} 无映射")
                 continue
             ps, bad = [], None
             for raw in [p.strip() for p in params.split(",") if p.strip()]:
+                # `#852`：`int... xs` 是**可变参数**，不是"类型 `int...` 无映射" ——
+                # 后者把一种 Java 形态说成了类型系统的缺口，用户没法照着改。
+                if "..." in raw:
+                    bad = "可变参数（varargs）`…` 不收 —— 用数组形参代替（`int[] xs`）"
+                    break
                 parts = raw.split()
                 if len(parts) < 2:
                     bad = f"形参 {raw!r} 不是 `类型 名字`"
@@ -569,6 +636,26 @@ def _from_class_lang(src: str, name: str, mode: str,
         # 不排掉的话，一份平常的 C# 文件（`using` + `namespace` + 两层壳的花括号）会因为
         # 这几行被**整份拒掉** —— 而 `loment/cstrans/*.cs` 三份语料全是这个形状。
         # `using` 那一条与翻译器的 `_CS_SHELLS` 同一口径（那里也把它当壳）。
+        # `#859`/`#860`：Java 的 `package` / `import` **不是壳** —— 它们改变名字解析，
+        # 静默丢掉会让一份"依赖了某个包"的单元照样编得过。C# 的 `using` / `namespace`
+        # 才是壳（语料全是那个形状），照旧跳过。
+        if lang.grammar == "java":
+            mi = re.match(r"\s*(package|import)\b", txt)
+            if mi:
+                what = "`package`" if mi.group(1) == "package" else "`import`"
+                rep.skip("decl", mi.group(1),
+                         f"第 {ln} 行: 不支持{what} 声明 —— 包名 / 导入会改变名字解析，"
+                         f"静默丢掉会让一份依赖它的单元照样编得过；把类写成全名，"
+                         f"或把依赖作为单独的类型声明带进来（`docs/188` §4）。"
+                         f"原文：{txt[:60]}")
+                continue
+            # `#844`/`#846`/`#847`：顶层的 interface / record / sealed 要**点名**
+            named = _named_row(_TOP_NAMED, txt)
+            if named is not None:
+                label, why = named
+                rep.skip("decl", (txt.split() or ["?"])[0][:24],
+                         f"第 {ln} 行: 顶层{label}不收 —— {why}；原文：{txt[:60]}")
+                continue
         if _SHELL_LINE.match(txt):
             continue
         rep.skip("decl", (txt.split() or ["?"])[0][:24],
@@ -1908,6 +1995,15 @@ GRAMMAR_ALIASES: dict[str, str] = {
     "tur2026.1": "tur2026.1",
     "tur2026.2": "tur2026.2",
     "tur2026.3": "tur2026.3",
+    # `tur2027.1Alpha`（块作用域，`docs/353`）是**显式选用**的 alpha 版次：
+    # 它不跟默认走（见 `DEFAULT_EDITION` 的注），但规范名本身是完整的。
+    # 别名 `2027.1Alpha` 只是省掉族前缀的源侧拼法，对象侧仍然只写规范名。
+    "2027.1Alpha": "tur2027.1Alpha",
+    "tur2027.1Alpha": "tur2027.1Alpha",
+    # `read_grammar_decl` 先把拼法 `.lower()` 再查表（与其它别名同一条路），
+    # 所以全小写的写法也要收 —— 规范名本身保留 `Alpha` 的大小写。
+    "2027.1alpha": "tur2027.1Alpha",
+    "tur2027.1alpha": "tur2027.1Alpha",
     "c": "c",
     "py": "python", "python": "python",
     "java": "java",
@@ -1937,11 +2033,17 @@ GRAMMAR_ALIASES: dict[str, str] = {
 #: Tur 的版次（`docs/296` §1.1）是两级名：`tur<年份>.<序号>`。原生读法的**规范名**就是
 #: 这两个；`tur` / `tur1` / `tur2` 在 `GRAMMAR_ALIASES` 里落到它们。版次只加不改 ——
 #: `tur2026.1` / `tur2026.2` 的语法与语义永久冻结，新特性只进新的规范名。
-TUR_EDITIONS = ("tur2026.1", "tur2026.2", "tur2026.3")
+TUR_EDITIONS = ("tur2026.1", "tur2026.2", "tur2026.3", "tur2027.1Alpha")
 NATIVE_GRAMMARS = ("loment",) + TUR_EDITIONS
 
+#: **alpha 版次**：语法/语义可以继续变，且**不跟默认走**（用户 2026-11-18 裁定）。
+#: 默认仍是最后一个**非 alpha** 版次；要试 alpha 得显式写
+#: `choose write grammar tur2027.1Alpha`。这条与 §26.4「默认跟最新版次走」的差别
+#: 是 LLS 里明写的例外：alpha 是预览，不是承诺。
+ALPHA_EDITIONS: tuple[str, ...] = ("tur2027.1Alpha",)
+
 #: **已封版的版次**（2026-11-05）：这两个版次的语法与语义不再变化。新特性只能开
-#: `tur2026.3`（2026 年内）或 `tur2027.1`（跨年），**不是**改这里已有的名字。
+#: `tur2026.3`（2026 年内）或 `tur2027.1Alpha`（跨年 alpha），**不是**改这里已有的名字。
 #: `TUR_EDITIONS` 是"当前认识的全部版次"，`FROZEN_EDITIONS` 是"其中已封死的"；
 #: 开新版次时前者增长，后者保持不变。判据在 `loment_grammar_test`。
 FROZEN_EDITIONS: tuple[str, ...] = ("tur2026.1", "tur2026.2")
@@ -1962,15 +2064,19 @@ TUR2026_2_FEATURES: tuple[str, ...] = (
 #: 缺掉的正是今天要用的那批构造（`def` / `for x in xs` / `break` / `orelse` / `defer` /
 #: `lgc` …）—— 于是每一份新文件都得先背一行声明。
 #:
-#: 新口径：**没声明 = 当前最新版次**（`TUR_EDITIONS[-1]`）。要钉旧读法仍然随时可钉：
+#: 新口径：**没声明 = 当前最新的稳定版次**（今天 `tur2026.3`）。要钉旧读法仍然随时可钉：
 #: `choose write grammar tur2026.1`（或 `tur1`）。`tur` / `tur1` 是**显式**的历史拼法，
 #: 不跟默认走；`loment` 是语言名，跟默认走。
+#:
+#: **alpha 版次是例外**（`ALPHA_EDITIONS`，2026-11-18 用户裁定）：`tur2027.1Alpha`
+#: 带块作用域，但它只做**显式选用**，默认仍停在 `tur2026.3`。理由：alpha 的语义还
+#: 会随反馈变，把默认挪过去等于让每一份没声明的新旧源先吃一轮预览语义。
 #:
 #: **代价与对策**：新版次只加不改，但"加"的拼法如果本该是旧版里的合法标识符
 #: （`break` / `continue` / `defer` / `print_num` / `lgc`），同一份旧源就会**静默改义**。
 #: 对策不是把默认退回去，而是 `EDITION_COLLISIONS` + 前门那一闸：无声明单元里
 #: **声明**了这些名字就拒编译，要求改名或显式钉版次 —— 宁可响亮地拒，不做安静的改义。
-DEFAULT_EDITION: str = TUR_EDITIONS[-1]
+DEFAULT_EDITION: str = "tur2026.3"
 
 #: **新版次里"从拼法变成语法"的那些词**（按引入它们的版次分组）。
 #:
@@ -1985,6 +2091,9 @@ DEFAULT_EDITION: str = TUR_EDITIONS[-1]
 EDITION_COLLISIONS: dict[str, tuple[str, ...]] = {
     "tur2026.2": ("break", "continue", "defer", "print_num"),
     "tur2026.3": ("lgc",),
+    # 块作用域与独立 `{ }` 块没有引入新的**裸词**：`{` 本来就是标点，旧版次里
+    # 把它写在语句位是解析错（#44），不是合法标识符。所以没有撞车面。
+    "tur2027.1Alpha": (),
 }
 
 
@@ -2065,7 +2174,11 @@ _GRAMMAR_TAIL = r"(?=[ \t;]|$)"
 #: 报出来的是 `1:1 非法字符 '﻿'` —— 用户完全看不出"是你那行声明没生效"。
 #: 而在本仓的平台上带 BOM 是常态（`docs/188` §2 又把"读法"整个压在那一行上）。
 #: 抹白是**等长**的，所以 BOM 会被换成空白、行号与偏移都不动。
-_GRAMMAR_LEAD = r"^(?:\ufeff)?[ \t]*"
+#: `#862`\uff1a\u884c\u9996**\u540c\u4e00\u884c\u5185**\u7684\u5757\u6ce8\u91ca\uff08`/* license */ choose write grammar java`\uff09\u4e5f\u8981
+#: \u8df3\u8fc7 \u2014\u2014 \u6ce8\u91ca\u4e0d\u662f"\u8fd9\u4e00\u884c\u8bf4\u4e86\u4ec0\u4e48"\uff0c\u5728\u5b83\u524d\u9762\u7684\u6ce8\u91ca\u4e0d\u8be5\u6539\u53d8\u8bfb\u6cd5\u3002\u8de8\u884c\u7684\u5757\u6ce8\u91ca**\u4e0d\u5728**
+#: \u8fd9\u4e00\u683c\uff1a`[^*\n]` \u4e0e `\*(?!/)` \u4e00\u8d77\u628a\u5b83\u6321\u5728\u884c\u5185\u3002\u62a5\u9519\u5668 `decl_at` \u91cc
+#: `skip_block_comment` \u662f\u540c\u4e00\u6761\u7ebf\uff08\u4e24\u8fb9\u5fc5\u987b\u8bf4\u540c\u4e00\u53e5\u8bdd\uff09\u3002
+_GRAMMAR_LEAD = r"^(?:\ufeff)?(?:[ \t]|/\*(?:[^*\n]|\*(?!/))*\*/)*"
 _GRAMMAR_ANY = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL, re.M)
 #: 别名**必须空白分隔**：`choose write grammar;python` 里的 `;python` **不是**别名
 #: （那是"头写了、别名没写"⇒ 报"后面要写语法名"）。别名本体到空白或 `;` 为止 ——
@@ -2080,6 +2193,10 @@ _GRAMMAR_DECL = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[ \
 #: 留下 `s python`。而 `read_grammar_decl` 那边有边界检查、**不认为**这是声明、**不报错**，
 #: 一路走到这里把第一行切坏 —— 用户拿到的是一行残缺的源和一句指不到点子的语法错。
 _GRAMMAR_LINE = re.compile(_GRAMMAR_LEAD + _GRAMMAR_HEAD + _GRAMMAR_TAIL + r"[^\n]*", re.M)
+#: 别名之后到行尾**只许**空白 / `;` / 同一行内的块注释，或者一个 `//` 行注释（`#861`）。
+#: 声明是"读法"，不是带参数的命令 —— `java version 21` 里的 `version 21` 原先被
+#: **静默删掉**，用户以为它生效了。
+_DECL_TAIL_OK = re.compile(r"[ \t;]*(?:/\*[^\n]*?\*/[ \t;]*)*(?://[^\n]*)?$")
 _MODULE_LINE = re.compile(r"^[ \t]*module[ \t]+[A-Za-z_]\w*", re.M)
 
 
@@ -2351,6 +2468,19 @@ def read_grammar_decl(src: str) -> tuple[str, str | None, bool]:
             f"第 {line} 行: `grammar {alias}` 不在出厂锁的取值表里"
             f"—— 这张表由官方给，**不可扩展、不可覆盖**（`docs/188` §1.1）。"
             f"可写的是：{'、'.join(sorted(GRAMMAR_ALIASES))}"), False
+    # `#861`：别名之后到行尾只许空白 / `;` / 注释。原先多出来的词被**静默删掉** ——
+    # `choose write grammar java version 21` 编得过，用户以为那句尾巴生效了。
+    tail = _GRAMMAR_DECL.search(src)
+    if tail is not None:
+        rest = src[tail.end():]
+        nl = rest.find("\n")
+        if nl >= 0:
+            rest = rest[:nl]
+        if not _DECL_TAIL_OK.match(rest):
+            return "loment", (
+                f"第 {line} 行: `choose write grammar {alias.strip()}` 后面还有别的词"
+                f"（实得：{rest.strip()!r}）—— 别名之后只允许空白、`;` 或注释。"
+                f"声明是**读法**，不带版本号之类的尾巴（`docs/188` §1）。"), False
     return GRAMMAR_ALIASES[word], None, True
 
 
@@ -2540,7 +2670,7 @@ def front_door(path: Path, lang: str = "auto", mode: str = "strict") -> FrontUni
             # 纯糖按**生效版次**算，不按拼法算：`loment` / 没声明现在都落到默认
             # （最新版），它们也必须有 `def` / `and` / `or` / `not` / `elif`。
             _prof = g if g in TUR_EDITIONS else DEFAULT_EDITION
-            if _prof in ("tur2026.2", "tur2026.3"):
+            if _prof in ("tur2026.2", "tur2026.3", "tur2027.1Alpha"):
                 # Tur 2 的纯糖（`docs/296` §2.1）：等长改写，行/列/偏移不动。
                 # Tur 2026.3 继承它（版次是累积的）。
                 body = _tur2_sugar(body)

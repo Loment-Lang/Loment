@@ -77,6 +77,10 @@ def _tree(dst: Path, *, release: str | None = None,
             target = dst / src.relative_to(ROOT)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, target)
+    # 信任锚在**跑着的那棵树**里 —— 候选目录里的公钥不被读取（`#1695`）。
+    pin = dst / "loment" / "hotswap" / "release-key.pem"
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(_keydir() / "pub.pem", pin)
     if release is not None:
         p = dst / "tools" / "loment_release.py"
         text = p.read_text(encoding="utf-8")
@@ -112,7 +116,6 @@ def _candidate(dst: Path, tree: Path, release: str, *,
     sums.write_text(f"{man['artifact']['sha256']}  {name}\n", encoding="utf-8", newline="\n")
     if sign:
         kd = _keydir()
-        shutil.copyfile(kd / "pub.pem", dst / "loment-signing.pub.pem")
         subprocess.run(
             ["openssl", "dgst", "-sha256", "-sign", str(kd / "key.pem"),
              "-out", str(dst / "SHA256SUMS.asc"), str(sums)],
@@ -127,6 +130,33 @@ def _reject(candidate: Path, tree: Path, **kw) -> str:
     except lu.Reject as e:
         return e.code
     raise AssertionError(f"应当拒绝，却接受了：{candidate}")
+
+
+@test
+def test_malformed_hot_meta_is_rejected_not_a_crash() -> None:
+    """`#1705`：坏 `.lomhot` 要报一句，**不许**冒 `IndexError`/`KeyError`/`ValueError`。
+
+    这份文件由 `lomelf --hot-meta` 写，但可以被手改、也可能来自别的构建 —— 用户输入
+    不是"内部数据"。夹具是几条各缺一样东西的记录行，外加一条正常的对照。
+    """
+    bad = [
+        "func f frame=1 layout=x\ncall g nope\n",        # 调用点那格不是 `名字=值`
+        "func f layout=x\n",                             # 缺 frame
+        "func f frame=one layout=x\n",                   # frame 不是整数
+        "call c at=4\n",                                 # call 在任何 func 之前
+        "wat 1 2\n",                                     # 不认识的记录行
+    ]
+    for text in bad:
+        try:
+            lu.parse_hot_meta(text)
+        except lu.Reject as e:
+            assert e.code == "hot-meta" and e.detail, (text, e)
+        else:
+            raise AssertionError(f"坏 .lomhot 被收下了: {text!r}")
+    good = "lomhot 1\nfunc f entry=0 frame=8 layout=abc\ncall c1 at=4\n"
+    fns = lu.parse_hot_meta(good)
+    assert fns["f"]["frame"] == 8 and fns["f"]["calls"] == [("c1", 4)], fns
+    print(f"      {len(bad)} 种坏 .lomhot 都报成 hot-meta；正常那份照旧解析")
 
 
 @test
@@ -171,9 +201,9 @@ def test_language_change_is_rejected() -> None:
     with tempfile.TemporaryDirectory() as t:
         t = Path(t)
         base = _tree(t / "base")
-        cand_tree = _tree(t / "cand", release="0.1.6")
+        cand_tree = _tree(t / "cand", release="0.1.7")
         # 0.1.6 的构建自然打 v0.1.6 的 tag；跑着的当前版本必须拒绝它。
-        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.6-hot.1")
+        cand = _candidate(t / "cand-dir", cand_tree, "v0.1.7-hot.1")
         assert _reject(cand, base) == "language"
         print("      语言版本变了（树里 RELEASE 改）—— 拒绝")
 
@@ -185,12 +215,12 @@ def test_baseline_change_is_rejected() -> None:
         t = Path(t)
         cand_tree = _tree(t / "cand")
         try:
-            hf.build(cand_tree, "v0.1.6-hot.1")
+            hf.build(cand_tree, "v0.1.7-hot.1")
         except SystemExit as e:
             assert "基线" in str(e), str(e)
         else:
             raise AssertionError("tag 与树里的 RELEASE 不一致，清单却出出来了")
-        print(f"      tag 说 0.1.6、RELEASE 说 {BASE} —— 生产侧拒绝")
+        print(f"      tag 说 0.1.7、RELEASE 说 {BASE} —— 生产侧拒绝")
 
 
 @test
@@ -228,6 +258,73 @@ def test_signature_tamper_is_rejected() -> None:
         sums.write_text(sums.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         assert _reject(cand, base) == "signature"
         print("      SHA256SUMS 被改一个字节 —— 签名不过，拒绝")
+
+
+def _attacker_key(d: Path) -> Path:
+    """一把与运行树**无关**的一次性钥匙（就是 `#1695` 里攻击者会生成的那种）。"""
+    d.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(d / "key.pem"), "-out", str(d / "cert.pem"),
+         "-subj", "/CN=not-the-release-key", "-days", "1"],
+        check=True, capture_output=True,
+    )
+    pub = subprocess.run(["openssl", "x509", "-pubkey", "-noout", "-in", str(d / "cert.pem")],
+                         check=True, capture_output=True)
+    (d / "pub.pem").write_bytes(pub.stdout)
+    return d
+
+
+@test
+def test_a_candidate_supplied_key_is_rejected() -> None:
+    """`#1695`：候选自带公钥 —— 它签的清单不算数，信任锚只在**运行树**里。"""
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        base = _tree(t / "base")
+        cand_tree = _tree(t / "cand", tool_append="\n// fix\n")
+        cand = _candidate(t / "cand-dir", cand_tree, f"v{BASE}-hot.1", sign=False)
+        kd = _attacker_key(t / "attacker")
+        shutil.copyfile(kd / "pub.pem", cand / "loment-signing.pub.pem")
+        subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", str(kd / "key.pem"),
+             "-out", str(cand / "SHA256SUMS.asc"), str(cand / "SHA256SUMS")],
+            check=True, capture_output=True,
+        )
+        assert _reject(cand, base) == "signature"
+        print("      候选自带公钥并自签 —— 拒绝（锚不在候选里）")
+
+
+@test
+def test_a_tree_without_a_pinned_key_is_refused() -> None:
+    """没有钉住公钥时**失败关闭** —— 不退回候选自带的任何一把。"""
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        base = _tree(t / "base")
+        (base / "loment" / "hotswap" / "release-key.pem").unlink()
+        cand = _candidate(t / "cand-dir", _tree(t / "cand", tool_append="\n// fix\n"),
+                          f"v{BASE}-hot.1")
+        assert _reject(cand, base) == "trust-anchor"
+        print("      运行树里没有固定公钥 —— 拒绝（不是退回候选）")
+
+
+@test
+def test_a_gpg_pinned_key_verifies_the_release_signature() -> None:
+    """发行流水线用 gpg；钉住的 `.asc` 必须能验**真实发行**签出来的清单。
+
+    夹具是 `v0.1.5.1` 的真 `SHA256SUMS` 与它的分离签名 —— 不是我们在测试里现造的一把钥匙
+    （`gpg --quick-gen-key` 在起不了 gpg-agent 的宿主上会失败，而验签不需要 agent）。
+    """
+    if not shutil.which("gpg"):
+        print("      SKIP: 没有 gpg")
+        return
+    key = ROOT / "loment" / "hotswap" / "release-key.asc"
+    fix = ROOT / "tools" / "fixtures" / "hot-gpg"
+    assert lu._gpg_verify(key, fix / "SHA256SUMS.asc", fix / "SHA256SUMS").returncode == 0
+    with tempfile.TemporaryDirectory() as t:
+        tampered = Path(t) / "SHA256SUMS"
+        tampered.write_bytes((fix / "SHA256SUMS").read_bytes() + b"\n")
+        assert lu._gpg_verify(key, fix / "SHA256SUMS.asc", tampered).returncode != 0
+    print("      真发行的 gpg 签名用运行树里钉住的 .asc 验过；改一个字节就不过")
 
 
 @test

@@ -290,6 +290,40 @@ def test_lomrel_emit_writes_same_bytes():
 
 
 @test
+def test_write_and_check_are_exclusive_on_both_sides():
+    """`#1784`：`--emit PATH --check` / `--checksums PATH --check` 要**拒**（退 2）。
+
+    原先写分支先返回，`--check` 被接受却从没跑过 —— 写出来的文件加上退 0，调用方
+    以为"刚写的那份清单已经核过了"。两侧（Python 与自举 `lomrel.lomt`）同一句、同一退码。
+    """
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        out = td / "rel.json"
+        rc, po, pe = _py(["--emit", str(out), "--check"])
+        assert rc == 2, (rc, po, pe)
+        assert not out.exists(), "被拒了却还是写了清单"
+        sums = td / "SUMS"
+        rc, po, pe = _py(["--checksums", str(sums), "--check"])
+        assert rc == 2, (rc, po, pe)
+        assert not sums.exists(), "被拒了却还是写了校验清单"
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    out = ROOT / f"loment/build/_rel_excl-{os.getpid()}.json"
+    out_rel = out.relative_to(ROOT).as_posix()
+    try:
+        with tempfile.TemporaryDirectory() as tds:
+            td = Path(tds)
+            elf = _build(td)
+            gr, go, ge = _run(elf, td, "excl", ["--emit", out_rel, "--check"])
+            assert gr == 2, (gr, go, ge)
+            assert not out.exists(), "自举侧被拒了却还是写了清单"
+    finally:
+        out.unlink(missing_ok=True)
+    print("      --emit/--checksums + --check：两侧都退 2，一个文件都不写")
+
+
+@test
 def test_emit_default_path_is_the_same_on_both_sides():
     """不给路径时 `--emit` 写哪儿 —— 两侧必须点名**同一条**。
 

@@ -5678,8 +5678,8 @@ def _lspe_registry_errors() -> list[str]:
 
 @test
 def test_lspe_obligation_registry():
-    """19 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
-    assert len(lspe.LSPE_OBLIGATIONS) == 19
+    """20 条义务、8 种证据；每条都有 owner 与 accept；Differential 不在任何 accept 里。"""
+    assert len(lspe.LSPE_OBLIGATIONS) == 20
     assert len(lspe.LSPE_EVIDENCE_KINDS) == 8
     assert _lspe_registry_errors() == []
     assert all("Differential" not in v["accept"]
@@ -7614,11 +7614,9 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
         "fn run() -> u32 {\n"
         "    let n: u32;\n"
         "    let a: u32;\n"
-        "    let __eff_r1: u32 = 41;\n"
-        "    a = __eff_r1;\n"
+        "    a = 41;\n"
         "    n = a + 1;\n"
         "    return n;\n}\n")
-    lomentc._EFF_TMP[0] = 0            # 临时名是确定的：这一条按名字比 IR
     a, b = parse(src), parse(plain)
     assert lomentc.check(a) == [], lomentc.check(a)
     assert lomentc.check(b) == [], lomentc.check(b)
@@ -7630,9 +7628,9 @@ def test_tail_resumptive_handle_lowers_to_plain_statements():
 
 
 @test
-def test_a3a_rejects_captures_and_non_tail_arms():
-    """A3a 的三条边界：闭臂、尾续、臂里平铺（`docs/341` §10.7）。"""
-    cap = _EFF_BASE + (
+def test_arm_capture_is_direct_and_shadowing_is_rejected():
+    """A3b：臂直接引用外层局部（不造合成名）；写捕获与同名遮蔽都点名拒（§7.8）。"""
+    ok = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"
         "    let base: u32 = 7;\n"
@@ -7641,7 +7639,76 @@ def test_a3a_rejects_captures_and_non_tail_arms():
         "        a\n"
         "    } with { get() => { resume(base); } };\n"
         "    return n;\n}\n")
-    assert any("A3a 的臂是闭的" in x for x in errs(cap)), errs(cap)
+    m = parse(ok)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    names = [getattr(s, "name", "") for s in m.funcs[0].body
+             if isinstance(s, lomentc.Let)]
+    assert not any(nm.startswith("__eff_") for nm in names), names
+    # handle 体里同名局部的遮蔽：直接引用会改绑，所以点名拒。
+    shadow = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let base: u32 = 9;\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { resume(base); } };\n"
+        "    return n;\n}\n")
+    assert any("被 handle 体里的同名局部遮住" in x for x in errs(shadow)), errs(shadow)
+    # 写捕获是错的（只读）。
+    bad = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let base: u32 = 7;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        a\n"
+        "    } with { get() => { base = base + 1; resume(base); } };\n"
+        "    return n;\n}\n")
+    assert any("捕获只读" in x for x in errs(bad)), errs(bad)
+
+
+@test
+def test_abort_arm_skips_the_rest_of_the_handle_body():
+    """A3b：不 `resume` 的臂 = abort；降级成 `while true { … n = v; break; }`。"""
+    src = _EFF_BASE + (
+        "effect Log { fn get() -> u32; fn stop() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let k: u32 = 9;\n"
+        "    let n: u32 = handle Log {\n"
+        "        let a: u32 = perform Log.get();\n"
+        "        let b: u32 = perform Log.stop();\n"
+        "        a + b\n"
+        "    } with {\n"
+        "        get() => { resume(40); }\n"
+        "        stop() => { return k; }\n"
+        "    };\n"
+        "    return n;\n}\n")
+    m = parse(src)
+    assert lomentc.check(m) == [], lomentc.check(m)
+    body = m.funcs[0].body
+    loops = [s for s in body if isinstance(s, lomentc.While)]
+    assert len(loops) == 1, body
+    assert isinstance(loops[0].body[-1], lomentc.Break), loops[0].body[-1]
+    assert any(isinstance(s, lomentc.Assign)
+               and isinstance(s.target, lomentc.Ident) and s.target.name == "n"
+               for s in loops[0].body), loops[0].body
+    # 裸 `return;` 不能当 abort（没有值）。
+    bad = _EFF_BASE + (
+        "effect Log { fn get() -> u32; }\n\n"
+        "fn run() -> u32 {\n"
+        "    let n: u32 = handle Log {\n"
+        "        perform Log.get();\n"
+        "        0\n"
+        "    } with { get() => { return; } };\n"
+        "    return n;\n}\n")
+    assert errs(bad), errs(bad)
+
+
+@test
+def test_a3a_rejects_non_tail_and_incomplete_arms():
+    """A3a 的两条边界：尾续、臂里平铺（`docs/341` §10.7）。"""
     two = _EFF_BASE + (
         "effect Log { fn get() -> u32; }\n\n"
         "fn run() -> u32 {\n"
@@ -8050,6 +8117,98 @@ fn call(f: (u32) -> u32, x: u32) -> u32 { return f(x); }
 """
     e = errs(src)
     assert any("没有封闭目标集" in x for x in e), e
+
+@test
+def test_alpha_block_scope_shadowing():
+    """`tur2027.1Alpha`（`docs/353`）：内层 `let` 遮蔽外层，出块后外层值不变。"""
+    src = ("choose write grammar tur2027.1Alpha\n"
+           "module scope_shadow\nchoose runtime\n\n"
+           "fn probe() -> u32 {\n"
+           "    let x: u32 = 1;\n"
+           "    let y: u32 = 0;\n"
+           "    if 1 == 1 {\n"
+           "        let x: u32 = 2;\n"
+           "        y = x;\n"
+           "    }\n"
+           "    return x + y;\n"
+           "}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "s.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        m = lomentc.load(p)
+        assert lomentc.check(m) == [], lomentc.check(m)
+        ir = lomentc.emit_llvm(m, ROOT)
+    body = ir[ir.index("define i32 @probe"):]
+    assert "%x.addr = alloca i32" in body
+    assert "%x.1.addr = alloca i32" in body
+    assert "store i32 2, ptr %x.1.addr" in body
+    assert "load i32, ptr %x.1.addr" in body
+    # 块后的 `x + y` 读外层：最后一次 `%x.addr` 的读在 `%x.1.addr` 的读之后。
+    assert body.rindex("load i32, ptr %x.addr") > body.rindex("load i32, ptr %x.1.addr")
+
+
+@test
+def test_alpha_block_scope_duplicate_and_standalone_block():
+    """同块重复 = E013；独立 `{ … }` 合法；块后的名字不可见（E002）。"""
+    dup = ("choose write grammar tur2027.1Alpha\nmodule scope_dup\nchoose runtime\n\n"
+           "fn f() -> u32 {\n    let x: u32 = 1;\n    let x: u32 = 2;\n    return x;\n}\n")
+    blk = ("choose write grammar tur2027.1Alpha\nmodule scope_blk\nchoose runtime\n\n"
+           "fn f() -> u32 {\n    let x: u32 = 1;\n    {\n        let x: u32 = 2;\n"
+           "        x = x + 1;\n    }\n    return x;\n}\n")
+    after = ("choose write grammar tur2027.1Alpha\nmodule scope_after\nchoose runtime\n\n"
+             "fn f() -> u32 {\n    {\n        let x: u32 = 2;\n    }\n    return x;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        for name, src, want in (
+                ("dup", dup, "已经声明过"),
+                ("blk", blk, None),
+                ("after", after, "使用未声明的变量 x")):
+            p = td / f"{name}.lomt"
+            p.write_text(src, encoding="utf-8", newline="\n")
+            m = lomentc.load(p)
+            errs = lomentc.check(m)
+            if want is None:
+                assert errs == [], (name, errs)
+                ir = lomentc.emit_llvm(m, ROOT)
+                assert "%x.1.addr" in ir, name
+            else:
+                assert any(want in e for e in errs), (name, errs)
+
+
+@test
+def test_alpha_block_scope_old_editions_are_unchanged():
+    """旧版次保持函数级泄漏：同一份源去掉 alpha 声明后只有一格 `%x.addr`。"""
+    body = ("module scope_old\nchoose runtime\n\n"
+            "fn f() -> u32 {\n    let x: u32 = 1;\n"
+            "    if 1 == 1 {\n        let x: u32 = 2;\n        x = x + 1;\n    }\n"
+            "    return x;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "old.lomt"
+        p.write_text(body, encoding="utf-8", newline="\n")
+        m = lomentc.load(p)
+        assert lomentc.check(m) == [], lomentc.check(m)
+        ir = lomentc.emit_llvm(m, ROOT)
+    assert "%x.1.addr" not in ir
+    assert ir.count("%x.addr = alloca") == 1
+
+
+@test
+def test_alpha_reclaim_sites_are_per_name():
+    """E12（`docs/353` §4）：唯一声明的 `alloc` 是 `Syntactic`，遮蔽名的是 `Assumed`。"""
+    src = ("choose write grammar tur2027.1Alpha\n"
+           "module scope_gc\nchoose gc_auto_alpha\nchoose runtime\n\n"
+           "fn f(n: u32) -> u32 {\n"
+           "    let p: ptr = alloc(4);\n"
+           "    store8(p, 0, 1);\n"
+           "    let s: u32 = load8(p, 0);\n"
+           "    {\n        let p: ptr = alloc(4);\n        store8(p, 0, 2);\n"
+           "        s = s + load8(p, 0);\n    }\n"
+           "    return s;\n}\n")
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "g.lomt"
+        p.write_text(src, encoding="utf-8", newline="\n")
+        d = json.loads(lomentc.emit_potato(lomentc.load(p), ROOT))
+    assert d["lspe"]["per_kind"].get("ReclaimScoped") == "0/2", d["lspe"]["per_kind"]
 
 
 @test

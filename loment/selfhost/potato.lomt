@@ -2428,7 +2428,7 @@ fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
 ///
 /// 位序就是 `LMS_TOGGLES` 的次序：check / manage / guard / reject / crash /
 /// restart / seed。默认满档 = 127。
-fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32, bits: u32) -> u32 {
     let v: u32 = pt_lms_val(unit, t, lo, hi);
     // 满档 127；法医 1+2+3+4 = 15；日常 1+3+4 = 13；只要管理器 = 2。
     let m: u32 = 127;
@@ -2506,12 +2506,26 @@ fn pt_lms_mask(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
         }
         i = i + 1;
     }
+    // 显式开关由驱动器预扫后传进来（`sw_lms_bits`）：`apply_switches` 已经把
+    // `choose` 从 token 流里删掉，按 token 的那一趟看不见它们。与 `emit_module`
+    // 同一张位图（低 7 位开、7..13 关、128 盘古）。
+    let q: u32 = 0;
+    while q < 7 {
+        let b2: u32 = (1 as u32) << q;
+        if bits & b2 != 0 {
+            m = m | b2;
+        }
+        if bits & ((1 as u32) << (q + 7)) != 0 {
+            m = m & (127 - b2);
+        }
+        q = q + 1;
+    }
     return m;
 }
 
 /// 把 `lms_mask` 逐个印成**布尔**，键序 = 七级的次序（参考实现是同一张 `LMS_TOGGLES`）。
-fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
-    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+fn pt_lms_levels(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32, bits: u32) -> u32 {
+    let m: u32 = pt_lms_mask(unit, t, lo, hi, bits);
     o = pt_str(out, o, "{\n");
     let names: u32 = 0;
     while names < 7 {
@@ -2974,11 +2988,150 @@ fn pt_lspe_state(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "lspe_open_admin");
 }
 
+/// 两个 token 的文本相等（真 token 才有意义）。
+fn pt_teq(src: ptr, t: ptr, a: u32, b: u32) -> bool {
+    if pt_kind(t, a) != pt_kind(t, b) || pt_tlen(t, a) != pt_tlen(t, b) {
+        return false;
+    }
+    let oa: u32 = pt_off(t, a);
+    let ob: u32 = pt_off(t, b);
+    let n: u32 = pt_tlen(t, a);
+    let k: u32 = 0;
+    while k < n {
+        if load8(src, oa + k) != load8(src, ob + k) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
+fn pt_block_end(unit: ptr, t: ptr, i: u32) -> u32 {
+    let d: u32 = 0;
+    let j: u32 = i;
+    while pt_kind(t, j) != 4 {
+        if pt_tis(unit, t, j, "{") {
+            d = d + 1;
+        }
+        if pt_tis(unit, t, j, "}") {
+            d = d - 1;
+            if d == 0 {
+                return j + 1;
+            }
+        }
+        j = j + 1;
+    }
+    return j;
+}
+
+/// E12（`docs/353` §5）的自举孪生：返回 `(rt << 32) | rp`。
+///
+/// `rt` = `alloc(` 站点数；`rp` = 分配名在该函数里**只声明一次**的站点数。
+/// 只统计 `fn` 的体；`extern fn` 与 trait 签名没有体，跳过。
+fn pt_reclaim_census(unit: ptr, t: ptr, lo: u32, hi: u32) -> u64 {
+    let rt: u32 = 0;
+    let rp: u32 = 0;
+    let fi: u32 = lo;
+    while fi < hi {
+        let is_fn: u32 = 0;
+        if pt_kind(t, fi) == 0 && pt_tis(unit, t, fi, "fn")
+                && !(fi > lo && pt_kind(t, fi - 1) == 0
+                     && pt_tis(unit, t, fi - 1, "extern")) {
+            is_fn = 1;
+        }
+        if is_fn == 1 {
+            let d: u32 = 0;
+            let b: u32 = 0;
+            let q: u32 = fi + 2;
+            while q < hi && b == 0 {
+                if pt_kind(t, q) == 3 && pt_tis(unit, t, q, "(") {
+                    d = d + 1;
+                } else if pt_kind(t, q) == 3 && pt_tis(unit, t, q, ")") {
+                    if d > 0 { d = d - 1; }
+                } else if pt_kind(t, q) == 3 && pt_tis(unit, t, q, "{") && d == 0 {
+                    b = q;
+                } else if pt_kind(t, q) == 3 && pt_tis(unit, t, q, ";") && d == 0 {
+                    q = hi;                      // trait 签名，没有体
+                }
+                q = q + 1;
+            }
+            if b != 0 {
+                let e: u32 = pt_block_end(unit, t, b) - 1;
+                let ai: u32 = b + 1;
+                while ai < e {
+                    let is_alloc: u32 = 0;
+                    if pt_kind(t, ai) == 0 && pt_tis(unit, t, ai, "alloc")
+                            && pt_kind(t, ai + 1) == 3
+                            && pt_tis(unit, t, ai + 1, "(")
+                            && !(ai > b && pt_kind(t, ai - 1) == 3
+                                 && (pt_tis(unit, t, ai - 1, ".")
+                                     || pt_tis(unit, t, ai - 1, ":"))) {
+                        is_alloc = 1;
+                    }
+                    if is_alloc == 1 {
+                        rt = rt + 1;
+                        // 往回找 `let NAME :`（不跨 `;`）
+                        let nm: u32 = 0;
+                        let z: u32 = ai;
+                        while z > b {
+                            z = z - 1;
+                            if pt_kind(t, z) == 3 && pt_tis(unit, t, z, ";") {
+                                z = b;
+                            } else if pt_kind(t, z) == 0 && pt_tis(unit, t, z, "let")
+                                    && pt_kind(t, z + 1) == 0 && pt_kind(t, z + 2) == 3
+                                    && pt_tis(unit, t, z + 2, ":") {
+                                nm = z + 1;
+                                z = b;
+                            }
+                        }
+                        if nm != 0 {
+                            // 同函数里声明的次数（let / for / for i,x / match 绑定 / catch）
+                            let cnt: u32 = 0;
+                            let k: u32 = b;
+                            while k < e {
+                                let hit: u32 = 0;
+                                if pt_kind(t, k) == 0 && (pt_tis(unit, t, k, "let")
+                                        || pt_tis(unit, t, k, "for"))
+                                        && pt_kind(t, k + 1) == 0
+                                        && pt_teq(unit, t, k + 1, nm) {
+                                    hit = 1;
+                                }
+                                if pt_kind(t, k) == 3 && pt_tis(unit, t, k, "(")
+                                        && k + 2 < e && pt_kind(t, k + 1) == 0
+                                        && pt_teq(unit, t, k + 1, nm)
+                                        && pt_kind(t, k + 2) == 3
+                                        && pt_tis(unit, t, k + 2, ")") {
+                                    hit = 1;
+                                }
+                                // `catch | NAME |` 的绑定（`docs/343`）
+                                if pt_kind(t, k) == 3 && pt_tis(unit, t, k, "|")
+                                        && k + 2 < e && pt_kind(t, k + 1) == 0
+                                        && pt_teq(unit, t, k + 1, nm)
+                                        && pt_kind(t, k + 2) == 3
+                                        && pt_tis(unit, t, k + 2, "|") {
+                                    hit = 1;
+                                }
+                                if hit == 1 { cnt = cnt + 1; }
+                                k = k + 1;
+                            }
+                            if cnt == 1 { rp = rp + 1; }
+                        }
+                    }
+                    ai = ai + 1;
+                }
+                fi = e + 1;
+            }
+        }
+        fi = fi + 1;
+    }
+    return (rt as u64) * 4294967296 + (rp as u64);
+}
+
 /// `sp` 是**回填地址**：把台账的 `sites` 数写在那里，供紧随其后的 `systems`
 /// 索引引用（索引写 `cost` 时不重算一遍普查 —— 两处数的必须是同一个数）。
 /// `wfn` 是单态化实例数：每个实例是一条 `TypeWellFormed`（`#745`）。
 fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
-           sp: ptr, wfn: u32, lvl: u32) -> u32 {
+           sp: ptr, wfn: u32, lvl: u32, prof: u32) -> u32 {
     let closed: u32 = 0;
     if lspe_val(unit, t, lo, hi) == 2 {
         closed = 1;
@@ -3003,6 +3156,9 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     let bcov: u32 = 0;
     let psites: u32 = 0;
     let passed: u32 = 0;
+    // E12（`docs/353` §5）：`alloc` 站点的回收归属。
+    let rt: u32 = 0;
+    let rp: u32 = 0;
     // 上下文级别（`#1091`）：证据按级别截断 —— Typed/LocalFlow 从 L1 起，
     // Interproc 从 L2 起，GlobalInvariant（E5）从 L3 起（`docs/262` §5.6）。
     let g_ok: u32 = 0;
@@ -3014,7 +3170,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     if lvl >= 2 {
         c_ok = 1;
     }
-    // v2（0.1.5.2）：析构器（`#747`）与替换后的良构（`#745`）。
+    // v2（0.1.6）：析构器（`#747`）与替换后的良构（`#745`）。
     let drop_n: u32 = 0;
     let wf_n: u32 = 0;
     // E9 域检查器（`docs/306`–`308`）。
@@ -3141,6 +3297,11 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         // 单态化实例 = 一次替换 ⇒ 一条 `TypeWellFormed`（`#745`）。
         wf_n = wfn;
     }
+    if closed == 0 && prof == 3 {
+        let rres: u64 = pt_reclaim_census(unit, t, lo, hi);
+        rt = (rres / 4294967296) as u32;
+        rp = (rres % 4294967296) as u32;
+    }
     // 域声明用 `Typed`（L0 不认）；字面量 guard 是 `Syntactic`；循环归纳从 L3 起。
     ddom_prov = dtot * g_ok;
     dloop_prov = 0;
@@ -3148,14 +3309,14 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
         dloop_prov = dloop;
     }
     let nsite: u32 = gt + it + ft + alt + nt + et + ct + bt + drop_n + wf_n
-                     + dtot + dacc + drev + eff_t;
+                     + dtot + dacc + drev + eff_t + rt;
     store32(sp, 0, nsite);
     // WF 的证据是 `Typed`：L0 不认（`docs/262` §5.6）；DropHonest 是 `Assumed`，恒认。
     wf_prov = wf_n * g_ok;
     // pass 块里的站点不证明：guard / index / bounds 的 proved 要扣掉覆盖数。
     let nproved: u32 = (gt - gcov) * g_ok + (ip - icovp)
                        + (fp + alp + np + ep) * g_ok + cp * c_ok
-                       + (bt - bcov) + drop_n + wf_prov
+                       + (bt - bcov) + drop_n + wf_prov + rp
                        + ddom_prov + dlit + dloop_prov + drev + eff_p;
     let nund: u32 = nsite - nproved;
     // 默认档下每条没被 pass 覆盖的 UNDECIDED 都有一条 Assumed 地板（`docs/262` §6）；
@@ -3359,6 +3520,18 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
             o = pt_str(out, o, "\"");
             first = 0;
         }
+        if rt > 0 {
+            if first == 0 {
+                o = pt_str(out, o, ",\n");
+            }
+            o = pt_key(out, o, 3, "ReclaimScoped");
+            o = pt_str(out, o, "\"");
+            o = pt_dec(out, o, rp as u64);
+            o = pt_str(out, o, "/");
+            o = pt_dec(out, o, rt as u64);
+            o = pt_str(out, o, "\"");
+            first = 0;
+        }
         if ct > 0 {
             if first == 0 {
                 o = pt_str(out, o, ",\n");
@@ -3397,7 +3570,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_key(out, o, 3, "falsification");
     // `falsification` 只数**有配对反证探针**的义务（`registry.LSPE_PROBED_OBLIGATIONS`）。
     // E11 的五种义务还不在其中，所以效应站点不能进这一格（`docs/341` §11）。
-    o = pt_dec(out, o, (nsite - eff_t) as u64);
+    o = pt_dec(out, o, (nsite - eff_t - rt) as u64);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 3, "cross_exam");
     o = pt_dec(out, o, nsite as u64);
@@ -3541,7 +3714,7 @@ fn pt_lspe(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
 /// `lspe` 是台账的 `sites`（`pt_lspe` 回填在 `PT_GLSCR`）。没有明细的那三个
 /// （`runtime` / `port` / `vm`）`detail` 与 `cost` 都写 `null`。
 fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
-              gl_tot: u32) -> u32 {
+              gl_tot: u32, lms_bits: u32) -> u32 {
     o = pt_str(out, o, "{\n");
     // ---- gc
     o = pt_key(out, o, 2, "gc");
@@ -3601,7 +3774,7 @@ fn pt_systems(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32,
     o = pt_ind(out, o, 2);
     o = pt_str(out, o, "},\n");
     // ---- lms：cost 是**开着的级数**（`lms_levels` 里为真的那七格）
-    let m: u32 = pt_lms_mask(unit, t, lo, hi);
+    let m: u32 = pt_lms_mask(unit, t, lo, hi, lms_bits);
     let cnt: u32 = 0;
     let b: u32 = 0;
     while b < 7 {
@@ -6752,7 +6925,7 @@ fn pt_layouts(out: ptr, o: u32, sc: ptr, unit: ptr, t: ptr, lo: u32, hi: u32) ->
 /// 键的顺序与参考实现**逐字对齐**(`emit_potato` 那个字面量 dict 的顺序): 对象是拿
 /// 字节比的, 顺序也在比较面里。
 pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
-                   lvl: u32, prof: u32, effc: ptr) -> u32 {
+                   lvl: u32, prof: u32, effc: ptr, lms_bits: u32) -> u32 {
     let rr: u64 = pt_root_range(unit, t, nt);
     if rr == PT_NONE as u64 {
         return pt_wfail("--emit-potato: the unit declares no `module` at all (the reference implementation's front door has the same rule)");
@@ -6799,10 +6972,16 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     let _sn: u32 = lspe_drop_unchecked(unit, t, ptr_add(sc, PT_GLSAFE));
     // E3/E4 的站点普查**在写对象之前**做完 —— 超容量是点名的失败（`pt_wfail`），
     // 不能在一半对象已经写出去之后再说。
-    let lrc: u32 = lspe_engine(unit, t, lo, hi, pt_lms_mask(unit, t, lo, hi),
-                               ptr_add(sc, PT_GLSAFE),
-                               ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
-                               ptr_add(sc, PT_PASS));
+    // `docs/361`：调度器是 SDK 的（`lspe_sched`），主检查器是唯一入口
+    // （`lspe_main`）；编译器不再直接调子检查器。
+    let lmsk: u32 = pt_lms_mask(unit, t, lo, hi, lms_bits);
+    let lplan: u32 = lspe_sched(unit, t, lo, hi);
+    let lrc: u32 = lspe_main(unit, t, lo, hi, lmsk,
+                             ptr_add(sc, PT_GLSAFE),
+                             ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
+                             ptr_add(sc, PT_PASS),
+                             ptr_add(sc, PT_DOMTAB), ptr_add(sc, PT_DOMCNT),
+                             lplan);
     if lrc == 1 {
         return pt_wfail("--emit-potato: more functions with a pointer first parameter than this section takes (1024)");
     }
@@ -6810,8 +6989,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
         return pt_wfail("--emit-potato: more `lspe pass` blocks than this section takes (64)");
     }
     // E9 域检查器（`docs/306`–`308`）：同样**在写对象之前**跑完，超容量点名失败。
-    if lspe_domain(unit, t, lo, hi, ptr_add(sc, PT_DOMTAB),
-                   ptr_add(sc, PT_DOMCNT)) == 1 {
+    // `lspe_main` 把它自己的失败码翻成 3，与引擎的两个码分开（写手要能点名）。
+    if lrc == 3 {
         return pt_wfail("--emit-potato: more domain declarations than this section takes (64)");
     }
     // E11 效应站点（`docs/341` A2c）：**计数是驱动器在检查之前预跑的**
@@ -6995,7 +7174,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // 覆盖它 —— 于是两者**可以不一致**，而这一格记的是**最后**的结果。
     // ⚠ **次序是判据**：参考实现那边 `"lms_levels"` 紧跟在 `"lms"` 之后。
     o = pt_key(out, o, 1, "lms_levels");
-    o = pt_lms_levels(out, o, unit, t, lo, hi);
+    o = pt_lms_levels(out, o, unit, t, lo, hi, lms_bits);
     o = pt_str(out, o, ",\n");
     // v18（`docs/253` §11.2.1，#1023）：七级的**运行期预算**。紧跟在 `lms_levels` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lms_budgets"` 紧跟在 `"lms_levels"` 之后。
@@ -7007,7 +7186,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     o = pt_key(out, o, 1, "lspe");
     // `PT_GLSCR` 是回填地址：`systems.lspe.cost` 要引台账的 `sites`，
     // 而它在 `pt_lspe` 里边才算得出 —— 那块内存在 gc 梯子算完之后就空着了。
-    o = pt_lspe(out, o, sc, unit, t, lo, hi, ptr_add(sc, PT_GLSCR), nins, lvl);
+    o = pt_lspe(out, o, sc, unit, t, lo, hi, ptr_add(sc, PT_GLSCR), nins, lvl, prof);
     o = pt_str(out, o, ",\n");
     // v22（`docs/299`）：**生命周期档**，紧跟在 `lspe` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lifetime"` 紧跟在 `"lspe"` 之后。
@@ -7022,7 +7201,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     // v20（`docs/147` §5 / `#1022`）：**系统索引**，紧跟在 `lspe` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"systems"` 紧跟在 `"lspe"` 之后。
     o = pt_key(out, o, 1, "systems");
-    o = pt_systems(out, o, sc, unit, t, lo, hi, ngl_tot);
+    o = pt_systems(out, o, sc, unit, t, lo, hi, ngl_tot, lms_bits);
     o = pt_str(out, o, ",\n");
     o = pt_key(out, o, 1, "switches");
     o = pt_aopen(out, o, ndf);

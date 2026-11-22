@@ -6931,10 +6931,16 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     let _sn: u32 = lspe_drop_unchecked(unit, t, ptr_add(sc, PT_GLSAFE));
     // E3/E4 的站点普查**在写对象之前**做完 —— 超容量是点名的失败（`pt_wfail`），
     // 不能在一半对象已经写出去之后再说。
-    let lrc: u32 = lspe_engine(unit, t, lo, hi, pt_lms_mask(unit, t, lo, hi),
-                               ptr_add(sc, PT_GLSAFE),
-                               ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
-                               ptr_add(sc, PT_PASS));
+    // `docs/361`：调度器是 SDK 的（`lspe_sched`），主检查器是唯一入口
+    // （`lspe_main`）；编译器不再直接调子检查器。
+    let lmsk: u32 = pt_lms_mask(unit, t, lo, hi);
+    let lplan: u32 = lspe_sched(unit, t, lo, hi);
+    let lrc: u32 = lspe_main(unit, t, lo, hi, lmsk,
+                             ptr_add(sc, PT_GLSAFE),
+                             ptr_add(sc, PT_PTRFIRST), ptr_add(sc, PT_L3CNT),
+                             ptr_add(sc, PT_PASS),
+                             ptr_add(sc, PT_DOMTAB), ptr_add(sc, PT_DOMCNT),
+                             lplan);
     if lrc == 1 {
         return pt_wfail("--emit-potato: more functions with a pointer first parameter than this section takes (1024)");
     }
@@ -6942,8 +6948,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
         return pt_wfail("--emit-potato: more `lspe pass` blocks than this section takes (64)");
     }
     // E9 域检查器（`docs/306`–`308`）：同样**在写对象之前**跑完，超容量点名失败。
-    if lspe_domain(unit, t, lo, hi, ptr_add(sc, PT_DOMTAB),
-                   ptr_add(sc, PT_DOMCNT)) == 1 {
+    // `lspe_main` 把它自己的失败码翻成 3，与引擎的两个码分开（写手要能点名）。
+    if lrc == 3 {
         return pt_wfail("--emit-potato: more domain declarations than this section takes (64)");
     }
     // E11 效应站点（`docs/341` A2c）：**计数是驱动器在检查之前预跑的**

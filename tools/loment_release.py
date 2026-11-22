@@ -209,6 +209,9 @@ GLOBS = [
     # `lms` 这一维与七级的判据（`docs/253` §9 / `docs/270`）。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。
     "tools/loment_lms_test.py",
+    # 产物公证人（`docs/361`）：独立验证器 + 判据；LMS 站点普查与桥梁判据（`docs/363`）。
+    # **两处清单插入同一位置** —— 次序就是发布清单的次序。
+    "tools/lnotary_test.py", "tools/lms_sites.py", "tools/lms_bridge_test.py",
     # 渠道常量（`docs/231` §2.2）：参考实现侧那份恒为 dev；**自举侧那一份在
     # `loment/selfhost/checker.lomt` 里**（一个常量一行），打包期由 `loment_dist.py` 换掉。
     # **两处清单插入同一位置** —— 次序就是发布清单的次序。

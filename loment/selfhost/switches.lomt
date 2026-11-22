@@ -670,6 +670,54 @@ pub fn desugar_lspe_pass(unit: ptr, toks: ptr, a: u32, b: u32, out: ptr, o: u32,
     return o;
 }
 
+/// 七个 LMS 细开关由**编译器定义**（`docs/253` §11.4 / `docs/270` §2）：用户不必、
+/// 也不该再写一遍 `set choose lms_guard {}`。
+///
+/// 参考实现的 `_seed_lms()` 在预扫期就铺了它们，所以 `choose lms_guard` 能过；
+/// 这里原来是漏的 —— 同一个程序在自举侧报 E0169「未定义的开关」，两边对不上。
+/// 名单次序与 `LMS_TOGGLES` 同一条（七个，不含盘古钩子：`lms_pangu_true` 是
+/// **用户**开关，仍然要 `set choose` 定义）。
+fn sw_lms_index(unit: ptr, sw: ptr, i: u32) -> u32 {
+    if sw_named(unit, sw, i, "lms_check") == 1 { return 1; }
+    if sw_named(unit, sw, i, "lms_manage") == 1 { return 2; }
+    if sw_named(unit, sw, i, "lms_guard") == 1 { return 3; }
+    if sw_named(unit, sw, i, "lms_reject") == 1 { return 4; }
+    if sw_named(unit, sw, i, "lms_crash") == 1 { return 5; }
+    if sw_named(unit, sw, i, "lms_restart") == 1 { return 6; }
+    if sw_named(unit, sw, i, "lms_seed") == 1 { return 7; }
+    return 0;
+}
+
+/// 显式写的七个细开关 + 盘古钩子，交给 `emit_module`：低 7 位 = 明确打开，
+/// 位 7..13 = 明确关闭，位 128 = 盘古。
+///
+/// 为什么必须由驱动器传：`apply_switches` 把 `choose` 从 token 流里**删掉**，
+/// 于是 codegen 那一边看不见它们（参考实现在预扫期把同样的信息记进 `mod.lms_writes`，
+/// 这是同一件事的第二个落点）。`lms_pangu_true` 也是同样的道理。
+pub fn sw_lms_bits(unit: ptr, sw: ptr) -> u32 {
+    let m: u32 = 0;
+    let ns: u32 = load32(sw, MAX_CHOOSE * SW_SIZE);
+    let i: u32 = 0;
+    while i < ns {
+        let kind: u32 = load32(sw, i * SW_SIZE + 8);
+        if kind != 2 {
+            let idx: u32 = sw_lms_index(unit, sw, i);
+            if idx != 0 {
+                if kind == 1 {
+                    m = m | ((1 as u32) << (idx - 1));
+                } else {
+                    m = m | ((1 as u32) << (idx + 6));
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if sw_state_named(unit, sw, "lms_pangu_true") == 1 {
+        m = m | 128;
+    }
+    return m;
+}
+
 /// 开关的**规则**（`docs/182` §1.8）。返回**条数**（不是字节偏移 —— 调用方拿它加到
 /// "共几条"上; 返回字节偏移会让那边按 8 倍去读未初始化的缓冲, 实测症状是**段错误**）。
 pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
@@ -716,8 +764,11 @@ pub fn switch_rules(unit: ptr, toks: ptr, sw: ptr, errs: ptr, o: u32) -> u32 {
                 b = b + 1;
             }
             // `domain_clock_explicit` 由**编译器定义**（`docs/315`），与 LMS 的七个细开关
-            // 同一条理由：用户不必也不该再写一遍 `set choose`。
-            if has == 0 && sw_named(unit, sw, a, "domain_clock_explicit") == 0 {
+            // 同一条理由：用户不必也不该再写一遍 `set choose`。七个的名单在
+            // `sw_lms_index` 里；漏掉它们时 `choose close lms_guard` 会被判成
+            // 未定义开关（2026-11-21 实测），而参考实现收下。
+            if has == 0 && sw_named(unit, sw, a, "domain_clock_explicit") == 0
+                    && sw_lms_index(unit, sw, a) == 0 {
                 n = sw_err(errs, n, a, 169);
             }
         }

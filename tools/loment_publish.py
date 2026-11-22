@@ -163,6 +163,11 @@ REPOS: dict[str, dict] = {
             # 名字既不以 `lom` 开头、也不在 potato 一族 —— **门禁闭包**那条判据在
             # CI 上点了名（2026-10-20）。开发口少了它，发布树里就没有这条判据。
             "tools/lspe_test.py",
+            # 独立公证人（`docs/361`）与 LMS × LVM 桥梁（`docs/363`）的判据 ——
+            # 名字不以 `lom` 开头，闭包判据在 CI 上点了名（2026-11-21）。
+            # `lms_sites` 是 `lnotary_test` 用**子进程**调的那把尺（不是 import），
+            # 闭包判据看不见它 —— 少了它发布树里那几条判据会在运行时缺文件。
+            "tools/lnotary_test.py", "tools/lms_bridge_test.py", "tools/lms_sites.py",
             # `pass_ratio` 棘轮的度量与基线导出（`docs/262` §5.16 / #1065）——
             # `lspe_test` import 它，闭包判据会点名。
             "tools/lspe_ratchet.py",

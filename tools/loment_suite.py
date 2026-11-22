@@ -41,7 +41,7 @@ import contextlib
 import io
 import sys
 
-__all__ = ["run", "entries"]
+__all__ = ["run", "run_unittest", "entries"]
 
 
 def entries(tests) -> list[tuple[str, object]]:
@@ -119,6 +119,56 @@ def run(tests, suite: str, *, only: str | None = None) -> int:
     if failed:
         tail += f", {len(failed)} 失败"
         why = "；".join(f"{n}: {type(e).__name__}: {str(e)[:400]}".replace("\n", " ")
+                        for n, e in failed)
+        tail += f"\n  红: {why}"
+    print(tail)
+    return 1 if failed else 0
+
+
+def run_unittest(case: type, suite: str) -> int:
+    """跑一个 `unittest.TestCase` 子类，**输出契约与 `run()` 相同**。
+
+    `run()` 按 `(名字, 无参函数)` 调，走不了 unittest 的 `setUpClass` / `tearDownClass`
+    （一次编译给整类用）与 `skipTest`（抛 `SkipTest`）。这里的运行器仍是 unittest 自己的
+    —— `ci.py` 读的那三行由 `_Fmt` 打出去，所以基线、预算、跳过账一个字都不用改。
+    """
+    import unittest
+
+    def _name(test: object) -> str:
+        # `setUpClass` 抛错时 unittest 报的是 `_ErrorHolder`，它没有 `_testMethodName`
+        return getattr(test, "_testMethodName", None) or str(test)
+
+    class _Fmt(unittest.TextTestResult):
+        def _line(self, mark: str, test: unittest.TestCase, tail: str = "") -> None:
+            print(f"  {mark}  {_name(test)}{tail}")
+
+        def addSuccess(self, test: unittest.TestCase) -> None:
+            super().addSuccess(test)
+            self._line("PASS", test)
+
+        def addSkip(self, test: unittest.TestCase, reason: str) -> None:
+            super().addSkip(test, reason)
+            self._line("SKIP", test, f": {reason}")
+
+        def addFailure(self, test: unittest.TestCase, err) -> None:  # noqa: ANN001
+            super().addFailure(test, err)
+            self._line("FAIL", test, f": {err[0].__name__}: {err[1]}")
+
+        def addError(self, test: unittest.TestCase, err) -> None:  # noqa: ANN001
+            super().addError(test, err)
+            self._line("FAIL", test, f": {err[0].__name__}: {err[1]}")
+
+    cases = unittest.TestLoader().loadTestsFromTestCase(case)
+    result = unittest.TextTestRunner(
+        stream=io.StringIO(), verbosity=0, resultclass=_Fmt).run(cases)
+    nskip = len(result.skipped)
+    failed = [(_name(t), e) for t, e in result.failures + result.errors]
+    tail = f"\n{suite}: {result.testsRun - nskip - len(failed)}/{result.testsRun} 通过"
+    if nskip:
+        tail += f", {nskip} SKIP"
+    if failed:
+        tail += f", {len(failed)} 失败"
+        why = "；".join(f"{n}: {e[0].__name__}: {str(e[1])[:400]}".replace("\n", " ")
                         for n, e in failed)
         tail += f"\n  红: {why}"
     print(tail)

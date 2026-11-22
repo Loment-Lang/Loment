@@ -4313,7 +4313,8 @@ fn _start() -> u32 {
             return fail(dm);
         }
         let pn: u32 = potato_emit(unit, toks2, nt, sw, ir, lvl,
-                                  load32(scr, PROF_OFF), effc);
+                                  load32(scr, PROF_OFF), effc,
+                                  sw_lms_bits(unit, sw));
         if pn == 0 {
             return die(1);
         }
@@ -4344,7 +4345,8 @@ fn _start() -> u32 {
     let cg: ptr = cgv as ptr;
     // `docs/315`：`domain_clock_explicit` 关掉"回边即 tick"（默认自动）。
     let m: u32 = emit_module(unit, ctoks, ir, cg, load32(scr, PROF_OFF),
-                             sw_state_named(unit, sw, "domain_clock_explicit"));
+                             sw_state_named(unit, sw, "domain_clock_explicit"),
+                             sw_lms_bits(unit, sw));
     if m == 0 {
         // **发射器自己的诊断通道**（`#775`）：先问它是不是"有一条规则降不下去"。
         // 那条比容量溢出更具体 —— 有规则号、有 token 位置，能指出是哪一处。

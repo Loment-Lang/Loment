@@ -966,7 +966,7 @@ CODEGEN_DRIVER = """#include <stdio.h>
 extern unsigned int lex(char *src, unsigned int len, unsigned char *out);
 extern unsigned int cg_arena_bytes(void);
 extern unsigned int emit_module(char *src, unsigned char *toks, char *out, unsigned char *st,
-                                unsigned int prof, unsigned int tickx);
+                                unsigned int prof, unsigned int tickx, unsigned int lmsbits);
 int main(int argc, char **argv) {
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -987,7 +987,8 @@ int main(int argc, char **argv) {
     unsigned int prof = (argc > 2) ? (unsigned int)atoi(argv[2]) : 0;
     /* `docs/315`：第三个实参 = `domain_clock_explicit`（1 = 关掉"回边即 tick"）。 */
     unsigned int tickx = (argc > 3) ? (unsigned int)atoi(argv[3]) : 0;
-    unsigned int m = emit_module(buf, toks, out, st, prof, tickx);
+    /* 第七参 = 用户开关位图；夹具直接喂 token 流，没有预扫，给 0。 */
+    unsigned int m = emit_module(buf, toks, out, st, prof, tickx, 0);
     printf("%.*s", (int)m, out);
     return 0;
 }

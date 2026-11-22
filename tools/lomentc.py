@@ -210,6 +210,18 @@ define internal void @__loment_abort() {
 declare void @llvm.trap()
 '''
 
+#: **LMS fault ABI**（`docs/356` §5.3 / `docs/363`）：`100 + kind`。
+#: 只在 `choose lms_pangu_true` 时发；默认档一个字节都不加。
+#: 站点由 LVM 的 `sw_cap` 基质报（`<函数>:<块>#<序号>`）；原生侧这一版只报 kind。
+_IR_FAULT = '''
+; ---- LMS fault ABI (docs/363): 100 + kind ----
+define internal void @__loment_fault(i32 %kind) {
+  %c = add i32 %kind, 100
+  %c64 = sext i32 %c to i64
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %c64, i64 0, i64 0)
+  unreachable
+}'''
+
 #: 能力域运行时（`docs/306`–`docs/308`）：虚拟钟 + 形状/极性/时律的统一判决。
 #: **只在真用到 `guard` / `tick;` 时发**（与自举侧 `emit_guard_runtime` 同位置）。
 _IR_GUARD_RUNTIME = '''; ---- 能力域运行时 (docs/306-308, 313): 虚拟钟 + 块级域 ----
@@ -3916,6 +3928,18 @@ def _lms_level(mod, name: str) -> bool:
         return writes[name]
     tier = getattr(mod, "chooses", {}).get("lms", CORE_DEFAULTS["lms"])
     return LMS_TIERS.get(tier, LMS_TIERS["lms_full"])[LMS_TOGGLES.index(name)]
+
+
+def _switch_on(mod, name: str) -> bool:
+    """一个**用户开关**（`set choose` 定义的）在整份程序里开没开。
+
+    `_lms_level` 只查七级那张表；盘古档的开关（`lms_pangu_true`）走这一条。
+    表不在（测试里直接构造的单元）⇒ 关。
+    """
+    sw = getattr(mod, "switches", None)
+    if sw is not None and (name in sw.seeded or name in sw.vals or name in sw.defs):
+        return bool(sw.state(name))
+    return False
 #: **每个取值"需要什么"**（`docs/175` §3.4 / #1019）。冲突**从这里算**，不再手写配对：
 #: 一个单元生效的取值并起来的 `needs` 与 `forbids` 一相交，冲突就出来了。
 #: 特征名是全表共用的一小组词汇（`runtime` / `collector` / `adaptive` / `host_libs`）——
@@ -14687,7 +14711,7 @@ class _Ir:
                  gc_alpha: bool = False, gc_auto: bool = False,
                  gc_barrier: bool = True, threads: bool = False,
                  lms_guard: bool = False, lms_reject: bool = False,
-                 lms_crash: bool = False,
+                 lms_crash: bool = False, lms_fault: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
                  gc_ctl: bool = False, tick_auto: bool = False,
                  caps: list | None = None, fn_clos: set | None = None):
@@ -14793,6 +14817,9 @@ class _Ir:
         self.lms_guard = lms_guard
         self.lms_reject = lms_reject
         self.lms_crash = lms_crash
+        #: `choose lms_pangu_true`：把 g1 的越界出口从 `__loment_abort`（SIGILL=132）
+        #: 换成 `__loment_fault(1)`（退出码 101）。默认关，产物逐字节不变。
+        self.lms_fault = lms_fault
         #: **指针的来源**（`docs/253` §5.3 入口 B 的第一步）：`let p: ptr = alloc(N)`
         #: 且 `N` 是编译期常量 ⇒ `{p: N}`。只收**直接来自 `alloc`** 的指针：
         #: 过了 `ptr_add` / 切片 / 结构体字段的，这里是**没有**记录的 —— 保守地不发，
@@ -15663,7 +15690,8 @@ class _Ir:
         ir = _Ir(self.funcs, self.consts, fake, self.structs, self.enums,
                  self.coverage, self.cov_counter, None, None, None, None,
                  self.gc_alpha, self.gc_auto, self.gc_barrier, self.threads,
-                 self.lms_guard, self.lms_reject, self.lms_crash, self.tur_edition,
+                 self.lms_guard, self.lms_reject, self.lms_crash, self.lms_fault,
+                 self.tur_edition,
                  self.gc_ctl, self.tick_auto, self.caps, self.fn_clos)
         ir.out.append(f"; {name} -> {ret}")
         ir.out.append(f"define internal {ir.ll(ret)} @{name}(ptr %__env{ps}) {{")
@@ -15942,6 +15970,12 @@ class _Ir:
             return None
         return self.lms_size.get(self.slot_of(a0.name))
 
+    def _lms_fatal(self, kind: int) -> str:
+        """越界出口：盘古档换成带 kind 的 fault（退出码 100+kind），否则保持 132。"""
+        if self.lms_fault:
+            return f"call void @__loment_fault(i32 {kind})"
+        return "call void @__loment_abort()"
+
     def _str_lit_ir(self, text: str) -> str:
         """一个字符串常量的 IR：注册 `.str.<fn>.<n>` + 造 `{ ptr, i64 }` 值。
 
@@ -16031,14 +16065,14 @@ class _Ir:
                 self.terminated = True
                 self.label(bad)
                 join = None
-                if self.lms_reject:
+                if self.lms_reject and not self.lms_fault:
                     # **第 4 级**（`docs/253` §5.4）：这一条 `load` 被拒，值取 0，
                     # 控制流**从它继续** —— 赔进去的是这一条指令，不是这个进程。
                     join = self.l("lmsjoin")
                     self.w(f"br label %{join}")
                 else:
-                    # **第 5 级**：拒不了就崩（`llvm.trap` = 进程自己退出）。
-                    self.w("call void @__loment_abort()")
+                    # **第 5 级**：拒不了就崩。盘古档带 kind（`docs/363`）。
+                    self.w(self._lms_fatal(1))
                     self.w("unreachable")
                 self.terminated = True
                 self.label(ok)
@@ -16076,11 +16110,11 @@ class _Ir:
                 self.w(f"br i1 {c}, label %{ok}, label %{bad}")
                 self.terminated = True
                 self.label(bad)
-                if self.lms_reject:
+                if self.lms_reject and not self.lms_fault:
                     join = self.l("lmsjoin")
                     self.w(f"br label %{join}")
                 else:
-                    self.w("call void @__loment_abort()")
+                    self.w(self._lms_fatal(1))
                     self.w("unreachable")
                 self.terminated = True
                 self.label(ok)
@@ -17168,14 +17202,14 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   gc_alpha: bool = False, gc_auto: bool = False,
                   gc_barrier: bool = True, threads: bool = False,
                   lms_guard: bool = False, lms_reject: bool = False,
-                  lms_crash: bool = False,
+                  lms_crash: bool = False, lms_fault: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
                   gc_ctl: bool = False, tick_auto: bool = False, caps: list | None = None,
                   fn_clos: set | None = None
                   ) -> tuple[list[str], list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
-             threads, lms_guard, lms_reject, lms_crash, tur_edition, gc_ctl, tick_auto,
+             threads, lms_guard, lms_reject, lms_crash, lms_fault, tur_edition, gc_ctl, tick_auto,
              caps, fn_clos)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
@@ -17543,6 +17577,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     _lms_guard = _lms_level(mod, "lms_guard")
     _lms_reject = _lms_level(mod, "lms_reject")
     _lms_crash = _lms_level(mod, "lms_crash")
+    _lms_fault = _switch_on(mod, "lms_pangu_true")
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -17622,7 +17657,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                         cov_counter, scope, lines, meta if debug else None,
                                         dbg_types if debug else None, gc_alpha, gc_auto,
                                         gc_alpha and _has_heap_pre, _has_threads,
-                                        _lms_guard, _lms_reject, _lms_crash,
+                                        _lms_guard, _lms_reject, _lms_crash, _lms_fault,
                                         getattr(mod, "profile", potato_from.DEFAULT_EDITION),
                                         _gc_ctl, _tick_auto, mod.caps, _fn_clos)
             globals_ += g
@@ -17651,6 +17686,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
         out.append("")
     if rt_on or "@__loment_" in text_all:  # M31: 自带运行时 (无 libc)
         out.append(_IR_RUNTIME)
+    if _lms_fault:
+        out.append(_IR_FAULT)
     # `print_num` 的那段**单独发**（`docs/296` §2.7）：它与 `_IR_RUNTIME` 同处运行时区、
     # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
     if "@__loment_print_num" in text_all:

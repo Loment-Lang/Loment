@@ -274,9 +274,14 @@ const CT_END: u32 = 19504132;        // CT_OFF + MAX_CT * 16
 const IOS_OFF: u32 = 19504132;       // = CT_END
 const IOS_CAP: u32 = 65536;
 const IOS_END: u32 = 19569668;       // IOS_OFF + IOS_CAP
+//: 活体表（`docs/375` §6）：摆放只跟活体比。否则每次 `alloca` 都要扫一遍
+//: "这辈子造过的所有体"，循环里调函数的程序是 O(n²)（2000 次 store32 要 57s）。
+const LIVE_OFF: u32 = 19569668;      // = IOS_END，MAX_DB 条 u32 体号
+const LIVE_END: u32 = 19586052;      // LIVE_OFF + MAX_DB * 4
 const C_TAGSEQ: u32 = 64;           // 标签轮转序列（1 + seq % 15）
 const C_SHN: u32 = 68;              // 影子表写了几条（环形下标 = 它 % SH_CAP）
 const C_DSH: u32 = 72;              // 表示层摆法（`docs/375` §2.3；0 = 规范）
+const C_DNL: u32 = 76;              // 活体表条数（摆放只看这些）
 
 const OBJ_GLOBAL: u32 = 1;
 const OBJ_BRK: u32 = 2;
@@ -3385,6 +3390,8 @@ fn d_body_new(a: ptr, kind: u32, size: u32, data: u32) -> u32 {
     d_bset(a, bi, 10, sh as u32);
     ctx_set(a, C_DNB, n + 1);
     d_place(a, bi);
+    wr(a, LIVE_OFF, ctx_get(a, C_DNL), bi);
+    ctx_set(a, C_DNL, ctx_get(a, C_DNL) + 1);
     if data != 0 {
         // 全局的初值先写在宿主暂存里（`place_globals`），这里按格搬进体。
         let m: ptr = ptr_add(a, MEM_OFF);
@@ -3398,16 +3405,17 @@ fn d_body_new(a: ptr, kind: u32, size: u32, data: u32) -> u32 {
 }
 
 fn d_overlap(a: ptr, x: u32, y: u32, z: u32, dx: u32, dy: u32, dz: u32, me: u32) -> u32 {
-    let n: u32 = ctx_get(a, C_DNB);
+    let n: u32 = ctx_get(a, C_DNL);
     let i: u32 = 0;
     while i < n {
-        if i != me && d_body(a, i, 9) == 1 {
-            let bx: u32 = d_body(a, i, 6);
-            let by: u32 = d_body(a, i, 7);
-            let bz: u32 = d_body(a, i, 8);
-            if x < bx + d_body(a, i, 3) && bx < x + dx
-                    && y < by + d_body(a, i, 4) && by < y + dy
-                    && z < bz + d_body(a, i, 5) && bz < z + dz {
+        let bi: u32 = rd(a, LIVE_OFF, i);
+        if bi != me {
+            let bx: u32 = d_body(a, bi, 6);
+            let by: u32 = d_body(a, bi, 7);
+            let bz: u32 = d_body(a, bi, 8);
+            if x < bx + d_body(a, bi, 3) && bx < x + dx
+                    && y < by + d_body(a, bi, 4) && by < y + dy
+                    && z < bz + d_body(a, bi, 5) && bz < z + dz {
                 return 1;
             }
         }
@@ -3461,6 +3469,19 @@ fn d_retire_body(a: ptr, bi: u32) {
         return;
     }
     d_bset(a, bi, 9, 0);
+    let lv: u32 = ctx_get(a, C_DNL);
+    let lk: u32 = 0;
+    let lh: u32 = NONE;
+    while lk < lv {
+        if rd(a, LIVE_OFF, lk) == bi && lh == NONE {
+            lh = lk;
+        }
+        lk = lk + 1;
+    }
+    if lh != NONE {
+        ctx_set(a, C_DNL, lv - 1);
+        wr(a, LIVE_OFF, lh, rd(a, LIVE_OFF, lv - 1));
+    }
     // 把这一颗体的令牌从两张有序表里删掉（令牌永不复用，不需要代号）。
     let n: u32 = ctx_get(a, C_DNT);
     let i: u32 = 0;
@@ -4890,6 +4911,7 @@ fn snap_read_dis(a: ptr, f: u64) {
     if nb2 > MAX_DB {
         fail("checkpoint：体表超过镜像上限");
     }
+    ctx_set(a, C_DNL, 0);
     i = 0;
     while i < nb2 {
         let kind: u32 = ru32(f, a);
@@ -4910,6 +4932,10 @@ fn snap_read_dis(a: ptr, f: u64) {
         d_bset(a, i, 6, 0);
         d_bset(a, i, 7, 0);
         d_bset(a, i, 8, 0);
+        if alive == 1 {
+            wr(a, LIVE_OFF, ctx_get(a, C_DNL), i);
+            ctx_set(a, C_DNL, ctx_get(a, C_DNL) + 1);
+        }
         d_place(a, i);
         i = i + 1;
     }
@@ -6772,7 +6798,7 @@ fn run(a: ptr) -> u32 {
 
 fn _start() -> u32 {
     // 末尾多留 `sw_tag` 的标签/能力表（`TAG_OFF` / `CAP_OFF`）—— 既有偏移一个都不挪。
-    let a: ptr = sys_alloc(IOS_END as u64) as ptr;
+    let a: ptr = sys_alloc(LIVE_END as u64) as ptr;
     if a as u64 == 0 {
         return fail("oom (brk 失败)");
     }

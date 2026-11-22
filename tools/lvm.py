@@ -1122,6 +1122,10 @@ class Dismem:
         #: 表示层摆法（`docs/375` §2.3）：0 = 规范；非 0 给每颗体一个确定性的移位。
         self.shuffle = int(shuffle)
         self.bodies: dict[int, _DismBody] = {}
+        #: **活体**（退休的不在这里）。摆放只跟活体比 —— 否则每次 `alloca` 都要扫
+        #: 一遍"这辈子造过的所有体"，循环里调函数的程序是 O(n²)（2026-11-22 实测
+        #: 2000 次 store32 要 57s，`docs/375` §6）。
+        self.live: dict[int, _DismBody] = {}
         self.next_bid = 1
         #: 令牌 -> (体编号, 体内偏移)。**永不外露**。
         self.tokens: dict[int, tuple[int, int]] = {}
@@ -1141,8 +1145,8 @@ class Dismem:
 
     # ------------------------------------------------------------ 排版
     def _overlap(self, x, y, z, dx, dy, dz, me=None) -> bool:
-        for b in self.bodies.values():
-            if not b.alive or b is me:
+        for b in self.live.values():
+            if b is me:
                 continue
             if (x < b.x + b.dx and b.x < x + dx
                     and y < b.y + b.dy and b.y < y + dy
@@ -1169,9 +1173,8 @@ class Dismem:
     def relocate(self) -> None:
         """重排全部活体 —— 改的是**运行期坐标**，令牌与 guest 值一个都不动。"""
         self.round += 1
-        for b in sorted(self.bodies.values(), key=lambda q: q.id):
-            if b.alive:
-                self._place(b)
+        for b in sorted(self.live.values(), key=lambda q: q.id):
+            self._place(b)
 
     # ------------------------------------------------------------ 令牌
     def _new_token(self, b: "_DismBody", off: int) -> int:
@@ -1251,6 +1254,7 @@ class Dismem:
         b = _DismBody(bid, kind, size, shift)
         self.bodies[bid] = b
         self._place(b)
+        self.live[bid] = b
         return self._new_token(b, 0)
 
     def retire(self, h: int) -> None:
@@ -1273,6 +1277,7 @@ class Dismem:
         b.tokens.clear()
         b.alive = False
         b.cells.clear()
+        self.live.pop(bid, None)
 
     def put(self, h, data) -> None:
         b, off = self.decode(h, len(data))
@@ -2667,6 +2672,7 @@ class ExplicitExecutor(Executor):
         """把 flags=3 的段装回 `Dismem`（`docs/375` §2.5）。"""
         m = self.mem
         m.bodies.clear()
+        m.live.clear()
         m.tokens.clear()
         m.rev.clear()
         m.tomb.clear()
@@ -2677,6 +2683,7 @@ class ExplicitExecutor(Executor):
             b.alive = True
             m.bodies[bid] = b
             m._place(b)
+            m.live[bid] = b
         for bid, k, v in cells:
             b = m.bodies.get(bid)
             if b is not None:

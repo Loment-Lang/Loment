@@ -171,6 +171,46 @@ def cmd_ir(a) -> int:
     return 0
 
 
+def cmd_opt(a) -> int:
+    """`loment opt FILE [-o OUT]` —— 要 C/Rust 级运行速度时的那一档（docs/365）。
+
+    与包里 `loment build --opt` **同一件事**（`docs/212` §5A）：把 Loment 的 IR 直接
+    喂 clang：默认 `-O3 -march=native`（按本机 CPU 调优），`--portable` 退到 generic `-O2`。产物与默认档不同（默认档保证与参考实现逐字节相同；这一档要的是
+    速度），所以它是一条显式的构建档，不是默认行为。只出 **ELF**（当前口径）。
+    """
+    import loment_dist
+    p, mod, deps = _load(a.file)
+    errs = lomentc.check(mod, deps=deps)
+    if errs:
+        for e in errs:
+            print("  " + e, file=sys.stderr)
+        return 1
+    cc = loment_dist.clang_path()
+    if cc is None:
+        print("loment opt: 没找到 clang —— 这一档需要它（docs/365）", file=sys.stderr)
+        return 2
+    out = Path(a.out) if a.out else p.with_suffix("")
+    ll = lomentc.emit_llvm(mod, ROOT, deps)
+    with tempfile.NamedTemporaryFile("w", suffix=".ll", delete=False,
+                                     encoding="utf-8", newline="\n") as f:
+        f.write(ll)
+        tmp = Path(f.name)
+    flags = (["-O2"] if a.portable else
+             ["-O3", "-march=native", "-mllvm", "-align-all-functions=6"])
+    try:
+        r = subprocess.run(
+            [cc, "--target=x86_64-unknown-linux-gnu", *flags, "-static",
+             "-nostdlib", "-ffreestanding", "-o", str(out), str(tmp)],
+            capture_output=True, text=True, shell=False)
+    finally:
+        tmp.unlink(missing_ok=True)
+    if r.returncode != 0:
+        print(f"loment opt: clang 失败:\n{r.stderr[-500:]}", file=sys.stderr)
+        return 1
+    print(f"[OK] {out} ({out.stat().st_size}B, clang {' '.join(flags)})")
+    return 0
+
+
 def cmd_test(a) -> int:
     p, mod, deps = _load(a.file)
     tests = [f for f in mod.funcs if f.name.startswith("test_") and not f.params
@@ -989,6 +1029,12 @@ def main(argv: list[str] | None = None) -> int:
     e.set_defaults(fn=cmd_err)
     i = sub.add_parser("ir"); i.add_argument("file"); i.add_argument("--objdump", action="store_true")
     i.set_defaults(fn=cmd_ir)
+    o = sub.add_parser("opt", help="clang 速度档出 ELF（默认 -O3 -march=native，docs/365）")
+    o.add_argument("file")
+    o.add_argument("-o", "--out", default=None)
+    o.add_argument("--portable", action="store_true",
+                   help="generic x86-64（-O2）；默认按本机 CPU 调优（-O3 -march=native）")
+    o.set_defaults(fn=cmd_opt)
     t = sub.add_parser("test"); t.add_argument("file"); t.set_defaults(fn=cmd_test)
     b = sub.add_parser("bench"); b.add_argument("file"); b.add_argument("--n", type=int, default=200000)
     b.set_defaults(fn=cmd_bench)

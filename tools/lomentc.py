@@ -18476,23 +18476,20 @@ def load(path: Path, sw: SwitchTable | None = None, lspe_level: int = 3,
     # LMS 的 g1 内联界检查也是站点（`#1021`）：档位从**开关表**读（预扫已按档铺过
     # 初值），与发射器同一个读法。
     _lms_on = frozenset(n for n in LMS_TOGGLES if _lms_level(mod, n))
-    # `docs/344` V0-V3：先给这一个单元算调度计划，再把计划交给普查。计划只决定
-    # 哪些**一定没有站点**的阶段不跑；站点集合与顺序不变。计划以 `_plan` 进台账
-    # 内部字段（`public()` 会剥掉），所以 Potato 产物逐字节不变。
-    mod.lspe_plan = lspe.plan_for_tokens(
-        tt, mod.name, dims=effective_dims(mod), level=lspe_level,
-        lms=_lms_on, slots=getattr(mod, "slots", {}))
+    # `docs/361` SDK 1.0：编译器只有一条 LSPE 入口 —— SDK 的 `audit()`。调度器
+    # 属于 SDK，不在检查器里：SDK 先算计划，再交给主检查器跑域/借用/效应/GC 等
+    # 子检查器，并把 E11 的站点追加在普查之后（顺序与旧路径逐字节相同）。计划仍以
+    # `_plan` 进台账内部字段（`public()` 会剥掉），所以 Potato 产物逐字节不变。
     _scoped = block_scope_on(_eff)
-    mod.lspe_sites, mod.lspe_unsourced_lines, mod.lspe_passes = lspe.census(
-        tt, mod.name, lms=_lms_on, plan=mod.lspe_plan,
-        shadowed=(_shadowed_names(mod) if _scoped else {}),
-        scoped=_scoped)
-    # **A2c：E11 的效应站点进台账**（`docs/341` §11）。只在 `lspe_effects_true` 时
-    # 挂上；默认关时一行都不加，旧产物的 `lspe` 块逐字节不变。
-    # 站点形状与报告面同一个函数产出 —— 不另写一份分析（两份必然漂）。
-    if (getattr(mod, "slots", {}) or {}).get("effects") == "true":
-        mod.lspe_sites = list(mod.lspe_sites) + list(
-            lspe.effects_analyze(tt, mod.name)["sites"])
+    _lspe_audit = lspe.audit(
+        tt, mod.name, dims=effective_dims(mod), level=lspe_level,
+        lms=_lms_on, slots=getattr(mod, "slots", {}),
+        scoped=_scoped,
+        shadowed=(_shadowed_names(mod) if _scoped else {}))
+    mod.lspe_plan = _lspe_audit.plan
+    mod.lspe_sites = _lspe_audit.sites
+    mod.lspe_unsourced_lines = _lspe_audit.unsourced
+    mod.lspe_passes = _lspe_audit.passes
     mod.lspe_level = lspe_level
     mod.lspe_mode = lspe_mode
     # 回答通道（`docs/262` §6 / `#755`）：同目录的 `lspe.answers` 是团队共享、可评审、

@@ -90,13 +90,13 @@ LSPE_PROBED_OBLIGATIONS: frozenset[str] = frozenset({
 #: 值写明"谁是那条路"。自举侧的两张表是既有的点名失败（`pt_wfail`），
 #: 参考侧靠预算与确定性上限，越界一律抛错，不静默截断。
 LSPE_CAPACITIES: dict[str, tuple[int, str]] = {
-    "pass_blocks": (64, "lspe_engine 回 2 -> pt_wfail（点名）"),
-    "ptr_first_functions": (1024, "lspe_engine 回 1 -> pt_wfail（点名）"),
+    "pass_blocks": (64, "lspe_main 透传 2（lspe_engine）-> pt_wfail（点名）"),
+    "ptr_first_functions": (1024, "lspe_main 透传 1（lspe_engine）-> pt_wfail（点名）"),
     "obligations_per_unit": (65536, "求解器步数预算耗尽 -> Q005，不静默"),
     "derivation_nodes": (65536, "证明哈希只对站点数（预算内）算，越界先报预算"),
     "substitution_log": (65536, "WF 站点数受预算约束；越界 -> Q005"),
     # E9 域检查器（`docs/306`–`308`）。
-    "domain_declarations": (64, "lspe_domain 回 1 -> pt_wfail（点名）"),
+    "domain_declarations": (64, "lspe_main 回 3（lspe_domain 回 1）-> pt_wfail（点名）"),
     # E11 效应检查器（`docs/341`）。行是有限集合，容量越界必须点名，不许静默截断。
     "effect_declarations": (64, "lspe_effects 回 1 -> pt_wfail（点名）"),
     "ops_per_effect": (256, "lspe_effects 回 1 -> pt_wfail（点名）"),

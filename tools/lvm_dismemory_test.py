@@ -24,6 +24,8 @@
   文案里没有体号/坐标/体素。
 * **L 时钟被虚拟化** —— 228/201 在 dismemory 下按**已执行指令数**给虚拟钟；
   同一程序 K=0/1/7 的 stdout（含两次时间戳）逐字节相同。
+* **S I/O 可用** —— `syscall4p` / `sys` 库的指针槽不 ptrtoint：`print` 与
+  `sys_write` 在 dismemory 下真的写出字节，K=0/1/7 同答（`docs/374` §3）。
 
 ⚠ **为什么有一半夹具是手写 IR**：ptrtoint / inttoptr / 跨体减法这些操作**在 Loment 源里
 写不出来**（这正是这一档要的）；要证明 LVM 边界拒绝它们，只能直接喂 IR。合法路径
@@ -338,6 +340,39 @@ def test_clock_is_virtual_under_dismemory() -> None:
     rc2, _o2, _e2 = _run(ir, 0)
     assert rc2 == rcs[0], f"同一程序两次跑出不同的虚拟钟：{rcs[0]} vs {rc2}"
     print(f"      虚拟钟 K=0/1/7 同答 rc={rcs[0]}；重跑同值（墙钟版会是 1）")
+
+
+_IO = """module dis_io
+choose lvm_dismemory_true
+choose runtime
+use bytes
+
+fn _start() {
+    print("io ok\n");
+    let p: ptr = alloc(4);
+    store8(p, 0, 66);
+    let w: i64 = syscall4p(1, 1, p, 1);
+    if w != 1 { syscall4(60, 2, 0, 0); }
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def test_typed_pointer_syscalls_write_bytes() -> None:
+    """判 S（`docs/374` §3）：dismemory 下的 I/O 不经过 ptrtoint。
+
+    `print` 与 `syscall4p` 的第三个实参是**类型化指针槽**：lowering 发 `ptr %t` 而不是
+    `ptrtoint`，于是令牌原样进寄存器、运行期按号解码。K=0/1/7 的 stdout 必须逐字节同。
+    """
+    ir = _ir(_IO)
+    assert "ptrtoint ptr %t" not in ir, "用户代码里仍有 ptrtoint —— 类型化槽没生效"
+    outs: list[bytes] = []
+    for rel in (0, 1, 7):
+        rc, out, err = _run(ir, rel)
+        assert rc == 0, (rel, rc, err[:300])
+        outs.append(out)
+    assert outs[0] == outs[1] == outs[2] == b"io ok\nB", outs
+    print("      syscall4p/print 在 dismemory 下真的写出字节；K=0/1/7 同答")
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 

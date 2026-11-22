@@ -2851,7 +2851,7 @@ fn gep(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
                         dlo = lo32(f);
                         dhi = hi32(f);
                         li = ni;
-                    } else {
+                    } else if lk == 2 {
                         let cnt: u32 = bsz / w;
                         if idx2 >= cnt {
                             let _f: u32 = d_fault(a, DF_BOUNDS, base, bi, idx2, w, 3, io, il, 0, 0);
@@ -2864,6 +2864,9 @@ fn gep(a: ptr, m: ptr, fr: u32, io: u32, il: u32) -> u64 {
                         li = idx2;
                         lc = cnt;
                         lw = w;
+                    } else {
+                        let _f: u32 = d_fault(a, DF_NOADDR, base, bi, 0, w, 4, io, il, 0, 0);
+                        return 0;
                     }
                 } else if scalar == 1 {
                     if lk == 0 && lw == w {

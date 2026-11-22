@@ -1349,6 +1349,10 @@ class Dismem:
                     d["count"] = cnt
                     self._fault(FAULT_BOUNDS, "index=%d count=%d" % (nidx, cnt), d)
                 path = path[:-1] + ((0, nidx, cnt, w),)
+            elif path:
+                # 从一个字段 / 不同宽度的元素上"往前挪"不是结构操作（`docs/377` §2.2）。
+                d = self.map_detail(h, width, "gep")
+                self._fault(FAULT_NOADDR, "pointer step from a non-element reference", d)
             else:
                 cnt = (b.size // width) if width > 0 else 0
                 if delta < 0 or delta >= cnt:

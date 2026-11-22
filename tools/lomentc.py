@@ -69,6 +69,11 @@ BUILTINS = {
     "ptr_add": (("ptr", "u32"), "ptr"),              # M73: 指针字节偏移
     "ptr_sub": (("ptr", "u32"), "ptr"),
     "syscall4": (("u64", "u64", "u64", "u64"), "i64"),  # M67: nr, a0..a2 (rax/rdi/rsi/rdx)
+    # `docs/375` §3：带**类型化指针槽**的 syscall。第三个实参声明成 `ptr`，lowering **不**
+    # 做 ptrtoint —— dismemory 下令牌原样进寄存器，运行期按号解码。普通档里它就是一个
+    # 地址，语义与 syscall4 同。
+    "syscall4p": (("u64", "u64", "ptr", "u64"), "i64"),
+    "syscall6p": (("u64", "u64", "ptr", "u64", "u64", "u64"), "i64"),
     "syscall6": (("u64", "u64", "u64", "u64", "u64", "u64"), "i64"),  # M72: nr, a0..a4
     # M72+: nr + a0..a5 —— 名字里的数就是**值**的个数（与 syscall4 / syscall6 同一约定），
     # 所以 7 = nr + 6 个实参，正好把 Linux 的六个实参寄存器（rdi/rsi/rdx/r10/r8/**r9**）用满。
@@ -11425,6 +11430,22 @@ def _expr_rs(e) -> str:
                     "in(\"rsi\") (" + a[2] + ") as i64, "
                     "in(\"rdx\") (" + a[3] + ") as i64, "
                     "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
+        if e.name == "syscall4p":  # docs/375：第三槽是 ptr（Rust 这一档只做语义等价）
+            return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
+                    "in(\"rdi\") (" + a[1] + ") as i64, "
+                    "in(\"rsi\") (" + a[2] + ") as i64, "
+                    "in(\"rdx\") (" + a[3] + ") as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
+        if e.name == "syscall6p":
+            return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
+                    "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
+                    "in(\"rdi\") (" + a[1] + ") as i64, "
+                    "in(\"rsi\") (" + a[2] + ") as i64, "
+                    "in(\"rdx\") (" + a[3] + ") as i64, "
+                    "in(\"r10\") (" + a[4] + ") as i64, "
+                    "in(\"r8\") (" + a[5] + ") as i64, "
+                    "lateout(\"rcx\") _, lateout(\"r11\") _); } __r }")
         if e.name == "syscall6":  # M72: nr + a0..a4
             return ("{ let mut __r: i64; unsafe { core::arch::asm!(\"syscall\", "
                     "inlateout(\"rax\") (" + a[0] + ") as i64 => __r, "
@@ -11905,7 +11926,7 @@ NET_WIDTH_RUNGS = {
 #: `surfaces.net` —— 两处数的是同一批站点，只是分的粗细不同。
 NET_WIDTH_RUNG_KEYS = ("w0", "w1", "w2", "w3")
 #: 机调用内建。与 `potato.BOUNDARY_BUILTINS` 里 `syscall` 开头那几个一致（那条子集判据钉着）。
-SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
+SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7", "syscall4p", "syscall6p")
 
 
 def _machine_call_sites(mod: Module) -> list[tuple[int, int | None]]:
@@ -14104,7 +14125,7 @@ _SYSCALL_BORROWS = frozenset((
 
 #: **只认这三个名字**（不是"以 syscall 开头"）：自举侧只能逐名比（没有前缀比较），
 #: 两边必须**同判** —— 放宽成前缀就可能在某个用户函数名上与自举侧分道扬镳。
-_SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
+_SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7", "syscall4p", "syscall6p")
 
 
 def _syscall_borrow_ok(toks: list, i: int) -> bool:
@@ -14143,6 +14164,40 @@ def _syscall_borrow_ok(toks: list, i: int) -> bool:
     return (_int_lit(nr.val) & 0xFFFFFFFF) in _SYSCALL_BORROWS
 
 
+def _syscall_ptr_borrow_ok(toks: list, i: int) -> bool:
+    """`docs/375` §3：`NAME` 是 `syscall4p/6p` 的**第三个实参**（类型化指针槽）。
+
+    与 `_syscall_borrow_ok` 同一套"借"的判据，只是形状不同：这里没有 `as`，指针本身就是
+    该槽的值（dismemory 下是令牌）。号仍必须在白名单里，否则按外逃算。
+    """
+    n = len(toks)
+    if not (i + 1 < n and toks[i].kind != "string" and toks[i + 1].val in (",", ")")):
+        return False
+    depth, j, commas = 0, i - 1, 0
+    while j >= 0:
+        tok = toks[j]
+        if tok.kind == "string":
+            j -= 1
+            continue
+        if tok.val == ")":
+            depth += 1
+        elif tok.val == "(":
+            if depth == 0:
+                break
+            depth -= 1
+        elif tok.val == "," and depth == 0:
+            commas += 1
+        j -= 1
+    if j < 1 or commas != 2:
+        return False
+    callee, nr = toks[j - 1], toks[j + 1]
+    if not (callee.kind == "ident" and callee.val in ("syscall4p", "syscall6p")):
+        return False
+    if nr.kind != "number":
+        return False
+    return (_int_lit(nr.val) & 0xFFFFFFFF) in _SYSCALL_BORROWS
+
+
 def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
                    safe: "dict[str, int] | None" = None) -> tuple[bool, int, int]:
     """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
@@ -14177,7 +14232,8 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
             elif word(k + 1, "="):
                 ok = False                          # 重新赋值
                 break
-            elif not (_safe_use(toks, k, safe) or _syscall_borrow_ok(toks, k)):
+            elif not (_safe_use(toks, k, safe) or _syscall_borrow_ok(toks, k)
+                          or _syscall_ptr_borrow_ok(toks, k)):
                 ok = False                          # 其余任何用法：外逃
                 break
         k += 1
@@ -14412,7 +14468,8 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
                     return False           # 体内第二处声明（遮蔽）：认不清哪个是哪个
                 elif word(k + 1, "="):
                     return False           # 重新赋值
-                elif not (_safe_use(toks, k, safe) or _syscall_borrow_ok(toks, k)):
+                elif not (_safe_use(toks, k, safe) or _syscall_borrow_ok(toks, k)
+                          or _syscall_ptr_borrow_ok(toks, k)):
                     return False
         if ndecl != 1:
             return False
@@ -14714,8 +14771,11 @@ class _Ir:
                  lms_crash: bool = False, lms_fault: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
                  gc_ctl: bool = False, tick_auto: bool = False,
-                 caps: list | None = None, fn_clos: set | None = None):
+                 caps: list | None = None, fn_clos: set | None = None,
+                 dismemory: bool = False):
         self.funcs, self.consts, self.f = funcs, consts, f
+        #: `docs/375` §3：这一档下 `print` / `syscall4p` 的指针实参**不做 ptrtoint**。
+        self.dismemory = dismemory
         #: 顶层能力表（撤销位的查找要用；块域的撤销位在 `dom_rev` 里）。
         self.caps = caps or []
         #: **回边即 tick**（`docs/315` §2）：整个单元用了虚拟钟（守卫 / `tick;` / 域块）
@@ -15692,7 +15752,8 @@ class _Ir:
                  self.gc_alpha, self.gc_auto, self.gc_barrier, self.threads,
                  self.lms_guard, self.lms_reject, self.lms_crash, self.lms_fault,
                  self.tur_edition,
-                 self.gc_ctl, self.tick_auto, self.caps, self.fn_clos)
+                 self.gc_ctl, self.tick_auto, self.caps, self.fn_clos,
+                 self.dismemory)
         ir.out.append(f"; {name} -> {ret}")
         ir.out.append(f"define internal {ir.ll(ret)} @{name}(ptr %__env{ps}) {{")
         ir.out.append("entry:")
@@ -16227,12 +16288,19 @@ class _Ir:
             self.w(f"{p} = extractvalue {{ ptr, i64 }} {sv}, 0")
             ln = self.t()
             self.w(f"{ln} = extractvalue {{ ptr, i64 }} {sv}, 1")
-            pi = self.t()
-            self.w(f"{pi} = ptrtoint ptr {p} to i64")
-            r = self.t()
-            self.w(f'{r} = call i64 asm sideeffect "syscall", '
-                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
-                   f"(i64 1, i64 1, i64 {pi}, i64 {ln})")
+            if self.dismemory:
+                # `docs/375` §3：dismemory 下令牌不能 ptrtoint —— 直接把 `ptr` 交给 asm。
+                r = self.t()
+                self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                       f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
+                       f"(i64 1, i64 1, ptr {p}, i64 {ln})")
+            else:
+                pi = self.t()
+                self.w(f"{pi} = ptrtoint ptr {p} to i64")
+                r = self.t()
+                self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                       f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
+                       f"(i64 1, i64 1, i64 {pi}, i64 {ln})")
             t = self.t()
             self.w(f"{t} = trunc i64 {r} to i32")
             return "u32", t
@@ -16253,6 +16321,29 @@ class _Ir:
             self.w(f'{r} = call i64 asm sideeffect "syscall", '
                    f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
                    f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]})")
+            return "i64", r
+        if e.name == "syscall4p":  # docs/375：第三槽是 ptr，**没有 ptrtoint**
+            v0 = self.expr(e.args[0], "u64")[1]
+            v1 = self.expr(e.args[1], "u64")[1]
+            _pt, vp = self.expr(e.args[2], "ptr")
+            v3 = self.expr(e.args[3], "u64")[1]
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},~{{cx}},~{{r11}},~{{memory}}"'
+                   f"(i64 {v0}, i64 {v1}, ptr {vp}, i64 {v3})")
+            return "i64", r
+        if e.name == "syscall6p":
+            v0 = self.expr(e.args[0], "u64")[1]
+            v1 = self.expr(e.args[1], "u64")[1]
+            _pt, vp = self.expr(e.args[2], "ptr")
+            v3 = self.expr(e.args[3], "u64")[1]
+            v4 = self.expr(e.args[4], "u64")[1]
+            v5 = self.expr(e.args[5], "u64")[1]
+            r = self.t()
+            self.w(f'{r} = call i64 asm sideeffect "syscall", '
+                   f'"={{ax}},{{ax}},{{di}},{{si}},{{dx}},{{r10}},{{r8}},~{{cx}},~{{r11}},'
+                   f'~{{memory}}"'
+                   f"(i64 {v0}, i64 {v1}, ptr {vp}, i64 {v3}, i64 {v4}, i64 {v5})")
             return "i64", r
         if e.name == "syscall6":  # M72: nr + a0..a4 (r10/r8)
             vals = [self.expr(a, "u64")[1] for a in e.args]
@@ -17205,12 +17296,12 @@ def _emit_ir_func(f: Func, funcs: dict, consts: dict,
                   lms_crash: bool = False, lms_fault: bool = False,
                  tur_edition: str = potato_from.DEFAULT_EDITION,
                   gc_ctl: bool = False, tick_auto: bool = False, caps: list | None = None,
-                  fn_clos: set | None = None
+                  fn_clos: set | None = None, dismemory: bool = False
                   ) -> tuple[list[str], list[str], str]:
     ir = _Ir(funcs, consts, f, structs, enums, coverage, cov_counter,
              dbg_scope, dbg_lines, dbg_meta, dbg_types, gc_alpha, gc_auto, gc_barrier,
              threads, lms_guard, lms_reject, lms_crash, lms_fault, tur_edition, gc_ctl, tick_auto,
-             caps, fn_clos)
+             caps, fn_clos, dismemory)
     if f.interrupt:  # M33: x86_intrcc 需要中断帧指针
         ir.out.append(f"; {f.name} -> interrupt (x86_intrcc)")
         ir.out.append(f"define x86_intrcc void @{f.name}(ptr byval([8 x i8]) %__frame)"
@@ -17659,7 +17750,9 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                                         gc_alpha and _has_heap_pre, _has_threads,
                                         _lms_guard, _lms_reject, _lms_crash, _lms_fault,
                                         getattr(mod, "profile", potato_from.DEFAULT_EDITION),
-                                        _gc_ctl, _tick_auto, mod.caps, _fn_clos)
+                                        _gc_ctl, _tick_auto, mod.caps, _fn_clos,
+                                        mod.chooses.get("lvm", CORE_DEFAULTS["lvm"])
+                                        == "lvm_dismemory_true")
             globals_ += g
             fn_defs_ += fd
             body.append(text)

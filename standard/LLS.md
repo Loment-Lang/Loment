@@ -1560,7 +1560,14 @@ the user's declarations is E002.
 | `syscall4(nr: u64, a0..a2: u64) -> i64` | raw syscall |
 | `syscall6(nr: u64, a0..a4: u64) -> i64` | raw syscall |
 | `syscall7(nr: u64, a0..a5: u64) -> i64` | raw syscall with all six argument registers |
+| `syscall4p(nr: u64, a0: u64, p: ptr, a2: u64) -> i64` | raw syscall whose **third argument is a typed `ptr`**; the lowering MUST NOT convert it with `ptrtoint` |
+| `syscall6p(nr: u64, a0: u64, p: ptr, a2..a4: u64) -> i64` | the same, with three more integer arguments |
 | `thread_spawn(name: str, stack_top: u64, arg: u64, done: u64) -> i64` | start a thread whose entry is named by a string literal |
+
+`syscall4p` / `syscall6p` exist so an artifact can hand a pointer to the kernel **without**
+`ptrtoint`: under the address-free LVM mode (`lvm_dismemory_true`) that conversion is a fault,
+and the typed slot is the only channel by which such a program can perform I/O. In an ordinary
+artifact the slot carries an address, exactly like the integer form (`docs/375` section 3).
 
 `print_num` is a **Tur 2026.2+ built-in** (`(i64) -> u32`), not part of the Tur 1 table.
 `inb` / `outb` are available only on the translation backend that maps them.

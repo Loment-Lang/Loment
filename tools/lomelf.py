@@ -2137,7 +2137,6 @@ PE_UNAME_VA = PE_IMAGE_BASE + PE_IDATA_RVA + PE_UNAME_OFF
 PE_IMPORTS = ["ExitProcess", "GetStdHandle", "ReadFile", "WriteFile", "CloseHandle",
               "CreateFileA", "GetFileAttributesA", "VirtualAlloc", "GetCommandLineA",
               "FindFirstFileA", "FindNextFileA", "Sleep",
-              "GetCurrentProcessId",
               # 系统与进程信息（`docs/303` §2.3/§2.6）：全部平 C API、无回调。
               "GlobalMemoryStatusEx", "OpenProcess", "CreateToolhelp32Snapshot",
               "Process32First", "Process32Next", "Thread32First", "Thread32Next",

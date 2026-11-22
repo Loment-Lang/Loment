@@ -125,6 +125,14 @@ LOOKAHEAD = 8
 #:   * **第二类的局部常量**：字面量上界 / 定长数组是**局部**的（拷贝到定长目的地、
 #:     定宽编码、算法常量），到界即停、不写穿；哪些是"有意截断"逐条写在下面。
 EXPLAINED: dict[tuple[str, str], str] = {
+    ("loment/tools/lvm.lomt", "MAX_CT"):
+        "格表的容量：越界在 `d_cput` 里走 `d_fault(DF_LIMIT)` → guest 看到 F06"
+        "（与参考同一条）。守卫离这条常量声明**超过筛子的 8 行**，所以它读不到 ——"
+        "不是没有失败路径（docs/375 §2.3）",
+    ("loment/tools/lvm.lomt", "IOS_CAP"):
+        "系统调用搬字节时的**分块大小**，不是存储容量：同一分支里 `chunk` 被夹到"
+        "不超过它（`if chunk > IOS_CAP { chunk = IOS_CAP; }`），越界不可能发生；"
+        "它只决定一次搬多少（docs/375 §2.5）",
     ("loment/tools/lvm.lomt", "MAX_RET"):
         "归还窗口是**滚动**的（`docs/362` §5.1）：满了丢最旧的一条、下标仍按"
         "`nr = MAX_RET - 1` 收回界内，所以不是写穿，也没有话可说 —— 丢掉的只是"

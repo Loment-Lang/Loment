@@ -731,10 +731,17 @@ L2 之所以能不扫描，是因为**严格后进先出**：前沿退回去，�
 | **回收不吞空闲链表** | 三只同源程序（只差 `choose` 档位与有没有 `free`）：循环里只握一块活块，每圈分配 8008 B、把**上一块** `free` 掉 —— 被 `free` 的那一块在回收发生时**没有任何根指着它**，正是"已经空闲、应当留在链上"的那一类。2.4 MB 请求过 64 KiB arena：`gc_auto` + `free` **跑完**（rc=7）、`gc_manual` + `free` **跑完**（钉住"程序本身跑得动"）、`gc_manual` 不 `free` **耗尽**（rc=132，证伪）。修之前第一只是 rc=132（`loment_elf_test::test_collection_keeps_blocks_that_were_already_free`，`FujoJTOP/loment#366`）| ✅ **已写**（2026-10-15）|
 | **每个分配点都触发** | 一份**一次 `alloc` 都不调**的程序（循环里 `str_concat(a, a)`，活集恒 32 B）：320 KB 请求过 64 KiB arena —— `gc_auto` **跑完**（rc=7）/ `gc_manual` **耗尽**（rc=132，证伪）。修之前 `gc_auto` 那只也是 rc=132：触发只挂在 `alloc` 内建上，`str_concat` 的分配点没问（`loment_elf_test::test_every_alloc_site_arms_the_collector`，`FujoJTOP/loment#367`）| ✅ **已写**（2026-10-15）|
 | **提升缓冲的字也在根里** | `#362` 的复现：一份 `gc_auto_alpha` 的源里，`hold` 是 L0 候选（`alloc(8)` 字面量、只经由只解引用的 `wr64` 使用），目标唯一的引用就是写进 `hold` 的那 8 个字节；末尾那个 `alloc(32)`（40 B 块，全程序只有目标用这个尺寸）是**探测块**。三只同源程序：`alpha` **跑完**（rc=7；修之前 rc=3，读回 200）；`alpha` **不写那 8 个字节** → **必须不是 7**（证伪：没有那 8 个字节，对象本就该被收）；`auto` **跑完**（rc=7，那一档没有 L0）（`loment_elf_test::test_a_promoted_buffer_is_scanned`，`FujoJTOP/loment#362`）| ✅ **已写**（2026-10-15）|
-| **大缓冲不撑爆根表**（`#1655`） | 一块 8 KiB 的 L0 缓冲（1024 个字）在旧口径下自己填满 1024 格根表（`alloc(8192)` → rc=132、stderr 一个字没有；`alloc(16384)` → 表外照写、rc=139）。修法：栈区整块登记一条 `(起点, 字数)`，扫描留在收集那一趟。三只同源程序：`alpha` **跑完**（rc=7）、`alpha` **不写目标指针** → **必须不是 7**（证伪）、`auto` **跑完**（rc=7）。同一份源两个实现**逐字节一致**（`loment_elf_test::test_a_promoted_buffer_larger_than_the_root_table_runs` + `loment_p8_test::test_m88_l0_alpha_pair_is_byte_identical`） | ✅ **已写**（2026-11-19）|
+| **大缓冲不撑爆根表**（`#1655`） | 一块 8 KiB 的 L0 缓冲（1024 个字）在旧口径下自己填满 1024 格根表（`alloc(8192)` → rc=132、stderr 一个字没有；`alloc(16384)` → 表外照写、rc=139）。修法：栈区整块登记一条 `(起点, 字数)`，扫描留在收集那一趟。三只同源程序：`alpha` **跑完**（rc=7）、`alpha` **不写目标指针** → **必须不是 7**（证伪）、`auto` **跑完**（rc=7）。同一份源两个实现**逐字节一致**（`loment_elf_test::test_a_promoted_buffer_larger_than_the_root_table_runs`；登记形状那一面由 `loment_p8_test::test_m108_alpha_stack_region_shapes_are_byte_identical` 的九份探针盖住 —— 8 B / 20 B（取整）/ 8 KiB / 16 KiB / 两块并存 / L0.5 共用区 / 与普通根槽混排 / 递归，外加 `gc_auto` 的阴性对照） | ✅ **已写**（2026-11-19）|
 | **复用不让遍历失步** | `#368` 的复现：每圈拼一条 8 字节的串再 `free`、随后分配 16 字节 —— 被 `free` 的那块会被**复用**，而 `24 - 16 = 8 < 16` 正好走**不拆**那条路（块的记录尺寸被写小了，遍历掉进块内部读到 0 就原地打转）。4097 圈、两次回收：`gc_auto` **跑完**（rc=7；修之前被 timeout 杀掉 rc=124）/ `gc_manual` **耗尽**（rc=132，证伪）（`loment_elf_test::test_a_recycled_block_does_not_derail_the_walks`，`FujoJTOP/loment#368`）| ✅ **已写**（2026-10-15）|
 
 **注意第七、八条是互补的**：只做甲，一个"从不回收"的收集器也能过；只做乙，一个"乱回收"的能过。**这两条必须成对**，形状与 `gc_manual` 那条 `free` 的证伪对（带 `free` 跑通 rc=176 / 不带耗尽 rc=132）一样。
+
+**PE 那条链接路也要跟 Linux 一致**（2026-11-22）：收集器的运行期文本、栈区表与根表都在
+IR 里，两条链接路只是摆法不同。同一份源两路各出一份：PE **本机原生**跑、ELF 经 WSL 跑，
+stdout 字节与退出码必须相同 —— `loment_pe_test::test_pe_runs_natively_matches_linux_behavior`
+的 LGC 那一节（8 KiB / 16 KiB 提升缓冲 + 阴性对照 + `gc_auto` 对照）；自举镜像出的 PE
+与参考 PE **逐字节相同**那一面在 `test_pe_selfhost_mirror_matches_reference`（含一份
+GC/栈区产物）。GC 只用 `exit(60)` 一个系统调用，`abort` 是 `llvm.trap`，两路本来就该同。
 
 **"L0 真的发生"这一格最后落成了静态形式**（产物里没有分配器了），而不是原先写的动态形式
 （`gc_manual` 下耗尽 / alpha 下跑通）。理由是**前者更强也更快**：一条 `call @__loment_alloc`

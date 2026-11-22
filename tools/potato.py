@@ -50,7 +50,7 @@ IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: 2026-09-23 实测: 这段注释原来写了那个名字, 判据当场红。所以这里一律只写"编译器"。
 #: 机调用那一类。**`print` 也算**：它落地就是一次 `write(1, …)`，与手写 syscall
 #: 越过的语言保证是同一层（`docs/205` R5 的口径是"这个名字被调用了没有"）。
-BOUNDARY_SYSCALLS = ("syscall4", "syscall6", "syscall7", "print")
+BOUNDARY_SYSCALLS = ("syscall4", "syscall6", "syscall7", "syscall4p", "syscall6p", "print")
 #: 裸指针变换那一类。
 BOUNDARY_PTR_TRANSFORMS = ("ptr_add", "ptr_sub", "str_ptr")
 BOUNDARY_BUILTINS = BOUNDARY_SYSCALLS + BOUNDARY_PTR_TRANSFORMS

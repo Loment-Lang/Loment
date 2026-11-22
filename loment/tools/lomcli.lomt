@@ -1610,6 +1610,8 @@ fn do_builtins(mem: ptr, ab: ptr, argc: u32) -> u32 {
     termrow(mem, 1, "syscall4", "syscall4(nr: u64, a0, a1, a2) -> i64   raw syscall (rax/rdi/rsi/rdx)");
     termrow(mem, 1, "syscall6", "syscall6(nr: u64, a0..a4) -> i64");
     termrow(mem, 1, "syscall7", "syscall7(nr: u64, a0..a5) -> i64   six argument registers (rdi/rsi/rdx/r10/r8/r9)");
+    termrow(mem, 1, "syscall4p", "syscall4p(nr: u64, a0: u64, p: ptr, a2: u64) -> i64   typed pointer slot, no ptrtoint (docs/375)");
+    termrow(mem, 1, "syscall6p", "syscall6p(nr: u64, a0: u64, p: ptr, a2..a4: u64) -> i64   typed pointer slot, no ptrtoint (docs/375)");
     termrow(mem, 1, "thread_spawn", "thread_spawn(\"worker\", stack_top, arg, done) -> i64   a real thread (ELF only)");
     wstr(1, "\n  ");
     gray(mem, 1);
@@ -1942,6 +1944,8 @@ fn do_stat(mem: ptr, ab: ptr, argc: u32) -> u32 {
     let n_sys: u32 = cnt_calls(p, n, str_ptr("syscall4"), str_len("syscall4"))
                    + cnt_calls(p, n, str_ptr("syscall6"), str_len("syscall6"))
                    + cnt_calls(p, n, str_ptr("syscall7"), str_len("syscall7"))
+                   + cnt_calls(p, n, str_ptr("syscall4p"), str_len("syscall4p"))
+                   + cnt_calls(p, n, str_ptr("syscall6p"), str_len("syscall6p"))
                    + cnt_calls(p, n, str_ptr("print"), str_len("print"));
     let n_ptr: u32 = cnt_calls(p, n, str_ptr("ptr_add"), str_len("ptr_add"))
                    + cnt_calls(p, n, str_ptr("ptr_sub"), str_len("ptr_sub"))

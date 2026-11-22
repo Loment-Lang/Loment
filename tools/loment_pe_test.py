@@ -2147,6 +2147,132 @@ def _check_openat(d: Path) -> None:
     assert (d / "keep.txt").read_bytes() == b"KEEP"
 
 
+#: `--opt` 的等价比对探针：递归 + 数组 + 循环 + 多次打印。
+#: 多次打印是关键 —— 优化档第一版没保住 RDI/RSI，症状只在"连打三个数"上现形。
+_OPT_PROBE = r'''module peopt_probe
+choose runtime
+
+fn fib(n: u32) -> u32 {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn two() -> u32 {
+    return 2;
+}
+
+fn _start() {
+    let a: [u32; 8] = [3, 1, 4, 1, 5, 9, 2, 6];
+    let s: u32 = 0;
+    for i in 0..8 {
+        s = s + a[i];
+    }
+    print("sum=");
+    print_num(s);
+    print("\n");
+    print("two=");
+    print_num(two());
+    print("\n");
+    print("fib=");
+    print_num(fib(12));
+    print("\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+#: 三个 libcall 探针（`extern fn` 直接点名）：clang 合成外的那三个名字由 lomelf 的
+#: 机器码版本提供，重叠 memmove 走的是反向那条路。
+_OPT_LIBC_PROBE = r'''module peopt_libc
+choose runtime
+
+extern fn memset(dst: ptr, v: u32, n: u64) -> ptr;
+extern fn memcpy(dst: ptr, src: ptr, n: u64) -> ptr;
+extern fn memmove(dst: ptr, src: ptr, n: u64) -> ptr;
+
+fn _start() {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    memset(a, 65 as u32, 5 as u64);
+    memcpy(b, a, 5 as u64);
+    memmove(a, b, 5 as u64);
+    let k: u32 = 0;
+    while k < 5 {
+        print_num(load8(a, k) as u32);
+        print(",");
+        k = k + 1;
+    }
+    store8(a, 0, 88 as u8);
+    store8(a, 1, 89 as u8);
+    store8(a, 2, 90 as u8);
+    store8(a, 3, 87 as u8);
+    store8(a, 4, 86 as u8);
+    let d: ptr = ptr_add(a, 2);
+    memmove(d, a, 5 as u64);
+    let m: u32 = 0;
+    while m < 5 {
+        print_num(load8(a, m) as u32);
+        print(",");
+        m = m + 1;
+    }
+    print("\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+
+@test
+def test_pe_opt_matches_the_default_build():
+    """`--opt` 的用户代码是 clang 编的，运行期仍是 lomelf 的 —— 行为必须一致。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows（PE 只在 Windows 上原生跑）")
+        return
+    cc = _clang()
+    if not cc:
+        print("      SKIP: 无 clang（--opt 那一档要它）")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "peopt_probe.lomt"
+        src.write_text(_OPT_PROBE, encoding="utf-8", newline="\n")
+        text = _ir(src, td).read_text(encoding="utf-8")
+        d = td / "probe-def.exe"
+        d.write_bytes(lomelf.compile_pe(text)[0])
+        o = td / "probe-opt.exe"
+        o.write_bytes(lomelf.compile_pe_opt(text, cc)[0])
+        rd, od = _run_native(d)
+        ro, oo = _run_native(o)
+        assert (rd, od) == (ro, oo), (
+            f"--opt 与默认档行为不一致: rc {rd}/{ro}\n"
+            f"  default: {od[:200]!r}\n  opt:     {oo[:200]!r}")
+        assert od == b"sum=31\ntwo=2\nfib=144\n", f"默认档自己的输出就不对: {od!r}"
+    print("      --opt 与默认档: rc + stdout 逐字节一致（递归 / 数组 / 多次打印）")
+
+
+@test
+def test_pe_opt_supplies_the_three_libcalls():
+    """优化器敢合成的 `memset`/`memcpy`/`memmove`：机器码版要实现得对（含重叠）。"""
+    if not _on_windows():
+        print("      SKIP: 非 Windows")
+        return
+    cc = _clang()
+    if not cc:
+        print("      SKIP: 无 clang")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "peopt_libc.lomt"
+        src.write_text(_OPT_LIBC_PROBE, encoding="utf-8", newline="\n")
+        text = _ir(src, td).read_text(encoding="utf-8")
+        o = td / "libc-opt.exe"
+        o.write_bytes(lomelf.compile_pe_opt(text, cc)[0])
+        rc, out = _run_native(o)
+        assert rc == 0, f"--opt PE 里三个 libcall 探针 rc={rc}"
+        assert out == b"65,65,65,65,65,88,89,88,89,90,\n", out
+    print("      memset / memcpy / 前向与反向 memmove: 结果与期望逐字节一致")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_pe_test")
 

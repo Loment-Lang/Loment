@@ -31,8 +31,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 #: **文本段的容量**（`docs/253`，2026-10-16）。与自举侧 `lomelf.lomt` 的 `OUT_CAP`
@@ -2403,6 +2406,96 @@ def _call_iat(asm: Asm, addr: int) -> None:
     """call qword ptr [addr]。地址是**编译期常量**（IAT 在固定 RVA），所以不需要回填。"""
     asm.emit(b"\x48\xA1" + struct.pack("<Q", addr))   # mov rax, [abs64]
     asm.emit(b"\xFF\xD0")                             # call rax
+
+
+def emit_win_syscall_c(em: "PeEmitter") -> None:
+    """`__win_syscall_c` —— **Win64 C ABI 的外壳**，转进 `__win_syscall`（docs/212 §5A）。
+
+    `--opt` 那条路把用户代码交给 clang，而 clang 发的是 Windows x64 调用约定
+    （rcx/rdx/r8/r9 + 栈），不是 Linux 的 rax/rdi/rsi/rdx/r10/r8。`__win_syscall`
+    本身仍按 Linux 约定收参（自举镜像逐字节照抄它），所以中间垫这一层：
+    **故意不进 `dump_win_shim`** —— 冻结的那段 blob 因此一个字节都不变。
+    """
+    a = em.asm
+    a.label("__win_syscall_c")
+    # 三个 push：rbx 是 shim 的状态基址（它从不保存）；rdi/rsi 是 shim 的 Linux 约定
+    # 实参寄存器，而 Win64 里它们是**被调方保存**的 —— 不救回来，clang 跨一次
+    # `print_num` 就丢掉寄存器里的活值（实测：连打三个数，第二个之后的输出错位）。
+    a.emit(b"\x53\x57\x56")                    # push rbx; push rdi; push rsi
+    a.emit(mov_rr(RAX, RCX))                   # nr
+    a.emit(mov_rr(RDI, RDX))                   # a0
+    a.emit(mov_rr(RSI, R8))                    # a1
+    a.emit(mov_rr(RDX, R9))                    # a2
+    a.emit(mov_rm(R10, RSP, 0x40))             # a3（入口 rsp+0x28，三次 push 后 +0x18）
+    a.emit(mov_rm(R8, RSP, 0x48))              # a4
+    a.emit(mov_rm(R9, RSP, 0x50))              # a5
+    a.call("__win_syscall")
+    a.emit(b"\x5E\x5F\x5B")                    # pop rsi; pop rdi; pop rbx
+    a.emit(b"\xC3")                            # ret
+
+
+def emit_win_libcalls(em: "PeEmitter") -> None:
+    """优化器敢合成的三个名字（`memset` / `memcpy` / `memmove`），按 **Win64 ABI** 实现。
+
+    ELF 那条 `--opt` 把同样三个名字当 IR 垫进来（`loment_dist._FREESTANDING_LIBCALLS`）。
+    这里给机器码版本：PE 的 `--opt` 自己就是链接器，不必多为它养一份 IR 文本。
+    约定：memset(rcx=dst, rdx=值, r8=n) / memcpy(rcx=dst, rdx=src, r8=n) /
+    memmove(rcx=dst, rdx=src, r8=n)，返回值都是 rax=dst。
+    """
+    a = em.asm
+    TEST_R8 = b"\x4D\x85\xC0"                  # test r8, r8
+    DEC_R8 = b"\x49\xFF\xC8"                   # dec r8
+    DEC_RCX = b"\x48\xFF\xC9"
+    DEC_RDX = b"\x48\xFF\xCA"
+    INC_RCX = b"\x48\xFF\xC1"
+    INC_RDX = b"\x48\xFF\xC2"
+
+    def byte_moves(dst_reg, src_reg):
+        return (load_sized(R9, src_reg, 0, 1)
+                + store_sized(dst_reg, 0, R9, 1))
+
+    # ---- memset
+    a.label("memset")
+    a.emit(mov_rr(RAX, RCX))
+    a.emit(TEST_R8)
+    a.jcc("e", "memset_done")
+    a.label("memset_loop")
+    a.emit(store_sized(RCX, 0, RDX, 1))
+    a.emit(INC_RCX + DEC_R8)
+    a.jcc("ne", "memset_loop")
+    a.label("memset_done")
+    a.emit(b"\xC3")
+
+    # ---- memcpy（前向）
+    a.label("memcpy")
+    a.label("memcpy_fwd")                      # memmove 也跳进来
+    a.emit(mov_rr(RAX, RCX))
+    a.emit(TEST_R8)
+    a.jcc("e", "memcpy_done")
+    a.label("memcpy_loop")
+    a.emit(byte_moves(RCX, RDX))
+    a.emit(INC_RCX + INC_RDX + DEC_R8)
+    a.jcc("ne", "memcpy_loop")
+    a.label("memcpy_done")
+    a.emit(b"\xC3")
+
+    # ---- memmove（重叠时从尾部走）
+    a.label("memmove")
+    a.emit(TEST_R8)
+    a.jcc("e", "memmove_done")
+    a.emit(alu_rr(0x39, RCX, RDX))             # cmp rcx, rdx：dst > src 才反向
+    a.jcc("be", "memcpy_fwd")
+    a.emit(mov_rr(RAX, RCX))
+    a.emit(alu_rr(0x01, RCX, R8))              # add rcx, r8 -> rcx = dst + n
+    a.emit(alu_rr(0x01, RDX, R8))              # add rdx, r8 -> rdx = src + n
+    a.emit(b"\x48\x83\xE9\x01")                # sub rcx, 1
+    a.emit(b"\x48\x83\xEA\x01")                # sub rdx, 1
+    a.label("memmove_loop")
+    a.emit(byte_moves(RCX, RDX))
+    a.emit(DEC_RCX + DEC_RDX + DEC_R8)
+    a.jcc("ne", "memmove_loop")
+    a.label("memmove_done")
+    a.emit(b"\xC3")
 
 
 def emit_win_shim(em: "PeEmitter", slots: dict) -> None:
@@ -5757,6 +5850,328 @@ def compile_pe(text: str) -> tuple[bytes, dict]:
                   "entry": entry - PE_IMAGE_BASE, "funcs": [f.name for f in funcs]}
 
 
+# ------------------------------------------------- PE 的 --opt：接 clang 编出来的 COFF（docs/212 §5A）
+#
+# 默认档是 lomelf 自己的栈机（逐字节可复现）；`--opt` 把**同一份 IR** 交给 clang，
+# 只把编译结果（一个 x86-64 COFF 目标文件）接回 PE 容器。运行期（`__win_syscall`、
+# 导入表、入口桩）仍是 lomelf 发的那些字节 —— 不许第二份 Win32 仿真层。
+
+#: clang 在 x64 COFF 上会发的重定位（实测覆盖：整份自举驱动只有 REL32）。
+COFF_ADDR64, COFF_ADDR32, COFF_ADDR32NB = 0x0001, 0x0002, 0x0003
+COFF_REL32 = 0x0004
+#: REL32 的五个变体只差"从字段后第几个字节算相对量"（0..5）。
+COFF_REL32_NAMES = {COFF_REL32 + n: n for n in range(6)}
+#: 没数据、纯链接器元数据的节：丢掉是对的（relocation 指向它们时一并丢）。
+COFF_SKIP_CHARS = 0x00000800          # IMAGE_SCN_LNK_REMOVE
+COFF_CNT_CODE = 0x00000020
+COFF_CNT_IDATA = 0x00000040
+COFF_CNT_UDATA = 0x00000080
+COFF_ALIGN_MASK = 0x00F00000
+
+
+class CoffObject:
+    """一个 x86-64 COFF 目标文件（clang --target=x86_64-pc-windows-msvc -c）。
+
+    只取本档要用的三样：节字节、符号表、重定位表。**不认识的重定位点名拒** ——
+    猜一个偏移的后果是运行期跳到错地址，那比编译期报错坏得多。
+    """
+
+    def __init__(self, name: str, raw: bytes):
+        self.name = name
+        if len(raw) < 20:
+            raise Unsupported(f"{name}: 不是 COFF 目标文件（太短）")
+        machine, nsect, _stamp, symptr, nsyms, _optsz, chars = struct.unpack_from(
+            "<HHIIIHH", raw, 0)
+        if machine != 0x8664:
+            raise Unsupported(f"{name}: 目标机器 {machine:#x}，只收 x86-64")
+        if chars & 0x0002:
+            raise Unsupported(f"{name}: 这是 PE 映像，不是可重定位目标文件")
+        if len(raw) < 20 + 40 * nsect:
+            raise Unsupported(f"{name}: 节表越界")
+        strtab = b""
+        strtab_at = symptr + 18 * nsyms
+        if nsyms and strtab_at + 4 <= len(raw):
+            size = struct.unpack_from("<I", raw, strtab_at)[0]
+            if size >= 4:
+                strtab = raw[strtab_at:min(len(raw), strtab_at + size)]
+
+        def sym_name(field: bytes) -> str:
+            if field[:4] == b"\x00\x00\x00\x00":
+                off = struct.unpack_from("<I", field, 4)[0]
+                if 4 <= off < len(strtab):
+                    end = strtab.find(b"\x00", off)
+                    return strtab[off:end if end >= 0 else len(strtab)].decode(
+                        "utf-8", "replace")
+                return ""
+            return field.rstrip(b"\x00").decode("utf-8", "replace")
+
+        self.sections = []
+        for k in range(nsect):
+            off = 20 + 40 * k
+            rawname = raw[off:off + 8]
+            if rawname[:1] == b"/":
+                try:
+                    no = int(rawname[1:].rstrip(b"\x00"))
+                    end = strtab.find(b"\x00", no)
+                    sname = strtab[no:end if end >= 0 else len(strtab)].decode(
+                        "utf-8", "replace")
+                except ValueError:
+                    sname = rawname.rstrip(b"\x00").decode("utf-8", "replace")
+            else:
+                sname = rawname.rstrip(b"\x00").decode("utf-8", "replace")
+            (vsize, _va, rsize, rptr, rlcptr, _lnptr, nrlc, _nln,
+             sch) = struct.unpack_from("<IIIIIIHHI", raw, off + 8)
+            data = raw[rptr:rptr + rsize] if rsize and rptr else b""
+            # `.bss` 的字节不在文件里（PointerToRawData = 0），大小在 VirtualSize/原始大小里。
+            size = max(vsize, rsize)
+            relocs = []
+            for j in range(nrlc):
+                at = rlcptr + 10 * j
+                ra, sym, ty = struct.unpack_from("<IIH", raw, at)
+                relocs.append((ra, sym, ty))
+            self.sections.append({"name": sname, "data": data, "size": size,
+                                  "chars": sch, "relocs": relocs})
+
+        # 符号表：aux 记录占名额但不可被重定位引用 —— 索引保持原样，缺口留 None。
+        self.syms: list[dict | None] = [None] * nsyms
+        i = 0
+        while i < nsyms:
+            off = symptr + 18 * i
+            nm8, value, secnum, _typ, cls, naux = struct.unpack_from(
+                "<8sIhHBB", raw, off)
+            self.syms[i] = {"name": sym_name(nm8), "value": value,
+                            "section": secnum, "class": cls}
+            i += 1 + naux
+
+
+def pe_opt_ir(text: str) -> str:
+    """把 IR 里的内联 `syscall` 换成 `@__win_syscall_c`（同一个号、同一组实参）。
+
+    这一步在 **clang 之前**：换完之后 clang 看到的是普通调用，能照常内联/优化。
+    `thread_spawn` 在这里点名拒 —— Windows 没有 `clone`，与其静默编一段假的，不如说清。
+    """
+    declare = ("declare i64 @__win_syscall_c(i64, i64, i64, i64, i64, i64, i64)")
+    out, used = [], False
+    pat = re.compile(r'^(\s*)(%[\w.$-]+) = call i64 asm sideeffect "([^"]*)", '
+                     r'"[^"]*"\((.*)\)$')
+    for line in text.splitlines():
+        m = pat.match(line)
+        if not m:
+            out.append(line)
+            continue
+        indent, dest, name, args = m.groups()
+        if name != "syscall":
+            raise Unsupported(f"PE --opt 不认识的内联汇编: {name!r}（docs/245）")
+        vals = []
+        for part in args.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if not part.startswith("i64 "):
+                raise Unsupported(f"PE --opt: 系统调用实参不是 i64: {part!r}")
+            vals.append(part[4:].strip())
+        while len(vals) < 7:
+            vals.append("0")
+        call = ", ".join(f"i64 {v}" for v in vals[:7])
+        out.append(f"{indent}{dest} = call i64 @__win_syscall_c({call})")
+        used = True
+    if used:
+        out.insert(0, declare)
+        out.insert(1, "")
+    return "\n".join(out) + "\n"
+
+
+def _pe_link_object(obj: CoffObject, asm: Asm, data: bytearray,
+                    externs: dict[str, int]) -> dict[str, int]:
+    """把对象摆进 PE 的 .text/.data：节数组装 + 重定位回填。
+
+    `externs` 是 lomelf 自己发的那几个符号（入口桩、`__win_syscall_c`、三个 libcall），
+    名字 -> VA。返回对象的**已定义外部符号**（名字 -> VA），入口桩靠它找 `_start`。
+    """
+    base_va = PE_IMAGE_BASE
+    text_start = align_up(len(asm.buf), 16)
+    asm.buf += b"\x00" * (text_start - len(asm.buf))
+    sec_place: list[dict | None] = []
+    bss: list[tuple[int, dict]] = []                 # (序号, 节) —— 等初始数据摆完再定位
+    for si, s in enumerate(obj.sections):
+        chars = s["chars"]
+        if chars & COFF_SKIP_CHARS or not (chars & (COFF_CNT_CODE | COFF_CNT_IDATA
+                                                    | COFF_CNT_UDATA)):
+            sec_place.append(None)                   # 链接器元数据：丢掉
+            continue
+        align = 1
+        if chars & COFF_ALIGN_MASK:
+            align = 1 << (((chars & COFF_ALIGN_MASK) >> 20) - 1)
+        if chars & COFF_CNT_CODE:
+            off = align_up(len(asm.buf), max(align, 16))
+            asm.buf += b"\x00" * (off - len(asm.buf))
+            at = off
+            asm.buf += s["data"]
+            sec_place.append({"buf": asm.buf, "at": at, "va": TEXT_VADDR + off})
+        elif chars & COFF_CNT_IDATA:
+            off = align_up(len(data), align)
+            data += b"\x00" * (off - len(data))
+            at = off
+            data += s["data"]
+            sec_place.append({"buf": data, "at": at,
+                              "va": base_va + PE_DATA_RVA + off})
+        else:                                        # .bss：只占地址，不占文件
+            sec_place.append(None)
+            bss.append((si, s))
+    bss_off = 0
+    bss_base = len(data)
+    for si, s in bss:
+        chars = s["chars"]
+        align = 1
+        if chars & COFF_ALIGN_MASK:
+            align = 1 << (((chars & COFF_ALIGN_MASK) >> 20) - 1)
+        off = align_up(bss_off, align)
+        bss_off = off + max(1, s["size"])
+        sec_place[si] = {"buf": None, "at": None,
+                         "va": base_va + PE_DATA_RVA + bss_base + off}
+
+    # 符号 -> VA（重定位按**符号表索引**解析，同名 COMDAT 常量不会串）
+    sym_va: dict[int, int] = {}
+    defined: dict[str, int] = {}
+    for i, sym in enumerate(obj.syms):
+        if sym is None:
+            continue
+        sec = sym["section"]
+        if sec > 0 and sec <= len(sec_place) and sec_place[sec - 1] is not None:
+            va = sec_place[sec - 1]["va"] + sym["value"]
+            sym_va[i] = va
+            if sym["class"] == 2 and sym["name"]:    # IMAGE_SYM_CLASS_EXTERNAL
+                defined[sym["name"]] = va
+
+    undef: list[str] = []
+    for si, s in enumerate(obj.sections):
+        place = sec_place[si]
+        if place is None:
+            continue
+        for ra, symi, ty in s["relocs"]:
+            sym = obj.syms[symi] if symi < len(obj.syms) else None
+            if sym is None:
+                raise Unsupported(f"{obj.name}: 重定位指向辅助记录（节 {s['name']}）")
+            sec = sym["section"]
+            if sec > 0:
+                if sec > len(sec_place) or sec_place[sec - 1] is None:
+                    continue                          # 指向被丢掉的节：空转
+                target = sym_va[symi]
+            elif sec == 0:
+                name = sym["name"]
+                if name not in externs:
+                    undef.append(name)
+                    continue
+                target = externs[name]
+            else:
+                raise Unsupported(f"{obj.name}: 绝对符号重定位 {sym['name']!r}")
+            if place["buf"] is None:
+                raise Unsupported(f"{obj.name}: .bss 上不该有重定位（{s['name']}+{ra}）")
+            field = place["at"] + ra
+            buf = place["buf"]
+            p_va = place["va"] + ra
+            if ty in COFF_REL32_NAMES:
+                add = struct.unpack_from("<i", buf, field)[0]
+                rel = target + add - (p_va + 4 + COFF_REL32_NAMES[ty])
+                struct.pack_into("<i", buf, field, rel)
+            elif ty == COFF_ADDR64:
+                add = struct.unpack_from("<q", buf, field)[0]
+                struct.pack_into("<Q", buf, field, target + add)
+            elif ty == COFF_ADDR32:
+                add = struct.unpack_from("<I", buf, field)[0]
+                struct.pack_into("<I", buf, field, (target + add) & 0xFFFFFFFF)
+            elif ty == COFF_ADDR32NB:
+                add = struct.unpack_from("<I", buf, field)[0]
+                struct.pack_into("<I", buf, field,
+                                 (target + add - PE_IMAGE_BASE) & 0xFFFFFFFF)
+            else:
+                raise Unsupported(
+                    f"{obj.name}: 不认识的 COFF 重定位类型 {ty:#x}（{s['name']}+{ra}）")
+    if undef:
+        names = ", ".join(sorted(set(undef)))
+        raise Unsupported(f"{obj.name}: 未定义的符号: {names}")
+    # 对象里的 `_start`/`main` 交给入口桩——桩里的 call 是名字键，finalize 时回填
+    for nm, va in defined.items():
+        if nm not in asm.labels:
+            asm.labels[nm] = va
+    return defined
+
+
+def _pe_find_clang() -> str | None:
+    cc = os.environ.get("LOMENT_CC")
+    if cc and Path(cc).exists():
+        return cc
+    hit = shutil.which("clang")
+    if hit:
+        return hit
+    fallback = Path(r"C:\Program Files\LLVM\bin\clang.exe")
+    if fallback.exists():
+        return str(fallback)
+    return None
+
+
+def _pe_opt_obj(text: str, cc: str) -> bytes:
+    """`pe_opt_ir` 之后把 IR 交给 clang，收回一个 COFF 目标文件的字节。"""
+    with tempfile.TemporaryDirectory(prefix="loment-peopt-") as td:
+        ll = Path(td) / "unit.ll"
+        obj = Path(td) / "unit.obj"
+        ll.write_text(pe_opt_ir(text), encoding="utf-8", newline="\n")
+        flags = os.environ.get("LOMENT_PE_OPT_FLAGS", "-O2").split()
+        r = subprocess.run(
+            [cc, "--target=x86_64-pc-windows-msvc", *flags, "-c",
+             "-ffreestanding", "-fno-stack-protector", "-mno-stack-arg-probe",
+             "-fno-unwind-tables", "-fno-asynchronous-unwind-tables",
+             "-fno-exceptions", "-fno-rtti", "-w",
+             "-o", str(obj), str(ll)],
+            capture_output=True, text=True, shell=False)
+        if r.returncode != 0:
+            raise Unsupported(f"clang 没收下这份 IR: {r.stderr.strip()[-400:]}")
+        return obj.read_bytes()
+
+
+def compile_pe_opt(text: str, cc: str | None = None) -> tuple[bytes, dict]:
+    """PE 的 `--opt` 档：同一份 IR，clang -O2 的用户代码 + lomelf 的运行期。
+
+    与默认档的差别只有**用户代码怎么编**；入口、`__win_syscall`、导入表、节布局
+    全部走同一套发射器 —— 两条路因此不会在 Win32 语义上分叉。
+    """
+    global TEXT_VADDR
+    cc = cc or _pe_find_clang()
+    if cc is None:
+        raise Unsupported("PE --opt 需要 clang（设置 LOMENT_CC 或把它放进 PATH）")
+    _globals, funcs, _externs = parse_ll(text)
+    entry = _entry_name(funcs)
+    TEXT_VADDR = PE_IMAGE_BASE + PE_TEXT_RVA
+    idata, slots = build_pe_idata()
+
+    em = PeEmitter([])
+    a = em.asm
+    # 入口桩：Windows 的进程入口栈对齐与 C 约定差一层，先摆正再 call。
+    a.label("__entry")
+    a.emit(b"\x48\x83\xE4\xF0")                # and rsp, -16
+    a.emit(b"\x48\x83\xEC\x20")                # sub rsp, 32（影子空间）
+    a.call(entry)
+    a.emit(mov_ri32(RAX, SYS_EXIT))
+    a.emit(mov_ri32(RDI, 0))
+    a.call("__win_syscall")
+    a.emit(b"\x0F\x0B")
+    emit_win_shim(em, slots)
+    emit_win_syscall_c(em)
+    emit_win_libcalls(em)
+    externs = {nm: a.labels[nm] for nm in ("__win_syscall_c", "memset", "memcpy",
+                                           "memmove")}
+
+    obj = CoffObject("clang 目标文件", _pe_opt_obj(text, cc))
+    data = bytearray()
+    _pe_link_object(obj, a, data, externs)
+
+    code = a.finalize()
+    entry_rva = a.labels["__entry"] - PE_IMAGE_BASE
+    blob = build_pe(code, bytes(data), entry_rva, idata)
+    return blob, {"text": len(code), "data": len(data), "bss": 0,
+                  "entry": entry_rva, "opt": True, "funcs": [f.name for f in funcs]}
+
+
 # ------------------------------------------------------------------ 驱动
 
 
@@ -7146,6 +7561,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "--dump-win-shim" and len(argv) == 2:
         return dump_win_shim(argv[1])
     out, check, target = None, False, "elf"
+    opt = False
     allow_ports = False
     interp = None
     hot_meta = None
@@ -7165,6 +7581,9 @@ def main(argv: list[str] | None = None) -> int:
         elif a == "--target":
             i += 1
             target = argv[i]
+        elif a == "--opt":
+            # 只有 PE 目标是这条路的入口（ELF 的 --opt 由启动器直接调 clang，docs/212 §5A）。
+            opt = True
         elif a == "--check":
             check = True
         elif a == "--allow-ports":
@@ -7189,6 +7608,7 @@ def main(argv: list[str] | None = None) -> int:
             or profile not in ("default", "hotswap")):
         print("用法: lomelf.py IN.ll [MORE.ll ...] [-o OUT] [--target elf|pe] [--check]"
               " [--link OBJ.o ...] [--allow-ports] [--interp PATH] [--hot-meta PATH]"
+              " [--opt]"
               " [--profile default|hotswap]",
               file=sys.stderr)
         return 2
@@ -7198,13 +7618,17 @@ def main(argv: list[str] | None = None) -> int:
     if profile == "hotswap" and target != "elf":
         print("[ERR] --profile hotswap 目前只支持 ELF 目标", file=sys.stderr)
         return 2
+    if opt and target != "pe":
+        print("[ERR] --opt 在 lomelf 里只接 PE 目标（ELF 那条在启动器里，docs/212 §5A）",
+              file=sys.stderr)
+        return 2
     src = Path(files[0])
     try:
         texts = [Path(f).read_text(encoding="utf-8") for f in files]
         text = texts[0] if len(texts) == 1 else merge_ir_texts(texts, files)
         objs = [load_foreign(p) for p in link]
         if target == "pe":
-            blob, info = compile_pe(text)
+            blob, info = (compile_pe_opt(text) if opt else compile_pe(text))
         else:
             blob, info = compile_ll(text, objs, allow_ports, interp,
                                     hotswap=(profile == "hotswap"))

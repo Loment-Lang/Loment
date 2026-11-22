@@ -1054,9 +1054,12 @@ shift
 shift
 goto barg_loop
 :barg_opt
-rem The clang-optimized path (docs/212 sec 5A) is implemented for ELF only; this launcher links
-rem with the self-hosted lomelf. Refused **by name** rather than silently ignored.
-echo loment: --opt needs clang and is ELF-only for now; this launcher links with lomelf 1>&2
+rem The clang-optimized path (docs/212 sec 5A) for PE exists in the REFERENCE linker
+rem (tools/lomelf.py --target pe --opt, docs/366) and in the packaging build; this
+rem launcher links with the self-hosted lomelf, whose PE side has no COFF object path yet.
+rem Refused **by name** - forwarding --opt to it would be an unknown option, and silently
+rem dropping it would make "I asked for --opt" a lie.
+echo loment: --opt is ELF in the package (PE --opt needs the reference linker; docs/366) 1>&2
 exit /b 2
 :barg_hosted
 rem Hosted linking (docs/222 sec 4) needs a PE-side path that does not exist yet: this launcher
@@ -1337,7 +1340,7 @@ echo                               --json:  one object per diagnostic (for edito
 echo                               --max N: render at most N (default 20; 0 = all)
 echo   loment build FILE [-o OUT] [--opt] [--profile hotswap] [--hosted]
 echo                               compile and link
-echo                               --opt: optimize with clang -O2 (ELF only)
+echo                               --opt: optimize with clang -O2 (ELF)
 echo                               --profile hotswap: slot table + entry gate (ELF only)
 echo                               --hosted: link the host's real libraries (ELF only)
 echo   loment run FILE [--opt] [--hosted]
@@ -3362,8 +3365,8 @@ def _link_opt(ir_text: str, cc: str) -> tuple[bytes | None, str]:
     包内启动器的 `--opt` 逐字相同 —— 否则"包里那个 lompi"和"你本地 `loment build --opt`
     出来的"会是两种不同的东西，而两边都自称同一条逃生舱。
 
-    PE 那一半**不走这里**：这个包的 PE 形状由自举链接器决定，不是 clang 出的。所以
-    `--opt` 只让 ELF 侧变快，Windows 侧维持 lomelf —— 这是如实的不对称，不是遗漏。
+    PE 那一半走 `_link_opt_pe`（2026-11-21 起）：用户代码同样交给 clang -O2，但容器
+    仍是自举链接器出的 PE（`lomelf.compile_pe_opt`）—— 运行期一个字节不换。
     """
     with tempfile.TemporaryDirectory(prefix="optdist-") as td:
         ll = Path(td) / "u.ll"
@@ -3380,6 +3383,23 @@ def _link_opt(ir_text: str, cc: str) -> tuple[bytes | None, str]:
             err = next((l.strip() for l in (r.stderr or "").splitlines() if l.strip()), "")
             return None, err or f"clang 退出码 {r.returncode}"
         return out.read_bytes(), ""
+
+
+def _link_opt_pe(ir_text: str, cc: str) -> tuple[bytes | None, str]:
+    """IR -> **clang -O2 的用户代码 + 自举运行期**的 PE（docs/366）。
+
+    与 `_link_opt` 同口径：返回 `(字节, "")` 或 `(None, 第一行诊断)`，**降级必须吵**。
+    容器与运行期不是 clang 决定的 —— 只有用户代码是；入口桩、`__win_syscall`、导入表
+    仍由 `tools/lomelf.py` 发射，所以两条档的 Win32 语义不会分叉。
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import lomelf
+    try:
+        with _LINK_LOCK:                     # 与 ELF 那半共享同一份模块级布局变量
+            blob, _info = lomelf.compile_pe_opt(ir_text, cc)
+        return blob, ""
+    except (lomelf.Unsupported, lomelf.ElfError) as e:
+        return None, str(e).splitlines()[0] if str(e) else "PE --opt 失败"
 
 
 def _write_shared(path: Path, data: bytes) -> Path:
@@ -3467,9 +3487,10 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
     **子进程**上；`_lomelf_link` 是纯 Python，GIL 下并不并行，但它总共才几秒
     （最大的 3.2MB IR 也只要 0.8s），不值得为它上进程池。
 
-    `opt=True` 时**ELF 那一半**改走 clang -O2（docs/212 §5A）；PE 那一半不动（见
-    `_link_opt` 的注解）。没有 clang 就**降级并说清楚**，不失败 —— 与启动器的 `--opt`
-    同一条口径（"装上 clang 才更快，没有它照样发得出去"）。
+    `opt=True` 时两半都改走 clang -O2：ELF 是整程序交给 clang（docs/212 §5A），PE 是
+    用户代码交给 clang、容器仍由自举链接器出（docs/366）。没有 clang 就**降级并说
+    清楚**，不失败 —— 与启动器的 `--opt` 同一条口径（"装上 clang 才更快，没有它照样发
+    得出去"）。
     """
     todo = []
     for row in TOOLS:
@@ -3495,10 +3516,15 @@ def build_tools(only: set[str] | None, opt: bool = False) -> dict[str, tuple[byt
         if elf is None:
             elf = _lomelf_link(text, "elf", prof)
             if cc:
-                print(f"  [{name}] --opt 降级：clang 没收下这份 IR —— {why}")
-        else:
+                print(f"  [{name}] --opt 降级（ELF）：clang 没收下这份 IR —— {why}")
+        pe, pwhy = _link_opt_pe(text, cc) if cc else (None, "")
+        if pe is None:
+            pe = _lomelf_link(text, "pe")
+            if cc:
+                print(f"  [{name}] --opt 降级（PE）：{pwhy}")
+        if elf is not None and pe is not None:
             optimized.append(name)
-        return name, elf, _lomelf_link(text, "pe")
+        return name, elf, pe
 
     jobs = max(1, min(4, (os.cpu_count() or 1)))
     if jobs == 1 or len(todo) == 1:

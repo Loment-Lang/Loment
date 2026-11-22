@@ -3732,7 +3732,7 @@ fn bind_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -
         fail("没有这个函数（extern 不接 FFI —— docs/243 §5）");
     }
     let npar: u32 = rd(a, F_OFF, fi * 8 + 4);
-    let fp: u32 = rd(a, F_OFF, fi * 8 + 5);
+    let fpar: u32 = rd(a, F_OFF, fi * 8 + 5);
     let d: u32 = ctx_get(a, C_DEPTH) + 1;
     if d > MAX_DEPTH {
         fail("调用太深");
@@ -3750,7 +3750,7 @@ fn bind_call(a: ptr, m: ptr, io: u32, il: u32, caller: u32, do_: u32, dl: u32) -
             fail("实参个数与形参不符");
         }
         let ae: u32 = seg_end(a, ap, rp);
-        let pnm: u64 = pspan(a, fp + k, 2);
+        let pnm: u64 = pspan(a, fpar + k, 2);
         let av: u64 = operand_text(a, m, caller, ap, ae);
         let acs: u64 = operand_value_span(a, ap, ae);
         let ac: u64 = operand_cap(a, m, caller, hi32(acs) as u32, lo32(acs) as u32);
@@ -5577,10 +5577,10 @@ fn t2_compile_all(a: ptr) {
         t2_fsw(a, fi, 1, 0);
         ctx_set(a, C_CFI, fi);
         let np: u32 = rd(a, F_OFF, fi * 8 + 4);
-        let fp: u32 = rd(a, F_OFF, fi * 8 + 5);
+        let fpar: u32 = rd(a, F_OFF, fi * 8 + 5);
         let k: u32 = 0;
         while k < np {
-            let pnm: u64 = pspan(a, fp + k, 2);
+            let pnm: u64 = pspan(a, fpar + k, 2);
             t2_slot_add(a, fi, hi32(pnm), lo32(pnm));
             k = k + 1;
         }

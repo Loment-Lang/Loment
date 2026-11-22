@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -23,10 +25,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import trust_demo_compiler as C  # noqa: E402
 import trust_kernel as K  # noqa: E402
+import trust_quorum as Q  # noqa: E402
 
 TESTS: list[tuple[str, object]] = []
 SRC_A = "PUSH 1\nPUSH 2\nADD\nPRINT\nHALT\n"
 SRC_B = "PUSH 3\nPUSH 4\nADD\nPRINT\nHALT\n"
+
+
+class Skip(Exception):
+    """本机缺少某个环境（例如没有 C 编译器）；CI 上不许跳过。"""
 
 
 def test(fn):
@@ -472,16 +479,208 @@ def test_tampered_potato_invariant_is_rejected():
     print("      改 Potato 的 gc_ladder -> 拒绝")
 
 
+_CLOADER: Q.CLoader | None = None
+
+
+def _c_loader() -> Q.CLoader:
+    global _CLOADER
+    if _CLOADER is None:
+        _CLOADER = Q.CLoader()
+    if not _CLOADER.available():
+        raise Skip("no C compiler (cc) here; on Windows the C kernel runs through WSL")
+    return _CLOADER
+
+
+def _fake_kernel(kid: str, verdict: str, crash: bool = False) -> Q.Kernel:
+    def run(a, d, c):
+        if crash:
+            raise RuntimeError("silent kernel")
+        return verdict, "test kernel"
+
+    return Q.Kernel(id=kid, lang="test", covers=frozenset({Q.CORE, Q.L0}),
+                    impl_sha256=hashlib.sha256(kid.encode()).hexdigest(),
+                    rules_sha256=K.RULES_SHA256, runner=run)
+
+
+_CORE_CASES: list[tuple[str, bytes, dict, dict]] = []
+
+
+def _core_batch() -> list[tuple[str, bytes, dict, dict]]:
+    global _CORE_CASES
+    if _CORE_CASES:
+        return _CORE_CASES
+    art, d, c = _build()
+    out = [("valid", art, d, c)]
+    art2, d2, c2 = _build([SRC_A, SRC_B])
+    out.append(("two units", art2, d2, c2))
+    bad = bytearray(art)
+    bad[len(bad) // 2] ^= 1
+    out.append(("tampered artifact", bytes(bad), d, c))
+    cases = [
+        ("unknown rule", lambda x: x["nodes"][2].__setitem__("rule", "MAGIC")),
+        ("missing premise", lambda x: x["nodes"][2].__setitem__("premises", ["nope"])),
+        ("bad translation map",
+         lambda x: [n["judgment"]["map"][0].__setitem__("arg", 9)
+                    for n in x["nodes"] if n["rule"] == "TV-L1"]),
+    ]
+    for name, mutate in cases:
+        dd = json.loads(json.dumps(d))
+        mutate(dd)
+        out.append((name, art, dd, c))
+    dd = json.loads(json.dumps(d))
+    for n in dd["nodes"]:
+        if n["rule"] == "SEM":
+            n["judgment"]["output"] = [999]
+    out.append(("bad SEM expectation", art, dd, c))
+    dd = json.loads(json.dumps(d))
+    dd["nodes"] = [n for n in dd["nodes"] if n["rule"] != "AX-S"]
+    out.append(("no AX-S", art, dd, c))
+    _CORE_CASES = out
+    return out
+
+
+@test
+def test_second_kernel_agrees_on_core_batch():
+    """C6: 第二个内核（C，另一份代码）对同一批推导给同一判决。"""
+    ck = _c_loader().kernel()
+    for name, art, d, c in _core_batch():
+        mine, why = K.verify(art, d, c)
+        theirs, twhy = ck.runner(art, d, c)
+        assert (theirs == Q.ACCEPT) == mine, (
+            f"{name}: python={'ACCEPT' if mine else 'REJECT'} c={theirs} ({twhy})")
+    print(f"      C 内核与 Python 内核在 {len(_core_batch())} 份推导上判决一致")
+
+
+@test
+def test_second_kernel_is_a_separate_implementation():
+    """C6: 它声明同一张规则表，且不是 Python 内核的包装。"""
+    ck = _c_loader().kernel()
+    assert ck.lang == "c" and ck.rules_sha256 == K.RULES_SHA256, ck
+    src = (Path(__file__).resolve().parent / "trust_kernel_c.c").read_text(encoding="utf-8")
+    includes = set(re.findall(r"#include\s*<([^>]+)>", src))
+    assert includes <= {"stdint.h", "stdio.h", "stdlib.h", "string.h"}, includes
+    assert "system(" not in src and "popen(" not in src, "C 内核不该调用外部程序"
+    assert ck.impl_sha256 != Q.python_kernel().impl_sha256
+    print(f"      C 内核独立：includes {sorted(includes)}，规则表 {ck.rules_sha256[:16]}…")
+
+
+@test
+def test_quorum_accepts_with_two_independent_kernels():
+    """C7: 两个零共享代码的内核都接受，k=2 接受。"""
+    pk, ck = Q.python_kernel(), _c_loader().kernel()
+    art, d, c = _build()
+    ok, det = Q.quorum_verify(art, d, c, [pk, ck], 2)
+    assert ok, det
+    assert det["profile"] == Q.CORE and det["covering"] == ["python-kernel", "c-kernel"]
+    print(f"      商团接受：{det['reason']}")
+
+
+@test
+def test_quorum_rejects_one_tampered_kernel():
+    """C7/T4: n=3,k=2，一个永远接受的内核不能放行坏产物。"""
+    pk, ck = Q.python_kernel(), _c_loader().kernel()
+    sab = _fake_kernel("saboteur", Q.ACCEPT)
+    art, d, c = _build()
+    bad = bytearray(art)
+    bad[len(bad) // 2] ^= 1
+    ok, det = Q.quorum_verify(bytes(bad), d, c, [pk, ck, sab], 2)
+    assert not ok and "disagree" in det["reason"], det
+    print(f"      一个坏内核被两个诚实内核挡住（{det['reason']}）")
+
+
+@test
+def test_quorum_rejects_disagreement_on_valid_proof():
+    """C7: 分歧 ⇒ 拒绝，不猜。"""
+    pk = Q.python_kernel()
+    liar = _fake_kernel("always-reject", Q.REJECT)
+    art, d, c = _build()
+    ok, det = Q.quorum_verify(art, d, c, [pk, liar], 2)
+    assert not ok and "disagree" in det["reason"], det
+    print(f"      接受/拒绝分歧 -> 拒绝（{det['reason']}）")
+
+
+@test
+def test_quorum_threshold_keeps_a_lone_saboteur_out():
+    """C7: 沉默按拒绝处理；一个接受票少于 k 不能放行。"""
+    sab = _fake_kernel("saboteur", Q.ACCEPT)
+    silent = _fake_kernel("silent", Q.REJECT, crash=True)
+    art, d, c = _build()
+    bad = bytearray(art)
+    bad[-3] ^= 1
+    ok, det = Q.quorum_verify(bytes(bad), d, c, [sab, silent], 2)
+    assert not ok, det
+    assert "1 accepting" in det["reason"] or "disagree" in det["reason"], det
+    print(f"      单独一个接受票不够（{det['reason']}）")
+
+
+@test
+def test_quorum_coverage_keeps_l0_single_kernel():
+    """R4 边界: C 内核只覆盖 core；L0 档的商团按覆盖取票，不把回避当接受。"""
+    pk, ck = Q.python_kernel(), _c_loader().kernel()
+    art, d, c = _build(l0_root=str(REPO))
+    assert Q.profile(d) == Q.L0
+    ok, det = Q.quorum_verify(art, d, c, [pk, ck], 2)
+    assert not ok and "coverage" in det["reason"], det
+    ok1, det1 = Q.quorum_verify(art, d, c, [pk, ck], 1)
+    assert ok1 and det1["covering"] == ["python-kernel"], det1
+    print(f"      L0 档只有 1 个覆盖内核；k=2 拒绝（{det['reason']}）")
+
+
+@test
+def test_quorum_rejects_bad_configuration():
+    pk, ck = Q.python_kernel(), _c_loader().kernel()
+    art, d, c = _build()
+    same = Q.Kernel(id="twin", lang="c", covers=ck.covers, impl_sha256=ck.impl_sha256,
+                    rules_sha256=ck.rules_sha256, runner=ck.runner)
+    foreign = Q.Kernel(id="foreign", lang="c", covers=frozenset({Q.CORE}),
+                       impl_sha256=hashlib.sha256(b"foreign").hexdigest(),
+                       rules_sha256="0" * 64, runner=ck.runner)
+    cases = [
+        ([], 1, "no kernels"),
+        ([pk], 0, "1..1"),
+        ([pk, ck], 3, "1..2"),
+        ([pk, pk], 2, "not unique"),
+        ([ck, same], 2, "share one implementation"),
+        ([pk, foreign], 1, "rule table"),
+    ]
+    for ks, k, why in cases:
+        ok, det = Q.quorum_verify(art, d, c, ks, k)
+        assert not ok and why in det["reason"], (why, det)
+    print(f"      六类坏配置 -> 拒绝")
+
+
+@test
+def test_quorum_budget_is_recorded():
+    pk, ck = Q.python_kernel(), _c_loader().kernel()
+    b = Q.quorum_budget([pk, ck], 2)
+    assert b["n"] == 2 and b["k"] == 2 and b["diversity_axes"] == 1
+    assert len({x["impl_sha256"] for x in b["kernels"]}) == 2
+    assert {x["lang"] for x in b["kernels"]} == {"python", "c"}
+    with tempfile.TemporaryDirectory(prefix="trust-quorum-budget-") as td:
+        out = Path(td)
+        C.write_program(out, [SRC_A], quorum=b)
+        trust = json.loads((out / "trust.json").read_text(encoding="utf-8"))
+        assert trust["n"] == 2 and trust["k"] == 2 and trust["diversity_axes"] == 1
+        assert trust["quorum"]["kernels"][1]["lang"] == "c"
+    print(f"      n={b['n']} k={b['k']} axes={b['diversity_axes']} (language)")
+
+
 def main() -> int:
     failed = []
+    skipped = 0
     for name, fn in TESTS:
         try:
             fn()
             print(f"  PASS  {name}")
+        except Skip as e:
+            skipped += 1
+            print(f"  SKIP  {name}: {e}")
         except Exception as e:  # noqa: BLE001
             failed.append((name, e))
             print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\ntrust_kernel_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
+    passed = len(TESTS) - len(failed) - skipped
+    extra = f", {skipped} 跳过" if skipped else ""
+    print(f"\ntrust_kernel_test: {passed}/{len(TESTS)} 通过{extra}")
     return 1 if failed else 0
 
 

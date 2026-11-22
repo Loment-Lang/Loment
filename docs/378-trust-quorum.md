@@ -1,10 +1,10 @@
 # 378 · 信任商团：推导、独立内核与 K-of-N 根
 
-> 状态: **R0–R3 已落地**（2026-11-22）；R4–R5 未实装。
+> 状态: **R0–R4 已落地**（2026-11-22）；R5 未实装。R4 的商团覆盖 core 档，L0 档仍是单内核。
 > 上游: `docs/358`（只信产物）· `docs/370`（LNotary）· `docs/344`（LSPE）·
 > `docs/349`（语义 oracle）· `docs/356`（Dissigsegv）· `docs/368`/`docs/369`（工具链代际）·
 > `docs/373`（Dismemory）· `docs/376`（可重演链 V0）· `standard/LLS.md`
-> 基准: `origin/main` `bd1f0309`（2026-11-22，PR #2143 已合）
+> 基准: `origin/main` `55c20dd8`（2026-11-22，PR #2143 已合）
 > 一句话: **信任链的终点是 K 个互不共享代码的检查器对同一份推导的共同接受；
 > 种子、程序、规范都只是推导里的节点，编译器可以删掉。**
 
@@ -221,6 +221,9 @@ struct TrustBudget {
 }
 ```
 
+上面的 3/2 是**目标形态**。本仓库 R4 的实装是 2/2（python + c，core 档），
+`diversity_axes` 只记 1（language）；差异见 §11。
+
 ---
 
 ## 4. 定理与边界
@@ -418,36 +421,39 @@ C5 与 C6 是「独立」的生死线；C12 是「可定价」的生死线；C14
 | **R1** | 玩具编译器逐步骤发 TV 证书；删编译器仍可验 | **已落地**：C2 / C9（TV 输出节点/映射变异被拒） |
 | **R2** | 把 `docs/376` 的 provenance 接成 `PROV` 前提 | **已落地**：C3 / C10（真实 L0 provenance 的文件核对） |
 | **R3** | 把 LNotary/LSPE/站点表接成 `SAFE` 前提 | **已落地**：C5 / C9（真 Potato + 站点表 + lawspace） |
-| **R4** | 第二个独立内核 + 商团；一个坏内核不能放行 | C6 / C7 |
+| **R4** | 第二个独立内核 + 商团；一个坏内核不能放行 | **已落地**：C6 / C7（商团覆盖 core 档；L0 档单内核） |
 | **R5** | 代际 refinement 边；热更新带推导 | C11 / C14 |
 
-R0 是唯一现在就能做的：一个玩具内核 + 一批有效/无效推导，先红后绿。R1 之后每一步都
-要付证明体积与检查时间的账；R4 要付第二份实现的账；R5 要付 `docs/369` 的语义账。
+R0 是起点：一个玩具内核 + 一批有效/无效推导，先红后绿。R1 之后每一步都要付证明体积与
+检查时间的账；R4 付的是第二份实现的账（C 内核 25.7 ms/次，Python 内核 0.12 ms/次）；
+R5 要付 `docs/369` 的语义账。
 
 **预算方向**：`rules` / `rule_lines` / `spec_lines` / `proof_bytes` / `check_ms` 只降；
 `n` / `diversity_axes` 只升；`k` 随 `n` 按阈值调整。种子字节不再是预算项。
 
 ---
 
-## 11. R0–R3 实装（2026-11-22）
+## 11. R0–R4 实装（2026-11-22）
 
 | 文件 | 作用 |
 |---|---|
 | `tools/trust_kernel.py` | 12 条规则；自带玩具解析器、栈机解释器、静态栈检查；零工具链 import |
+| `tools/trust_kernel_c.c` | 第二个内核（C）；自带 JSON/SHA-256/解析器/解释器，与 Python 版零共享代码 |
+| `tools/trust_quorum.py` | 商团策略：按档位取覆盖内核、k 票接受、分歧/沉默拒绝 |
 | `tools/trust_demo_compiler.py` | 玩具源 → 链接容器 + 推导 + 结论；它可以撒谎，内核按规则拒 |
-| `tools/trust_kernel_test.py` | 24 条判据；登记进 `ci.py`、`gate-floors.txt`、发布口径与自举 `lomrel.lomt` |
+| `tools/trust_kernel_test.py` | 33 条判据；登记进 `ci.py`、`gate-floors.txt`、发布口径与自举 `lomrel.lomt` |
 
 实测（本机，2026-11-22）：
 
-| 项 | R0 → R3 |
+| 项 | R0 → R4 |
 |---|---|
 | `rules` | 12 |
-| `rule_lines` | 531 → 797 |
+| `rule_lines` | 531 → 832（Python）+ 1,466（C）+ 243（商团） |
 | `proof_bytes` | 3,263 → 4,484 |
-| `check_ms` | 0.09 → 16.2 |
-| `tests` | 14 → 24 |
-| `n / k` | 1 / 1 |
-| `diversity_axes` | 0 |
+| `check_ms` | 0.09 → 0.12（Python）/ 25.7（C，WSL 进程 + 临时文件） |
+| `tests` | 14 → 33 |
+| `n / k` | 1 / 1 → 2 / 2（core 档；L0 档仍 1 / 1） |
+| `diversity_axes` | 0 → 1（language） |
 
 R1 增量：`TV-L1` 的 `map` 与 `TV-L2` 的 `bytes` 逐节点复核；改输出字节或翻译映射即拒（C9）。
 
@@ -463,15 +469,28 @@ R3 增量：`SAFE` 增加可选 `l0_safe`。它不 import LNotary；内核独立
 `lms_budgets`、`lspe`、`switches`。夹具由真 `lomentc` + `lms_sites.py` + `lnotary.lawspace`
 生成（真 Potato v24、真站点表、真 lawspace）。
 
+R4 增量：第二内核 + 商团。`tools/trust_kernel_c.c` 用 C 重写同一张规则表（自带 JSON、
+SHA-256、玩具解析器、静态栈检查与解释器），与 Python 内核零共享代码。`tools/trust_quorum.py`
+只做策略：按推导档位取覆盖内核，至少 k 票接受且没有相反判决；崩溃/沉默按拒绝，
+「未覆盖」是回避而不是接受；重复实现、异构规则表、非法 k 直接拒。
+
+覆盖边界：C 内核只覆盖 core 档。带 `l0` 或 `l0_safe` 的推导（R2/R3）只有 Python 内核
+覆盖，商团在 k=2 时明确报 `coverage:` 并拒绝 —— 它不会被当成第二个接受票。
+
 覆盖的判据：有效推导、两单元组合、改产物、改规则名、改前提、改 SEM 期望输出、提权、
 两粒不同种子、删掉 `AX-S`、确定性、零工具链 import、**删掉编译器后仍接受**、四类畸形推导、
 预算记录、TV 输出节点/映射变异、真实 L0 provenance、L0 记录/路径逃逸/闭包文件篡改、
-真 LNotary bundle、lawspace claim、站点等级、fault edge 与 Potato `gc_ladder` 篡改。
+真 LNotary bundle、lawspace claim、站点等级、fault edge 与 Potato `gc_ladder` 篡改；
+R4 再加：C 内核与 Python 在 8 份 core 推导上判决一致、两内核商团接受、一个永远接受的内核
+被诚实内核挡住、接受/拒绝分歧拒、单独一个接受票不足 k 拒、L0 档按覆盖取票、六类坏配置拒、
+商团的 n/k/轴数进 `trust.json`。
 §3.5 的 `null` 是「未测」；实测在上表。
 
-未落地：R4 的第二个独立内核与商团、R5 的 `seed : Compiler` 与代际 refinement。
-R0–R3 的内核是 Python 参考实现；R4 的第二个内核应当用 Loment/C/Coq 之一重写，
-不能与它共享代码。
+**不成立的独立性**：语言与代码谱系两条成立；作者与组织两条**不成立**（同一维护者）。
+`diversity_axes` 只记机械可测的 1 条（language），§3.4 的目标 ≥3 未达。C 内核也不覆盖
+L0 档，所以 L0 推导的商团仍是 n=1。这两条是 R4 的余项，不计入「已落地」。
+
+未落地：R5 的 `seed : Compiler` 与代际 refinement；R4 的 L0 覆盖与第三/第四个独立内核。
 
 ---
 

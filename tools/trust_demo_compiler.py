@@ -195,7 +195,7 @@ def write_program(out: Path, sources: list[str], seed: str = "seed-0",
                   recipe: str = "toy-compiler/1", allowed: list[str] | None = None,
                   l0_root: str | None = None,
                   provenance: str = "loment/build/genesis/provenance.json",
-                  l0_safe: dict | None = None) -> dict:
+                  l0_safe: dict | None = None, quorum: dict | None = None) -> dict:
     art, deriv, conc = build_program(sources, seed=seed, recipe=recipe, allowed=allowed,
                                      l0_root=l0_root, provenance=provenance,
                                      l0_safe=l0_safe)
@@ -218,6 +218,11 @@ def write_program(out: Path, sources: list[str], seed: str = "seed-0",
         "n": 1, "k": 1, "diversity_axes": 0,
         "assumptions": 7,
     }
+    if quorum is not None:
+        budget["n"] = quorum["n"]
+        budget["k"] = quorum["k"]
+        budget["diversity_axes"] = quorum["diversity_axes"]
+        budget["quorum"] = quorum
     (out / "trust.json").write_text(
         json.dumps(budget, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
         encoding="utf-8", newline="\n")

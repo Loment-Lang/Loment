@@ -736,6 +736,13 @@ L2 之所以能不扫描，是因为**严格后进先出**：前沿退回去，�
 
 **注意第七、八条是互补的**：只做甲，一个"从不回收"的收集器也能过；只做乙，一个"乱回收"的能过。**这两条必须成对**，形状与 `gc_manual` 那条 `free` 的证伪对（带 `free` 跑通 rc=176 / 不带耗尽 rc=132）一样。
 
+**PE 那条链接路也要跟 Linux 一致**（2026-11-22）：收集器的运行期文本、栈区表与根表都在
+IR 里，两条链接路只是摆法不同。同一份源两路各出一份：PE **本机原生**跑、ELF 经 WSL 跑，
+stdout 字节与退出码必须相同 —— `loment_pe_test::test_pe_runs_natively_matches_linux_behavior`
+的 LGC 那一节（8 KiB / 16 KiB 提升缓冲 + 阴性对照 + `gc_auto` 对照）；自举镜像出的 PE
+与参考 PE **逐字节相同**那一面在 `test_pe_selfhost_mirror_matches_reference`（含一份
+GC/栈区产物）。GC 只用 `exit(60)` 一个系统调用，`abort` 是 `llvm.trap`，两路本来就该同。
+
 **"L0 真的发生"这一格最后落成了静态形式**（产物里没有分配器了），而不是原先写的动态形式
 （`gc_manual` 下耗尽 / alpha 下跑通）。理由是**前者更强也更快**：一条 `call @__loment_alloc`
 都不剩，就**不可能**还有内存来自那个 arena —— 而动态形式要跑 ELF、依赖退出码，

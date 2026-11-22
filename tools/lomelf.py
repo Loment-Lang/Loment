@@ -7911,7 +7911,7 @@ def _fault_shim_bytes(sig_addr: int, info_addr: int, uctx_addr: int,
 #
 # 现场偏移（WinNT.h 的公开布局）：EXCEPTION_RECORD 的 code@0、ExceptionAddress@0x10、
 # NumberParameters@0x18、ExceptionInformation[1]@0x28；x86-64 CONTEXT 的 Rsp@0x98、
-# Rip@0xF8。判据 `test_pe_fault_report_prints_site_on_windows` 按这几格核报告。
+# Rip@0xF8。判据 `test_pe_fault_report_is_default_off` 的 Windows 那一段按这几格核报告。
 
 
 def _fault_pe_messages() -> list[tuple[str, str]]:

@@ -188,7 +188,7 @@ stage 1 挂在 `compile_ll(..., fault_report=True)`（以及 CLI 的 `--fault-re
 | **2** ✅ | 自举镜像 `loment/tools/lomelf.lomt` 同形 | `loment_elf_test` 的孪生格：开关打开时两边产物**逐字节相同**（`_start` / `main` 两个入口） |
 | **2.5** ✅ | 可恢复故障：`--fault-heal N` 把未映射页置零后从同一条指令继续，预算用完才死 | `loment_segv_test` 判据 J：第一页修复后继续、第二页致命；孪生格带 `--fault-heal 2` |
 | **3** | 默认打开 | 现有 ELF 判据全绿；体积与启动开销记账（`docs/263`） |
-| **4** ✅ | Windows PE（参考发射器） | `loment_pe_test::test_pe_fault_report_is_default_off`（默认关、逐字节同，打开后有 VEH + 文案）· `test_pe_fault_report_prints_site_on_windows`（坏访存 / `ud2` 的码、地址、PC、RSP、站点；退出码是异常码）· `test_pe_fault_heal_is_refused_for_pe`（`--fault-heal` 点名拒） |
+| **4** ✅ | Windows PE（参考发射器） | `loment_pe_test::test_pe_fault_report_is_default_off`（默认关、逐字节同，打开后有 VEH + 文案；Windows 上再跑坏访存 / `ud2` 两格，验码/地址/PC/RSP/站点与退出码）· `test_pe_fault_heal_is_refused_for_pe`（`--fault-heal` 点名拒） |
 | **5** | 语言级 fault 走同一条通道（`docs/356` §5 的 `__loment_fault`） | 编译期已知的 panic / trap 站点带 kind + witness，不再只靠信号 |
 
 **clang 路**（`loment_elf_test` 的 (a) 路）不在 stage 1–3 里：它不经 lomelf，注入点

@@ -63,7 +63,7 @@ TOOLS = [
     ("lomrel", "loment/tools/lomrel.lomt", ["--check"], "loment_release"),
     # `docs/311` §5 L4：**解释器自己**。它的参照物不是"另一个工具"，而是
     # `tools/lvm.py` 对同一份 IR 的答案 —— 所以它不走下面那条"工具目录遍历"的用例，
-    # 走 `test_pe_lvm_interprets_ir_like_the_reference`（argv 是 IR 路径，不是 --check）。
+    # 由 `test_pe_runs_the_loment_toolchain_natively` 的末段拿 IR 语料比（不是 --check）。
     ("lvm", "loment/tools/lvm.lomt", [], "lvm"),
 ]
 # 程序自己的规格输出（与 clang 路对过；这里是给"不碰 clang/WSL"那条用例用的定值）
@@ -530,7 +530,13 @@ def test_pe_links_capability_programs():
 def test_pe_runs_the_loment_toolchain_natively():
     """**去 WSL 的判据（构建路径）**：Loment 工具本身编成 PE 后在本机原生跑，
     stdout 字节 + 退出码与 Python 参照版一致 —— 也就是说这台机器上已经不需要
-    "把 ELF 丢进 WSL" 才能跑构建工具。"""
+    "把 ELF 丢进 WSL" 才能跑构建工具。
+
+    末段是 `docs/311` §5 L4：**解释器自己**也在 `TOOLS` 里，PE 版 LVM 解释一份语料，
+    与 `tools/lvm.py` 的 stdout + 退出码相同。它挂在**这一条**而不是新起 Windows-only
+    判据：跳过表只许变短，新写一条生来就跳过的判据正是那道棘轮要堵的形状（与
+    `--opt` 探针挂在 `test_pe_runs_natively_matches_linux_behavior` 同一个理由）。
+    """
     if not _on_windows():
         print("      SKIP: 非 Windows")
         return
@@ -539,7 +545,7 @@ def test_pe_runs_the_loment_toolchain_natively():
         td = Path(tds)
         for name, rel, argv, pymod in TOOLS:
             if not argv:
-                continue        # `lvm`：解释器，走它自己的那条判据
+                continue        # `lvm`：解释器，走下面那段语料比对
             ll = _ir(ROOT / rel, td)
             exe = td / f"{name}.exe"
             blob, _info = lomelf.compile_pe(ll.read_text(encoding="utf-8"))
@@ -559,8 +565,10 @@ def test_pe_runs_the_loment_toolchain_natively():
                 f"  python ({len(want)}B): {want[:160]!r}\n"
                 f"  pe     ({len(got.stdout)}B): {got.stdout[:160]!r}")
             ok += 1
+        lvm_ok = _pe_lvm_matches_reference(td)
     print(f"      {ok} 个构建工具（argv + 目录遍历 + 文件 I/O）"
-          f"在 Windows 上原生跑，与 Python 版逐字节相同")
+          f"在 Windows 上原生跑，与 Python 版逐字节相同；"
+          f"{lvm_ok} 份语料 PE 版 LVM 与 tools/lvm.py 同答")
 
 
 @test
@@ -2331,42 +2339,35 @@ LVM_CORPUS = [
 ]
 
 
-@test
-def test_pe_lvm_interprets_ir_like_the_reference():
+def _pe_lvm_matches_reference(td: Path) -> int:
     """`docs/311` §5 L4：**PE 版的解释器**解释语料，与 `tools/lvm.py` 的 stdout+rc 相同。
 
-    这是本线的验收格，也是 §1 那条症状的封口：同一份 `lvm.lomt`，宿主换成 PE 之后
-    guest 的可观察行为不变。证伪很直接 —— 只要 `vm_syscall` 转发了 PE 没有的号，
-    或者读输入那一步走的是 `open`(2) 而不是 `openat`(257)，这里的 stdout/rc 就会分叉。
-
-    只在 Windows 上真跑（PE 产物需要 Windows）；编译与结构检查在别的用例里。
+    本线的验收格，也是 §1 那条症状的封口：同一份 `lvm.lomt`，宿主换成 PE 之后 guest
+    的可观察行为不变。证伪很直接 —— 只要 `vm_syscall` 转发了 PE 没有的号，或者读输入
+    那一步走的是 `open`(2) 而不是 `openat`(257)，这里的 stdout/rc 就会分叉。
+    返回语料份数；由 `test_pe_runs_the_loment_toolchain_natively` 调用（Windows 上）。
     """
-    if not _on_windows():
-        print("      SKIP: 非 Windows（PE 产物本机跑不了）")
-        return
     import lvm  # noqa: PLC0415
 
-    with tempfile.TemporaryDirectory() as tds:
-        td = Path(tds)
-        exe = td / "lvm.exe"
-        blob, _info = lomelf.compile_pe(
-            _ir(ROOT / "loment/tools/lvm.lomt", td).read_text(encoding="utf-8"))
-        exe.write_bytes(blob)
-        ok = 0
-        for rel in LVM_CORPUS:
-            src = ROOT / rel
-            ll = _ir(src, td)
-            ir = ll.read_text(encoding="utf-8")
-            buf = io.BytesIO()
-            rc_ref = lvm.run_ir(ir, buf, None, [str(ll)])
-            r = subprocess.run([str(exe), str(ll)], capture_output=True,
-                               timeout=300, shell=False)
-            assert (rc_ref, buf.getvalue()) == (r.returncode, r.stdout), (
-                f"[{src.stem}] PE 版解释器与参考不一致："
-                f"参考 rc={rc_ref} {buf.getvalue()[:80]!r} / "
-                f"PE rc={r.returncode} {r.stdout[:80]!r} {r.stderr[-120:]!r}")
-            ok += 1
-    print(f"      {ok} 份语料：PE 版 LVM 的 stdout + 退出码与 tools/lvm.py 相同")
+    exe = td / "lvm.exe"
+    blob, _info = lomelf.compile_pe(
+        _ir(ROOT / "loment/tools/lvm.lomt", td).read_text(encoding="utf-8"))
+    exe.write_bytes(blob)
+    ok = 0
+    for rel in LVM_CORPUS:
+        src = ROOT / rel
+        ll = _ir(src, td)
+        ir = ll.read_text(encoding="utf-8")
+        buf = io.BytesIO()
+        rc_ref = lvm.run_ir(ir, buf, None, [str(ll)])
+        r = subprocess.run([str(exe), str(ll)], capture_output=True,
+                           timeout=300, shell=False)
+        assert (rc_ref, buf.getvalue()) == (r.returncode, r.stdout), (
+            f"[{src.stem}] PE 版解释器与参考不一致："
+            f"参考 rc={rc_ref} {buf.getvalue()[:80]!r} / "
+            f"PE rc={r.returncode} {r.stdout[:80]!r} {r.stderr[-120:]!r}")
+        ok += 1
+    return ok
 
 
 # ---------------------------------------------------------------- docs/367 stage 4：PE 故障报告
@@ -2390,7 +2391,12 @@ def test_pe_fault_report_is_default_off():
     """`--fault-report` 默认关：不开时 PE 产物**逐字节不变**（`docs/367` §3）。
 
     开了以后才有向量化异常处理器。这条判据也钉住"报告器确实被编进去了"：
-    消息文本与导入名都在产物里 —— 否则 Windows 那条跑红时会看不出是没编进去。
+    消息文本与导入名都在产物里 —— 否则跑红时会看不出是没编进去。
+
+    末段在 Windows 上真跑一记坏访存与一记 `ud2`：报告里有异常码/地址/PC/RSP/站点
+    （与 ELF 的 stage 1 同形，`docs/367` §4.1，但**机制不同、结局也不同**：PE 上不是
+    信号，进程按 Windows 的方式终止，退出码就是异常码本身 —— 0xC0000005 / 0xC000001D）。
+    挂在同一条上而不是新起 Windows-only 判据：跳过表只许变短。
     """
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
@@ -2405,43 +2411,32 @@ def test_pe_fault_report_is_default_off():
         assert "loment: 原生档故障".encode("utf-8") in with_fault, \
             "报告文案没有进产物"
         assert "站点：".encode("utf-8") in with_fault, "站点那一行的文案没进产物"
-    print("      --fault-report 默认关（产物逐字节同）；打开后带 VEH + 报告文案")
-
-
-@test
-def test_pe_fault_report_prints_site_on_windows():
-    """PE 上真跑一记坏访存与一记 `ud2`：报告里有异常码/地址/PC/RSP/站点。
-
-    与 ELF 的 stage 1 同形（`docs/367` §4.1），但**机制不同、结局也不同**：
-    PE 上不是信号，进程按 Windows 的方式终止（退出码就是异常码本身，这里是
-    0xC0000005 / 0xC000001D）。这条不主张两边同形（§5.4）。
-    """
-    if not _on_windows():
-        print("      SKIP: 非 Windows（PE 产物本机跑不了）")
-        return
-    with tempfile.TemporaryDirectory() as tds:
-        td = Path(tds)
-        cases = ((_CRASH_STORE, 0xC0000005, "store"), (_CRASH_UD2, 0xC000001D, "ud2"))
-        for src_text, code, tag in cases:
-            ll = td / f"{tag}.ll"
-            ll.write_text(src_text, encoding="utf-8", newline="\n")
-            exe = td / f"{tag}.exe"
-            exe.write_bytes(lomelf.compile_pe(src_text, fault_report=True)[0])
-            r = subprocess.run([str(exe)], capture_output=True, timeout=30, shell=False)
-            err = r.stderr.decode("utf-8", "replace")
-            assert (r.returncode & 0xFFFFFFFF) == code, (
-                f"[{tag}] 退出码应当是 {code:#x}（Windows 异常码），"
-                f"得到 {r.returncode:#x}: {err[-200:]!r}")
-            for needle in ("loment: 原生档故障", "error[FAULT]",
-                           f"异常：0x{code:016x}", "PC：0x", "RSP：0x", "站点："):
-                assert needle in err, f"[{tag}] 报告里没有 {needle!r}: {err!r}"
-            if tag == "store":
-                # 坏访存点在 `_start / entry` 的 store 上；地址是 0。
-                assert "地址：0x0000000000000000" in err, err
-                assert "_start / entry" in err, err
-            else:
-                assert "_start" in err, err
-    print("      坏访存 / ud2：PE 报告有异常码、地址、PC、RSP、站点；退出码是异常码")
+        ran = 0
+        if _on_windows():
+            for src_text, code, tag in ((_CRASH_STORE, 0xC0000005, "store"),
+                                        (_CRASH_UD2, 0xC000001D, "ud2")):
+                ll = td / f"{tag}.ll"
+                ll.write_text(src_text, encoding="utf-8", newline="\n")
+                exe = td / f"{tag}.exe"
+                exe.write_bytes(lomelf.compile_pe(src_text, fault_report=True)[0])
+                r = subprocess.run([str(exe)], capture_output=True, timeout=30,
+                                   shell=False)
+                err = r.stderr.decode("utf-8", "replace")
+                assert (r.returncode & 0xFFFFFFFF) == code, (
+                    f"[{tag}] 退出码应当是 {code:#x}（Windows 异常码），"
+                    f"得到 {r.returncode:#x}: {err[-200:]!r}")
+                for needle in ("loment: 原生档故障", "error[FAULT]",
+                               f"异常：0x{code:016x}", "PC：0x", "RSP：0x", "站点："):
+                    assert needle in err, f"[{tag}] 报告里没有 {needle!r}: {err!r}"
+                if tag == "store":
+                    # 坏访存点在 `_start / entry` 的 store 上；地址是 0。
+                    assert "地址：0x0000000000000000" in err, err
+                    assert "_start / entry" in err, err
+                else:
+                    assert "_start" in err, err
+                ran += 1
+    print("      --fault-report 默认关（产物逐字节同）；打开后带 VEH + 报告文案"
+          + (f"；坏访存 / ud2 两格报告与异常码都对" if ran else ""))
 
 
 @test

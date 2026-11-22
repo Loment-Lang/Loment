@@ -7,7 +7,7 @@
 > 判据：`loment_pe_test::test_pe_uname_and_clock_surface`（P0）·
 > `lvm_test::test_unknown_syscall_is_enosys` / `test_syscall_report_lists_number_program_site`
 > （P1）· `lvm_test::test_guest_abi_and_host_profiles`（P2 的 L1/L2）·
-> `loment_pe_test::test_pe_lvm_interprets_ir_like_the_reference`（P4，Windows 上真跑）
+> `loment_pe_test::test_pe_runs_the_loment_toolchain_natively` 的 P4 那一段（Windows 上真跑）
 
 ---
 
@@ -282,7 +282,7 @@ Linux 侧只有 `test_elf_net_programs_run_on_linux` 那一条会跑）。这条
 ### L4 · 新产物：LVM 自己编成 PE（**已落地**，2026-11-22）
 
 `loment_pe_test.TOOLS` 加了 `("lvm", "loment/tools/lvm.lomt", [], "lvm")`；
-`test_pe_lvm_interprets_ir_like_the_reference` 用 PE 版 LVM 解释四份语料
+`test_pe_runs_the_loment_toolchain_natively` 的末段用 PE 版 LVM 解释四份语料
 （`user_hello` / `cmd_hello` / `bootprobe` / `selfcheck`），stdout + rc 与
 `tools/lvm.py` 相同。这是本文件的**验收线**。
 

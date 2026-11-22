@@ -44,8 +44,8 @@
   "inputs": {
     "mirror": {
       "path": "loment/tools/lomelf.lomt",
-      "sha256": "98014653a2d7d9b42f19af5844d02ee1684b5228fcbd9177b7d7dce6441d832f",
-      "size": 417355
+      "sha256": "1af166c16f5178787e1e3c7ff70a4c6aa6784a1fc113a131243a6cb3393b400c",
+      "size": 408619
     },
     "seed": {
       "path": "loment/build/selfhost_driver.ll",

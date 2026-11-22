@@ -43,6 +43,7 @@ loment_pe_test test_pe_runs_natively_matches_linux_behavior  # 环境: 非 Windo
 loment_pe_test test_pe_runs_the_loment_toolchain_natively  # 环境: 非 Windows
 loment_pe_test test_pe_runs_the_selfhost_compiler_natively  # 环境: 非 Windows
 loment_pe_test test_pe_selfhost_mirror_matches_reference  # 环境: 无 clang/WSL
+loment_pe_test test_pe_uname_and_clock_surface  # 环境: 非 Windows（只验 uname 字面量）
 loment_sign_test 分离签名  # 环境: 见该判据打的 SKIP 行
 loment_sign_test 签PE  # 环境: 见该判据打的 SKIP 行
 loment_tools_test test_m30_bare_metal_object_and_link  # 环境: 无 clang

@@ -1,10 +1,13 @@
 # 311 · LVM 在 PE 上模拟 Linux：一份 guest ABI，三种落地
 
-> 状态：**P0 已实装**（2026-11-21），P1–P4 是计划 · 2026-11-06
+> 状态：**P0 / P1 / P2 / P4 已实装**（2026-11-21 / 2026-11-22），P3（Windows 上的逐字节
+> 对拍）仍是计划 · 2026-11-06
 > 上游：`docs/243` §3.4（VM 该如实回答还是自己合成）、`docs/217` / `docs/221`（PE shim 的翻译哲学）、
 > `docs/309` §2.5（PE 上没有 228 的实测后果）、`docs/231`（select）、`docs/234`（socketpair/epoll）
-> 判据：`loment_pe_test::test_pe_uname_and_clock_surface`（P0 的四个号：形状 PE 与 ELF 同）·
-> 其余三层见 §5（尚未落地）
+> 判据：`loment_pe_test::test_pe_uname_and_clock_surface`（P0）·
+> `lvm_test::test_unknown_syscall_is_enosys` / `test_syscall_report_lists_number_program_site`
+> （P1）· `lvm_test::test_guest_abi_and_host_profiles`（P2 的 L1/L2）·
+> `loment_pe_test::test_pe_runs_the_loment_toolchain_natively` 的 P4 那一段（Windows 上真跑）
 
 ---
 
@@ -34,7 +37,9 @@ Loment 的产物有四种形态，系统调用面有三种独立实现：
 | 63 | `uname` | ✓ `Linux` | ✓ `Linux`（合成） | 合成 `Linux` | 合成 `Linux` |
 | 201 | `time` | ✓ | ✓ `GetSystemTimeAsFileTime` | 转宿主 | 转宿主 |
 | 228 | `clock_gettime` | ✓ | ✓ 按 clockid 分流 | 转宿主（0 = 墙钟） | 转宿主 `syscall4(228)` |
-| 未知号 | —— | **−38** | **−38** | **`die(2)`** | **`die(2)`** |
+| 未知号 | —— | **−38** | **−38** | **`die(2)`** → **−38** ✅ | **`die(2)`** → **−38** ✅ |
+
+（"→"是 2026-11-22 P1 的落地结果；本表的"今天"指 2026-11-06 写下时的实测。）
 
 两条后果，都是"静默"的：
 
@@ -45,8 +50,9 @@ Loment 的产物有四种形态，系统调用面有三种独立实现：
    −38 —— 而同一份 `lvm.lomt` 在 ELF 上是好的。**这正是本文件要消灭的形状**：
    同一份解释器，换一个宿主，guest 的可观察行为变了。
 
-> LVM 今天**从来没有被编成 PE 过**：`loment_pe_test.TOOLS` 只编 `lomstatus` 与 `lomrel`。
-> 所以第 2 条现在还没人踩到 —— 但它不是假设，是 `vm_syscall` 源码直接可读出来的。
+> 2026-11-22 之前 LVM **从来没有被编成 PE 过**：`loment_pe_test.TOOLS` 只编 `lomstatus`
+> 与 `lomrel`，所以第 2 条没人踩到 —— 但它不是假设，是 `vm_syscall` 源码直接可读出来的。
+> 现在 P4 把它编进去了，第 2 条只剩静态判据能守住的形态（宿主号 ⊆ `PE_DISPATCH`）。
 
 ---
 
@@ -189,6 +195,13 @@ return ENOSYS as u64;          // -38
 折中：**回 −38 的同时写进覆盖报告**（`--syscall-report`，列出"哪个号、哪个程序、第几条")，
 于是"响亮度"从 stderr 挪到一份可数的产物上，判据可以对着它断言"语料没有打到表外的号"。
 
+**落地记录（2026-11-22）**：两份实现都改了兜底（`tools/lvm.py` 的 `refuse` /
+`loment/tools/lvm.lomt` 的 `vm_syscall`）。`lvm_test` 的棘轮因此**清空**：`selfcheck`
+要的 317 在 Linux 上拿到 −1、在 VM 里拿到 −38，程序自己的 `!= 8` 判断把两条路引到同一句
+`FAIL getrandom`（rc=1、stdout 同）。这不是"VM 支持了 317"—— 它仍然不实现，只是不再
+把"这个号没有"变成一次崩溃。`--syscall-report PATH` 每行
+`nr<TAB>类<TAB>程序<TAB>fn/blk/idx`，同一站点只记一次。
+
 ### 4.3 叠层：LVM-on-PE 的能力集包含关系
 
 LVM 编成 PE 之后，`vm_syscall` 里所有 **F 类**的宿主调用都要经过 `__win_syscall`。
@@ -199,6 +212,14 @@ LVM 编成 PE 之后，`vm_syscall` 里所有 **F 类**的宿主调用都要经�
 这条不需要 Windows：它是**两张表的包含关系**，读源码就能判（§5 L1）。
 它也是唯一能在 CI 上跑住的那一半 —— 真正的行为比较见 §5 L3 的坦白的缺口。
 
+**落地记录（2026-11-22）**：`tools/lvm.py` 的 `forwarded_host_numbers()` 读
+`loment/tools/lvm.lomt` 的 `vm_syscall` 体，扫出 `syscall4/6/7` 的字面量号
+（今天是 39 / 60 / 201 / 228）。`lvm_test::test_guest_abi_and_host_profiles` 断言
+它 ⊆ `lomelf.PE_DISPATCH`，缺一个就点名**号本身**。同日还修了这条判据逼出来的第一处
+真实缺口：`read_file` 原先用 `open`(2)（PE 上没有），现在是
+`syscall6(257, AT_FDCWD, path, …)` —— 与 `argv_n` 里那条同源。四处可选输出
+（剖面 / 统计 / 快照写 / 快照读）跟着一起换了；不换的话它们在 PE 上只会得到 −38。
+
 ### 4.4 不做（并且写在这里，不是留白）
 
 * **VM 里的文件系统**：`read`/`openat` 只认合成 fd 与 `/proc/self/cmdline`（`docs/243` §3.4）。
@@ -207,6 +228,11 @@ LVM 编成 PE 之后，`vm_syscall` 里所有 **F 类**的宿主调用都要经�
 * **PE 上的 `epoll`**：IOCP 不是一次翻译能补的（`docs/221` §7 的理由仍成立）。
 * **文件 fd 的 `poll`**：PE 上只认 socket 型 fd，文件 fd 报 `POLLNVAL`（`docs/221` §3）——
   这是**已点名的不一致**，本文件不消灭它，只要求它留在名单上。
+* **PE 上的 `--link`**（**点名的拒绝**，2026-11-22）：PE 一侧没有 COFF 对象的链接面。
+  归档 / 目标文件的重定位与符号表是 ELF 的形态；要做等于另写一只链接器，不在本线里。
+  `lomelf.py --link --target pe` 因此**保留** rc=2 的拒绝，报文点名本文件 §4.4；
+  判据 `loment_pe_test::test_pe_link_refusal_is_named` 钉住它 —— 哪天实现了，那条会红，
+  逼着回来改这一节，而不是让拒绝在文档里过期。
 
 ---
 
@@ -222,6 +248,11 @@ LVM 编成 PE 之后，`vm_syscall` 里所有 **F 类**的宿主调用都要经�
 * **叠层包含**：`vm_syscall` 用到的宿主号 ⊆ `PE_DISPATCH`（§4.3），缺一个就红，
   并在消息里点名 `(GuestNr, HostNr)`。
 
+**落地（2026-11-22）**：`GUEST_ABI` 在 `tools/lvm.py`（号 / 名字 / 类四元组），
+`forwarded_host_numbers()` 是静态扫描。今天两半都在
+`lvm_test::test_guest_abi_and_host_profiles` 里：包含关系（缺号点名）+ 表成形
+（号不重复、四类只有 S/E/F/R）。
+
 ### L2 · 宿主剖面：**在 Linux 上模拟 PE 的宿主能力**（能进 CI 的关键）
 
 给解释器一个 `HostProfile`：`elf` / `pe`。`pe` 这一份**只放行 `PE_DISPATCH` 里的号**，
@@ -235,6 +266,11 @@ LVM 编成 PE 之后，`vm_syscall` 里所有 **F 类**的宿主调用都要经�
 
 ⚠ 它**不能**证明 `__win_syscall` 真的实现了那 29 个号 —— 那是 L3 的事。
 
+**落地（2026-11-22）**：`lvm.host_profile("elf" | "pe")`；CLI 上是
+`--host-profile`（只在 `--tier t0`）。判据三层：10 份语料两边同答；一个**拿不到 201**
+的剖面让 guest 只拿到 −38（机制本身可证伪）；报告里的类列是 `F`。dismemory 下
+201 / 228 走虚拟钟（`docs/368`），**不碰宿主**，所以宿主剖面在那两格不参与。
+
 ### L3 · 真产物：Windows 上 PE × ELF 逐字节（**只在 Windows 跑，要明写**）
 
 `loment_pe_test` 里 PE 那一侧的"真跑"用例今天都是 `SKIP: 非 Windows`（CI 是 ubuntu；
@@ -243,10 +279,20 @@ Linux 侧只有 `test_elf_net_programs_run_on_linux` 那一条会跑）。这条
 1. 把**新的三个号**（39/201/228）加进 `NET_CASES` 同一张表 —— PE 与 WSL 的 ELF 逐字节；
 2. 在文档与判据输出里**明写"S 个用例在这个 runner 上是 SKIP"**，别让"全绿"读成"两边都跑过"。
 
-### L4 · 新产物：LVM 自己编成 PE（本轮之后）
+### L4 · 新产物：LVM 自己编成 PE（**已落地**，2026-11-22）
 
-`loment_pe_test.TOOLS` 加一项 `("lvm", "loment/tools/lvm.lomt", […], "lvm")`：
-用 PE 版 LVM 去解释一份语料，stdout + rc 与 `tools/lvm.py` 相同。这是本文件的**验收线**。
+`loment_pe_test.TOOLS` 加了 `("lvm", "loment/tools/lvm.lomt", [], "lvm")`；
+`test_pe_runs_the_loment_toolchain_natively` 的末段用 PE 版 LVM 解释四份语料
+（`user_hello` / `cmd_hello` / `bootprobe` / `selfcheck`），stdout + rc 与
+`tools/lvm.py` 相同。这是本文件的**验收线**。
+
+为什么是这四份：命令行合成、`uname` 合成、以及**表外的号**各占一份 —— 它们正好是
+本轮改过的三条路径。本机实测 PE 版解释器 620 KB、十份 `loment_elf_test.CORPUS`
+全部与参考同答（多出来的六份没有进判据：那是"另加覆盖"，不是这条验收线的一部分）。
+CI 是 ubuntu，所以这条在门禁里**是 SKIP**（`gate-skips.txt` 有它）；"PE 版 LVM 编得
+出来、结构自洽"那一半由 `test_pe_image_is_structurally_sane` 与
+`test_pe_runs_the_loment_toolchain_natively` 的产物覆盖，不需要 Windows 的那部分
+在 CI 上真跑。
 
 ---
 
@@ -254,10 +300,14 @@ Linux 侧只有 `test_elf_net_programs_run_on_linux` 那一条会跑）。这条
 
 | 阶段 | 内容 | 完成时能说什么 | 依赖 |
 |---|---|---|---|
-| **P0** | PE shim 补 39 / 63 / 201 / 228（表驱动生成）· **已落地 2026-11-21** | `lgc` 的预算在 PE 上真的收紧；`uname`/`time` 不再 −38 | 无 |
-| **P1** | LVM 未知号改 −ENOSYS + `--syscall-report`；核 `lvm_test` 的既有断言 | guest 探测号拿到 Linux 的答案 | P0 |
-| **P2** | `GUEST_ABI` 表 + `HostProfile` + L1/L2 判据 | CI 上能红："VM 转发了 PE 没有的号" | P1 |
-| **P3** | `lvm.lomt` 编 PE 跑语料（L4） | LVM-on-PE 与 LVM-on-ELF 逐字节 | P2 |
+| **P0** ✅ 2026-11-21 | PE shim 补 39 / 63 / 201 / 228（表驱动生成） | `lgc` 的预算在 PE 上真的收紧；`uname`/`time` 不再 −38 | 无 |
+| **P1** ✅ 2026-11-22 | LVM 未知号改 −ENOSYS + `--syscall-report`；`lvm_test` 的棘轮清空 | guest 探测号拿到 Linux 的答案 | P0 |
+| **P2** ✅ 2026-11-22 | `GUEST_ABI` 表 + `HostProfile` + L1/L2 判据 | CI 上能红："VM 转发了 PE 没有的号" | P1 |
+| **P4** ✅ 2026-11-22 | `lvm.lomt` 编 PE 跑语料（L4） | LVM-on-PE 与 LVM-on-ELF 同答（Windows 上真跑） | P2 |
+| **P3** | Windows 上 PE × ELF 逐字节补三条新号（L3） | 把 Windows 用例真的数出来 | P4 |
+
+> 编号沿用 §5 的 L1–L4；P3 是 L3 那一层（真产物在 Windows 上逐字节），与 P4 的验收线
+> 不同：P4 是**解释器**自己编成 PE，P3 是**语料产物**在 PE 与 ELF 之间逐字节比。
 
 P0 是唯一一件**今天就有一个用户可见症状**的事（`lgc` 预算），建议先做。
 

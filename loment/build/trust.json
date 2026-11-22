@@ -75,11 +75,11 @@
     },
     {
      "path": "loment/tools/win_shim_data.lomt",
-     "sha256": "665bbcec9d0d61a197af1e32e8ecc49449b66948642333d241439d127ca916b3",
+     "sha256": "a679820e3b821d7d1819bc3c60812f79b928c7652a7f8f0eb0ff72cc07588d62",
      "size": 46307
     }
    ],
-   "sha256": "8a27c86fc3236d2a29010ab17fd9b801153c54dc651f935a3a24db72773d95a4"
+   "sha256": "397dd302f23911cd815084081b29fbbec3716e5ee8237fbadec5d12f7bc430a9"
   },
   "reference_closure": {
    "files": [
@@ -235,11 +235,11 @@
   "genesis": {
    "mode": "100755",
    "name": "lomelf-linux-x64.elf",
-   "sha256": "059b342b07250d70ddd03f70055c16a568a2ff9fcd854da485ee79857a2c1c48",
+   "sha256": "ff54af0df9d2999a4fd1643be1adcd9ff287391bd776092a144f1bddc928c0fd",
    "size": 312328
   },
   "mirror_ir": {
-   "sha256": "7da7a04a71c78575f5aec27467e1a40a5d266d85b7ca1f4920d65cea993d9b6a",
+   "sha256": "17b78d0b7ccfd9ab60e6e04d029079cfbf4ea15e91947cd08847dc8fcca13159",
    "size": 1679955
   },
   "provenance_format": 2,

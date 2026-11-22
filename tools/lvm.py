@@ -58,6 +58,131 @@ VFD_BASE = 1000
 #: `/proc/self/cmdline` 的字段分隔符（也是内核给的那个字节）。
 B_NUL = bytes([0])
 
+# ---------------------------------------------------------------- guest ABI（`docs/311`）
+#
+# **guest 看不到宿主。** 这张表说的是"guest 该看到什么"：固定是 Linux，与解释器自己
+# 编成什么、跑在哪台机器上无关。四类（`docs/311` §2）：
+#
+#   S 合成   —— 答案由 guest 的身份/目标平台决定（`uname` 永远是 `Linux`）
+#   E 模拟   —— 答案只由 guest 状态决定（`brk`、合成 fd 的 `read`/`close`）
+#   F 转发   —— 答案里有一部分是"这台机器"的事实（`getpid`/`time`/`clock_gettime`）
+#   R 拒绝   —— 这条 ABI 在 VM 里没有实现（网络族、`poll`/`select`、真实文件系统）
+#
+# 宿主能给什么**不在**这张表里 —— 那是 `HostProfile`（§3.1）。两张表分开，才有
+# "同一份 IR、宿主换一份、guest 的行为不变"这句话。
+GUEST_SYNTH, GUEST_EMULATE = "S", "E"
+GUEST_FORWARD, GUEST_REFUSE = "F", "R"
+
+#: 未知/未实现号的答案。Linux 对不认得的系统调用就是 `-ENOSYS`（`-38`）；guest 里
+#: `if syscall(...) == -38 { … }` 是合法程序，所以这里**不 die** —— `die` 留给
+#: "调用本身是坏的"（越界指针、非合成 fd），`-ENOSYS` 留给"这个号没有"（`docs/311` §4.2）。
+ENOSYS = -38
+
+GUEST_ABI = (
+    (0, "read", GUEST_EMULATE),
+    (1, "write", GUEST_EMULATE),
+    (3, "close", GUEST_EMULATE),
+    (12, "brk", GUEST_EMULATE),
+    (39, "getpid", GUEST_FORWARD),
+    (60, "exit", GUEST_EMULATE),
+    (63, "uname", GUEST_SYNTH),
+    (201, "time", GUEST_FORWARD),
+    (228, "clock_gettime", GUEST_FORWARD),
+    (257, "openat", GUEST_SYNTH),          # 只认 `/proc/self/cmdline`
+    (41, "socket", GUEST_REFUSE),          # 网络族：VM 不做
+    (7, "poll", GUEST_REFUSE),
+)
+GUEST_ABI_BY_NR = {nr: (name, kind) for nr, name, kind in GUEST_ABI}
+
+
+class HostProfile:
+    """宿主能给什么（`docs/311` §3.1）。**唯一允许随平台变的东西。**
+
+    `elf` 无限制（内核就是 Linux ABI 的实现）；`pe` 只放行 `lomelf.PE_DISPATCH`
+    里的号 —— 其余照 `__win_syscall` 的兜底回 `-ENOSYS`。于是"VM 转发了一个 PE
+    没有的号"这件事，在**不用 Windows** 的前提下也能跑出来（§5 L2）。
+    """
+
+    __slots__ = ("name", "allow")
+
+    def __init__(self, name: str, allow: frozenset | None = None) -> None:
+        self.name = name
+        self.allow = allow
+
+    def can(self, nr: int) -> bool:
+        return self.allow is None or nr in self.allow
+
+    def __repr__(self) -> str:
+        return f"HostProfile({self.name!r})"
+
+
+def host_profile(name: str) -> HostProfile:
+    if name == "elf":
+        return HostProfile("elf")
+    if name == "pe":
+        return HostProfile("pe", frozenset(lomelf.PE_DISPATCH))
+    raise LvmError(f"没有这一档宿主剖面: {name!r}（只有 elf / pe，`docs/311` §5 L2）")
+
+
+class SyscallReport:
+    """`--syscall-report`（`docs/311` §4.2）：把"这一条没实现"变成**可数的产物**。
+
+    每条第一次出现的 `(号, 程序, 站点)` 一行，制表符分隔：
+    `nr<TAB>类<TAB>program<TAB>fn/blk/idx`。同一站点重复命中只记一次 —— 循环里
+    探测一个号不该把报告撑成程序长度的函数。
+    """
+
+    __slots__ = ("hits", "_seen")
+
+    def __init__(self) -> None:
+        self.hits: list[tuple[int, str, str, tuple[str, str, int]]] = []
+        self._seen: set = set()
+
+    def hit(self, nr: int, program: str, site, kind: str) -> None:
+        key = (nr, program, tuple(site))
+        if key in self._seen:
+            return
+        self._seen.add(key)
+        self.hits.append((nr, kind, program, tuple(site)))
+
+    def text(self) -> str:
+        out = []
+        for nr, kind, program, (fn, blk, idx) in self.hits:
+            out.append(f"{nr}\t{kind}\t{program}\t{fn}/{blk}/{idx}\n")
+        return "".join(out)
+
+
+def forwarded_host_numbers(source: Path | None = None) -> frozenset[int]:
+    """`loment/tools/lvm.lomt` 的 `vm_syscall` 直接转给宿主的号（`docs/311` §4.3）。
+
+    这是**静态**判据：LVM 编成 PE 时，内层转发出去的每一个号都必须在外层的
+    `PE_DISPATCH` 里 —— 缺一个，guest 拿到的是 `-ENOSYS`，与"Linux 上本来就没有
+    这个号"**从 guest 侧分不出来**。等运行时才发现已经晚了，所以这里读源码。
+    """
+    path = source or (Path(__file__).resolve().parent.parent
+                      / "loment" / "tools" / "lvm.lomt")
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        # 去掉行注释：`//` 里的花括号与 `syscall4(` 不算数。
+        k = raw.find("//")
+        lines.append(raw if k < 0 else raw[:k])
+    text = "\n".join(lines)
+    start = text.find("fn vm_syscall(")
+    if start < 0:
+        raise LvmError(f"{path}: 找不到 `vm_syscall`")
+    brace = text.find("{", start)
+    depth, i = 0, brace
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = text[brace:i]
+    return frozenset(int(m) for m in re.findall(r"\bsyscall[467]\s*\(\s*(\d+)", body))
+
 
 class Counters:
     """一次跑的**确定性**工作量计数（issue #1028）。
@@ -869,7 +994,8 @@ class Frame:
         a = (self.next + SLOT - 1) // SLOT * SLOT
         self.next = a + SLOT
         if isinstance(self.mem, Dismem):
-            return self.mem.add_off(self.base, a)
+            # 帧体是 `[u8; FRAME_SIZE]`；槽 = 这个数组的元素（`docs/377` §2.3）。
+            return self.mem.elem(self.base, a, FRAME_SIZE, 1)
         return a
 
 
@@ -945,7 +1071,14 @@ class Vm:
                  profile: Profile | None = None, argv: list[str] | None = None,
                  counters: "Counters | None" = None, sub: "SwCap | None" = None,
                  dismemory: bool = False, relocate_every: int = 0,
-                 shuffle: int = 0) -> None:
+                 shuffle: int = 0,
+                 host: HostProfile | None = None,
+                 report: "SyscallReport | None" = None) -> None:
+        #: 宿主剖面（`docs/311` §3.1）：`elf` 什么都给，`pe` 只给 `PE_DISPATCH` 里的号。
+        #: 只影响 F 类（转发）—— S/E 类按定义不碰宿主，R 类永远是同一个答案。
+        self.host = host if host is not None else host_profile("elf")
+        #: `--syscall-report`：`None` = 不记（关掉时一个字节都不写，与剖面同一条纪律）。
+        self.syscall_report = report
         #: `docs/368`：没有地址的那一档。关着时 `mem` 仍是 `Mem`，一个字节都不多走。
         self.dismemory = dismemory
         self.relocate_every = relocate_every
@@ -995,7 +1128,10 @@ class Vm:
             align = max(1, min(8, lomelf.size_of(g.ty) or 1))
             g.addr = (self.mem.alloc(len(data), align, kind="global")
                       if self.dismemory else self.mem.alloc(len(data), align))
-            self.mem.put(g.addr, data)
+            if self.dismemory:
+                self.mem.put(g.addr, data, g.ty)
+            else:
+                self.mem.put(g.addr, data)
             if self.sub is not None:
                 oid = self.sub.new_obj(g.addr, len(data), "global")
                 self.global_caps[g.name] = self.sub.cap_of(oid)
@@ -1029,7 +1165,9 @@ class Vm:
         n = lomelf.size_of(ty)
         if self.dismemory:
             self.mem.site = self.site
-        raw = self.mem.get(addr, n)
+            raw = self.mem.get(addr, n, ty)
+        else:
+            raw = self.mem.get(addr, n)
         if _is_agg(ty):
             return raw
         return int.from_bytes(raw, "little")
@@ -1038,10 +1176,18 @@ class Vm:
         if self.dismemory:
             self.mem.site = self.site
         if _is_agg(ty):
-            self.mem.put(addr, val if isinstance(val, bytes) else bytes(val))
+            blob = val if isinstance(val, bytes) else bytes(val)
+            if self.dismemory:
+                self.mem.put(addr, blob, ty)
+            else:
+                self.mem.put(addr, blob)
             return
         n = lomelf.size_of(ty)
-        self.mem.put(addr, (int(val) & ((1 << (n * 8)) - 1)).to_bytes(n, "little"))
+        blob = (int(val) & ((1 << (n * 8)) - 1)).to_bytes(n, "little")
+        if self.dismemory:
+            self.mem.put(addr, blob, ty)
+        else:
+            self.mem.put(addr, blob)
 
 
 
@@ -1102,11 +1248,11 @@ class _DismBody:
         self.dy = d
         self.dz = max(1, (self.size + d * d - 1) // (d * d))
         self.x = self.y = self.z = 0
-        #: `docs/375` §2：体**没有连续字节数组** —— 内容是一张稀疏映射（逻辑下标 -> 字节）。
-        #: `shift` 只改物理键的写法（同一个逻辑下标在不同摆法下落到不同的桶），访问路径
-        #: 从不出现"基址 + 字节数"。`--dismemory-shuffle N` 只动它。
-        self.cells: dict[int, int] = {}
-        self.shift = (shift % self.size) if self.size else 0
+        #: `docs/377` §2：体是一张 `路径 -> 叶字节` 的映射。路径是**结构位置**
+        #: （数组第 i 个元素 / 结构第 f 个字段），不是体内字节偏移。
+        self.cells: dict[tuple, bytes] = {}
+        #: 深度 3 的摆法在深度 4 没有物理键可换；保留字段只为快照字段对齐。
+        self.shift = 0
         self.alive = True
         self.tokens: set[int] = set()
 
@@ -1127,11 +1273,10 @@ class Dismem:
         #: 2000 次 store32 要 57s，`docs/375` §6）。
         self.live: dict[int, _DismBody] = {}
         self.next_bid = 1
-        #: 令牌 -> (体编号, 体内偏移)。**永不外露**。
-        self.tokens: dict[int, tuple[int, int]] = {}
-        #: (体编号, 偏移) -> 令牌。同一个引用点只有**一个**令牌：a[i] 取一万次
-        #: 也只烧一个序号（`docs/368` §1.7）。
-        self.rev: dict[tuple[int, int], int] = {}
+        #: 令牌 -> (体编号, 路径, 叶宽)。**永不外露**；表里没有 offset。
+        self.tokens: dict[int, tuple[int, tuple, int]] = {}
+        #: (体编号, 路径) -> 令牌。同一个引用点只有**一个**令牌（`docs/377` §2）。
+        self.rev: dict[tuple[int, tuple], int] = {}
         self.next_serial = 1
         #: 退休令牌的墓碑（只为诊断；令牌永不复用，所以它只增不减，按容量截断）。
         self.tomb: dict[int, tuple[int, str]] = {}
@@ -1177,8 +1322,8 @@ class Dismem:
             self._place(b)
 
     # ------------------------------------------------------------ 令牌
-    def _new_token(self, b: "_DismBody", off: int) -> int:
-        key = (b.id, off)
+    def _new_token(self, b: "_DismBody", path: tuple, leaf: int) -> int:
+        key = (b.id, path)
         got = self.rev.get(key)
         if got is not None:
             return got
@@ -1188,7 +1333,7 @@ class Dismem:
                         {"dismem": True, "reason": "tokens", "width": 8})
         self.next_serial = serial + 1
         t = (DISM_TAG << 56) | serial
-        self.tokens[t] = key
+        self.tokens[t] = (b.id, path, leaf)
         self.rev[key] = t
         b.tokens.add(t)
         return t
@@ -1203,9 +1348,11 @@ class Dismem:
             if dead is not None:
                 d.update({"body_kind": dead[1], "dead": True})
             return d
-        _bid, off = key
+        _bid, path, leaf = key
         b = self.bodies.get(_bid)
-        d.update({"offset": off})
+        d.update({"path_len": len(path), "leaf": leaf})
+        if path:
+            d.update({"step": path[-1][1], "steps": [s[1] for s in path]})
         if b is not None:
             d.update({"body_kind": b.kind, "size": b.size})
         return d
@@ -1214,7 +1361,7 @@ class Dismem:
         raise _Fault(kind, self.site or ("?", "?", 0), witness, detail)
 
     def decode(self, h, width: int):
-        """令牌 -> (体, 偏移)。**表里没有 = 身份不存在**（F02），没有代号可以比对。"""
+        """令牌 -> (体, 路径, 叶宽)。**表里没有 = 身份不存在**（F02）。"""
         if not isinstance(h, int) or h == 0:
             self._fault(FAULT_NULL, "size=%d" % width,
                         self.map_detail(0, width, "null"))
@@ -1230,15 +1377,16 @@ class Dismem:
         if key is None:
             self._fault(FAULT_DANGLING, "token=%#x not live" % h,
                         self.map_detail(h, width, "retired"))
-        bid, off = key
+        bid, path, leaf = key
         b = self.bodies.get(bid)
         if b is None or not b.alive:
             self._fault(FAULT_DANGLING, "token=%#x retired" % h,
                         self.map_detail(h, width, "retired"))
-        if off + width > b.size:
-            self._fault(FAULT_BOUNDS, "offset=%d size=%d limit=%d" % (off, width, b.size),
+        if width > leaf:
+            self._fault(FAULT_BOUNDS,
+                        "width=%d leaf=%d path_steps=%d" % (width, leaf, len(path)),
                         self.map_detail(h, width, "over"))
-        return b, off
+        return b, path, leaf
 
     # ------------------------------------------------------------ Mem 接口
     def alloc(self, n: int, align: int = 8, kind: str = "heap") -> int:
@@ -1251,17 +1399,17 @@ class Dismem:
         # 摆法（`docs/375` §2.3）：只改物理键的写法，逻辑格号与令牌不动。
         shift = 0 if self.shuffle == 0 else (
             (self.shuffle * 2654435761 + bid * 40503) & 0x7FFFFFFF)
-        b = _DismBody(bid, kind, size, shift)
+        b = _DismBody(bid, kind, size, 0)
         self.bodies[bid] = b
         self._place(b)
         self.live[bid] = b
-        return self._new_token(b, 0)
+        return self._new_token(b, (), size)
 
     def retire(self, h: int) -> None:
         key = self.tokens.get(h) if isinstance(h, int) else None
         if key is None:
             return
-        bid, off = key
+        bid, _path, _leaf = key
         b = self.bodies.get(bid)
         if b is None or not b.alive:
             return
@@ -1279,43 +1427,201 @@ class Dismem:
         b.cells.clear()
         self.live.pop(bid, None)
 
-    def put(self, h, data) -> None:
-        b, off = self.decode(h, len(data))
+    # ------------------------------------------------------------ 叶访问
+    def put(self, h, data, ty: str | None = None) -> None:
+        b, path, leaf = self.decode(h, len(data))
+        if ty is not None and _is_agg(ty):
+            self._put_agg(b, path, ty, bytes(data))
+            return
+        if any(data):
+            b.cells[path] = bytes(data)
+        else:
+            b.cells.pop(path, None)
+
+    def get(self, h, n: int, ty: str | None = None) -> bytes:
+        b, path, leaf = self.decode(h, n if ty is None else 0)
+        if ty is not None and _is_agg(ty):
+            return self._get_agg(b, path, ty)
+        return bytes(b.cells.get(path, b"\0" * n)[:n]).ljust(n, b"\0")
+
+    # ------------------------------------------------------------ 路径派生
+    def gep(self, h: int, delta: int, ty: str, rest: list[int]) -> int:
+        """`getelementptr ty, ptr %p, delta, rest...` -> 新令牌（`docs/377` §2.2）。
+
+        第 0 个下标是"沿指针的元素推进"：若当前路径末尾就是一个数组元素，
+        就在**同一根数组轴**上前进；否则从体根起算（体尺寸 / sizeof(ty) 个元素）。
+        越界在**派生时**就是 F01 —— 不是等到 load。"""
+        b, path, _leaf = self.decode(h, 0)
+        width = lomelf.size_of(ty)
+        scalar = not (ty.startswith("[") or ty.startswith("{"))
+        if delta == 0 and scalar and not (
+                path and path[-1][3] == width):
+            # `gep T, p, 0`：指针停在同一根数组的**第 0 个元素**上；但若 p 已经指向
+            # 一个**更宽**的元素（字段/数组元素），用更窄的 T 去指它是**字节重解释**
+            # —— 深度 4 不主张这件事（`docs/377` §2.2，F04）。
+            if path:
+                d = self.map_detail(h, width, "gep")
+                d["want"] = width
+                self._fault(FAULT_NOADDR, "reinterpret a wider element",
+                            d)
+            cnt = (b.size // width) if width > 0 else 0
+            if cnt <= 0:
+                d = self.map_detail(h, width, "gep")
+                d["index"] = 0
+                d["count"] = cnt
+                self._fault(FAULT_BOUNDS, "index=0 count=0", d)
+            path = ((0, 0, cnt, width),)
+        elif delta != 0:
+            if path and path[-1][0] == 0 and path[-1][3] == width:
+                kind, idx, cnt, w = path[-1]
+                nidx = idx + delta
+                if nidx < 0 or nidx >= cnt:
+                    d = self.map_detail(h, width, "gep")
+                    d["index"] = nidx
+                    d["count"] = cnt
+                    self._fault(FAULT_BOUNDS, "index=%d count=%d" % (nidx, cnt), d)
+                path = path[:-1] + ((0, nidx, cnt, w),)
+            elif path:
+                # 从一个字段 / 不同宽度的元素上"往前挪"不是结构操作（`docs/377` §2.2）。
+                d = self.map_detail(h, width, "gep")
+                self._fault(FAULT_NOADDR, "pointer step from a non-element reference", d)
+            else:
+                cnt = (b.size // width) if width > 0 else 0
+                if delta < 0 or delta >= cnt:
+                    d = self.map_detail(h, width, "gep")
+                    d["index"] = delta
+                    d["count"] = cnt
+                    self._fault(FAULT_BOUNDS, "index=%d count=%d" % (delta, cnt), d)
+                path = path + ((0, delta, cnt, width),)
+        cur, leaf = ty, width
+        for idx in rest:
+            if cur.startswith("["):
+                n, elem = lomelf.array_parts(cur)
+                w = lomelf.size_of(elem)
+                if idx < 0 or idx >= n:
+                    d = self.map_detail(h, w, "gep")
+                    d["index"] = idx
+                    d["count"] = n
+                    self._fault(FAULT_BOUNDS, "index=%d count=%d" % (idx, n), d)
+                path = path + ((0, idx, n, w),)
+                cur, leaf = elem, w
+            elif cur.startswith("{"):
+                _off, fty = lomelf.field_offset(cur, idx)
+                w = lomelf.size_of(fty)
+                path = path + ((1, idx, 0, w),)
+                cur, leaf = fty, w
+            else:
+                raise LvmError(f"GEP 的这一步 T0 没实现: {cur!r}")
+        return self._new_token(b, path, leaf)
+
+    def elem(self, h: int, index: int, count: int, width: int) -> int:
+        """帧里的字节槽：`ELEM(index, count, width)`（`docs/377` §2.3）。"""
+        b, path, _leaf = self.decode(h, 0)
+        if index < 0 or index >= count:
+            d = self.map_detail(h, width, "slot")
+            d["index"] = index
+            d["count"] = count
+            self._fault(FAULT_BOUNDS, "index=%d count=%d" % (index, count), d)
+        return self._new_token(b, path + ((0, index, count, width),), width)
+
+    # ------------------------------------------------------------ 聚合（逐叶，没有 blob）
+    def _get_agg(self, b, path: tuple, ty: str) -> bytes:
+        size = lomelf.size_of(ty)
+        out = bytearray(size)
+        if ty.startswith("["):
+            n, elem = lomelf.array_parts(ty)
+            w = lomelf.size_of(elem)
+            for i in range(n):
+                out[i * w:(i + 1) * w] = self._get_agg(
+                    b, path + ((0, i, n, w),), elem)
+            return bytes(out)
+        if ty.startswith("{"):
+            k = _struct_arity(ty)
+            for i in range(k):
+                off, fty = lomelf.field_offset(ty, i)
+                w = lomelf.size_of(fty)
+                out[off:off + w] = self._get_agg(b, path + ((1, i, 0, w),), fty)
+            return bytes(out)
+        return bytes(b.cells.get(path, b"\0" * size))[:size].ljust(size, b"\0")
+
+    def _put_agg(self, b, path: tuple, ty: str, data: bytes) -> None:
+        if ty.startswith("["):
+            n, elem = lomelf.array_parts(ty)
+            w = lomelf.size_of(elem)
+            for i in range(n):
+                self._put_agg(b, path + ((0, i, n, w),), elem,
+                              data[i * w:(i + 1) * w])
+            return
+        if ty.startswith("{"):
+            k = _struct_arity(ty)
+            for i in range(k):
+                off, fty = lomelf.field_offset(ty, i)
+                w = lomelf.size_of(fty)
+                self._put_agg(b, path + ((1, i, 0, w),), fty,
+                              data[off:off + w])
+            return
+        if any(data):
+            b.cells[path] = bytes(data)
+        else:
+            b.cells.pop(path, None)
+
+    # ------------------------------------------------------------ 字节串：沿 u8 数组轴
+    def _run_base(self, h: int, n: int):
+        b, path, leaf = self.decode(h, 0)
+        if path and path[-1][0] == 0 and path[-1][3] == 1:
+            _k, start, cnt, _w = path[-1]
+            if start + n > cnt:
+                d = self.map_detail(h, 1, "run")
+                d["index"] = start + n - 1
+                d["count"] = cnt
+                self._fault(FAULT_BOUNDS, "run index=%d count=%d" % (start + n, cnt), d)
+            return b, path[:-1], start, cnt
+        if not path and b.size >= n:
+            return b, (), 0, b.size
+        self._fault(FAULT_NOADDR, "byte run over a non-u8-element reference",
+                    {"dismem": True, "reason": "run", "token": h, "width": n})
+        return None, (), 0, 0
+
+    def get_run(self, h, n: int) -> bytes:
+        b, base, start, cnt = self._run_base(h, n)
+        return bytes(_cell_byte(b.cells.get(base + ((0, start + k, cnt, 1),)))
+                     for k in range(n))
+
+    def put_run(self, h, data) -> None:
+        b, base, start, cnt = self._run_base(h, len(data))
         for k, byte in enumerate(data):
-            key = (off + k + b.shift) % b.size
+            key = base + ((0, start + k, cnt, 1),)
             if byte:
-                b.cells[key] = byte
+                b.cells[key] = bytes([byte])
             else:
                 b.cells.pop(key, None)
 
-    def get(self, h, n: int) -> bytes:
-        b, off = self.decode(h, n)
-        return bytes(b.cells.get((off + k + b.shift) % b.size, 0) for k in range(n))
-
     def cstr(self, h, limit: int = 4096) -> bytes:
-        b, off = self.decode(h, 1)
+        b, path, _leaf = self.decode(h, 0)
+        if not (path and path[-1][0] == 0 and path[-1][3] == 1):
+            if path:
+                self._fault(FAULT_NOADDR, "cstr over a non-u8-element reference",
+                            {"dismem": True, "reason": "cstr", "token": h, "width": 1})
+            base, start, cnt = (), 0, b.size
+        else:
+            base, start, cnt = path[:-1], path[-1][1], path[-1][2]
         out = bytearray()
-        i = off
-        while i < b.size and len(out) < limit:
-            c = b.cells.get((i + b.shift) % b.size, 0)
+        i = start
+        while i < cnt and len(out) < limit:
+            c = _cell_byte(b.cells.get(base + ((0, i, cnt, 1),)))
             if c == 0:
                 break
             out.append(c)
             i += 1
         return bytes(out)
 
-    # ------------------------------------------------------------ 令牌算术（在表里派生）
-    def off_of(self, h: int):
-        return self.decode(h, 0)
 
-    def add_off(self, h: int, delta: int) -> int:
-        b, off = self.decode(h, 0)
-        n = off + delta
-        if n < 0 or n > b.size:
-            d = self.map_detail(h, 1, "walk")
-            d["new_offset"] = n
-            self._fault(FAULT_BOUNDS, "offset=%d -> %d limit=%d" % (off, n, b.size), d)
-        return self._new_token(b, n)
+def _cell_byte(cell) -> int:
+    return cell[0] if cell else 0
+
+
+def _struct_arity(ty: str) -> int:
+    return len(lomelf._fields(ty))
 
 
 def _d_num(v) -> bool:
@@ -1371,8 +1677,25 @@ def trap_exit(site, detail: dict | None = None) -> int:
 
 class Executor(Vm):
     # ------------------------------------------------------------ 系统调用
+    def refuse(self, nr: int, kind: str = "") -> int:
+        """guest 拿到 `-ENOSYS`；"这一条没实现"记进覆盖报告（`docs/311` §4.2）。
+
+        `die` 留给"调用本身是坏的"（越界指针、非合成 fd）；"这个号没有"是 Linux
+        也会给的答案，不是一次崩溃 —— 两者要分开。
+        """
+        if self.syscall_report is not None:
+            name = GUEST_ABI_BY_NR.get(nr, ("", ""))[1]
+            self.syscall_report.hit(nr, self.argv[0] if self.argv else "?",
+                                    self.site or ("?", "?", 0), kind or name or "?")
+        return ENOSYS
+
     def syscall(self, nr: int, a: list[int]) -> int:
-        """**唯一**的对外通道（`docs/243` §3.4）。表里没有的就点名拒。"""
+        """**唯一**的对外通道（`docs/243` §3.4）。表里没有的回 `-ENOSYS`。
+
+        `docs/311` §4.2 之前这里是 `raise LvmError`（= 工具的响亮）。那是把
+        "工具该说话"与"guest 该像 Linux"写成了同一件事。现在分开：**guest 拿到
+        `-ENOSYS`**，响亮度挪到 `--syscall-report` 那份可数的产物上。
+        """
         if nr == 0:                                    # read(fd, buf, count)
             # 解释器没有真的文件描述符 —— 只认识 257 开的那个合成文件。
             v = self.vfds.get(a[0])
@@ -1381,11 +1704,14 @@ class Executor(Vm):
                                "（`docs/243` §3.4）")
             data = v[0][v[1]:v[1] + a[2]]
             v[1] += len(data)
-            self.mem.put(a[1], data)
+            if self.dismemory:
+                self.mem.put_run(a[1], data)
+            else:
+                self.mem.put(a[1], data)
             return len(data)
         if nr == 1:                                    # write(fd, buf, count)
             fd, buf, n = a[0], a[1], a[2]
-            data = self.mem.get(buf, n)
+            data = self.mem.get_run(buf, n) if self.dismemory else self.mem.get(buf, n)
             if fd in (1, 2):
                 self.out.write(data)
                 self.out.flush()
@@ -1395,23 +1721,19 @@ class Executor(Vm):
                 raise LvmError(f"close: fd {a[0]} 不是 VM 合成的那一个"
                                "（`docs/243` §3.4）")
             return 0
-        if nr == 12 and self.dismemory:                 # brk —— 只认堆体
+        if nr == 12 and self.dismemory:                 # brk —— 只认堆体的**根**
             want = a[0]
-            heap_body, _h = self.mem.off_of(self.mem.heap)
+            heap_body, _hp, _hl = self.mem.decode(self.mem.heap, 0)
             if want == 0:
                 return self.mem.heap
             if not d_is_handle(want):
                 raise _Fault(FAULT_NOORDER, self.site, "brk on a number",
                              {"dismem": True, "reason": "brk-number", "width": 8})
-            b, off = self.mem.off_of(want)
-            if b is not heap_body:
+            b, path, _leaf = self.mem.decode(want, 0)
+            if b is not heap_body or path:
                 raise _Fault(FAULT_NOORDER, self.site,
-                             "brk on a non-heap body",
+                             "brk on a non-root reference",
                              {"dismem": True, "reason": "brk-body", "width": 8})
-            if off > b.size:
-                raise _Fault(FAULT_BOUNDS, self.site,
-                             "brk offset=%d limit=%d" % (off, b.size),
-                             self.mem.map_detail(want, 1, "over"))
             return want
         if nr == 12:                                   # brk(addr)
             # `_IR_HEAP` 的分配器用它向 OS 要页。解释器的堆本来就在地址空间里，
@@ -1426,15 +1748,24 @@ class Executor(Vm):
             return self.mem.heap
         if nr == 39:                                   # getpid
             # 如实转出去：这是**这台机器的事实**，被解释程序问的就是"我"是谁。
+            # F 类：宿主给不了（例如 PE 上那条 shim 没有这个号）⇒ guest 仍然拿 -ENOSYS。
+            if not self.host.can(nr):
+                return self.refuse(nr, GUEST_FORWARD)
             return os.getpid()
         if nr == 63:                                   # uname(struct utsname *p)
             # ⚠ **合成，不转宿主** —— 它描述的是**目标平台**，不是解释器跑在哪台机器上。
             # 判据 A 比的是"这份产物在目标平台上会打印什么"，所以这里必须给 Linux：
             # 宿主是 Windows 也照样给 Linux（`docs/243` §3.4 那条规矩）。
             fields = [b"Linux", b"loment", b"0.1.5", b"#1 LVM T0", b"x86_64", b"(none)"]
-            self.mem.put(a[0], b"".join(f[:64].ljust(65, b"\0") for f in fields))
+            blob = b"".join(f[:64].ljust(65, b"\0") for f in fields)
+            if self.dismemory:
+                self.mem.put_run(a[0], blob)
+            else:
+                self.mem.put(a[0], blob)
             return 0
         if nr == 201:                                  # time(NULL)
+            if not self.dismemory and not self.host.can(nr):
+                return self.refuse(nr, GUEST_FORWARD)
             if self.dismemory:
                 # 时间也在观察代数里（`docs/371`）：dismemory 下宿主墙钟会被 guest 用来
                 # 量重排效应，所以按**已执行指令数**给一台确定性虚拟钟（1 条 = 1 ms）。
@@ -1445,12 +1776,18 @@ class Executor(Vm):
             # 其余是单调钟 —— 实测 ELF 侧两者差一个数量级，拿单调钟回答 realtime 会让
             # "同一份源在 PE 与 ELF 上"的形状不同（`docs/311` §2 的 F 类）。
             # 按 Linux x86-64 的 `timespec`（两个 i64：秒、纳秒）写进 guest 内存。
+            if not self.dismemory and not self.host.can(nr):
+                return self.refuse(nr, GUEST_FORWARD)
             if self.dismemory:
                 ns = self.executed * 1_000_000
             else:
                 ns = time.time_ns() if a[0] == 0 else time.monotonic_ns()
-            self.mem.put(a[1], (ns // 1_000_000_000).to_bytes(8, "little", signed=True)
-                         + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
+            blob = ((ns // 1_000_000_000).to_bytes(8, "little", signed=True)
+                    + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
+            if self.dismemory:
+                self.mem.put_run(a[1], blob)
+            else:
+                self.mem.put(a[1], blob)
             return 0
         # ⚠ **317 不是 getrandom** —— 我一开始照 `selfcheck` 的名字猜它是，写了个
         # `os.urandom` 分支。**判据 A 当场把这个臆造纠了出来**：原生产物在 Linux 上拿到
@@ -1471,7 +1808,8 @@ class Executor(Vm):
             return fd
         if nr == 60:                                   # exit(code)
             raise _Exit(a[0] & 0xFF)
-        raise LvmError(f"系统调用表里没有 {nr}（`docs/243` §3.4）")
+        # 表外的号：Linux 给 `-ENOSYS`，不是"进程死掉"。`docs/311` §4.2。
+        return self.refuse(nr)
 
     # ------------------------------------------------------------ 调用
     def call(self, fr: Frame, text: str):
@@ -1700,30 +2038,12 @@ class Executor(Vm):
         """句柄参与的算术（`docs/368` §1.4）。**只有 `add`/`sub` 的体内偏移是允许的。**
         体内偏移有顺序（数组下标），所以同体相减/比较照常；跨体一律 F05。"""
         ha, hb = d_is_handle(a), d_is_handle(b)
-        if op == "add":
-            if ha and hb:
-                raise _Fault(FAULT_NOORDER, self.site, "add two bodies",
-                             {"dismem": True, "reason": "add-bodies",
-                              "width": 8})
-            if ha:
-                return self.mem.add_off(a, int(b))
-            if hb:
-                return self.mem.add_off(b, int(a))
-        if op == "sub":
-            if ha and hb:
-                ba, oa = self.mem.off_of(a)
-                bb, ob = self.mem.off_of(b)
-                if ba is not bb:
-                    raise _Fault(FAULT_NOORDER, self.site,
-                                 "subtract two bodies",
-                                 {"dismem": True, "reason": "sub-bodies", "width": 8})
-                return mask(oa - ob, ty)
-            if ha:
-                return self.mem.add_off(a, -int(b))
-            if hb:
-                raise _Fault(FAULT_NOORDER, self.site, "integer - body",
-                             {"dismem": True, "reason": "int-sub-body", "width": 8})
         if ha or hb:
+            # 深度 4：引用没有可加减的整数（F04）；两个引用的差是"序"（F05）。
+            if op == "sub" and ha and hb:
+                raise _Fault(FAULT_NOORDER, self.site, op,
+                             {"dismem": True, "reason": "order", "op": op,
+                              "width": 8})
             raise _Fault(FAULT_NOADDR, self.site, op,
                          {"dismem": True, "reason": "arith", "op": op,
                           "width": 8})
@@ -1896,9 +2216,11 @@ class Executor(Vm):
         parts = lomelf.split_top(body[i:].lstrip(", "))
         _bty, base = self.operand(fr, parts[0])
         idxs = [self.operand(fr, s)[1] for s in parts[1:]]
-        off = gep_offset(ty, idxs, text)
         if self.dismemory and d_is_handle(base):
-            return self.mem.add_off(base, off)
+            # 深度 4：下标变**结构步骤**，不是字节偏移（`docs/377` §2.2）。
+            self.mem.site = self.site
+            return self.mem.gep(base, int(idxs[0]), ty, [int(i) for i in idxs[1:]])
+        off = gep_offset(ty, idxs, text)
         return base + off
 
     def _extractvalue(self, fr: Frame, text: str):
@@ -1938,16 +2260,8 @@ class Executor(Vm):
             if pred in ("eq", "ne"):
                 same = (a == b) if (d_is_handle(a) and d_is_handle(b)) else False
                 return 1 if (same == (pred == "eq")) else 0
-            if d_is_handle(a) and d_is_handle(b):
-                ba, oa = self.mem.off_of(a)
-                bb, ob = self.mem.off_of(b)
-                if ba is not bb:
-                    raise _Fault(FAULT_NOORDER, self.site,
-                                 "compare two bodies",
-                                 {"dismem": True, "reason": "order-bodies", "width": 8})
-            else:
-                raise _Fault(FAULT_NOORDER, self.site, "order handle vs number",
-                             {"dismem": True, "reason": "order-handle", "width": 8})
+            raise _Fault(FAULT_NOORDER, self.site, "compare references",
+                         {"dismem": True, "reason": "order", "width": 8})
         if pred in _SIGNED_CMP:
             a, b = signed(a, ty), signed(b, ty)
         return 1 if _ICMP[pred](a, b) else 0
@@ -2053,7 +2367,7 @@ class Executor(Vm):
 #: 共同快照格式（`docs/365`）：与自举镜像**同一套布局**。
 #: 头 16 B + ctx 256 B + 全局表 + 对象表 + 续延栈 2112 B + 4 MiB 内存 + 参考侧扩展。
 CP_MAGIC = b"LVMC"
-CP_VERSION = 1
+CP_VERSION = 2
 CP_HEADER = 16
 CTX_SIZE = 256
 CONT_REC = 16          # u32 / 帧
@@ -2526,21 +2840,24 @@ class ExplicitExecutor(Executor):
         return pending
 
     def _place_value_d(self, fr, val) -> tuple[int, int]:
-        """dismemory 的宿主值 -> `(lo, hi)`；聚合按**帧体内偏移**记成 `(off, size)`。"""
+        """dismemory 的宿主值 -> `(lo, hi)`；聚合按**帧体里的字节 run** 记 `(off, size)`。"""
         if isinstance(val, bytes):
             fr.next = self._align8(fr.next)
             off = fr.next
-            self.mem.put(self.mem.add_off(fr.base, off), bytes(val))
+            self._frame_put(fr, off, bytes(val))
             fr.next = off + len(val)
             return off, len(val)
         v = int(val) & 0xFFFFFFFFFFFFFFFF
         return v & 0xFFFFFFFF, v >> 32
 
+    def _frame_elem(self, fr, off: int) -> int:
+        return self.mem.elem(fr.base, off, FRAME_SIZE, 1)
+
     def _frame_put(self, fr, off: int, data: bytes) -> None:
-        self.mem.put(self.mem.add_off(fr.base, off), data)
+        self.mem.put_run(self._frame_elem(fr, off), data)
 
     def _frame_get(self, fr, off: int, n: int) -> bytes:
-        return self.mem.get(self.mem.add_off(fr.base, off), n)
+        return self.mem.get_run(self._frame_elem(fr, off), n)
 
     def _sub_code(self) -> int:
         if self.sub is None:
@@ -2684,20 +3001,21 @@ class ExplicitExecutor(Executor):
             m.bodies[bid] = b
             m._place(b)
             m.live[bid] = b
-        for bid, k, v in cells:
+        for bid, path, blob in cells:
             b = m.bodies.get(bid)
             if b is not None:
-                b.cells[k] = v
-        for tok, bid, off in toks:
-            m.tokens[tok] = (bid, off)
-            m.rev[(bid, off)] = tok
+                b.cells[path] = blob
+        for tok, bid, path, leaf in toks:
+            m.tokens[tok] = (bid, path, leaf)
+            m.rev[(bid, path)] = tok
             b = m.bodies.get(bid)
             if b is not None:
                 b.tokens.add(tok)
         m.next_bid = next_bid
         m.next_serial = next_serial
-        for tok, (bid, off) in m.tokens.items():
-            if off == 0 and m.bodies.get(bid) is not None and m.bodies[bid].kind == "heapspan":
+        for tok, (bid, path, _leaf) in m.tokens.items():
+            if path == () and m.bodies.get(bid) is not None \
+                    and m.bodies[bid].kind == "heapspan":
                 m.heap = tok
                 break
 
@@ -2736,14 +3054,20 @@ class ExplicitExecutor(Executor):
                 out += _u64(h)
         bodies = sorted((b for b in self.mem.bodies.values() if b.alive),
                         key=lambda q: q.id)
-        cells = [(b.id, k, v) for b in bodies for k, v in sorted(b.cells.items())]
+        cells = [(b.id, path, blob) for b in bodies
+                 for path, blob in sorted(b.cells.items())]
         out += _u32(len(cells))
-        for bid, k, v in cells:
-            out += _u32(bid) + _u32(k) + _u32(v)
+        for bid, path, blob in cells:
+            out += _u32(bid) + _u32(len(path))
+            for kind, idx, cnt, w in path:
+                out += _u32(kind) + _u32(idx) + _u32(cnt) + _u32(w)
+            out += _u32(len(blob)) + blob
         toks = sorted(self.mem.tokens.items())
         out += _u32(len(toks))
-        for tok, (bid, off) in toks:
-            out += _u64(tok) + _u32(bid) + _u32(off)
+        for tok, (bid, path, leaf) in toks:
+            out += _u64(tok) + _u32(bid) + _u32(leaf) + _u32(len(path))
+            for kind, idx, cnt, w in path:
+                out += _u32(kind) + _u32(idx) + _u32(cnt) + _u32(w)
         out += _u32(len(bodies))
         for b in bodies:
             nb = b.kind.encode("utf-8")
@@ -2801,9 +3125,25 @@ class ExplicitExecutor(Executor):
                 objs_h = [r.u64() for _ in range(na)]
                 dis_frames.append((base_tok, fr_next, objs_h))
             nc = r.u32()
-            dis_cells = [(r.u32(), r.u32(), r.u32()) for _ in range(nc)]
+            dis_cells = []
+            for _ in range(nc):
+                bid = r.u32()
+                plen = r.u32()
+                path = tuple((r.u32(), r.u32(), r.u32(), r.u32())
+                             for _ in range(plen))
+                blen = r.u32()
+                blob = r.take(blen)
+                dis_cells.append((bid, path, blob))
             nt = r.u32()
-            dis_toks = [(r.u64(), r.u32(), r.u32()) for _ in range(nt)]
+            dis_toks = []
+            for _ in range(nt):
+                tok = r.u64()
+                bid = r.u32()
+                leaf = r.u32()
+                plen = r.u32()
+                path = tuple((r.u32(), r.u32(), r.u32(), r.u32())
+                             for _ in range(plen))
+                dis_toks.append((tok, bid, path, leaf))
             nb = r.u32()
             dis_bodies = []
             for _ in range(nb):
@@ -2915,20 +3255,20 @@ class ExplicitExecutor(Executor):
             fr.prev = prev_label
             fr.steps = steps
             if flags == 3:
-                headers = self.mem.get(self.mem.add_off(fr.base, 0), 8)
+                headers = self.mem.get_run(self.mem.elem(fr.base, 0, FRAME_SIZE, 1), 8)
                 n, fr.next = struct.unpack("<II", headers)
                 if n > 1024:
                     raise LvmError("checkpoint：一帧里的值超过 1024 格")
                 fr.vals = {}
                 for k in range(n):
-                    blob16 = self.mem.get(self.mem.add_off(
-                        fr.base, FRAME_VALS + k * VAL_REC), VAL_REC)
+                    blob16 = self.mem.get_run(self.mem.elem(
+                        fr.base, FRAME_VALS + k * VAL_REC, FRAME_SIZE, 1), VAL_REC)
                     no, nl, lo, hi = struct.unpack("<IIII", blob16)
                     name = self._span_name(no, nl)
                     ty = self.value_types.get((fn.name, name))
                     if ty is not None and lomelf.is_agg(ty):
-                        fr.vals[name] = self.mem.get(
-                            self.mem.add_off(fr.base, lo), hi)
+                        fr.vals[name] = self.mem.get_run(
+                            self.mem.elem(fr.base, lo, FRAME_SIZE, 1), hi)
                     else:
                         fr.vals[name] = lo | (hi << 32)
             else:
@@ -2969,7 +3309,8 @@ class ExplicitExecutor(Executor):
                     continue
                 ty = self.value_types.get((fn.name, name))
                 if ty is not None and lomelf.is_agg(ty):
-                    val = (self.mem.get(self.mem.add_off(fr.base, lo), hi)
+                    val = (self.mem.get_run(
+                               self.mem.elem(fr.base, lo, FRAME_SIZE, 1), hi)
                            if flags == 3 else bytes(self.mem.buf[lo:lo + hi]))
                 else:
                     val = lo | (hi << 32)
@@ -3055,8 +3396,9 @@ def run_checkpointed(text: str, out, substrate: str = "none",
 def run_ir(text: str, out, profile: Profile | None = None,
            argv: list[str] | None = None, tier: str = "t0",
            values=None, deopts=None, counters: "Counters | None" = None,
-           substrate: str = "none", relocate_every: int = 0,
-           shuffle: int = 0) -> int:
+           substrate: str = "none", relocate_every: int = 0, shuffle: int = 0,
+           host: HostProfile | None = None,
+           report: "SyscallReport | None" = None) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口按 `docs/243` §3.5 那张表认**。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
@@ -3071,6 +3413,10 @@ def run_ir(text: str, out, profile: Profile | None = None,
     就不编一个像路径的东西出来；要真名字的调用方自己传（`lvm_test` 传的就是它
     喂给原生产物的同一个名字，好让两边逐字节可比）。
     """
+    if host is not None or report is not None:
+        if tier != "t0":
+            raise LvmError("宿主剖面与覆盖报告只在 t0 落地（`docs/311` §5）")
+        host = host or host_profile("elf")
     if tier == "t2":
         if substrate != "none":
             raise LvmError("基质（sw_cap / sw_tag）只在 t0 落地（`docs/362`/`docs/364`）；t2/t3 还没有它")
@@ -3104,7 +3450,8 @@ def run_ir(text: str, out, profile: Profile | None = None,
            else SwCap("tag") if substrate == "sw_tag" else None)
     vm = Executor(globals_, funcs, externs, out, profile, argv, counters, sub,
                   dismemory=dismemory,
-                  relocate_every=relocate_every, shuffle=shuffle)
+                  relocate_every=relocate_every, shuffle=shuffle,
+                  host=host, report=report)
     start = next((f for f in funcs if f.name == name), None)
     if start is None:
         raise LvmError(f"这份 IR 声明了入口 `{name}`，但解析表里没有它")
@@ -3128,14 +3475,16 @@ def run_ir(text: str, out, profile: Profile | None = None,
 def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
                argv: list[str] | None = None, tier: str = "t0",
                values=None, deopts=None, counters: "Counters | None" = None,
-               substrate: str = "none", relocate_every: int = 0,
-               shuffle: int = 0) -> int:
+               substrate: str = "none", relocate_every: int = 0, shuffle: int = 0,
+               host: HostProfile | None = None,
+               report: "SyscallReport | None" = None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     if argv is None:
         argv = [str(src)]
     return run_ir(compile_source(src, root),
                   out if out is not None else sys.stdout, profile, argv, tier,
-                  values, deopts, counters, substrate, relocate_every, shuffle)
+                  values, deopts, counters, substrate, relocate_every, shuffle,
+                  host=host, report=report)
 
 
 def compile_source(src: Path, root: Path) -> str:
@@ -3193,6 +3542,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="LVM-A 的执行基质（docs/362/364）：none（默认，今天的行为）、"
                          "sw_cap（对象表 + 边界 + 对象代）、sw_tag（4 位标签，概率检测）；"
                          "只在 --tier t0")
+    ap.add_argument("--host-profile", choices=("elf", "pe"), default="elf",
+                    help="宿主能给什么（docs/311 §5 L2）：elf（默认，内核全给）、"
+                         "pe（只放行 PE_DISPATCH 里的号，其余回 -ENOSYS）；只在 --tier t0")
+    ap.add_argument("--syscall-report", metavar="PATH", default=None,
+                    help="把表外的号写成一份可数的报告（docs/311 §4.2）："
+                         "每行 `nr<TAB>类<TAB>程序<TAB>fn/blk/idx`；只在 --tier t0")
     ap.add_argument("--checkpoint-at", type=int, default=None, metavar="N",
                     help="P5（docs/363）：在第 N 条指令之前停住，把 guest 状态写进 "
                          "--checkpoint-out（只走显式栈引擎）")
@@ -3221,6 +3576,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if a.compact_out is not None or a.compact is not None:
             print("lvm: --cache 与 --compact/--compact-out 不能同时给", file=sys.stderr)
+            return 2
+    if (a.host_profile != "elf" or a.syscall_report is not None):
+        if a.tier != "t0":
+            print("lvm: --host-profile / --syscall-report 只在 --tier t0 下有效"
+                  "（docs/311 §5）", file=sys.stderr)
+            return 2
+        if a.compact is not None or a.compact_out is not None or a.cache is not None:
+            print("lvm: --host-profile / --syscall-report 与紧凑形/缓存不能同时给"
+                  "（它们是另一个引擎）", file=sys.stderr)
+            return 2
+        if a.checkpoint_at is not None or a.resume is not None:
+            print("lvm: --host-profile / --syscall-report 不进快照（它们是解释器的账，"
+                  "不是 guest 状态）", file=sys.stderr)
             return 2
     if a.substrate != "none":
         if a.tier != "t0":
@@ -3259,6 +3627,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     root = Path(a.root).resolve()
     buf = io.BytesIO()
+    host = host_profile(a.host_profile)
+    sreport = SyscallReport() if a.syscall_report is not None else None
+
+    def _write_syscall_report() -> None:
+        if sreport is not None:
+            with Path(a.syscall_report).open("w", encoding="utf-8", newline="\n") as f:
+                f.write(sreport.text())
     prof = Profile() if a.profile_out else None
     counters = Counters() if a.counters_out else None
     fusion = None
@@ -3328,7 +3703,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rc = run_ir(ir, buf, prof, [a.entry], a.tier, values, deopts, counters,
                             a.substrate, a.dismemory_relocate_every,
-                            a.dismemory_shuffle)
+                            a.dismemory_shuffle, host=host, report=sreport)
         else:
             if a.tier == "t2":
                 import lvm_t2                                # noqa: PLC0415
@@ -3339,13 +3714,16 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry],
                                 a.tier, values, deopts, counters, a.substrate,
-                                a.dismemory_relocate_every, a.dismemory_shuffle)
+                                a.dismemory_relocate_every, a.dismemory_shuffle,
+                                host=host, report=sreport)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported,
             lvm_compact.CompactError) as e:
         sys.stdout.buffer.write(buf.getvalue())
+        _write_syscall_report()
         print(f"lvm: {e}", file=sys.stderr)
         return 2
     sys.stdout.buffer.write(buf.getvalue())
+    _write_syscall_report()
     if values is not None and a.values_out is not None:
         with Path(a.values_out).open("w", encoding="utf-8", newline="\n") as f:
             f.write(values.text())

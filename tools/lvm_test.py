@@ -44,17 +44,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 #: **棘轮**：VM 跑不了、而原生产物跑得了的那些。**只许变短** ——
 #: 每条都要写清"为什么现在跑不了"，哪天跑通了这条判据会红，逼着把条目删掉。
-VM_KNOWN_GAPS: dict[str, str] = {
-    # `cmd_hello` / `register_hello`（257 openat）**已经收进来了**（2026-10-15，issue #330）：
-    # VM **合成**一份"被解释程序自己的"命令行 —— 见下面判 F 与 `docs/243` §3.4.1。
-    "selfcheck": (
-        "要系统调用 **317** —— 而 317 在 Linux 上是 **`seccomp`，不是 `getrandom`**（318 才是）。"
-        "原生产物拿到 -1，于是 `selfcheck` 自己报 `FAIL getrandom` 并退 1；VM 表里没有 317，"
-        "**点名拒**（退 2，stdout 为空）。两者**不是同一个形状** —— 一个是"
-        "「程序自己失败」，一个是「VM 不支持」 —— 所以它留在棘轮里。"
-        "⚠ 这一条曾被我按名字猜成 getrandom 并实现掉，是判据 A 把那个臆造纠出来的："
-        "**VM「通过」了，而原生失败**。"),
-}
+#:
+#: 2026-11-22：`selfcheck` 出局了。它要系统调用 **317**（Linux 上是 `seccomp`，
+#: 不是 `getrandom`）；原生产物拿到 -1 后自己报 `FAIL getrandom` 并退 1。VM 现在对
+#: 表外的号回 **`-ENOSYS`**（`docs/311` §4.2）—— 与 Linux 同一个答案，于是两条路的
+#: stdout + 退出码一致。**注意这不是"让 VM 支持 317"**：它仍然不实现，只是不再
+#: 把"这个号没有"变成一次崩溃。
+VM_KNOWN_GAPS: dict[str, str] = {}
 
 
 def _run_native(elf: Path, td: Path, argv0: str, timeout: int = 20) -> tuple[int, bytes]:
@@ -464,6 +460,142 @@ def test_entry_shape_thread_spawn_target_is_refused_by_name() -> None:
         assert "worker" in msg and "thread_spawn" in msg and "docs/245" in msg, (tier, msg)
         assert "没有 `_start`" not in msg, (tier, msg)
     print("      线程入口 `worker`：三档都点名拒，报文含入口名 + docs/245，不说「没有 _start」")
+
+
+# ---------------------------------------------------------------- guest ABI（`docs/311`）
+#: 表外的号：两个都**在 Linux 上也不存在**，所以期望值是同一个 `-ENOSYS`（-38）。
+#: 进场用 `command_main`：`run_ir` 对 `_start` 一律回 0，量不到"guest 拿到什么"。
+_ENOSYS_PROBE = """define i32 @command_main(ptr %argv, i32 %argc) {
+entry:
+  %a = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 317, i64 0, i64 0, i64 0)
+  %b = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 9999, i64 0, i64 0, i64 0)
+  %ca = icmp eq i64 %a, -38
+  %cb = icmp eq i64 %b, -38
+  %c = and i1 %ca, %cb
+  %z = zext i1 %c to i32
+  %bad = sub i32 1, %z
+  ret i32 %bad
+}
+"""
+
+
+def test_unknown_syscall_is_enosys() -> None:
+    """判 J（`docs/311` §4.2）：表外的号回 **`-ENOSYS`**，不是 `die`。
+
+    证伪很直接：旧实现抛 `LvmError`（工具退 2、guest 什么也没拿到）；这条探针要求
+    guest 自己看见 `-38` 并把结果算进退出码 —— 0 才是"两个号都回了 -ENOSYS"。
+    """
+    b = io.BytesIO()
+    rc = lvm.run_ir(_ENOSYS_PROBE, b, None, ["p"])
+    assert (rc, b.getvalue()) == (0, b""), (
+        f"表外的号没有回 -ENOSYS：rc={rc} out={b.getvalue()!r}")
+
+
+def test_syscall_report_lists_number_program_site() -> None:
+    """判 K（`docs/311` §4.2）：`--syscall-report` 把"哪条没实现"写成可数的产物。
+
+    一行一条：`nr<TAB>类<TAB>程序<TAB>fn/blk/idx`。两半都证伪：缺了某一列这条就红；
+    同一个站点在循环里重复命中**只记一次**（否则报告会随程序长度膨胀）。
+    """
+    rep = lvm.SyscallReport()
+    rc = lvm.run_ir(_ENOSYS_PROBE, io.BytesIO(), None, ["prog"], report=rep)
+    assert rc == 0, rc
+    lines = rep.text().splitlines()
+    assert len(lines) == 2, f"应当两条（317 与 9999），得到 {lines}"
+    for nr in (317, 9999):
+        line = next((x for x in lines if x.startswith(f"{nr}\t")), None)
+        assert line is not None, f"报告里没有号 {nr}: {lines}"
+        cols = line.split("\t")
+        assert len(cols) == 4 and cols[1] == "?", f"列不对: {line!r}"
+        assert cols[2] == "prog", f"程序名不对: {line!r}"
+        assert cols[3].startswith("command_main/entry/"), f"站点不对: {line!r}"
+    # 同一站点两遍只记一次（把探针跑两次，报告不长大）
+    rep2 = lvm.SyscallReport()
+    lvm.run_ir(_ENOSYS_PROBE, io.BytesIO(), None, ["prog"], report=rep2)
+    lvm.run_ir(_ENOSYS_PROBE, io.BytesIO(), None, ["prog"], report=rep2)
+    assert len(rep2.text().splitlines()) == 2, rep2.text()
+    print("      表外的号 ⇒ -ENOSYS，报告两行（号/程序/站点），同一站点只记一次")
+
+
+_TIME_PROBE = """define i32 @command_main(ptr %argv, i32 %argc) {
+entry:
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 201, i64 0, i64 0, i64 0)
+  %c = icmp eq i64 %r, -38
+  %z = zext i1 %c to i32
+  ret i32 %z
+}
+"""
+
+
+def test_guest_abi_and_host_profiles() -> None:
+    """判 L（`docs/311` §5 L1/L2）：`GUEST_ABI` 是单源，宿主剖面只影响 F 类。
+
+    三条，各能单独红：
+
+    * **L1 静态包含**：`lomt/lvm.lomt` 的 `vm_syscall` 转给宿主的号 ⊆ `PE_DISPATCH`。
+      这条抓的正是本轮的病根（"VM 转发了一个 PE 没有的号"），而且不需要 Windows。
+    * **表本身成形**：号不重复、四类只有 S/E/F/R。
+    * **L2 宿主剖面**：同一份语料 `host=elf` 与 `host=pe` 的 stdout+rc 相同；而一个
+      **拿不到 201 的剖面**上，guest 仍然只拿到 `-ENOSYS`（不是 die、不是 0）。
+    """
+    fwd = lvm.forwarded_host_numbers()
+    missing = fwd - set(lomelf.PE_DISPATCH)
+    assert not missing, (
+        f"`vm_syscall` 转发了 PE 没有的号: {sorted(missing)} —— 编成 PE 时 guest 会拿到 -38，"
+        "而同一份 IR 在 ELF 上正常（`docs/311` §4.3）")
+    assert fwd, "一个宿主号都没扫到 —— 静态判据没测到东西"
+    nrs = [nr for nr, _n, _k in lvm.GUEST_ABI]
+    assert len(nrs) == len(set(nrs)), f"GUEST_ABI 有重复的号: {nrs}"
+    assert {k for _n, _n2, k in lvm.GUEST_ABI} <= {"S", "E", "F", "R"}, \
+        lvm.GUEST_ABI
+    # L2：同一份语料，两档宿主剖面同一个答案（语料不打印 pid/时间，见 docs/311 §5 L2）
+    ran = 0
+    for rel in ELF.CORPUS:
+        src = ROOT / rel
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        if lomentc.check(mod, deps=deps):
+            continue
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        b0, b1 = io.BytesIO(), io.BytesIO()
+        r0 = lvm.run_ir(ir, b0, None, [rel], host=lvm.host_profile("elf"))
+        r1 = lvm.run_ir(ir, b1, None, [rel], host=lvm.host_profile("pe"))
+        assert (r0, b0.getvalue()) == (r1, b1.getvalue()), (
+            f"{rel}: host=elf 与 host=pe 不一致："
+            f"elf rc={r0} {b0.getvalue()[:40]!r} / pe rc={r1} {b1.getvalue()[:40]!r}")
+        ran += 1
+    assert ran, "一份都没跑成 —— L2 判据没测到东西"
+    # 拿不到 201 的剖面：guest 仍拿到 -ENOSYS，且报告记的是 F 类
+    thin = lvm.HostProfile("thin", frozenset({1, 60}))
+    rep = lvm.SyscallReport()
+    rc = lvm.run_ir(_TIME_PROBE, io.BytesIO(), None, ["p"], host=thin, report=rep)
+    assert rc == 1, f"宿主给不了 201 时 guest 应当看见 -ENOSYS，rc={rc}"
+    assert rep.text().splitlines() == ["201\tF\tp\tcommand_main/entry/0"], rep.text()
+    rc_elf = lvm.run_ir(_TIME_PROBE, io.BytesIO(), None, ["p"],
+                        host=lvm.host_profile("elf"))
+    assert rc_elf == 0, f"elf 剖面应当能拿到时间，rc={rc_elf}"
+    print(f"      宿主号 ⊆ PE_DISPATCH {sorted(fwd)}；{ran} 份语料 elf/pe 同答；"
+          f"缺号 ⇒ guest 拿 -ENOSYS")
+
+
+def test_syscall_report_cli_writes_the_file() -> None:
+    """`--syscall-report PATH` 真的落盘（CLI 接线，不是只测类）。"""
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        ll = td / "probe.ll"
+        ll.write_text(_ENOSYS_PROBE, encoding="utf-8", newline="\n")
+        out = td / "report.txt"
+        with open(td / "sink", "wb") as sink:
+            real, sys.stdout = sys.stdout, io.TextIOWrapper(sink, encoding="utf-8")
+            try:
+                rc = lvm.main([str(ll), "--ir", "--syscall-report", str(out)])
+            finally:
+                sys.stdout.flush()
+                sys.stdout = real
+        assert rc == 0, rc
+        got = out.read_text(encoding="utf-8")
+        assert got.splitlines() and got.splitlines()[0].startswith("317\t"), got
+    print("      --syscall-report 落盘：317 那条在")
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -209,6 +209,13 @@ pass"，收敛到 **`function (lex_cap)`**；给 `lex_cap` 单独加 `optnone` �
 **顺带一个数**：lomelf 编出来的驱动，**编它自己**要 **5 分 28 秒**（WSL，3.2 MB IR，
 单线程）。门禁慢的那个根因就在这里 —— `--opt` 这条路通了之后，§1 那 10.7× 才有得收。
 
+### 5.3 PE 的 `--opt`（2026-11-21）
+
+Windows 侧走同一条"交给 clang"，但容器与运行期仍是 lomelf 的：内联 `syscall` 先改写成
+`@__win_syscall_c`，clang 出 COFF 对象，lomelf 把对象摆进自己的 PE。实现、ABI 垫片
+（入口栈 / RDI-RSI / 三个 libcall）、实测与**覆盖范围**（安装包的启动器仍点名拒）见
+`docs/366`。
+
 ## 6. 真正的代价：可复现（Loment 独有，Python 从不付）
 
 Python **从没承诺** hermetic build；Loment **承诺了**（种子自举 + `loment_seed_test` 的逐字节判据）。

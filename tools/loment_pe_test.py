@@ -291,8 +291,35 @@ def test_pe_runs_natively_matches_linux_behavior():
         assert "rc=0" in w.stdout, f"openat Linux 对拍失败：{w.stdout[-300:]}"
         assert "probe=abcd" in w.stdout and "keep=KEEP" in w.stdout
         assert "append=0123456789abcd" in w.stdout
+
+        # ---- `--opt`（docs/366）：同一份 IR，clang -O2 的用户代码 + lomelf 的运行期。
+        # 挂在**这一条**而不是新起判据：跳过表只许变短（`ci.py --budget-vs`），而 Windows
+        # 之外的机器跑不了 PE —— 新判据生来就跳过，正是那道棘轮要堵的形状。
+        src = td / "peopt_probe.lomt"
+        src.write_text(_OPT_PROBE, encoding="utf-8", newline="\n")
+        text = _ir(src, td).read_text(encoding="utf-8")
+        d = td / "probe-def.exe"
+        d.write_bytes(lomelf.compile_pe(text)[0])
+        o = td / "probe-opt.exe"
+        o.write_bytes(lomelf.compile_pe_opt(text, clang)[0])
+        rd, od = _run_native(d)
+        ro, oo = _run_native(o)
+        assert (rd, od) == (ro, oo), (
+            f"--opt 与默认档行为不一致: rc {rd}/{ro}\n"
+            f"  default: {od[:200]!r}\n  opt:     {oo[:200]!r}")
+        assert od == b"sum=31\ntwo=2\nfib=144\n", f"默认档自己的输出就不对: {od!r}"
+
+        # 三个 libcall（含重叠 memmove 的反向路径）：机器码版，Win64 ABI。
+        src = td / "peopt_libc.lomt"
+        src.write_text(_OPT_LIBC_PROBE, encoding="utf-8", newline="\n")
+        lo = td / "libc-opt.exe"
+        lo.write_bytes(lomelf.compile_pe_opt(
+            _ir(src, td).read_text(encoding="utf-8"), clang)[0])
+        lrc, lout = _run_native(lo)
+        assert lrc == 0, f"--opt PE 里三个 libcall 探针 rc={lrc}"
+        assert lout == b"65,65,65,65,65,88,89,88,89,90,\n", lout
     print(f"      {ok} 个程序的 PE 产物与 clang/Linux 产物 stdout 字节 + 退出码一致；"
-          f"openat 三格与 Linux 语义一致")
+          f"openat 三格与 Linux 语义一致；--opt 两档逐字节一致、三个 libcall 对")
 
 
 #: `docs/311` P0 的探针：`getpid`(39) / `uname`(63) / `time`(201) / `clock_gettime`(228)。
@@ -2450,6 +2477,79 @@ def test_pe_fault_heal_is_refused_for_pe():
         assert r.returncode == 2, f"应当 rc=2，得到 {r.returncode}"
         assert "docs/367" in r.stderr and "fault-heal" in r.stderr, r.stderr[-300:]
     print("      --fault-heal --target pe：rc=2，点名 docs/367 stage 4")
+#: `--opt` 的等价比对探针：递归 + 数组 + 循环 + 多次打印。
+#: 多次打印是关键 —— 优化档第一版没保住 RDI/RSI，症状只在"连打三个数"上现形。
+_OPT_PROBE = r'''module peopt_probe
+choose runtime
+
+fn fib(n: u32) -> u32 {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn two() -> u32 {
+    return 2;
+}
+
+fn _start() {
+    let a: [u32; 8] = [3, 1, 4, 1, 5, 9, 2, 6];
+    let s: u32 = 0;
+    for i in 0..8 {
+        s = s + a[i];
+    }
+    print("sum=");
+    print_num(s);
+    print("\n");
+    print("two=");
+    print_num(two());
+    print("\n");
+    print("fib=");
+    print_num(fib(12));
+    print("\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
+
+#: 三个 libcall 探针（`extern fn` 直接点名）：clang 合成外的那三个名字由 lomelf 的
+#: 机器码版本提供，重叠 memmove 走的是反向那条路。
+_OPT_LIBC_PROBE = r'''module peopt_libc
+choose runtime
+
+extern fn memset(dst: ptr, v: u32, n: u64) -> ptr;
+extern fn memcpy(dst: ptr, src: ptr, n: u64) -> ptr;
+extern fn memmove(dst: ptr, src: ptr, n: u64) -> ptr;
+
+fn _start() {
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    memset(a, 65 as u32, 5 as u64);
+    memcpy(b, a, 5 as u64);
+    memmove(a, b, 5 as u64);
+    let k: u32 = 0;
+    while k < 5 {
+        print_num(load8(a, k) as u32);
+        print(",");
+        k = k + 1;
+    }
+    store8(a, 0, 88 as u8);
+    store8(a, 1, 89 as u8);
+    store8(a, 2, 90 as u8);
+    store8(a, 3, 87 as u8);
+    store8(a, 4, 86 as u8);
+    let d: ptr = ptr_add(a, 2);
+    memmove(d, a, 5 as u64);
+    let m: u32 = 0;
+    while m < 5 {
+        print_num(load8(a, m) as u32);
+        print(",");
+        m = m + 1;
+    }
+    print("\n");
+    syscall4(60, 0, 0, 0);
+}
+'''
 
 
 def main() -> int:

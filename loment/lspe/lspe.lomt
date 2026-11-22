@@ -10,6 +10,12 @@ use codegen
 
 const LS_NONE: u32 = 4294967295;
 
+//: SDK 调度器的计划位（`docs/361` §1）。与参考侧 `Plan.run` 同一条过近似纪律：
+//: 拿不准就置位；少跑是漏检，多跑只是成本。E2b（g1 界检查）与 E1–E6 共用
+//: `LS_PLAN_ENGINE` 这一段，所以 `lms` 不改变阶段粒度，调度器不收它。
+const LS_PLAN_ENGINE: u32 = 1;   // E1/E2/E5 + E2b + E3/E4 + E6 + pass 块
+const LS_PLAN_DOMAIN: u32 = 2;   // E9 域检查器
+
 // token 原语：与 `potato.lomt` 的 `pt_*` 同一形状（同一份驱动器 token 数组，
 // 每条 20 字节：kind / off / len）。复制这四支，是为了不让 `lspe` 反向 `use potato`
 // 形成环。
@@ -583,8 +589,8 @@ fn lspe_dom_loop(unit: ptr, t: ptr, lo: u32, hi: u32, at: u32, arg: u32,
 /// `tab` 是声明表 `[name_tok, lo, hi, flags] × 64`（flags: 1 下无界 / 2 上无界 /
 /// 4 revocable）；`out` 是五个计数：
 /// `[域总数, 字面量证明的 guard, 循环证明的 guard, guard 总数, 撤销域数]`。
-/// 返回 1 = 声明表超容量（调用方点名失败）。
-pub fn lspe_domain(unit: ptr, t: ptr, lo: u32, hi: u32, tab: ptr, out: ptr) -> u32 {
+/// 返回 1 = 声明表超容量（`lspe_main` 翻成 3，调用方点名失败）。
+fn lspe_domain(unit: ptr, t: ptr, lo: u32, hi: u32, tab: ptr, out: ptr) -> u32 {
     let q: u32 = 0;
     while q < 5 {
         store32(out, q * 4, 0);
@@ -1097,9 +1103,9 @@ fn lspe_note_covered(i: u32, pbuf: ptr, out: ptr) -> u32 {
 ///
 /// `out` 十六个 u32 见 `PT_L3CNT`。`lm` 是 LMS 的七级掩码（`pt_lms_mask` 算好传进来；
 /// `bounds` 站点只在 `lms_guard` **且**（`lms_reject` 或 `lms_crash`）时存在）。
-/// 返回 1 = 首参表超容量（调用方 `pt_wfail`）。
-pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
-                  sft: ptr, pft: ptr, out: ptr, pbuf: ptr) -> u32 {
+/// 返回 1 = 首参表超容量 / 2 = pass 块超容量（`lspe_main` 透传，调用方 `pt_wfail`）。
+fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
+               sft: ptr, pft: ptr, out: ptr, pbuf: ptr) -> u32 {
     let q: u32 = 0;
     while q < 16 {
         store32(out, q * 4, 0);
@@ -1632,6 +1638,105 @@ pub fn lspe_engine(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
     store32(out, 52, icov2);
     store32(out, 44, load32(out, 44) + gcov + icov2);
     store32(out, 40, lspe_pass_outer(pbuf));
+    return 0;
+}
+
+/// **SDK 的调度器**（`docs/361` §1）：只决定阶段跑不跑，不在主检查器里。
+///
+/// 与参考侧 `Scheduler._skip_reason` 同一条过近似纪律：拿不准就置位；少跑是
+/// 漏检，多跑只是成本。自举侧的 E2b 与 E1–E6 共用 `LS_PLAN_ENGINE` 一段，
+/// 所以 `lms` 不影响阶段粒度，这里不收它。
+pub fn lspe_sched(unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
+    let plan: u32 = 0;
+    let i: u32 = lo;
+    while i < hi && lspe_kind(t, i) != 4 {
+        let k: u32 = lspe_kind(t, i);
+        if k == 1 {
+            // 字面量：E1 的常量下标 / 常量界。
+            plan = plan | LS_PLAN_ENGINE;
+        } else if k == 3 {
+            // 下标 / 类型 / 借用 / 局部赋值 / 泛型。
+            if lspe_tis(unit, t, i, "[") == 1
+                    || lspe_tis(unit, t, i, ":") == 1
+                    || lspe_tis(unit, t, i, "&") == 1
+                    || lspe_tis(unit, t, i, "=") == 1
+                    || lspe_tis(unit, t, i, "<") == 1 {
+                plan = plan | LS_PLAN_ENGINE;
+            }
+        } else if k == 0 {
+            // 域检查器：声明 / 能力 / guard 包含性 / 撤销。
+            if lspe_tis(unit, t, i, "domain") == 1
+                    || lspe_tis(unit, t, i, "capability") == 1
+                    || lspe_tis(unit, t, i, "revoke") == 1
+                    || lspe_tis(unit, t, i, "guard") == 1 {
+                plan = plan | LS_PLAN_DOMAIN;
+            }
+            // 引擎：与参考侧 UnitFacts 的 triggers 同一张表（过近似）。
+            if lspe_tis(unit, t, i, "guard") == 1
+                    || lspe_tis(unit, t, i, "domain") == 1
+                    || lspe_tis(unit, t, i, "capability") == 1
+                    || lspe_tis(unit, t, i, "revoke") == 1
+                    || lspe_tis(unit, t, i, "excluded") == 1
+                    || lspe_tis(unit, t, i, "revocable") == 1
+                    || lspe_tis(unit, t, i, "let") == 1
+                    || lspe_tis(unit, t, i, "mut") == 1
+                    || lspe_tis(unit, t, i, "for") == 1
+                    || lspe_tis(unit, t, i, "while") == 1
+                    || lspe_tis(unit, t, i, "drop") == 1
+                    || lspe_tis(unit, t, i, "Drop") == 1
+                    || lspe_tis(unit, t, i, "free") == 1
+                    || lspe_tis(unit, t, i, "load8") == 1
+                    || lspe_tis(unit, t, i, "store8") == 1
+                    || lspe_tis(unit, t, i, "lspe") == 1 {
+                plan = plan | LS_PLAN_ENGINE;
+            }
+            // 调用点：非关键字标识符后接 `(`。依赖里的 ptr 首参函数也能从
+            // 根单元产生 E4 站点，所以不能只靠根自己的类型标注。
+            if lspe_kw(unit, t, i) == 0 && i + 1 < hi
+                    && lspe_kind(t, i + 1) == 3
+                    && lspe_tis(unit, t, i + 1, "(") == 1 {
+                plan = plan | LS_PLAN_ENGINE;
+            }
+        }
+        i = i + 1;
+    }
+    return plan;
+}
+
+/// **主检查器**（`docs/361` §1）：自举侧唯一的顶层检查器。
+///
+/// 它自己不算计划 —— `plan` 由 `lspe_sched`（SDK）给出。子检查器
+/// `lspe_engine` / `lspe_domain` 都是私有的，只有这里派发。
+pub fn lspe_main(unit: ptr, t: ptr, lo: u32, hi: u32, lm: u32,
+                 sft: ptr, pft: ptr, out: ptr, pbuf: ptr,
+                 domtab: ptr, domcnt: ptr, plan: u32) -> u32 {
+    if (plan & LS_PLAN_ENGINE) != 0 {
+        let rc: u32 = lspe_engine(unit, t, lo, hi, lm, sft, pft, out, pbuf);
+        if rc != 0 {
+            return rc;
+        }
+    } else {
+        // 跳过也要把输出格清零：调用方无条件读它们。
+        let qe: u32 = 0;
+        while qe < 16 {
+            store32(out, qe * 4, 0);
+            qe = qe + 1;
+        }
+        store32(pft, 0, 0);
+        store32(pbuf, 0, 0);
+    }
+    if (plan & LS_PLAN_DOMAIN) != 0 {
+        let drc: u32 = lspe_domain(unit, t, lo, hi, domtab, domcnt);
+        if drc != 0 {
+            return 3;                     // 写手点名报，不静默丢
+        }
+    } else {
+        let qd: u32 = 0;
+        while qd < 5 {
+            store32(domcnt, qd * 4, 0);
+            qd = qd + 1;
+        }
+    }
     return 0;
 }
 

@@ -127,18 +127,19 @@ def test(fn):
 #: 2026-11-20（`docs/350` §12.6）：检查器加名字表哈希索引，多一个真上界
 #: `CHK_HASH_SLOTS`（越界由 `declare` 的容量判据在更早处拒）。条数 270 → **271**，
 #: 沉默数不变（这一处有话）。
-#: 2026-11-21（`docs/362`–`docs/368`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
+#: 2026-11-21（`docs/362`–`docs/371`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
 #: 续延栈、段错误详细化的五条、dismemory 的三张定长表、`sw_tag` 的两处（`CAP_SLOTS` /
 #: `SH_CAP`）先后进了口径；本侧从 271 走到 **287**、沉默 179 → **181**。
-#: 同日 main 的原生更新器 `update.lomt` 又加三处（`SCR_CAP` / `NAME_CAP` 两处沉默，
-#: `PAYLOAD_CAP` 有话）—— 合并后条数 **290**、沉默 **183**。
+#: 同日 main 的两条线又加了：原生更新器 `update.lomt` 三处（`SCR_CAP` / `NAME_CAP`
+#: 两处沉默、`PAYLOAD_CAP` 有话）与 LSPE SDK 的一处字面量。合并后条数 **290**、
+#: 沉默 **183**（以本机 `loment_caps.scan()` 实测为准）。
 CAPACITY_SITES = 290
 SILENT_SITES = 183
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
-LITERAL_SITES = 69
-LITERAL_SILENT = 68
+LITERAL_SITES = 70
+LITERAL_SILENT = 69
 ARRAY_SITES = 20
 ARRAY_SILENT = 19
 
@@ -330,7 +331,7 @@ SILENT_LITERALS = {
     ("loment/selfhost/interp.lomt", "literal:20"): 1,
     ("loment/selfhost/lexer.lomt", "literal:256"): 1,
     ("loment/selfhost/potato.lomt", "literal:20"): 1,
-    ("loment/lspe/lspe.lomt", "literal:16"): 1,
+    ("loment/lspe/lspe.lomt", "literal:16"): 2,
     ("loment/tools/lomadmit.lomt", "literal:4000"): 1,
     ("loment/tools/lomc.lomt", "literal:4000"): 1,
     ("loment/tools/lomcapasserts.lomt", "literal:4000"): 2,

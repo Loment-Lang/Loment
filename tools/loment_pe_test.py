@@ -386,11 +386,19 @@ def test_pe_uname_and_clock_surface():
     但**符号、布局、量级**必须同。这一条钉的是 `lgc` 的预算在 PE 上真的收紧 ——
     在此之前 228 是 -38，窗口照开、没有截止（`docs/309` §2.5）。
     """
-    # 跨平台的部分：`struct utsname` 的字面量形状（纯数据，CI 的 ubuntu 也跑得到）。
+    # 跨平台的部分：字面量形状 + 四个号真的在派发表与 shim 字节里（CI 的 ubuntu 也跑得到）。
     assert len(lomelf.PE_UNAME) == 390, f"utsname 不是六段 65 字节：{len(lomelf.PE_UNAME)}"
     assert lomelf.PE_UNAME[:5] == b"Linux"
+    want = {lomelf.SYS_GETPID: "__ws_getpid", lomelf.SYS_UNAME: "__ws_uname",
+            lomelf.SYS_TIME: "__ws_time", lomelf.SYS_CLOCK_GETTIME: "__ws_clock_gettime"}
+    table = {num: (surface, label) for num, surface, label in lomelf.PE_SYSCALLS}
+    for num, label in want.items():
+        assert table.get(num) == ("proc", label), (num, table.get(num))
+    _blob, _idata, _slots, labels = _shim_blob()
+    for label in want.values():
+        assert label in labels, f"派发表指向的处理块不在 shim 里：{label}"
     if not _on_windows():
-        print("      SKIP: 非 Windows（只验了 uname 字面量）")
+        print("      非 Windows：结构已验（四个号在派发表与 shim 字节里）")
         return
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)

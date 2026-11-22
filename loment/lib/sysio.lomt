@@ -1,0 +1,35 @@
+module sysio
+choose runtime
+
+// sysio.lomt — 带类型指针的 syscall 包装（`docs/374` §3，issue #2135）。
+//
+// 原语是 `syscall4p/6p`：**第三个实参声明为 `ptr`**，lowering 不做 ptrtoint。
+// dismemory 下那个槽里是令牌，运行期按号解码；普通档里它就是一个地址。
+// 这一族只是名字更好读，不新增 ABI —— 每个都直接落到原语上。
+//
+// 为什么不让调用方写 `p as u64`：那是 ptrtoint，在 dismemory 下按定义就是 F04。
+
+/// `write(fd, p, n)`。**不**做 `p as u64` —— 指针走类型化槽。
+pub fn sys_write(fd: u64, p: ptr, n: u64) -> i64 {
+    return syscall4p(1, fd, p, n);
+}
+
+/// `read(fd, p, n)`。
+pub fn sys_read(fd: u64, p: ptr, n: u64) -> i64 {
+    return syscall4p(0, fd, p, n);
+}
+
+/// `openat(dirfd, path, flags)`。`path` 是字节串（无 NUL 时由调用方保证）。
+pub fn sys_openat(dirfd: u64, p: ptr, flags: u64) -> i64 {
+    return syscall4p(257, dirfd, p, flags);
+}
+
+/// `close(fd)`。没有指针实参，走普通原语。
+pub fn sys_close(fd: u64) -> i64 {
+    return syscall4(3, fd, 0, 0);
+}
+
+/// 写一个字符串到给定 fd —— dismemory 下 `print` 是这条路的语法糖。
+pub fn sys_puts(fd: u64, s: str) -> i64 {
+    return syscall4p(1, fd, str_ptr(s), str_len(s) as u64);
+}

@@ -149,8 +149,11 @@ def _run_mirror(mir: Path, ll: Path, prof: Path | None = None,
         p = prof.read_bytes() if prof is not None and prof.exists() else b""
         return r.returncode, r.stdout, p
     tag = f"/tmp/lvm_twin_{os.getpid()}"
-    outp = Path(tempfile.gettempdir()) / "lvm_twin_out.bin"
-    pout = Path(tempfile.gettempdir()) / "lvm_twin_prof.bin"
+    # ⚠ 落回 Windows 的那两个文件**也要按 pid 分开**：WSL 里的 `{tag}.out` 是每进程的，
+    # 而 `%TEMP%\lvm_twin_out.bin` 不是 —— 本机同时跑两份判据时，一份会把另一份**刚取回
+    # 的字节**覆盖掉，症状是某份语料"镜像打印了另一个程序的输出"。
+    outp = Path(tempfile.gettempdir()) / f"lvm_twin_out_{os.getpid()}.bin"
+    pout = Path(tempfile.gettempdir()) / f"lvm_twin_prof_{os.getpid()}.bin"
     arg2 = f"{tag}.prof" if prof is not None else ""
     script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.prof; "
               f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
@@ -890,6 +893,10 @@ fn _start() {
     store32(p, 0, s);
     let v: u32 = load32(p, 0);
     free(p);
+    print("dis twin\n");
+    let b: ptr = alloc(2);
+    store8(b, 0, 65);
+    let w: i64 = syscall4p(1, 1, b, 1);
     syscall4(60, v as u64, 0, 0);
 }
 """

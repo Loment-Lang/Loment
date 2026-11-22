@@ -1080,6 +1080,8 @@ fn pt_surf_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
     return pt_surf_count(unit, t, lo, hi, "syscall4", 0, code)
          + pt_surf_count(unit, t, lo, hi, "syscall6", 0, code)
          + pt_surf_count(unit, t, lo, hi, "syscall7", 0, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall4p", 0, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6p", 0, code)
          + p;
 }
 
@@ -1094,7 +1096,9 @@ fn pt_surf_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
 fn pt_rung_total(unit: ptr, t: ptr, lo: u32, hi: u32, code: u32) -> u32 {
     return pt_surf_count(unit, t, lo, hi, "syscall4", 1, code)
          + pt_surf_count(unit, t, lo, hi, "syscall6", 1, code)
-         + pt_surf_count(unit, t, lo, hi, "syscall7", 1, code);
+         + pt_surf_count(unit, t, lo, hi, "syscall7", 1, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall4p", 1, code)
+         + pt_surf_count(unit, t, lo, hi, "syscall6p", 1, code);
 }
 
 /// 写一个面（名 + 数）；`first` 为 0 时先补一个逗号。**只写非零的那些、按面名字母序**，
@@ -7049,6 +7053,8 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr,
     let nbd_sys: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "syscall4")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "syscall7")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall4p")
+                     + pt_cnt_boundary_call(unit, t, lo, hi, "syscall6p")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "print");
     let nbd_ptr: u32 = pt_cnt_boundary_call(unit, t, lo, hi, "ptr_add")
                      + pt_cnt_boundary_call(unit, t, lo, hi, "ptr_sub")

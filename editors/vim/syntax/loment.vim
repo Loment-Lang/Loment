@@ -30,7 +30,7 @@ syn keyword lomentType u8 u16 u32 u64 i8 i16 i32 i64 bool str ptr
 syn keyword lomentBuiltin load8 store8
 syn keyword lomentBuiltin alloc free panic
 syn keyword lomentBuiltin str_len str_byte str_ptr str_eq str_concat slice_len
-syn keyword lomentBuiltin syscall4 syscall6 syscall7 thread_spawn
+syn keyword lomentBuiltin syscall4 syscall6 syscall7 syscall4p syscall6p thread_spawn
 syn keyword lomentBuiltin get_bits set_bits atomic_add ptr_add ptr_sub inb outb
 
 " ---- 声明名: `fn add` / `struct Pair` / `capability blk` 里的那个名字

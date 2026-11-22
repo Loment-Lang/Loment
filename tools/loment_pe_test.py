@@ -286,8 +286,35 @@ def test_pe_runs_natively_matches_linux_behavior():
         assert "rc=0" in w.stdout, f"openat Linux 对拍失败：{w.stdout[-300:]}"
         assert "probe=abcd" in w.stdout and "keep=KEEP" in w.stdout
         assert "append=0123456789abcd" in w.stdout
+
+        # ---- `--opt`（docs/366）：同一份 IR，clang -O2 的用户代码 + lomelf 的运行期。
+        # 挂在**这一条**而不是新起判据：跳过表只许变短（`ci.py --budget-vs`），而 Windows
+        # 之外的机器跑不了 PE —— 新判据生来就跳过，正是那道棘轮要堵的形状。
+        src = td / "peopt_probe.lomt"
+        src.write_text(_OPT_PROBE, encoding="utf-8", newline="\n")
+        text = _ir(src, td).read_text(encoding="utf-8")
+        d = td / "probe-def.exe"
+        d.write_bytes(lomelf.compile_pe(text)[0])
+        o = td / "probe-opt.exe"
+        o.write_bytes(lomelf.compile_pe_opt(text, clang)[0])
+        rd, od = _run_native(d)
+        ro, oo = _run_native(o)
+        assert (rd, od) == (ro, oo), (
+            f"--opt 与默认档行为不一致: rc {rd}/{ro}\n"
+            f"  default: {od[:200]!r}\n  opt:     {oo[:200]!r}")
+        assert od == b"sum=31\ntwo=2\nfib=144\n", f"默认档自己的输出就不对: {od!r}"
+
+        # 三个 libcall（含重叠 memmove 的反向路径）：机器码版，Win64 ABI。
+        src = td / "peopt_libc.lomt"
+        src.write_text(_OPT_LIBC_PROBE, encoding="utf-8", newline="\n")
+        lo = td / "libc-opt.exe"
+        lo.write_bytes(lomelf.compile_pe_opt(
+            _ir(src, td).read_text(encoding="utf-8"), clang)[0])
+        lrc, lout = _run_native(lo)
+        assert lrc == 0, f"--opt PE 里三个 libcall 探针 rc={lrc}"
+        assert lout == b"65,65,65,65,65,88,89,88,89,90,\n", lout
     print(f"      {ok} 个程序的 PE 产物与 clang/Linux 产物 stdout 字节 + 退出码一致；"
-          f"openat 三格与 Linux 语义一致")
+          f"openat 三格与 Linux 语义一致；--opt 两档逐字节一致、三个 libcall 对")
 
 
 @test
@@ -2220,57 +2247,6 @@ fn _start() {
     syscall4(60, 0, 0, 0);
 }
 '''
-
-
-@test
-def test_pe_opt_matches_the_default_build():
-    """`--opt` 的用户代码是 clang 编的，运行期仍是 lomelf 的 —— 行为必须一致。"""
-    if not _on_windows():
-        print("      SKIP: 非 Windows（PE 只在 Windows 上原生跑）")
-        return
-    cc = _clang()
-    if not cc:
-        print("      SKIP: 无 clang（--opt 那一档要它）")
-        return
-    with tempfile.TemporaryDirectory() as tds:
-        td = Path(tds)
-        src = td / "peopt_probe.lomt"
-        src.write_text(_OPT_PROBE, encoding="utf-8", newline="\n")
-        text = _ir(src, td).read_text(encoding="utf-8")
-        d = td / "probe-def.exe"
-        d.write_bytes(lomelf.compile_pe(text)[0])
-        o = td / "probe-opt.exe"
-        o.write_bytes(lomelf.compile_pe_opt(text, cc)[0])
-        rd, od = _run_native(d)
-        ro, oo = _run_native(o)
-        assert (rd, od) == (ro, oo), (
-            f"--opt 与默认档行为不一致: rc {rd}/{ro}\n"
-            f"  default: {od[:200]!r}\n  opt:     {oo[:200]!r}")
-        assert od == b"sum=31\ntwo=2\nfib=144\n", f"默认档自己的输出就不对: {od!r}"
-    print("      --opt 与默认档: rc + stdout 逐字节一致（递归 / 数组 / 多次打印）")
-
-
-@test
-def test_pe_opt_supplies_the_three_libcalls():
-    """优化器敢合成的 `memset`/`memcpy`/`memmove`：机器码版要实现得对（含重叠）。"""
-    if not _on_windows():
-        print("      SKIP: 非 Windows")
-        return
-    cc = _clang()
-    if not cc:
-        print("      SKIP: 无 clang")
-        return
-    with tempfile.TemporaryDirectory() as tds:
-        td = Path(tds)
-        src = td / "peopt_libc.lomt"
-        src.write_text(_OPT_LIBC_PROBE, encoding="utf-8", newline="\n")
-        text = _ir(src, td).read_text(encoding="utf-8")
-        o = td / "libc-opt.exe"
-        o.write_bytes(lomelf.compile_pe_opt(text, cc)[0])
-        rc, out = _run_native(o)
-        assert rc == 0, f"--opt PE 里三个 libcall 探针 rc={rc}"
-        assert out == b"65,65,65,65,65,88,89,88,89,90,\n", out
-    print("      memset / memcpy / 前向与反向 memmove: 结果与期望逐字节一致")
 
 
 def main() -> int:

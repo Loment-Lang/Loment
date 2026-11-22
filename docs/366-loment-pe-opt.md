@@ -67,9 +67,9 @@
 
 ## 5. 判据
 
-- `loment_pe_test::test_pe_opt_matches_the_default_build`：同一份 IR 的两档，rc +
-  stdout 逐字节一致（递归 / 数组 / 多次打印）。
-- `loment_pe_test::test_pe_opt_supplies_the_three_libcalls`：三个 libcall（含重叠
-  memmove）结果逐字节对。
+- `loment_pe_test::test_pe_runs_natively_matches_linux_behavior`（既有那条 Windows 专用
+  判据）里多两段：**同一份 IR 的两档 rc + stdout 逐字节一致**（递归 / 数组 / 多次打印），
+  以及三个 libcall（含重叠 memmove）结果逐字节对。**没有新起判据** —— 跳过表只许变短
+  （`ci.py --budget-vs`），而 Windows 之外的机器跑不了 PE，新判据生来就跳过正是要堵的形状。
 - `tools/loment_dist.py` 的打包路径：`--opt` 时 PE 那一半也优化；clang 不在或拒收
   时**降级并点名**（与 ELF 那半同一口径）。

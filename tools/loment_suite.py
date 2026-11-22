@@ -168,8 +168,13 @@ def run_unittest(case: type, suite: str) -> int:
         tail += f", {nskip} SKIP"
     if failed:
         tail += f", {len(failed)} 失败"
-        why = "；".join(f"{n}: {e[0].__name__}: {str(e[1])[:400]}".replace("\n", " ")
-                        for n, e in failed)
+        # `result.failures` / `.errors` 带的是**格式化好的 traceback 字符串**
+        # （不是 `addFailure` 那种 `(type, value, tb)` 三元组）—— 取最后一行当摘要。
+        def _why(e: str) -> str:
+            lines = [ln.strip() for ln in str(e).splitlines() if ln.strip()]
+            return lines[-1] if lines else ""
+
+        why = "；".join(f"{n}: {_why(e)[:400]}" for n, e in failed)
         tail += f"\n  红: {why}"
     print(tail)
     return 1 if failed else 0

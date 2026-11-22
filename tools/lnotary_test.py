@@ -237,27 +237,32 @@ class LNotaryTest(unittest.TestCase):
 
     # ---- V2 · 站点表（docs/363） ------------------------------------------
 
-    def _site_table(self) -> dict:
-        src = self.tmp / "sites.lomt"
-        src.write_text(
-            "module s\nchoose runtime\nchoose close lms_reject\n\n"
-            "fn _start() {\n"
-            "    let p: ptr = alloc(4);\n"
-            "    let x: u32 = load8(p, 4);\n"
-            "    syscall4(60, 0, 0, 0);\n"
-            "}\n", encoding="utf-8")
+    _SITES_SRC = (
+        "module s\nchoose vm\nchoose runtime\n\n"
+        "fn _start() {\n"
+        "    let p: ptr = alloc(4);\n"
+        "    let x: u32 = load8(p, 4);\n"
+        "    syscall4(60, 0, 0, 0);\n"
+        "}\n")
+
+    def _table_for(self, text: str, name: str) -> tuple[dict, dict]:
+        src = self.tmp / f"{name}.lomt"
+        src.write_text(text, encoding="utf-8")
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "lomentc.py"),
                             str(src), "--print", "llvm"],
                            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
-        ir = self.tmp / "sites.ll"
+        ir = self.tmp / f"{name}.ll"
         ir.write_text(r.stdout, encoding="utf-8")
-        out = self.tmp / "sites.json"
+        out = self.tmp / f"{name}.sites.json"
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "lms_sites.py"),
                             str(ir), "--out", str(out)],
                            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(r.returncode, 0, r.stderr)
-        return json.loads(out.read_text(encoding="utf-8"))
+        return json.loads(out.read_text(encoding="utf-8")), _compile(text, f"{name}_doc", self.tmp)
+
+    def _site_table(self) -> dict:
+        return self._table_for(self._SITES_SRC, "sites")[0]
 
     # Q · 真站点表被接受
     def test_site_table_is_accepted(self) -> None:
@@ -280,21 +285,21 @@ class LNotaryTest(unittest.TestCase):
     def test_lawspace_binds_site_table(self) -> None:
         from lnotary import lawspace
 
-        table = self._site_table()
-        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"), table)
+        table, doc = self._table_for(self._SITES_SRC, "sites")
+        side = lawspace.derive_lawspace(doc, self._bytes("sites_doc"), table)
         self.assertIn("sites", side)
         self.assertEqual(lawspace.verify_lawspace(
-            self.plain, side, self._bytes("plain"), table), [])
+            doc, side, self._bytes("sites_doc"), table), [])
 
     # T · 换一张站点表
     def test_lawspace_rejects_a_different_site_table(self) -> None:
         from lnotary import lawspace
 
-        table = self._site_table()
-        side = lawspace.derive_lawspace(self.plain, self._bytes("plain"), table)
+        table, doc = self._table_for(self._SITES_SRC, "sites")
+        side = lawspace.derive_lawspace(doc, self._bytes("sites_doc"), table)
         other = json.loads(json.dumps(table))
         other["seal"] = "0" * 64
-        errs = lawspace.verify_lawspace(self.plain, side, self._bytes("plain"), other)
+        errs = lawspace.verify_lawspace(doc, side, self._bytes("sites_doc"), other)
         self.assertTrue(any(e.code == "LNT-LS" for e in errs), errs)
 
     # U · 站点表自己的封印
@@ -305,6 +310,66 @@ class LNotaryTest(unittest.TestCase):
         table["seal"] = "0" * 64
         errs = sites.verify_sites(table)
         self.assertTrue(any(e.code == "LNT-SEAL" for e in errs), errs)
+
+    # ---- V3 · fault 账（docs/370 §6） --------------------------------------
+
+    _G1 = ("module {name}\nchoose vm\nchoose runtime\n{switches}\n"
+           "fn _start() {{\n"
+           "    let p: ptr = alloc(4);\n"
+           "    let x: u32 = load8(p, 4);\n"
+           "    syscall4(60, 0, 0, 0);\n"
+           "}}\n")
+
+    def _g1(self, name: str, switches: str = "") -> tuple[dict, dict]:
+        return self._table_for(self._G1.format(name=name, switches=switches), name)
+
+    @staticmethod
+    def _checked_site(table: dict) -> dict:
+        for s in table["sites"]:
+            if s["grade"] == "checked":
+                return s
+        raise AssertionError(f"没有 checked 站点：{table['sites']}")
+
+    # AH · 坏块的出口是**读出来的**：默认 skip / 关拒绝器 abort / 盘古 fault
+    def test_site_edges_are_read_from_the_ir(self) -> None:
+        skip_t, _ = self._g1("e_skip")
+        abort_t, _ = self._g1("e_abort", "choose close lms_reject")
+        fault_t, _ = self._g1("e_fault",
+                              "set choose lms_pangu_true {\n}\nchoose lms_pangu_true")
+        s = self._checked_site(skip_t)
+        self.assertEqual(s.get("edge"), "skip", s)
+        self.assertNotIn("fault", s)
+        s = self._checked_site(abort_t)
+        self.assertEqual(s.get("edge"), "abort", s)
+        self.assertNotIn("fault", s)
+        s = self._checked_site(fault_t)
+        self.assertEqual(s.get("edge"), "fault", s)
+        self.assertEqual(s.get("fault"), "F01", s)
+
+    # AI · fault 账与产物开关一致；改一边就红
+    def test_fault_coverage_matches_the_artifact(self) -> None:
+        from lnotary import sites
+
+        for name, sw in (("c_skip", ""),
+                         ("c_abort", "choose close lms_reject"),
+                         ("c_fault",
+                          "set choose lms_pangu_true {\n}\nchoose lms_pangu_true")):
+            table, doc = self._g1(name, sw)
+            self.assertEqual(sites.verify_fault_coverage(table, doc), [], name)
+            tampered = json.loads(json.dumps(table))
+            site = self._checked_site(tampered)
+            site["edge"] = "abort" if site["edge"] != "abort" else "skip"
+            errs = sites.verify_fault_coverage(tampered, doc)
+            self.assertTrue(any(e.code == "LNT-FAULT" for e in errs), (name, errs))
+
+    # AJ · 说有 checked 站点，产物却把 guard 关了 ⇒ 红
+    def test_checked_sites_require_guard(self) -> None:
+        from lnotary import sites
+
+        table, doc = self._g1("c_guard")
+        doc["lms_levels"]["lms_guard"] = False
+        errs = sites.verify_fault_coverage(table, doc)
+        self.assertTrue(any(e.code == "LNT-FAULT" for e in errs), errs)
 
 
     # ---- V5 · 同产物派生链（docs/370 §6） ----------------------------------

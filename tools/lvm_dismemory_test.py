@@ -10,7 +10,8 @@
 * **A 默认不变** —— 不写 `choose lvm_dismemory_true` 的同一份源，IR 里没有 marker，
   行为与从前逐字节相同。
 * **B 真前端能跑** —— 数组 + `alloc`/`free` 的源在 K=0/1/7 三次重定位下同答（rc=10）。
-* **C 体表** —— 越出体 → F01（101），详细块里有 `令牌` / `体` / `位形` / `体素`。
+* **C 体表** —— 越出体 → F01（101），详细块只报**令牌相对**的事实（令牌、体类别、
+  偏移、宽）：不出现体的编号或坐标（`docs/371` §可观察代数）。
 * **D 令牌不是数** —— ptrtoint / inttoptr / 位运算 → F04（104）。
 * **E 没有全局空间** —— 跨体相减 / 排序 → F05（105）。
 * **F 身份** —— 退休令牌 F02（102）、空令牌 F03（103）。
@@ -19,6 +20,10 @@
 * **H 原生拒绝** —— `lomelf` 读到 marker 点名拒（原生有地址）。
 * **I 编译器发 marker** —— `choose lvm_dismemory_true` 才发那一行。
 * **J 不与基质叠加** —— `--substrate sw_cap` + dismemory 点名拒。
+* **K 详细块对重排不变** —— 同一故障程序 K=0/1/7 的整段 stderr（含详细块）逐字节相同；
+  文案里没有体号/坐标/体素。
+* **L 时钟被虚拟化** —— 228/201 在 dismemory 下按**已执行指令数**给虚拟钟；
+  同一程序 K=0/1/7 的 stdout（含两次时间戳）逐字节相同。
 
 ⚠ **为什么有一半夹具是手写 IR**：ptrtoint / inttoptr / 跨体减法这些操作**在 Loment 源里
 写不出来**（这正是这一档要的）；要证明 LVM 边界拒绝它们，只能直接喂 IR。合法路径
@@ -124,10 +129,11 @@ def test_real_frontend_runs_under_every_relocation_schedule() -> None:
 def test_out_of_body_is_f01_with_3d_detail() -> None:
     rc, _out, err = _run(_HAND)
     assert rc == 101, (rc, err[:400])
-    for want in ("error[F01]:", "令牌：0x", "体：#", "位形：(", "体积 ",
-                 "访问：偏移 4", "体素 (", "这一档没有"):
+    for want in ("error[F01]:", "令牌：0x", "体：", "访问：令牌内偏移 4", "这一档没有"):
         assert want in err, (want, err[:800])
-    print("      越出体表：rc=101，令牌/体/位形/体素都在")
+    for banned in ("体 #", "位形：(", "体素 ("):
+        assert banned not in err, (banned, err[:800])
+    print("      越出体表：rc=101；详细块只报令牌相对事实（无体号/坐标/体素）")
 
 
 def test_tokens_are_not_numbers() -> None:
@@ -274,6 +280,64 @@ def test_substrate_cannot_combine() -> None:
         raise AssertionError("dismemory 与 sw_cap 叠加没被拒")
     print("      dismemory 与基质不叠加")
 
+
+
+def test_fault_detail_is_invariant_under_relocation() -> None:
+    """判 K（`docs/371`）：故障详细块不能泄漏隐藏格子的全序。
+
+    同一份 IR、同一个故障，K=0/1/7 只是运行期重排体；整段 stderr 必须逐字节相同。
+    之前的文案带 `体 #n` / `(x,y,z)` / 体素 —— 那等于把房间号念给 guest。
+    """
+    errs: list[str] = []
+    for rel in (0, 1, 7):
+        rc, _out, err = _run(_HAND, rel)
+        assert rc == 101, (rel, rc, err[:300])
+        errs.append(err)
+    assert errs[0] == errs[1] == errs[2], (
+        "重排改变了详细块：\n--- K=0\n" + errs[0][:400]
+        + "\n--- K=7\n" + errs[2][:400])
+    for banned in ("体 #", "位形：(", "体素 ("):
+        assert banned not in errs[0], (banned, errs[0][:400])
+    print("      同一故障 K=0/1/7：stderr 逐字节相同，且没有体号/坐标/体素")
+
+
+_TIME = """module dis_time
+choose lvm_dismemory_true
+choose runtime
+
+fn _start() {
+    let t1: i64 = syscall4(201, 0, 0, 0);
+    let k: u32 = 0;
+    while k < 500000 {
+        k = k + 1;
+    }
+    let t2: i64 = syscall4(201, 0, 0, 0);
+    let d: u64 = (t2 - t1) as u64;
+    syscall4(60, (d % 251) + 1, 0, 0);
+}
+"""
+
+
+def test_clock_is_virtual_under_dismemory() -> None:
+    """判 L（`docs/371`）：dismemory 下时间也在观察代数里。
+
+    228 / 201 不再读宿主墙钟；按**已执行指令数**给确定性虚拟钟（1 条 = 1 ms）。
+    于是同一程序 K=0/1/7 的 stdout（含两次时间戳）逐字节相同 —— guest 不能拿钟
+    去量重排的缓存效应。虚拟钟仍要**前进**（否则"时间"成了常量）。
+    """
+    ir = _ir(_TIME)
+    rcs: list[int] = []
+    for rel in (0, 1, 7):
+        rc, _out, err = _run(ir, rel)
+        assert rc == rcs[0] if rcs else True, (rel, rc, rcs, err[:300])
+        rcs.append(rc)
+    assert len(set(rcs)) == 1, f"重排改变了虚拟钟（rc 各是 {rcs}）"
+    assert rcs[0] > 1, (
+        "虚拟秒没有前进（rc={}）：50 万次循环在墙钟上不到 1 秒，说明还在读宿主钟"
+        .format(rcs[0]))
+    rc2, _o2, _e2 = _run(ir, 0)
+    assert rc2 == rcs[0], f"同一程序两次跑出不同的虚拟钟：{rcs[0]} vs {rc2}"
+    print(f"      虚拟钟 K=0/1/7 同答 rc={rcs[0]}；重跑同值（墙钟版会是 1）")
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 

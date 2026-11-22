@@ -4,7 +4,7 @@
 > 坐标即地址不够，连句柄里的 body/offset 也不要）
 > 上游: `docs/360`（LVM-A 的六个原语）· `docs/362`（F01–F03 与对象表）· `docs/231`
 > （第五维 `lvm`）· `docs/370`（快照）· `docs/264`（"可使用的 LVM"五条）
-> 判据: `tools/lvm_dismemory_test.py`（10 条，参考 T0）· `lvm_twin_test` 判据 L
+> 判据: `tools/lvm_dismemory_test.py`（12 条，参考 T0）· `lvm_twin_test` 判据 L
 > （镜像 vs 参考：合法程序 rc/stdout、故障的码+站点；详细文案两边可以不同）
 > 一句话: **在 `choose lvm_dismemory_true` 下，内存里没有"地址"这个东西 —— 指针不是数，
 > 是一颗**体**的句柄；访存只能发生在体内，离开体是 fault 而不是"走到隔壁"。
@@ -152,10 +152,10 @@ choose lvm_dismemory_true
 | 码 | 名字 | 退出码 | 首行 |
 |---|---|---|---|
 | **F01** | `BOUNDS` | 101 | `lvm: F01 bounds violation at fn:blk#idx (offset=40 size=4 limit=16)` |
-| **F02** | `DANGLING` | 102 | `lvm: F02 dangling reference at fn:blk#idx (body=7 gen=3 was retired)` |
+| **F02** | `DANGLING` | 102 | `lvm: F02 dangling reference at fn:blk#idx (token=0x… retired)` |
 | **F03** | `NULL` | 103 | `lvm: F03 null dereference at fn:blk#idx (size=4)` |
 | **F04** | `NOADDR` | 104 | `lvm: F04 no addresses at fn:blk#idx (a handle is not a number: ptrtoint)` |
-| **F05** | `NOORDER` | 105 | `lvm: F05 no address space at fn:blk#idx (subtract bodies #3 and #7)` |
+| **F05** | `NOORDER` | 105 | `lvm: F05 no address space at fn:blk#idx (subtract two bodies)` |
 | **F06** | `LIMIT` | 106 | `lvm: F06 identity exhausted at fn:blk#idx (token serials exhausted)` |
 
 详细块（F01 的例子）：
@@ -163,25 +163,59 @@ choose lvm_dismemory_true
 ```text
 error[F01]: 越出体的体积（这一档没有"隔壁"）
   --> IR:main:entry#12
-   | 体：#3（heap）在 (12,-4,7)，体积 4×2×5
-   | 访问：偏移 40，宽 4 —— 体素 (0,0,2) 起 1 字节就出了体（size=16）
-   | 句柄：0xD1.02.0003.00000028
+   | 令牌：0xD1.0000_0000_0000_0028
+   | 体：heap（只报类别，不报编号与位置）
+   | 访问：令牌内偏移 40，宽 4
    |
    = 事实：体是实心长方体；任何跨越体表的访问都是 fault —— 不是地址空间的下一页。
-   = 建议：检查下标；要跨越多个体，就用多个句柄 / 显式链接，而不是加法。
+   = 建议：检查下标；要跨越多个体，就用多个令牌 / 显式链接，而不是加法。
 ```
+
+**详细块不能成为第二条观察通道**（`docs/371` §3.5）：它只报**令牌相对**的事实
+（令牌、体类别、体内偏移、宽、是否退休、站点），**不报体号、不报坐标、不报体素**。
+判据 K 把同一故障在 K=0/1/7 下的整段 stderr 逐字节比 —— 文案里任何对排版的依赖
+都会在那里现形。
+
+---
+
+### 3.5 可观察代数与可辩护的主张
+
+"没有地址"这句话只有在说清**对谁**没有地址时才可证伪。本档的**可观察代数 O** 是：
+
+> **O =（stdout 字节、stderr 字节、退出码、syscall 返回值、每步寄存器）。**
+> 排版不在 O 里；令牌的值、体号、坐标、体素、墙钟也不在 O 里。
+
+**主张（窄的、可辩护的）**：存在一个 guest 语义，其中
+1. 指针值是**不透明令牌**，其代数里没有"地址"（无加法换址、无跨体序、无整数互转）；
+2. 隐藏三维排版**不通过 O 的任何一项**可观察 —— 故障详细块与时钟都按令牌/指令数
+   归一（K/L 判据）；
+3. 因此"屋子里有没有外面"在 O 上**不是一个可以回答的问题**：外面的存在影响不到
+   O 的任何一项。
+
+**它不主张**："三维格子不存在"或"物理上不可能存在地址" —— 那是形而上学的说法。
+**下一步（未做）**：
+* **布局双模拟**：对**所有**程序、所有合法排版给同一份 O —— K 抽样只是证据；
+* **硬件**：真硅的缓存/DRAM 延迟仍按布局泄漏时间；要连这一半也钉死，只有
+  **均匀延迟阵列**（或把时间从 O 里拿掉）才行；
+* **令牌序号**：十六进制里的序号给出分配先后（身份序，不是空间序）—— 要在 O 的
+  定义里明确它算不算可观察。
+
+**今天还漏着的一条（诚实写）**：syscall 的指针实参要写成 `ptr as u64`，而那是
+`ptrtoint` → **F04**；所以 dismemory 的 guest **今天没有任何 I/O 路径**（连 `write`
+都过不去）。判据 L 因此用**退出码**观察虚拟钟。这不是模型的定义，是运行时还没给
+"令牌实参"的 syscall 通道；补它要动 L0 的调用形状，不顺手做。
 
 ---
 
 ## 4. 判据（已实装）
 
-`tools/lvm_dismemory_test.py`（参考 T0，10 条）与 `lvm_twin_test` 的判据 L：
+`tools/lvm_dismemory_test.py`（参考 T0，12 条）与 `lvm_twin_test` 的判据 L：
 
 | # | 判据 |
 |---|---|
 | **A** | 默认 `choose lvm`（无 marker）行为不变：现有 `lvm_test` / `lvm_twin_test` 全绿 |
 | **B** | 体 + 句柄：全局 / 栈 / `alloca` / `brk` 四类都能存取；K=0/1/7 的 stdout 与退出码逐字节相同 |
-| **C** | 体内越界 `offset=size` → F01，详细块里有体素坐标 |
+| **C** | 体内越界 `offset=size` → F01；详细块只报令牌相对事实（无体号/坐标/体素） |
 | **D** | `ptrtoint` / `inttoptr` → F04；句柄参与 `and`/`mul` → F04 |
 | **E** | 两个体相减 / 序比较 → F05；`brk` 给非堆句柄 → F05 |
 | **F** | 退休后的句柄 → F02；`null` → F03 |
@@ -189,6 +223,8 @@ error[F01]: 越出体的体积（这一档没有"隔壁"）
 | **G** | 空间排他：随机 100 颗体，穷举任意两颗的盒子不重叠；重定位后坐标变了、句柄不变 |
 | **H** | 孪生：参考 T0 与自举 `loment/tools/lvm.lomt` 对同一份 IR、同一 K，rc + stdout 相同；故障的 `F0k` 码与 `函数:块#序号` 相同（详细文案见 `docs/366` §5.3，两边不主张逐字节） |
 | **I** | 原生拒绝：`lomelf` / `lomelf.lomt` 读到 marker 报同一句"原生有地址" |
+| **K** | 详细块对重排不变：同一故障 K=0/1/7 的整段 stderr 逐字节相同，且不含体号/坐标/体素 |
+| **L** | 时钟被虚拟化：228/201 在 dismemory 下按已执行指令数（1 条 = 1 ms）走；同一程序 K=0/1/7 与重跑同值（墙钟版给不出） |
 
 ---
 
@@ -201,6 +237,9 @@ error[F01]: 越出体的体积（这一档没有"隔壁"）
 3. **不主张三维排版是最优的**：first-fit + 立方体只是确定性的最小实现；后续的下一步才谈空间局部性、八叉树与重定位策略。
 4. **不主张它能跑所有现有程序**：任何依赖 `ptrtoint`/跨体算术/地址序的程序会被
    F04/F05 拒掉 —— 那是本档的定义，不是回归。
+5. **不主张“宇宙里没有地址”**：主张的是 §3.5 那条窄命题（guest 的代数与本体论里
+   没有地址运算，且排版不进 O）；布局双模拟与真硅的均匀延迟都还没做。
+6. **不主张 guest 今天能 I/O**：syscall 的指针实参是 `ptrtoint` → F04（§3.5 末尾）。
 
 ---
 

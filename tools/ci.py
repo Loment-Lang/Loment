@@ -544,7 +544,7 @@ SHARD_COST = {
     "lvm_t3_test": 24.7,
     "lvm_test": 20.3,
     "lvm_twin_test": 120.0,    # 2026-11-21：本机 Windows 实测 91.1s；sw_tag 判据 M 再加 19 次镜像运行
-    "lvm_dismemory_test": 4.0, # 2026-11-21：本机（纯进程内 + 五份手写 IR）
+    "lvm_dismemory_test": 5.0, # 2026-11-21：本机（纯进程内 + 五份手写 IR；K/L 再加几次重排与重跑）
     "lvm_mirror_t2_test": 60.0,
     "potato_cross": 0.0,
     "potato_test": 9.5,

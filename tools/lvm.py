@@ -213,19 +213,12 @@ def _render_dismem(kind: int, site, d: dict) -> str:
     tok = d.get("token")
     if isinstance(tok, int):
         out.append(f"   | 令牌：0x{tok:016x}")
-    bid = d.get("body_id")
-    if bid is not None:
-        kb = d.get("body_kind") or "?"
-        out.append(f"   | 体：#{bid}（{kb}）")
-    origin, extent = d.get("origin"), d.get("extent")
-    if origin is not None and extent is not None:
-        out.append(f"   | 位形：({origin[0]},{origin[1]},{origin[2]})，"
-                   f"体积 {extent[0]}×{extent[1]}×{extent[2]}（{d.get('size')} 字节）")
-    off, w, vox = d.get("offset"), d.get("width") or 0, d.get("voxel")
-    if off is not None and vox is not None:
-        out.append(f"   | 访问：偏移 {off}，宽 {w} —— 体素 ({vox[0]},{vox[1]},{vox[2]})")
-    elif off is not None:
-        out.append(f"   | 访问：偏移 {off}，宽 {w}")
+    kb = d.get("body_kind")
+    if kb is not None:
+        out.append(f"   | 体：{kb}（只报类别，不报编号与位置）")
+    off, w = d.get("offset"), d.get("width") or 0
+    if off is not None:
+        out.append(f"   | 访问：令牌内偏移 {off}，宽 {w}")
     out.append("   |")
     reason = d.get("reason") or ""
     size = d.get("size")
@@ -249,9 +242,9 @@ def _render_dismem(kind: int, site, d: dict) -> str:
     elif reason == "add-bodies":
         fact = "两个令牌相加：没有地址空间可以把两颗体拼起来。"
     elif reason == "sub-bodies":
-        fact = f"体 #{d.get('body_a')} 与体 #{d.get('body_b')} 相减：没有地址空间可以量。"
+        fact = "两个不同体的令牌相减：没有地址空间可以量。"
     elif reason == "order-bodies":
-        fact = f"体 #{d.get('body_a')} 与体 #{d.get('body_b')} 比大小：没有地址序。"
+        fact = "两个不同体的令牌比大小：没有地址序。"
     elif reason == "order-handle":
         fact = "令牌与整数比大小：没有地址序。"
     elif reason == "int-sub-body":
@@ -259,8 +252,7 @@ def _render_dismem(kind: int, site, d: dict) -> str:
     elif reason == "brk-number":
         fact = "brk 拿到了一个整数：堆只能由**堆体的令牌 + 偏移**来长大。"
     elif reason == "brk-body":
-        fact = (f"brk 拿到的是体 #{d.get('body_a')} 的令牌，而堆是体 "
-                f"#{d.get('body_b')}。")
+        fact = "brk 拿到的是堆**以外**的体的令牌：堆只能由堆体长大。"
     elif reason == "size":
         fact = "申请的体超过 4 GiB：令牌的偏移字段放不下。"
     elif reason == "tokens":
@@ -977,6 +969,8 @@ class Vm:
         self.externs = set(externs)
         self.out = out
         self.depth = 0
+        #: 全局已执行指令数（两个引擎共用）：dismemory 的虚拟钟按它走（`docs/371`）。
+        self.executed = 0
         #: T1（`docs/247`）。`None` = 这一趟不记账 —— **关掉时一个字节都不写**，
         #: 而且下面每一处记账都写成 `if self.profile is not None:`，所以关掉时**没有代价**
         #: （判据 D 要的正是"记录不许改变被记录的行为"）。
@@ -1197,18 +1191,13 @@ class Dismem:
         if key is None:
             dead = self.tomb.get(h) if isinstance(h, int) else None
             if dead is not None:
-                d.update({"body_id": dead[0], "body_kind": dead[1],
-                          "dead": True})
+                d.update({"body_kind": dead[1], "dead": True})
             return d
-        bid, off = key
-        b = self.bodies.get(bid)
-        d.update({"body_id": bid, "offset": off})
+        _bid, off = key
+        b = self.bodies.get(_bid)
+        d.update({"offset": off})
         if b is not None:
-            d.update({"body_kind": b.kind, "origin": (b.x, b.y, b.z),
-                      "extent": (b.dx, b.dy, b.dz), "size": b.size})
-            if b.size:
-                d["voxel"] = (off % b.dx, (off // b.dx) % b.dy,
-                              off // (b.dx * b.dy))
+            d.update({"body_kind": b.kind, "size": b.size})
         return d
 
     def _fault(self, kind: int, witness: str, detail: dict):
@@ -1234,7 +1223,7 @@ class Dismem:
         bid, off = key
         b = self.bodies.get(bid)
         if b is None or not b.alive:
-            self._fault(FAULT_DANGLING, "token=%#x body=%d retired" % (h, bid),
+            self._fault(FAULT_DANGLING, "token=%#x retired" % h,
                         self.map_detail(h, width, "retired"))
         if off + width > b.size:
             self._fault(FAULT_BOUNDS, "offset=%d size=%d limit=%d" % (off, width, b.size),
@@ -1394,9 +1383,8 @@ class Executor(Vm):
             b, off = self.mem.off_of(want)
             if b is not heap_body:
                 raise _Fault(FAULT_NOORDER, self.site,
-                             "brk on body #%d (heap is #%d)" % (b.id, heap_body.id),
-                             {"dismem": True, "reason": "brk-body",
-                              "body_a": b.id, "body_b": heap_body.id, "width": 8})
+                             "brk on a non-heap body",
+                             {"dismem": True, "reason": "brk-body", "width": 8})
             if off > b.size:
                 raise _Fault(FAULT_BOUNDS, self.site,
                              "brk offset=%d limit=%d" % (off, b.size),
@@ -1424,13 +1412,20 @@ class Executor(Vm):
             self.mem.put(a[0], b"".join(f[:64].ljust(65, b"\0") for f in fields))
             return 0
         if nr == 201:                                  # time(NULL)
+            if self.dismemory:
+                # 时间也在观察代数里（`docs/371`）：dismemory 下宿主墙钟会被 guest 用来
+                # 量重排效应，所以按**已执行指令数**给一台确定性虚拟钟（1 条 = 1 ms）。
+                return self.executed // 1000
             return int(time.time())
         if nr == 228:                                  # clock_gettime(id, struct timespec *)
             # `lgc` 的预算读它（`docs/309`）。**按 clockid 分流**：0 是墙钟（与 201 同源），
             # 其余是单调钟 —— 实测 ELF 侧两者差一个数量级，拿单调钟回答 realtime 会让
             # "同一份源在 PE 与 ELF 上"的形状不同（`docs/311` §2 的 F 类）。
             # 按 Linux x86-64 的 `timespec`（两个 i64：秒、纳秒）写进 guest 内存。
-            ns = time.time_ns() if a[0] == 0 else time.monotonic_ns()
+            if self.dismemory:
+                ns = self.executed * 1_000_000
+            else:
+                ns = time.time_ns() if a[0] == 0 else time.monotonic_ns()
             self.mem.put(a[1], (ns // 1_000_000_000).to_bytes(8, "little", signed=True)
                          + (ns % 1_000_000_000).to_bytes(8, "little", signed=True))
             return 0
@@ -1619,6 +1614,7 @@ class Executor(Vm):
                 elif ins.text.startswith("call "):
                     self.site = (fn.name, blk.label, idx)
                 steps += 1
+                self.executed += 1
                 if (self.dismemory and self.relocate_every
                         and steps % self.relocate_every == 0):
                     self.mem.relocate()
@@ -1696,9 +1692,8 @@ class Executor(Vm):
                 bb, ob = self.mem.off_of(b)
                 if ba is not bb:
                     raise _Fault(FAULT_NOORDER, self.site,
-                                 "subtract bodies #%d and #%d" % (ba.id, bb.id),
-                                 {"dismem": True, "reason": "sub-bodies",
-                                  "body_a": ba.id, "body_b": bb.id, "width": 8})
+                                 "subtract two bodies",
+                                 {"dismem": True, "reason": "sub-bodies", "width": 8})
                 return mask(oa - ob, ty)
             if ha:
                 return self.mem.add_off(a, -int(b))
@@ -1925,9 +1920,8 @@ class Executor(Vm):
                 bb, ob = self.mem.off_of(b)
                 if ba is not bb:
                     raise _Fault(FAULT_NOORDER, self.site,
-                                 "compare bodies #%d and #%d" % (ba.id, bb.id),
-                                 {"dismem": True, "reason": "order-bodies",
-                                  "body_a": ba.id, "body_b": bb.id, "width": 8})
+                                 "compare two bodies",
+                                 {"dismem": True, "reason": "order-bodies", "width": 8})
             else:
                 raise _Fault(FAULT_NOORDER, self.site, "order handle vs number",
                              {"dismem": True, "reason": "order-handle", "width": 8})

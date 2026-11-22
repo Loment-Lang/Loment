@@ -2951,6 +2951,10 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         return 0;
     }
     if nr == 201 {                                       // time(NULL)
+        if d_on(a) == 1 {
+            // `docs/371`：dismemory 下时间也在观察代数里，按已执行指令数给虚拟秒。
+            return (ctx_get(a, C_STEPS) / 1000) as u64;
+        }
         return syscall4(201, 0, 0, 0) as u64;
     }
     if nr == 228 {                                       // clock_gettime(id, struct timespec *)
@@ -2958,18 +2962,27 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         // **绝对值**不是判决面（窗口只比先后与差），所以直接用宿主那一只。
         // Linux x86-64 的 `timespec` 是两个 i64（秒、纳秒）—— 按 guest 的字节序写回。
         let tb: ptr = ctx_get(a, C_TSBUF) as ptr;
-        let rr: i64 = syscall4(228, x1, tb as u64, 0);
-        if rr < 0 {
-            return rr as u64;                            // 与内核同侧：读不到就回负值
-        }
         let tsd: u32 = 0;
         let tsgo: u32 = 0;
         if d_on(a) == 1 {
             tsd = d_addr(a, x2, 16, 0, 0, 0, 0);
             tsgo = 1;
         }
-        let sec: u64 = mr(tb, 0, 8);
-        let nsec: u64 = mr(tb, 8, 8);
+        let sec: u64 = 0;
+        let nsec: u64 = 0;
+        if d_on(a) == 1 {
+            // 与参考同一条口径（`docs/371`）：1 条已执行指令 = 1 ms 的虚拟钟。
+            let ns: u64 = (ctx_get(a, C_STEPS) as u64) * 1000000;
+            sec = ns / 1000000000;
+            nsec = ns % 1000000000;
+        } else {
+            let rr: i64 = syscall4(228, x1, tb as u64, 0);
+            if rr < 0 {
+                return rr as u64;                        // 与内核同侧：读不到就回负值
+            }
+            sec = mr(tb, 0, 8);
+            nsec = mr(tb, 8, 8);
+        }
         if tsgo == 1 {
             mw(m, tsd, 8, sec);
             mw(m, tsd + 8, 8, nsec);
@@ -3548,22 +3561,10 @@ fn d_fault(a: ptr, kind: u32, tok: u64, bi: u32, off: u32, sz: u32,
     wstr(2, "\n   | 令牌：");
     d_whex16(a, tok);
     if bi < ctx_get(a, C_DNB) {
-        wstr(2, "\n   | 体：#");
-        wnum32(a, 2, bi + 1);
-        wstr(2, "（");
+        wstr(2, "\n   | 体：");
         d_kind_word(d_body(a, bi, 0));
-        wstr(2, "）");
-        if d_body(a, bi, 9) == 1 {
-            wstr(2, " 在 (");
-            wnum32(a, 2, d_body(a, bi, 6)); wstr(2, ",");
-            wnum32(a, 2, d_body(a, bi, 7)); wstr(2, ",");
-            wnum32(a, 2, d_body(a, bi, 8)); wstr(2, ")，体积 ");
-            wnum32(a, 2, d_body(a, bi, 3)); wstr(2, "×");
-            wnum32(a, 2, d_body(a, bi, 4)); wstr(2, "×");
-            wnum32(a, 2, d_body(a, bi, 5));
-            wstr(2, "（"); wnum32(a, 2, d_body(a, bi, 1)); wstr(2, " 字节）");
-        }
-        wstr(2, "\n   | 访问：偏移 ");
+        wstr(2, "（只报类别，不报编号与位置）");
+        wstr(2, "\n   | 访问：令牌内偏移 ");
         wnum32(a, 2, off);
         wstr(2, "，宽 ");
         wnum32(a, 2, sz);

@@ -659,6 +659,32 @@ MUTATORS_V23 = [
 ]
 
 
+def fixture_v24() -> dict:
+    """一份合法的 **v24** 形式对象：v23 的再 + **第五维改名**（2026-11-21）。
+
+    `vm` / `no_vm` → `lvm` / `no_lvm`，键与取值一起换。**这不是两个都能写的别名**：
+    v24 的对象里出现 `vm` 是未知顶层字段，v23 及更早只认 `vm`。
+    """
+    d = fixture_v23()
+    d["potato"] = "v24"
+    d.pop("vm")
+    d["lvm"] = "no_lvm"
+    # `systems` 索引的第五个键也跟着改名（索引键必须与顶层字段同名）。
+    sy = d["systems"]
+    sy["lvm"] = sy.pop("vm")
+    return d
+
+
+#: v24 的改名规则反例（2026-11-21）。作用在 **v24** 的对象上。
+MUTATORS_V24 = [
+    ("lvm 整个缺掉", lambda d: d.pop("lvm"), "lvm 必须是"),
+    ("lvm 拼错", lambda d: d.__setitem__("lvm", "lvm_t0"), "lvm 必须是"),
+    ("lvm 写成旧的 vm 键",
+     lambda d: (d.__setitem__("vm", d.pop("lvm"))), "未知顶层字段"),
+    ("lvm 不是字符串", lambda d: d.__setitem__("lvm", 1), "lvm 必须是"),
+]
+
+
 #: v20 的 `systems` 那几条规则的反例（#1022）。作用在 **v20** 的对象上。
 #: 三条验收点各至少一条：**错 state / 错 cost / 缺系统**；另外把"指针"那两格也钉住。
 MUTATORS_V20 = [
@@ -767,6 +793,34 @@ def test_v23_requires_the_fp_tier():
 
 
 @test
+def test_v24_renames_the_fifth_dimension():
+    """v24（2026-11-21）：第五维 `vm` → `lvm`。键、取值、`systems` 索引一起换。"""
+    for lv in potato.LVMS:
+        d = fixture_v24()
+        d["lvm"] = lv
+        d["systems"]["lvm"]["state"] = lv
+        assert potato.validate(d) == [], (lv, potato.validate(d))
+    for name, mut, needle in MUTATORS_V24:
+        d = fixture_v24()
+        mut(d)
+        errs = potato.validate(d)
+        assert any(needle in e for e in errs), (name, errs)
+    # **旧拼写不是别名**：v23 的对象仍按 `vm` 合法，v24 的对象写 `vm` 必须红。
+    assert potato.validate(fixture_v23()) == []
+    d = fixture_v24()
+    d["vm"] = d.pop("lvm")
+    errs = potato.validate(d)
+    assert any("未知顶层字段 'vm'" in e for e in errs), errs
+    assert any("lvm 必须是" in e for e in errs), errs
+    # `systems` 里还叫 `vm` 也要红（索引键与顶层字段同名）。
+    d = fixture_v24()
+    d["systems"]["vm"] = d["systems"].pop("lvm")
+    errs = potato.validate(d)
+    assert any("不认识的系统 'vm'" in e for e in errs), errs
+    assert any("systems 少了 'lvm'" in e for e in errs), errs
+
+
+@test
 def test_lspe_ledger_cross_checks_reject_self_contradiction():
     """LSPE 台账自洽（`#1084`）：计数、`per_kind`、地板、`pass_ratio` 互相打架必须红。
 
@@ -838,6 +892,9 @@ def test_v20_systems_index_cross_checks_every_link():
     assert any("未知顶层字段" in e for e in potato.validate(d)), potato.validate(d)
     # 索引必须**恰好**是六个系统 —— 少一个、多一个都红。
     assert set(potato.SYSTEM_KEYS) == {"gc", "runtime", "port", "vm", "lms", "lspe"}
+    # v24 起第五个系统叫 `lvm`（2026-11-21 改名）—— 按版本选表，不是两种都收。
+    assert set(potato.system_keys("v24")) == {"gc", "runtime", "port", "lvm", "lms", "lspe"}
+    assert potato.system_keys("v23") == potato.SYSTEM_KEYS
 
 
 @test
@@ -1280,6 +1337,16 @@ def _cases() -> list[tuple[str, dict]]:
         d = fixture_v23()
         mut(d)
         out.append((f"v23-{name}", d))
+    # v24 那一组（第五维改名，2026-11-21）：两档各一份，再挂反例。
+    for lv in potato.LVMS:
+        dv = fixture_v24()
+        dv["lvm"] = lv
+        dv["systems"]["lvm"]["state"] = lv
+        out.append((f"v24-{lv}", dv))
+    for name, mut, _ in MUTATORS_V24:
+        d = fixture_v24()
+        mut(d)
+        out.append((f"v24-{name}", d))
     d0 = fixture()
     for k in ("traits", "impls", "generics", "instances", "guards"):
         d0.pop(k)

@@ -1,5 +1,8 @@
 # 229 · LVM：**基座是 V8 与 GraalVM**，而新颖面只剩两处窄口
 
+> **2026-11-21**：本文写于第五维还叫 `vm` 的时候。今天的拼写是 `lvm` / `no_lvm`
+> （`docs/231` 页首，Potato v24）；文中的 `choose vm` 读作 `choose lvm`。
+>
 > 状态: **研究稿 + 基座决定**（2026-10-11）。回答一个问题（能不能是新的），并记一个决定（基座是谁）。
 > 上游: `wiki/pages/Versions_and_roadmap.mediawiki`（0.1.6 = first LVM）· `docs/204` J1/J2 ·
 > `docs/205` §2（"不插 VM"）· `docs/208`（静态度）· `docs/212`（逃生舱）·

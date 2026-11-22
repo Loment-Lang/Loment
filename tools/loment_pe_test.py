@@ -8,13 +8,14 @@
 #   3. 不支持的输入必须报错退出, 不许静默错编;
 #   4. CLI: `--target pe --check` 不落盘 rc=0; 非法 `--target` rc=2。
 #
-# **语料只取平台中性的两个。** `bootprobe`(M76) 与 `selfcheck`(M77) 是 OS 探针 —— 一个打印
-# uname 的 sysname, 一个断言 seccomp 沙箱里 getrandom 会失败。它们在 Windows 上**本就该不同**
-# (shim 还没有 uname/getpid/seccomp), 拿它们当判据只会把平台差异误判成回归。
+# **逐字节对拍的语料只取平台中性的两个。** `bootprobe`(M76) 的 `uname` 现在是**合成**的
+# `Linux`（`docs/311` §2：guest 看不到宿主），单独在 `test_pe_uname_and_clock_surface`
+# 里钉形状；`selfcheck`(M77) 断言的是 seccomp 沙箱里 `getrandom` 会失败 —— 那是宿主事实，
+# 拿它当逐字节判据只会把平台差异误判成回归。
 #
-# 已知边界 (与 lomelf.py 头注同源): shim 只实现了 `write`(1) 与 `exit`(60), 其余 syscall 号
-# 返回 -1。所以**还不能跑需要 argv 或文件 I/O 的程序** (openat/read/getdents64/newfstatat/brk
-# 未做, Windows 也没有 procfs 可读)。
+# 已知边界 (与 lomelf.py 头注同源): shim 实现了 `PE_DISPATCH` 那张表（`PE_SYSCALLS`）
+# 里的号，表外的号返回 `-ENOSYS`（-38）—— 与 Linux 对不认识的号同一个答案。文件 I/O 与
+# 联网都在表里；`uname` 是**合成**的 `Linux`（guest 看不到宿主，`docs/311` §2）。
 #
 # 运行: python tools/loment_pe_test.py   (非 Windows 或无 clang/WSL 时 SKIP 相应用例)
 
@@ -288,6 +289,144 @@ def test_pe_runs_natively_matches_linux_behavior():
         assert "append=0123456789abcd" in w.stdout
     print(f"      {ok} 个程序的 PE 产物与 clang/Linux 产物 stdout 字节 + 退出码一致；"
           f"openat 三格与 Linux 语义一致")
+
+
+#: `docs/311` P0 的探针：`getpid`(39) / `uname`(63) / `time`(201) / `clock_gettime`(228)。
+#: 八条检查写成退出码（8 - ok），两边都应当 0 —— 形状相同，绝对值各是各的。
+_CLOCK_PROG = """module clockprobe
+choose runtime
+
+fn wstr(fd: u64, s: str) -> i64 {
+    return syscall4(1, fd, str_ptr(s) as u64, str_len(s) as u64);
+}
+
+fn wnum(fd: u64, v: u64) -> i64 {
+    if v >= 10 {
+        let z: i64 = wnum(fd, v / 10);
+    }
+    let buf: ptr = alloc(1);
+    store8(buf, 0, ((v % 10) + 48) as u8);
+    let r: i64 = syscall4(1, fd, buf as u64, 1);
+    free(buf);
+    return r;
+}
+
+fn r64(p: ptr, off: u32) -> u64 {
+    let v: u64 = 0;
+    let i: u32 = 0;
+    while i < 8 {
+        let b: u64 = load8(p, off + i) as u64;
+        v = v + (b << (i * 8));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn _start() {
+    let pid: i64 = syscall4(39, 0, 0, 0);
+    let tbuf: ptr = alloc(8);
+    let t: i64 = syscall4(201, 0, 0, 0);
+    let tw: i64 = syscall4(201, tbuf as u64, 0, 0);
+    let ts: ptr = alloc(16);
+    let r1: i64 = syscall4(228, 0, ts as u64, 0);
+    let s1: u64 = r64(ts, 0);
+    let n1: u64 = r64(ts, 8);
+    let r2: i64 = syscall4(228, 1, ts as u64, 0);
+    let s2: u64 = r64(ts, 0);
+    let n2: u64 = r64(ts, 8);
+    let k: u64 = 0;
+    let acc: u64 = 0;
+    while k < 1000000 {
+        acc = acc + k;
+        k = k + 1;
+    }
+    let r3: i64 = syscall4(228, 1, ts as u64, 0);
+    let s3: u64 = r64(ts, 0);
+    let n3: u64 = r64(ts, 8);
+    let ok: u32 = 0;
+    if pid > 0 { ok = ok + 1; }
+    if t > 1600000000 { ok = ok + 1; }
+    if tw > 0 && r64(tbuf, 0) == tw as u64 { ok = ok + 1; }
+    if r1 == 0 && r2 == 0 && r3 == 0 { ok = ok + 1; }
+    if n1 < 1000000000 && n2 < 1000000000 && n3 < 1000000000 { ok = ok + 1; }
+    if s1 > 1600000000 { ok = ok + 1; }
+    if s2 < 1000000 { ok = ok + 1; }
+    if s3 > s2 || (s3 == s2 && n3 >= n2) { ok = ok + 1; }
+    wstr(1, "pid=");
+    let z1: i64 = wnum(1, pid as u64);
+    wstr(1, " time=");
+    let z2: i64 = wnum(1, t as u64);
+    wstr(1, " cg1=");
+    let z3: i64 = wnum(1, s1);
+    wstr(1, ".");
+    let z4: i64 = wnum(1, n1);
+    wstr(1, " cg2=");
+    let z5: i64 = wnum(1, s2);
+    wstr(1, ".");
+    let z6: i64 = wnum(1, n2);
+    wstr(1, " acc=");
+    let z7: i64 = wnum(1, acc);
+    wstr(1, "\\n");
+    syscall4(60, (8 - ok) as u64, 0, 0);
+}
+"""
+
+
+def _clock_shape(out: bytes, where: str) -> None:
+    assert re.fullmatch(
+        rb"pid=\d+ time=\d{10} cg1=\d{10}\.[0-9]+ cg2=\d+\.[0-9]+ acc=499999500000\n",
+        out), f"{where}: 时钟形状不对: {out!r}"
+
+
+@test
+def test_pe_uname_and_clock_surface():
+    """`docs/311` P0：PE shim 的 39 / 63 / 201 / 228 —— 形状与 Linux 同。
+
+    `uname` 是 S 类（合成 `Linux`，与宿主无关）；另外三个是 F 类：绝对值可以不同，
+    但**符号、布局、量级**必须同。这一条钉的是 `lgc` 的预算在 PE 上真的收紧 ——
+    在此之前 228 是 -38，窗口照开、没有截止（`docs/309` §2.5）。
+    """
+    # 跨平台的部分：字面量形状 + 四个号真的在派发表与 shim 字节里（CI 的 ubuntu 也跑得到）。
+    assert len(lomelf.PE_UNAME) == 390, f"utsname 不是六段 65 字节：{len(lomelf.PE_UNAME)}"
+    assert lomelf.PE_UNAME[:5] == b"Linux"
+    want = {lomelf.SYS_GETPID: "__ws_getpid", lomelf.SYS_UNAME: "__ws_uname",
+            lomelf.SYS_TIME: "__ws_time", lomelf.SYS_CLOCK_GETTIME: "__ws_clock_gettime"}
+    table = {num: (surface, label) for num, surface, label in lomelf.PE_SYSCALLS}
+    for num, label in want.items():
+        assert table.get(num) == ("proc", label), (num, table.get(num))
+    _blob, _idata, _slots, labels = _shim_blob()
+    for label in want.values():
+        assert label in labels, f"派发表指向的处理块不在 shim 里：{label}"
+    if not _on_windows():
+        print("      非 Windows：结构已验（四个号在派发表与 shim 字节里）")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        # bootprobe：uname 的 sysname 在 PE 上也是 Linux。
+        src = ROOT / "loment/examples/bootprobe.lomt"
+        ll = _ir(src, td)
+        exe = td / "bootprobe.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe)
+        assert (rc, out) == (0, b"M76 sysname=Linux\nM76 RESULT: PASS bootprobe\n"), (
+            rc, out)
+        # 四个号的形状（PE 原生）。
+        src = td / "clockprobe.lomt"
+        src.write_text(_CLOCK_PROG, encoding="utf-8", newline="\n")
+        ll = _ir(src, td)
+        exe = td / "clockprobe.exe"
+        exe.write_bytes(lomelf.compile_pe(ll.read_text(encoding="utf-8"))[0])
+        rc, out = _run_native(exe)
+        assert rc == 0, f"PE 上 39/201/228 的八条检查没全过（rc={rc}）：{out!r}"
+        _clock_shape(out, "PE")
+        # 同一份 IR 的 ELF 产物：**形状**同（绝对值当然各是各的）。
+        if _wsl():
+            elf = td / "clockprobe.elf"
+            elf.write_bytes(lomelf.compile_ll(ll.read_text(encoding="utf-8"))[0])
+            wrc, wout = _run_in_wsl(elf, "clockprobe", td)
+            assert wrc == 0, f"ELF 上 39/201/228 的八条检查没全过（rc={wrc}）：{wout!r}"
+            _clock_shape(wout, "ELF")
+    print("      uname=Linux（合成）；39/201/228 的八项形状 PE 与 ELF 都过")
 
 
 @test

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# trust_demo_compiler.py — R0 玩具编译器 / 证明生产者 (docs/378)
+# trust_demo_compiler.py — R0 玩具编译器 / 证明生产者 (docs/379)
 #
 # 它把玩具源编成一个链接容器，并**同时**产出 `(derivation, conclusion)`。
 # 内核不 import 它；它可以撒谎，内核会按规则拒绝。
@@ -230,7 +230,7 @@ def build_refinement(old_sources: list[str], new_sources: list[str],
 
 
 def _write_budget(out: Path, deriv: dict, quorum: dict | None) -> dict:
-    spec = Path(__file__).resolve().parent.parent / "docs" / "378-trust-quorum.md"
+    spec = Path(__file__).resolve().parent.parent / "docs" / "379-trust-quorum.md"
     budget = {
         "format": 1,
         "rules": len(K.RULES),
@@ -295,7 +295,7 @@ def write_program(out: Path, sources: list[str], seed: str = "seed-0",
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="trust_demo_compiler",
-                                 description="R0 toy compiler/prover (docs/378)")
+                                 description="R0 toy compiler/prover (docs/379)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("build")
     b.add_argument("--source", action="append", required=True)

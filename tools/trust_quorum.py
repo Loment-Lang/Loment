@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# trust_quorum.py — R4 K-of-N 商团 (docs/378 §3.4 / C7)
+# trust_quorum.py — R4 K-of-N 商团 (docs/379 §3.4 / C7)
 #
 # 商团判决: 至少 k 个**覆盖该推导档位**的内核接受同一份 (artifact, derivation,
 # conclusion)，且没有内核在「接受/拒绝」上相反。沉默按拒绝处理；回避不是接受。

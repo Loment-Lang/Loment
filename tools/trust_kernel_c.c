@@ -1,4 +1,4 @@
-/* trust_kernel_c.c — R4/R5 第二个独立内核 (docs/378 §3.4 / C6 / C11)
+/* trust_kernel_c.c — R4/R5 第二个独立内核 (docs/379 §3.4 / C6 / C11)
  *
  * 它检查同一份 `(artifact, derivation, conclusion)`，与 tools/trust_kernel.py
  * **不共享一行代码**：自带 JSON 解析、SHA-256、玩具源解析器、静态栈检查与解释器。

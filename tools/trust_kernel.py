@@ -38,6 +38,7 @@ SITE_OPS = frozenset({"load", "store", "atomicrmw"})
 SITE_GRADES = frozenset({"proven", "checked", "unsafe"})
 SITE_RULES = frozenset({"R1", "R2", "R3", "R4"})
 SITE_FAULTS = frozenset({"F01", "F02", "F03"})
+SITE_EDGES = frozenset({"fault", "abort", "skip"})
 
 #: 规则表。改一条就换哈希；推导里的 `kernel.rules_sha256` 随之失效。
 RULES = ("AX-K", "AX-S", "PARSE", "TV-L1", "TV-L2", "LINK",
@@ -613,8 +614,9 @@ def _check_lawspace(doc: dict, side: dict, potato_sha: str, potato_size: int,
 
 
 def _check_sites(table: dict) -> None:
-    if table.get("schema") != 1:
-        raise Reject("L0Safe: site table schema is not 1")
+    schema = table.get("schema")
+    if schema not in (1, 2):
+        raise Reject("L0Safe: site table schema is not 1/2")
     sites = table.get("sites")
     if not isinstance(sites, list):
         raise Reject("L0Safe: site table has no sites list")
@@ -637,12 +639,25 @@ def _check_sites(table: dict) -> None:
             proven += 1
             if s.get("rule") not in SITE_RULES:
                 raise Reject("L0Safe: proven site has no rule")
+            if schema == 2 and ("edge" in s or "fault" in s):
+                raise Reject("L0Safe: proven site has an edge/fault")
         elif s["grade"] == "checked":
             checked += 1
-            if s.get("fault") not in SITE_FAULTS:
+            if schema == 2:
+                edge = s.get("edge")
+                if edge not in SITE_EDGES:
+                    raise Reject("L0Safe: checked site has no valid edge")
+                if edge == "fault":
+                    if s.get("fault") not in SITE_FAULTS:
+                        raise Reject("L0Safe: fault edge has no valid fault")
+                elif "fault" in s:
+                    raise Reject("L0Safe: non-fault edge carries a fault")
+            elif s.get("fault") not in SITE_FAULTS:
                 raise Reject("L0Safe: checked site has no fault")
         else:
             unsafe += 1
+            if schema == 2 and ("edge" in s or "fault" in s):
+                raise Reject("L0Safe: unsafe site has an edge/fault")
     counts = table.get("counts")
     want = {"sites": len(sites), "proven": proven,
             "checked": checked, "unsafe": unsafe}
@@ -651,6 +666,25 @@ def _check_sites(table: dict) -> None:
     body = {k: v for k, v in table.items() if k != "seal"}
     if table.get("seal") != _sha(_canon(body)):
         raise Reject("L0Safe: site table seal mismatch")
+
+
+def _check_fault_coverage(doc: dict, table: dict) -> None:
+    """V3: checked 站点的坏块出口必须与产物自己的开关一致。"""
+    if table.get("schema") != 2:
+        return
+    checked = [s for s in table.get("sites", [])
+               if isinstance(s, dict) and s.get("grade") == "checked"]
+    if not checked:
+        return
+    levels = doc.get("lms_levels") or {}
+    if levels.get("lms_guard") is not True:
+        raise Reject("L0Safe: checked sites but lms_guard is off")
+    pangu = any(isinstance(x, dict) and x.get("name") == "lms_pangu_true"
+                and x.get("on") is True for x in (doc.get("switches") or []))
+    want = "fault" if pangu else ("skip" if levels.get("lms_reject") is True else "abort")
+    for s in checked:
+        if s.get("edge") != want:
+            raise Reject(f"L0Safe: fault edge is {s.get('edge')!r}, artifact implies {want!r}")
 
 
 def _check_l0_safe(j) -> None:
@@ -677,6 +711,7 @@ def _check_l0_safe(j) -> None:
     _check_lawspace(potato, law, _sha(potato_raw), len(potato_raw), sites)
     if sites is not None:
         _check_sites(sites)
+        _check_fault_coverage(potato, sites)
 
 
 def _r_prov(node, pre, ctx):

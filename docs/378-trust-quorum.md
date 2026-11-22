@@ -435,7 +435,7 @@ R0 是唯一现在就能做的：一个玩具内核 + 一批有效/无效推导�
 |---|---|
 | `tools/trust_kernel.py` | 12 条规则；自带玩具解析器、栈机解释器、静态栈检查；零工具链 import |
 | `tools/trust_demo_compiler.py` | 玩具源 → 链接容器 + 推导 + 结论；它可以撒谎，内核按规则拒 |
-| `tools/trust_kernel_test.py` | 23 条判据；登记进 `ci.py`、`gate-floors.txt`、发布口径与自举 `lomrel.lomt` |
+| `tools/trust_kernel_test.py` | 24 条判据；登记进 `ci.py`、`gate-floors.txt`、发布口径与自举 `lomrel.lomt` |
 
 实测（本机，2026-11-22）：
 
@@ -445,7 +445,7 @@ R0 是唯一现在就能做的：一个玩具内核 + 一批有效/无效推导�
 | `rule_lines` | 531 → 797 |
 | `proof_bytes` | 3,263 → 4,484 |
 | `check_ms` | 0.09 → 16.2 |
-| `tests` | 14 → 23 |
+| `tests` | 14 → 24 |
 | `n / k` | 1 / 1 |
 | `diversity_axes` | 0 |
 
@@ -458,15 +458,16 @@ seed `7d75a74f…`）。
 
 R3 增量：`SAFE` 增加可选 `l0_safe`。它不 import LNotary；内核独立重算 lawspace 与站点表的
 封印，核对 lawspace 的 artifact 绑定/dims/laws.checked/genesis/站点绑定，核对站点表的等级、
-规则、fault、计数与封印，并核对 Potato 的 `gc_ladder` 恒等式、七级 `lms_levels`、
+规则、edge/fault、计数与封印，核对 `checked` 站点的坏块出口与 Potato 的 `lms_pangu_true`/
+`lms_reject` 开关一致，并核对 Potato 的 `gc_ladder` 恒等式、七级 `lms_levels`、
 `lms_budgets`、`lspe`、`switches`。夹具由真 `lomentc` + `lms_sites.py` + `lnotary.lawspace`
 生成（真 Potato v24、真站点表、真 lawspace）。
 
 覆盖的判据：有效推导、两单元组合、改产物、改规则名、改前提、改 SEM 期望输出、提权、
 两粒不同种子、删掉 `AX-S`、确定性、零工具链 import、**删掉编译器后仍接受**、四类畸形推导、
 预算记录、TV 输出节点/映射变异、真实 L0 provenance、L0 记录/路径逃逸/闭包文件篡改、
-真 LNotary bundle、lawspace claim、站点等级、Potato `gc_ladder` 篡改。§3.5 的 `null` 是
-「未测」；实测在上表。
+真 LNotary bundle、lawspace claim、站点等级、fault edge 与 Potato `gc_ladder` 篡改。
+§3.5 的 `null` 是「未测」；实测在上表。
 
 未落地：R4 的第二个独立内核与商团、R5 的 `seed : Compiler` 与代际 refinement。
 R0–R3 的内核是 Python 参考实现；R4 的第二个内核应当用 Loment/C/Coq 之一重写，

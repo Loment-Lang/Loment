@@ -410,6 +410,45 @@ def test_tampered_site_table_is_rejected():
 
 
 @test
+def test_tampered_fault_edge_is_rejected():
+    """V3: checked 站点的 edge 必须与 Potato 的 pangu/reject 开关一致。"""
+    b = _bundle()
+    root = Path(b["root"])
+    sites = json.loads((root / b["sites"]).read_text(encoding="utf-8"))
+    checked = [s for s in sites.get("sites", []) if s.get("grade") == "checked"]
+    assert checked, "R3 夹具没有 checked 站点"
+    doc = json.loads((root / b["potato"]).read_text(encoding="utf-8"))
+    levels = doc.get("lms_levels") or {}
+    pangu = any(isinstance(x, dict) and x.get("name") == "lms_pangu_true"
+                and x.get("on") is True for x in (doc.get("switches") or []))
+    want = "fault" if pangu else ("skip" if levels.get("lms_reject") is True else "abort")
+    s = checked[0]
+    if want == "fault":
+        s["edge"] = "skip"
+        s.pop("fault", None)
+    else:
+        s["edge"] = "fault"
+        s["fault"] = "F01"
+    _reseal(sites)
+    bad_sites = root / "sites_edge_bad.json"
+    bad_sites.write_text(json.dumps(sites, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                         encoding="utf-8", newline="\n")
+    side = json.loads((root / b["lawspace"]).read_text(encoding="utf-8"))
+    side["sites"] = {"sha256": sites["seal"],
+                     "count": (sites.get("counts") or {}).get("sites")}
+    _reseal(side)
+    bad_law = root / "lawspace_edge_bad.json"
+    bad_law.write_text(json.dumps(side, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+                       encoding="utf-8", newline="\n")
+    l0 = dict(b)
+    l0["sites"] = "sites_edge_bad.json"
+    l0["lawspace"] = "lawspace_edge_bad.json"
+    art, d, c = _build(l0_safe=l0)
+    assert not K.verify(art, d, c)[0], "checked 站点的 edge 与开关不一致仍然被接受"
+    print(f"      改 checked 站点的 edge（应为 {want}）-> 拒绝")
+
+
+@test
 def test_tampered_potato_invariant_is_rejected():
     b = _bundle()
     root = Path(b["root"])

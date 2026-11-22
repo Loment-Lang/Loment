@@ -46,12 +46,12 @@ class LNotaryTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.tmp = Path(tempfile.mkdtemp(prefix="lnotary-"))
         cls.plain = _compile(
-            "module plain\nchoose vm\n\n"
+            "module plain\nchoose lvm\n\n"
             "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
             "plain", cls.tmp,
         )
         cls.claimed = _compile(
-            "module claimed\nchoose vm\n"
+            "module claimed\nchoose lvm\n"
             "set choose lnotary_true {\n}\n"
             "choose lnotary_true\n\n"
             "fn _start() {\n    syscall4(60, 0, 0, 0);\n}\n",
@@ -69,7 +69,7 @@ class LNotaryTest(unittest.TestCase):
         self.assertTrue(v.ok, v.errors)
         self.assertGreaterEqual(v.version, 20)
 
-    # A' · 没有 `choose vm` 就不启用（用户 2026-11-21）
+    # A' · 没有 `choose lvm`（旧拼写 `choose vm`）就不启用（用户 2026-11-21）
     def test_refuses_a_no_vm_artifact(self) -> None:
         from lnotary import lawspace
 
@@ -238,7 +238,7 @@ class LNotaryTest(unittest.TestCase):
     # ---- V2 · 站点表（docs/363） ------------------------------------------
 
     _SITES_SRC = (
-        "module s\nchoose vm\nchoose runtime\n\n"
+        "module s\nchoose lvm\nchoose runtime\n\n"
         "fn _start() {\n"
         "    let p: ptr = alloc(4);\n"
         "    let x: u32 = load8(p, 4);\n"
@@ -313,7 +313,7 @@ class LNotaryTest(unittest.TestCase):
 
     # ---- V3 · fault 账（docs/370 §6） --------------------------------------
 
-    _G1 = ("module {name}\nchoose vm\nchoose runtime\n{switches}\n"
+    _G1 = ("module {name}\nchoose lvm\nchoose runtime\n{switches}\n"
            "fn _start() {{\n"
            "    let p: ptr = alloc(4);\n"
            "    let x: u32 = load8(p, 4);\n"
@@ -502,7 +502,7 @@ class LNotaryTest(unittest.TestCase):
     def _r1_table(self) -> dict:
         src = self.tmp / "r1.lomt"
         src.write_text(
-            "module r1\nchoose vm\n\n"
+            "module r1\nchoose lvm\n\n"
             "fn _start() {\n"
             "    let a: [u32; 4] = [1, 2, 3, 4];\n"
             "    let x: u32 = a[0];\n"
@@ -556,7 +556,7 @@ class LNotaryTest(unittest.TestCase):
     def _r23_table(self) -> dict:
         src = self.tmp / "r23.lomt"
         src.write_text(
-            "module r23\nchoose vm\n\n"
+            "module r23\nchoose lvm\n\n"
             "fn _start() {\n"
             "    let a: [u32; 4] = [1, 2, 3, 4];\n"
             "    let s: u32 = 0;\n"

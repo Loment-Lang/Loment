@@ -171,7 +171,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 
 ---
 
-## 5. 判据（三十四条，`tools/lnotary_test.py`）
+## 5. 判据（三十七条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -209,9 +209,12 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | AE | `proven` 少了 `rule` ⇒ `LNT-SITES` | 同上 |
 | AF | R2：规范循环（`for i in 0..N { a[i] }`） | 同上 |
 | AG | R3：支配分支（`if j < N { a[j] }`） | 同上 |
+| AH | 坏块出口**读**出来：默认 `skip` / 关拒绝器 `abort` / 盘古 `fault(F01)` | `edge` 字段不存在 ⇒ 红 |
+| AI | fault 账与产物开关一致；改一边（表或 Potato）⇒ `LNT-FAULT` | `verify_fault_coverage` 不存在 ⇒ 红 |
+| AJ | 有 `checked` 站点却把 `lms_guard` 关了 ⇒ `LNT-FAULT` | 同上 |
 
-三十四条在本机全绿（`python tools/lnotary_test.py`，34/34，约 14.7s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 34`。
+三十七条在本机全绿（`python tools/lnotary_test.py`，37/37，约 17s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 37`。
 
 ---
 
@@ -221,7 +224,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 |---|---|---|---|
 | **V1** | `lawspace` 旁挂与**封印哈希**（`docs/358` §4.1） | `docs/357` W1 | **已落地** |
 | **V2** | 站点表与旁挂绑定（`docs/363`） | `docs/356` 站点坐标 | **已落地** |
-| **V3** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | 下一档 |
+| **V3** | `fault_ladder` 与 R1–R4 的复查（`docs/356` §6） | Dissigsegv 实装 | **第一半已落地**（坏块出口 `edge`/`kind` 与开关对账；R4 仍未） |
 | **V4** | `proven` 站点的规则引用必须可复查 | 规则表进产物 | **已落地** |
 | **V5** | 同产物派生链（`docs/358` §3.2 的 `derive`） | `docs/357` W3 | **已落地** |
 
@@ -270,6 +273,24 @@ import）。
 
 ---
 
+## 6.7 fault 账（V3 的第一半）
+
+V3 要的是 `fault_ladder` 与 R1–R4 的复查。2026-11-21 落了第一半：**坏块出口的真相**。
+
+- `lms_sites`（schema 2）不再假定 `checked ⇒ F01`：它把 `lmsbad` 块读出来，
+  记 `edge ∈ {fault, abort, skip}`；只有 `fault` 才带 `F0K`。
+  此前默认档的站点表写 `F01`，而拒绝器其实**跳过那一条访存**——账是假的。
+- LNotary 的 `verify_fault_coverage` 用**产物自己的开关**重算期望出口
+  （`docs/363` §6.5 的 g1 出口表）：盘古开 ⇒ `fault`；否则拒绝器开 ⇒ `skip`；
+  否则 `abort`。表与产物不一致 ⇒ `LNT-FAULT`；有 `checked` 站点而
+  `lms_levels.lms_guard` 为假 ⇒ 同样 `LNT-FAULT`。
+- 这是**两份账的互钉**：表来自 IR，开关来自 Potato。改任何一边都红。
+
+**没做**：R4 —— 逐站点的生命周期层还没有产物（`gc_ladder` 是聚合的四层计数，
+不是站点地图）。这一条要等编译器把"站点 → 层"写进产物，不能在公证人里猜。
+
+---
+
 ## 7. 我不主张
 
 1. **不主张 V0–V2 能证明产物安全。** 它只证明产物内部没有假账；
@@ -285,6 +306,9 @@ import）。
 7. **不主张 `choose lvm` 是运行证明。** 它是声明；真正的运行证明要等 LVM 侧交出运行记录（§2.5）。
 8. **不主张 V4 的证明覆盖 R4。** 落了 R1–R3；R4（生命周期 + `gc_ladder` 交叉）要另一份产物，
    是下一档（§6.6）。
+9. **不主张 V3 的 `edge` 字段证明 IR 本身诚实。** 它证明**站点表与 Potato 两份账一致**；
+   表是 `tools/lms_sites.py` 从 IR 读出来的，一个说谎的 IR 可以让两份账一起说谎
+   （`docs/349` 的三方判据是那只补丁，不在 LNotary 里）。
 
 ---
 

@@ -1,6 +1,6 @@
 # 370 · LNotary：产物公证人
 
-> 状态: **V0–V2 + V5 已落地**（2026-11-21，Python 包）· 上游: `docs/358` §4.2（独立验证器）·
+> 状态: **V0–V2 + V5 已落地；V3 第一半 + 原生实现已落地**（2026-11-21/22）· 上游: `docs/358` §4.2（独立验证器）·
 > `docs/357` §4.2 · `docs/262`（LSPE）· `docs/147`（Potato 台阶）· `docs/353`（Dissigsegv）
 > 基准: `origin/main` `a460b90e` + 本分支
 > 一句话: **第三方视角的产物审计器：只读 Potato，零工具链 import，
@@ -171,7 +171,7 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 
 ---
 
-## 5. 判据（三十七条，`tools/lnotary_test.py`）
+## 5. 判据（三十八条，`tools/lnotary_test.py`）
 
 | # | 判据 | 先红的方式 |
 |---|---|---|
@@ -212,9 +212,10 @@ loment lnotary derive <lawspace.json> [--parent <universe.json>] --caps A,B
 | AH | 坏块出口**读**出来：默认 `skip` / 关拒绝器 `abort` / 盘古 `fault(F01)` | `edge` 字段不存在 ⇒ 红 |
 | AI | fault 账与产物开关一致；改一边（表或 Potato）⇒ `LNT-FAULT` | `verify_fault_coverage` 不存在 ⇒ 红 |
 | AJ | 有 `checked` 站点却把 `lms_guard` 关了 ⇒ `LNT-FAULT` | 同上 |
+| AK | **原生公证人**（`loment/tools/lomlnotary.lomt`）与 Python 侧判决逐条一致（12 组正/反例） | 原生文件不存在 ⇒ 红 |
 
-三十七条在本机全绿（`python tools/lnotary_test.py`，37/37，约 17s）。
-登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 37`。
+三十八条在本机全绿（`python tools/lnotary_test.py`，38/38，约 25s）。
+登记处：`tools/ci.py` 的套件表与时间表、`.github/gate-floors.txt` 的 `lnotary_test 38`。
 
 ---
 
@@ -291,6 +292,37 @@ V3 要的是 `fault_ladder` 与 R1–R4 的复查。2026-11-21 落了第一半�
 
 ---
 
+## 6.8 原生公证人（`loment/tools/lomlnotary.lomt`）
+
+"只信产物"那条链的最后一环，是**公证人自己也得是一件产物**。此前 LNotary 是一个
+Python 包：判得再细，信任面仍然包括 CPython 与它的标准库。
+
+现在有一个**零依赖的 Loment 实现**：
+
+- 源码 `loment/tools/lomlnotary.lomt`（`use json` / `use bytes`，只用 open/read/
+  write/brk/exit 五个系统调用）；
+- 判据 AK 把它用**仓库自己的后端**（`lomentc` + `lomelf`）编成本机可执行文件，
+  与 Python 侧喂**同一批 JSON**，比**接受/拒绝逐条一致**（12 组：6 个正例/变体 +
+  6 个反例）。文案与错误条数留在 Python 侧 —— 与 `lompotato` 的孪生同一条纪律。
+
+**它覆盖什么**：V0 的版本 / LVM 圈地 / `systems` 六条（含 state、detail、cost 的
+交叉）/ `gc_ladder` 求和 / 七级布尔与预算 / `switches` 去重；以及 V3 第一半的
+站点表结构、计数与 `edge` 对账。
+
+**它不覆盖什么**（写得比覆盖的更重要）：
+
+- **不重算封印**。`lawspace` / 站点表的 `seal` 是 canonical JSON 的 SHA-256；
+  原生侧还没实现 canonical 序列化，所以**不带 `--seal` 时它不核封印**。
+  Python 侧那条判据（`LNT-SEAL`）仍然在。
+- 不做派生链（V5）、不做 R4、不做文案。
+- 它把"只信产物"的信任面从 CPython 缩到**工具链 + 这个可执行文件**，
+  但种子与二进制的对应关系仍由 `docs/270` 的地板与 genesis 证明 —— 这一页不重复主张。
+- ⚠ **它今天由参考实现构建**（`lomentc` + `lomelf`）：自举编译器还编不过这份源
+  （2026-11-22 实测，E0185/E0136 一串）。"种子自己构建公证人"是下一格，
+  在那之前"原生"二字的边界就是这一行。
+
+---
+
 ## 7. 我不主张
 
 1. **不主张 V0–V2 能证明产物安全。** 它只证明产物内部没有假账；
@@ -309,6 +341,8 @@ V3 要的是 `fault_ladder` 与 R1–R4 的复查。2026-11-21 落了第一半�
 9. **不主张 V3 的 `edge` 字段证明 IR 本身诚实。** 它证明**站点表与 Potato 两份账一致**；
    表是 `tools/lms_sites.py` 从 IR 读出来的，一个说谎的 IR 可以让两份账一起说谎
    （`docs/349` 的三方判据是那只补丁，不在 LNotary 里）。
+10. **不主张原生公证人已经覆盖 Python 侧的全部判据。** 它今天没有 canonical JSON
+    与封印重算；判据 AK 比的是两边**都覆盖到的那批**对象的接受/拒绝。缺口在 §6.8 列着。
 
 ---
 

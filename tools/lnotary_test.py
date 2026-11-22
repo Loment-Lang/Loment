@@ -371,6 +371,103 @@ class LNotaryTest(unittest.TestCase):
         errs = sites.verify_fault_coverage(table, doc)
         self.assertTrue(any(e.code == "LNT-FAULT" for e in errs), errs)
 
+    # ---- AK · 原生验证器（`loment/tools/lomlnotary.lomt`）------------------
+    #
+    # **这是 LNotary 的第二个实现**：同一批 JSON，Python 侧与 Loment 侧各自给判决。
+    # 它是"只信产物"的那一半 —— 公证人本身也是一件 Loment 产物（IR → ELF/PE，
+    # 不是 Python 包）。比的是**接受/拒绝逐条一致**；文案与错误条数留在 Python 侧
+    # （与 `lompotato` 的孪生同一条纪律）。
+
+    def _native_exe(self) -> Path:
+        import lomentc
+        import lomelf
+
+        twin = ROOT / "loment" / "tools" / "lomlnotary.lomt"
+        mod = lomentc.load(twin)
+        deps = lomentc.resolve_deps(mod, ROOT, twin.parent, entry=twin)
+        errs = lomentc.check(mod, deps=deps)
+        self.assertFalse(errs, errs[:3])
+        ir = lomentc.emit_llvm(mod, ROOT, deps)
+        exe = self.tmp / ("lomlnotary.exe" if sys.platform == "win32" else "lomlnotary")
+        exe.write_bytes((lomelf.compile_pe(ir) if sys.platform == "win32"
+                         else lomelf.compile_ll(ir))[0])
+        exe.chmod(0o755)
+        return exe
+
+    @staticmethod
+    def _py_ok(doc: dict, table: dict | None) -> bool:
+        from lnotary import sites, verify
+
+        if not verify.verify_potato(doc).ok:
+            return False
+        if table is not None:
+            if sites.verify_sites(table):
+                return False
+            if sites.verify_fault_coverage(table, doc):
+                return False
+        return True
+
+    def test_native_verifier_matches_python(self) -> None:
+        exe = self._native_exe()
+        table, doc = self._table_for(self._SITES_SRC, "native")
+
+        def clone(x):
+            return json.loads(json.dumps(x))
+
+        cases: list[tuple[str, dict, dict | None]] = [
+            ("valid", clone(doc), clone(table)),
+            ("valid-nosites", clone(doc), None),
+        ]
+        d = clone(doc)
+        d["potato"] = "v999"
+        cases.append(("version", d, clone(table)))
+        d = clone(doc)
+        d.pop("lvm", None)
+        d.pop("vm", None)
+        cases.append(("no-lvm", d, clone(table)))
+        d = clone(doc)
+        d["lms_levels"]["lms_guard"] = False
+        d["systems"]["lms"]["cost"]["levels"] = 6
+        cases.append(("guard-off", d, clone(table)))
+        d = clone(doc)
+        d["systems"]["gc"]["cost"]["sites"] += 1
+        cases.append(("cost", d, clone(table)))
+        d = clone(doc)
+        d["gc_ladder"]["total_sites"] += 1
+        cases.append(("ladder", d, clone(table)))
+        d = clone(doc)
+        d["lms_budgets"]["lms_guard"] = "bogus"
+        cases.append(("budget", d, clone(table)))
+        d = clone(doc)
+        d["switches"] = [{"name": "lms_pangu_true", "on": True},
+                         {"name": "lms_pangu_true", "on": True}]
+        cases.append(("switch-dup", d, clone(table)))
+        t = clone(table)
+        checked = next(s for s in t["sites"] if s["grade"] == "checked")
+        checked["edge"] = "abort"
+        cases.append(("edge", clone(doc), t))
+        t = clone(table)
+        t["schema"] = 1
+        cases.append(("schema", clone(doc), t))
+        t = clone(table)
+        t["counts"]["sites"] += 1
+        cases.append(("counts", clone(doc), t))
+
+        for name, d, t in cases:
+            pp = self.tmp / f"n-{name}.potato.json"
+            pp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            args = [str(exe), str(pp)]
+            if t is not None:
+                tp = self.tmp / f"n-{name}.sites.json"
+                tp.write_text(json.dumps(t, ensure_ascii=False), encoding="utf-8")
+                args += ["--sites", str(tp)]
+            r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8")
+            native_ok = r.returncode == 0
+            self.assertEqual(
+                native_ok, self._py_ok(d, t),
+                f"{name}: Python={self._py_ok(d, t)} 原生={native_ok} "
+                f"rc={r.returncode} out={r.stdout!r} err={r.stderr!r}")
+
 
     # ---- V5 · 同产物派生链（docs/370 §6） ----------------------------------
 

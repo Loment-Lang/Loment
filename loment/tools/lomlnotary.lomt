@@ -1,0 +1,1061 @@
+// lomlnotary.lomt — 产物公证人的**原生实现**（`docs/370`）
+//
+// 与 `loment/lnotary/` 那个 Python 包判同一批账：本文件**只吃 JSON**，不 import
+// 编译器、不 import `lnotary`、不看源码。它是"小验证器"那一半 —— 判据比的是
+// **接受/拒绝逐条一致**（`tools/lnotary_test.py` 的原生孪生那一格）。
+//
+// 这一版覆盖 V0（版本 / LVM 圈地 / systems / gc_ladder / lms 七级与预算 / switches）
+// 与 V3 的第一半（站点表的 `edge` 与产物开关对账）。**不做**的写在 docs/370 §6.8：
+// 封印重算（canonical JSON）、派生链、R4。
+//
+// 用法: lomlnotary <potato.json> [--sites TABLE.json]
+// 退出码: 0 = 接受 / 1 = 拒绝 / 2 = 用法或读文件失败。stdout: `ok` / `err N`。
+
+module lomlnotary
+choose runtime
+
+use bytes
+use json
+
+// ---------------------------------------------------------------- 内存布局
+const P_CAP: u32 = 262144;
+const S_CAP: u32 = 262144;
+const A_CAP: u32 = 524288;
+const M_P: u32 = 0;
+const M_S: u32 = 262144;
+const M_AP: u32 = 524288;
+const M_AS: u32 = 1048576;
+const M_ST: u32 = 1572864;
+const M_SB1: u32 = 1572928;
+const M_SB2: u32 = 1581120;
+const M_KT: u32 = 1589312;
+const M_KS: u32 = 1590848;
+const M_CAP: u32 = 1607232;
+
+const S_ERR: u32 = 0;
+const S_VER: u32 = 4;
+const S_GUARD: u32 = 8;
+const S_REJECT: u32 = 12;
+const S_PANGU: u32 = 16;
+
+const NOTFOUND: u32 = 4294967295;
+const K_OBJ: u32 = 1;
+const K_ARR: u32 = 2;
+const K_STR: u32 = 3;
+const K_NUM: u32 = 4;
+const K_TRUE: u32 = 5;
+const K_FALSE: u32 = 6;
+const K_NULL: u32 = 7;
+
+// ---------------------------------------------------------------- 基础
+
+fn die(code: u64) -> u32 {
+    syscall4(60, code, 0, 0);
+    return 0;
+}
+
+fn sys_alloc(n: u64) -> u64 {
+    let cur: i64 = syscall4(12, 0, 0, 0);
+    if cur <= 0 {
+        return 0;
+    }
+    let got: i64 = syscall4(12, (cur as u64) + n, 0, 0);
+    if got < 0 {
+        return 0;
+    }
+    return cur as u64;
+}
+
+fn read_all(fd: u64, buf: ptr, cap: u64) -> u64 {
+    let off: u64 = 0;
+    while off < cap {
+        let n: i64 = syscall4(0, fd, (buf as u64) + off, cap - off);
+        if n <= 0 {
+            return off;
+        }
+        off = off + (n as u64);
+    }
+    return off;
+}
+
+fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
+    let off: u64 = 0;
+    while off < n {
+        let w: i64 = syscall4(1, fd, (p as u64) + off, n - off);
+        if w <= 0 {
+            return off;
+        }
+        off = off + (w as u64);
+    }
+    return off;
+}
+
+fn wstr(fd: u64, s: str) -> u64 {
+    return write_all(fd, str_ptr(s), str_len(s) as u64);
+}
+
+fn wdec(mem: ptr, fd: u64, v: u32) -> u64 {
+    let b: ptr = ptr_add(mem, M_SB2 + 4096);
+    if v == 0 {
+        store8(b, 0, 48 as u8);
+        return write_all(fd, b, 1);
+    }
+    let n: u32 = 0;
+    let x: u32 = v;
+    while x > 0 {
+        store8(b, 15 - n, (48 + (x % 10)) as u8);
+        n = n + 1;
+        x = x / 10;
+    }
+    return write_all(fd, ptr_add(b, 16 - n), n as u64);
+}
+
+fn ld32(p: ptr, off: u32) -> u32 {
+    let v: u32 = load8(p, off);
+    v = v + load8(p, off + 1) * 256;
+    v = v + load8(p, off + 2) * 65536;
+    v = v + load8(p, off + 3) * 16777216;
+    return v;
+}
+
+fn st32(p: ptr, off: u32, v: u32) -> u32 {
+    store8(p, off, (v % 256) as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+    return 0;
+}
+
+fn bad(mem: ptr) -> u32 {
+    let _a: u32 = st32(mem, M_ST + S_ERR, ld32(mem, M_ST + S_ERR) + 1);
+    return 0;
+}
+
+fn eq_lit(p: ptr, n: u32, s: str) -> u32 {
+    let sl: u32 = str_len(s);
+    if n != sl {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != str_byte(s, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn same_bytes(p1: ptr, l1: u32, p2: ptr, l2: u32) -> u32 {
+    if l1 != l2 {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < l1 {
+        if load8(p1, i) != load8(p2, i) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn arg_at(buf: ptr, tot: u32, k: u32, outp: ptr) -> u32 {
+    let i: u32 = 0;
+    let idx: u32 = 0;
+    let s: u32 = 0;
+    let found: u32 = 0;
+    let ln: u32 = 0;
+    while i < tot {
+        if load8(buf, i) == 0 {
+            if idx == k && found == 0 {
+                let _a: u32 = st32(outp, 0, s);
+                ln = i - s;
+                found = 1;
+            }
+            idx = idx + 1;
+            s = i + 1;
+        }
+        i = i + 1;
+    }
+    return ln;
+}
+
+// ---------------------------------------------------------------- JSON 取用
+
+fn jget(js: ptr, ar: ptr, obj: u32, key: str) -> u32 {
+    return json_get(js, ar, obj, key);
+}
+
+fn jkind(ar: ptr, n: u32) -> u32 {
+    return json_nkind(ar, n);
+}
+
+fn jfirst(ar: ptr, n: u32) -> u32 {
+    let c: u32 = json_first_child(ar, n);
+    if c == 0 {
+        return NOTFOUND;
+    }
+    return c;
+}
+
+fn jsib(ar: ptr, m: u32) -> u32 {
+    let c: u32 = json_sibling(ar, m);
+    if c == 0 {
+        return NOTFOUND;
+    }
+    return c;
+}
+
+fn jmkey(ar: ptr, m: u32) -> u32 {
+    return json_member_key(ar, m);
+}
+
+fn jmval(ar: ptr, m: u32) -> u32 {
+    return json_member_val(ar, m);
+}
+
+fn jstr(js: ptr, ar: ptr, n: u32, buf: ptr, cap: u32) -> u32 {
+    return json_str_into(js, ar, n, buf, cap);
+}
+
+fn jis_eq(mem: ptr, js: ptr, ar: ptr, n: u32, s: str) -> u32 {
+    if n == NOTFOUND || jkind(ar, n) != K_STR {
+        return 0;
+    }
+    let l: u32 = jstr(js, ar, n, ptr_add(mem, M_SB1), 8192);
+    return eq_lit(ptr_add(mem, M_SB1), l, s);
+}
+
+fn jsame(mem: ptr, js: ptr, ar: ptr, a: u32, b: u32) -> u32 {
+    if jkind(ar, a) != K_STR || jkind(ar, b) != K_STR {
+        return 0;
+    }
+    let la: u32 = jstr(js, ar, a, ptr_add(mem, M_SB1), 8192);
+    let lb: u32 = jstr(js, ar, b, ptr_add(mem, M_SB2), 8192);
+    return same_bytes(ptr_add(mem, M_SB1), la, ptr_add(mem, M_SB2), lb);
+}
+
+fn jnonneg(js: ptr, ar: ptr, n: u32) -> u32 {
+    if jkind(ar, n) != K_NUM {
+        return 0;
+    }
+    let off: u32 = json_raw_off(ar, n);
+    let c0: u32 = load8(js, off);
+    if c0 == 45 || c0 == 43 {
+        return 0;
+    }
+    return 1;
+}
+
+fn ju32(js: ptr, ar: ptr, n: u32) -> u32 {
+    return json_as_u32(js, ar, n);
+}
+
+fn jb(ar: ptr, n: u32) -> u32 {
+    let k: u32 = jkind(ar, n);
+    if k == K_TRUE {
+        return 1;
+    }
+    if k == K_FALSE {
+        return 2;
+    }
+    return 0;
+}
+
+fn obj_keys_n(ar: ptr, obj: u32) -> u32 {
+    let n: u32 = 0;
+    let m: u32 = jfirst(ar, obj);
+    while m != NOTFOUND {
+        n = n + 1;
+        m = jsib(ar, m);
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------- Potato
+
+fn chk_version(mem: ptr, js: ptr, ar: ptr, root: u32) -> u32 {
+    let n: u32 = jget(js, ar, root, "potato");
+    if n == NOTFOUND || jkind(ar, n) != K_STR {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let l: u32 = jstr(js, ar, n, ptr_add(mem, M_SB1), 8192);
+    if l < 2 {
+        let _b: u32 = bad(mem);
+        return 0;
+    }
+    if load8(ptr_add(mem, M_SB1), 0) != 118 {
+        let _c: u32 = bad(mem);
+        return 0;
+    }
+    let v: u32 = 0;
+    let i: u32 = 1;
+    while i < l {
+        let c: u32 = load8(ptr_add(mem, M_SB1), i);
+        if c < 48 || c > 57 {
+            let _d: u32 = bad(mem);
+            return 0;
+        }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    let _e: u32 = st32(mem, M_ST + S_VER, v);
+    if v > 24 {
+        let _f: u32 = bad(mem);
+    }
+    return v;
+}
+
+fn chk_lvm(mem: ptr, js: ptr, ar: ptr, root: u32) -> u32 {
+    let lm: u32 = jget(js, ar, root, "lvm");
+    if lm != NOTFOUND && jis_eq(mem, js, ar, lm, "lvm") == 1 {
+        return 1;
+    }
+    let vm: u32 = jget(js, ar, root, "vm");
+    if vm != NOTFOUND && (jis_eq(mem, js, ar, vm, "vm") == 1 || jis_eq(mem, js, ar, vm, "lvm") == 1) {
+        return 1;
+    }
+    let _a: u32 = bad(mem);
+    return 0;
+}
+
+fn lms_key_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "lms_check") == 1 { return 1; }
+    if eq_lit(p, l, "lms_manage") == 1 { return 1; }
+    if eq_lit(p, l, "lms_guard") == 1 { return 1; }
+    if eq_lit(p, l, "lms_reject") == 1 { return 1; }
+    if eq_lit(p, l, "lms_crash") == 1 { return 1; }
+    if eq_lit(p, l, "lms_restart") == 1 { return 1; }
+    if eq_lit(p, l, "lms_seed") == 1 { return 1; }
+    return 0;
+}
+
+fn budget_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "none") == 1 { return 1; }
+    if eq_lit(p, l, "instructions") == 1 { return 1; }
+    if eq_lit(p, l, "state") == 1 { return 1; }
+    if eq_lit(p, l, "outside") == 1 { return 1; }
+    return 0;
+}
+
+fn chk_levels(mem: ptr, js: ptr, ar: ptr, root: u32) -> u32 {
+    let lv: u32 = jget(js, ar, root, "lms_levels");
+    if lv == NOTFOUND || jkind(ar, lv) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let cnt: u32 = 0;
+    let keyn: u32 = 0;
+    let m: u32 = jfirst(ar, lv);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(ar, m);
+        let kl: u32 = jstr(js, ar, kn, ptr_add(mem, M_SB1), 8192);
+        if lms_key_ok(ptr_add(mem, M_SB1), kl) == 0 {
+            let _b: u32 = bad(mem);
+        }
+        keyn = keyn + 1;
+        let vn: u32 = jmval(ar, m);
+        let b: u32 = jb(ar, vn);
+        if b == 0 {
+            let _c: u32 = bad(mem);
+        } else {
+            let on: u32 = 0;
+            if b == 1 {
+                on = 1;
+                cnt = cnt + 1;
+            }
+            if eq_lit(ptr_add(mem, M_SB1), kl, "lms_guard") == 1 {
+                let _d: u32 = st32(mem, M_ST + S_GUARD, on);
+            }
+            if eq_lit(ptr_add(mem, M_SB1), kl, "lms_reject") == 1 {
+                let _e: u32 = st32(mem, M_ST + S_REJECT, on);
+            }
+        }
+        m = jsib(ar, m);
+    }
+    if keyn != 7 {
+        let _f: u32 = bad(mem);
+    }
+    return cnt;
+}
+
+fn chk_budgets(mem: ptr, js: ptr, ar: ptr, root: u32) -> u32 {
+    let bd: u32 = jget(js, ar, root, "lms_budgets");
+    if bd == NOTFOUND || jkind(ar, bd) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let keyn: u32 = 0;
+    let m: u32 = jfirst(ar, bd);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(ar, m);
+        let kl: u32 = jstr(js, ar, kn, ptr_add(mem, M_SB1), 8192);
+        if lms_key_ok(ptr_add(mem, M_SB1), kl) == 0 {
+            let _b: u32 = bad(mem);
+        }
+        keyn = keyn + 1;
+        let vn: u32 = jmval(ar, m);
+        if jkind(ar, vn) != K_STR {
+            let _c: u32 = bad(mem);
+        } else {
+            let vl: u32 = jstr(js, ar, vn, ptr_add(mem, M_SB2), 8192);
+            if budget_ok(ptr_add(mem, M_SB2), vl) == 0 {
+                let _d: u32 = bad(mem);
+            }
+        }
+        m = jsib(ar, m);
+    }
+    if keyn != 7 {
+        let _e: u32 = bad(mem);
+    }
+    return keyn;
+}
+
+fn chk_switches(mem: ptr, js: ptr, ar: ptr, root: u32) -> u32 {
+    let sw: u32 = jget(js, ar, root, "switches");
+    if sw == NOTFOUND {
+        return 0;
+    }
+    if jkind(ar, sw) != K_ARR {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let n: u32 = 0;
+    let it: u32 = jfirst(ar, sw);
+    while it != NOTFOUND {
+        if jkind(ar, it) != K_OBJ {
+            let _b: u32 = bad(mem);
+        } else {
+            let keyn: u32 = 0;
+            let nm: u32 = NOTFOUND;
+            let onv: u32 = NOTFOUND;
+            let m: u32 = jfirst(ar, it);
+            while m != NOTFOUND {
+                let kn: u32 = jmkey(ar, m);
+                let kl: u32 = jstr(js, ar, kn, ptr_add(mem, M_SB1), 8192);
+                if eq_lit(ptr_add(mem, M_SB1), kl, "name") == 1 {
+                    nm = jmval(ar, m);
+                } else if eq_lit(ptr_add(mem, M_SB1), kl, "on") == 1 {
+                    onv = jmval(ar, m);
+                } else {
+                    let _c: u32 = bad(mem);
+                }
+                keyn = keyn + 1;
+                m = jsib(ar, m);
+            }
+            if keyn != 2 || nm == NOTFOUND || onv == NOTFOUND {
+                let _d: u32 = bad(mem);
+            } else if jkind(ar, nm) != K_STR {
+                let _e: u32 = bad(mem);
+            } else if jb(ar, onv) == 0 {
+                let _f: u32 = bad(mem);
+            } else if n < 64 {
+                let l1: u32 = jstr(js, ar, nm, ptr_add(mem, M_SB1), 8192);
+                let j: u32 = 0;
+                while j < n {
+                    let off: u32 = M_KT + j * 24;
+                    let l0: u32 = ld32(mem, off);
+                    let p0: u32 = ld32(mem, off + 4);
+                    if same_bytes(ptr_add(mem, M_SB1), l1, ptr_add(mem, M_KS + p0), l0) == 1 {
+                        let _g: u32 = bad(mem);
+                    }
+                    j = j + 1;
+                }
+                let q: u32 = 0;
+                while q < l1 {
+                    store8(ptr_add(mem, M_KS + n * 128), q, load8(ptr_add(mem, M_SB1), q) as u8);
+                    q = q + 1;
+                }
+                let _h: u32 = st32(mem, M_KT + n * 24, l1);
+                let _i: u32 = st32(mem, M_KT + n * 24 + 4, n * 128);
+                if eq_lit(ptr_add(mem, M_SB1), l1, "lms_pangu_true") == 1 && jb(ar, onv) == 1 {
+                    let _j: u32 = st32(mem, M_ST + S_PANGU, 1);
+                }
+                n = n + 1;
+            }
+        }
+        it = jsib(ar, it);
+    }
+    return n;
+}
+
+fn sys_key_ok(p: ptr, l: u32, v24: u32) -> u32 {
+    if eq_lit(p, l, "gc") == 1 { return 1; }
+    if eq_lit(p, l, "runtime") == 1 { return 1; }
+    if eq_lit(p, l, "port") == 1 { return 1; }
+    if eq_lit(p, l, "lms") == 1 { return 1; }
+    if eq_lit(p, l, "lspe") == 1 { return 1; }
+    if v24 == 0 && eq_lit(p, l, "vm") == 1 { return 1; }
+    if v24 == 1 && eq_lit(p, l, "lvm") == 1 { return 1; }
+    return 0;
+}
+
+fn sys_entry_ok(mem: ptr, js: ptr, ar: ptr, e: u32) -> u32 {
+    if e == NOTFOUND || jkind(ar, e) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let seen: u32 = 0;
+    let sn: u32 = NOTFOUND;
+    let m: u32 = jfirst(ar, e);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(ar, m);
+        let kl: u32 = jstr(js, ar, kn, ptr_add(mem, M_SB1), 8192);
+        if eq_lit(ptr_add(mem, M_SB1), kl, "state") == 1 {
+            sn = jmval(ar, m);
+            seen = seen | 1;
+        } else if eq_lit(ptr_add(mem, M_SB1), kl, "detail") == 1 {
+            seen = seen | 2;
+        } else if eq_lit(ptr_add(mem, M_SB1), kl, "cost") == 1 {
+            seen = seen | 4;
+        } else {
+            let _b: u32 = bad(mem);
+        }
+        m = jsib(ar, m);
+    }
+    if seen != 7 {
+        let _c: u32 = bad(mem);
+        return 0;
+    }
+    if jkind(ar, sn) != K_STR {
+        let _d: u32 = bad(mem);
+    }
+    return 1;
+}
+
+fn sys_state_is(mem: ptr, js: ptr, ar: ptr, e: u32, other: u32) -> u32 {
+    let s: u32 = jget(js, ar, e, "state");
+    if jsame(mem, js, ar, s, other) == 0 {
+        let _a: u32 = bad(mem);
+    }
+    return 0;
+}
+
+fn cost_one(mem: ptr, js: ptr, ar: ptr, e: u32, key: str) -> u32 {
+    let c: u32 = jget(js, ar, e, "cost");
+    if c == NOTFOUND || jkind(ar, c) != K_OBJ || obj_keys_n(ar, c) != 1 {
+        let _a: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    let v: u32 = jget(js, ar, c, key);
+    if jnonneg(js, ar, v) == 0 {
+        let _b: u32 = bad(mem);
+        return NOTFOUND;
+    }
+    return v;
+}
+
+fn cost_null(mem: ptr, js: ptr, ar: ptr, e: u32) -> u32 {
+    let c: u32 = jget(js, ar, e, "cost");
+    if c != NOTFOUND && jkind(ar, c) != K_NULL {
+        let _a: u32 = bad(mem);
+    }
+    return 0;
+}
+
+fn detail_lit(mem: ptr, js: ptr, ar: ptr, e: u32, lit: str) -> u32 {
+    let d: u32 = jget(js, ar, e, "detail");
+    if jis_eq(mem, js, ar, d, lit) == 0 {
+        let _a: u32 = bad(mem);
+    }
+    return 0;
+}
+
+fn chk_systems(mem: ptr, js: ptr, ar: ptr, root: u32, ver: u32, ntrue: u32) -> u32 {
+    let sy: u32 = jget(js, ar, root, "systems");
+    if sy == NOTFOUND || jkind(ar, sy) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let v24: u32 = 0;
+    if ver >= 24 {
+        v24 = 1;
+    }
+    let n: u32 = 0;
+    let m: u32 = jfirst(ar, sy);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(ar, m);
+        let kl: u32 = jstr(js, ar, kn, ptr_add(mem, M_SB1), 8192);
+        if sys_key_ok(ptr_add(mem, M_SB1), kl, v24) == 0 {
+            let _b: u32 = bad(mem);
+        }
+        n = n + 1;
+        m = jsib(ar, m);
+    }
+    if n != 6 {
+        let _c: u32 = bad(mem);
+    }
+    let eg: u32 = jget(js, ar, sy, "gc");
+    if sys_entry_ok(mem, js, ar, eg) == 1 {
+        let _d: u32 = detail_lit(mem, js, ar, eg, "gc_ladder");
+        let _e: u32 = sys_state_is(mem, js, ar, eg, jget(js, ar, root, "gc"));
+        let st: u32 = cost_one(mem, js, ar, eg, "sites");
+        let lad: u32 = jget(js, ar, root, "gc_ladder");
+        let tot: u32 = jget(js, ar, lad, "total_sites");
+        if st != NOTFOUND {
+            if jnonneg(js, ar, tot) == 0 || ju32(js, ar, st) != ju32(js, ar, tot) {
+                let _f: u32 = bad(mem);
+            }
+        }
+    }
+    let el: u32 = jget(js, ar, sy, "lms");
+    if sys_entry_ok(mem, js, ar, el) == 1 {
+        let _g: u32 = detail_lit(mem, js, ar, el, "lms_levels");
+        let _h: u32 = sys_state_is(mem, js, ar, el, jget(js, ar, root, "lms"));
+        let lv: u32 = cost_one(mem, js, ar, el, "levels");
+        if lv != NOTFOUND && ju32(js, ar, lv) != ntrue {
+            let _i: u32 = bad(mem);
+        }
+    }
+    let ep: u32 = jget(js, ar, sy, "lspe");
+    if sys_entry_ok(mem, js, ar, ep) == 1 {
+        let _j: u32 = detail_lit(mem, js, ar, ep, "lspe");
+        let lp: u32 = jget(js, ar, root, "lspe");
+        let _k: u32 = sys_state_is(mem, js, ar, ep, jget(js, ar, lp, "state"));
+        let ss: u32 = jget(js, ar, lp, "sites");
+        let sc: u32 = cost_one(mem, js, ar, ep, "sites");
+        if sc != NOTFOUND && jnonneg(js, ar, ss) == 1 && ju32(js, ar, sc) != ju32(js, ar, ss) {
+            let _l: u32 = bad(mem);
+        }
+    }
+    let er: u32 = jget(js, ar, sy, "runtime");
+    if er != NOTFOUND {
+        let _m: u32 = cost_null(mem, js, ar, er);
+        let _n: u32 = sys_state_is(mem, js, ar, er, jget(js, ar, root, "runtime"));
+        let d: u32 = jget(js, ar, er, "detail");
+        if d != NOTFOUND && jkind(ar, d) != K_NULL {
+            let _o: u32 = bad(mem);
+        }
+    }
+    let epo: u32 = jget(js, ar, sy, "port");
+    if epo != NOTFOUND {
+        let _p: u32 = cost_null(mem, js, ar, epo);
+        let _q: u32 = sys_state_is(mem, js, ar, epo, jget(js, ar, root, "port"));
+        let d2: u32 = jget(js, ar, epo, "detail");
+        if d2 != NOTFOUND && jkind(ar, d2) != K_NULL {
+            let _r: u32 = bad(mem);
+        }
+    }
+    let ev: u32 = jget(js, ar, sy, "lvm");
+    let evm: u32 = jget(js, ar, sy, "vm");
+    if v24 == 1 && ev != NOTFOUND {
+        let _s: u32 = cost_null(mem, js, ar, ev);
+        let _t: u32 = sys_state_is(mem, js, ar, ev, jget(js, ar, root, "lvm"));
+        let d3: u32 = jget(js, ar, ev, "detail");
+        if d3 != NOTFOUND && jkind(ar, d3) != K_NULL {
+            let _u: u32 = bad(mem);
+        }
+    }
+    if v24 == 0 && evm != NOTFOUND {
+        let _v: u32 = cost_null(mem, js, ar, evm);
+        let _w: u32 = sys_state_is(mem, js, ar, evm, jget(js, ar, root, "vm"));
+        let d4: u32 = jget(js, ar, evm, "detail");
+        if d4 != NOTFOUND && jkind(ar, d4) != K_NULL {
+            let _x: u32 = bad(mem);
+        }
+    }
+    return n;
+}
+
+fn chk_ladder(mem: ptr, js: ptr, ar: ptr, root: u32, ver: u32) -> u32 {
+    let lad: u32 = jget(js, ar, root, "gc_ladder");
+    if lad == NOTFOUND || jkind(ar, lad) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let sum: u32 = 0;
+    let n: u32 = 0;
+    let m: u32 = jfirst(ar, lad);
+    while m != NOTFOUND {
+        let kn: u32 = jmkey(ar, m);
+        let kl: u32 = jstr(js, ar, kn, ptr_add(mem, M_SB1), 8192);
+        let okk: u32 = 0;
+        if eq_lit(ptr_add(mem, M_SB1), kl, "l0") == 1 { okk = 1; }
+        if eq_lit(ptr_add(mem, M_SB1), kl, "l1") == 1 { okk = 1; }
+        if eq_lit(ptr_add(mem, M_SB1), kl, "l2") == 1 { okk = 1; }
+        if eq_lit(ptr_add(mem, M_SB1), kl, "l3") == 1 { okk = 1; }
+        if eq_lit(ptr_add(mem, M_SB1), kl, "total_sites") == 1 { okk = 1; }
+        if ver >= 19 && eq_lit(ptr_add(mem, M_SB1), kl, "l0_5") == 1 { okk = 1; }
+        if okk == 0 {
+            let _b: u32 = bad(mem);
+        }
+        n = n + 1;
+        let vn: u32 = jmval(ar, m);
+        if jnonneg(js, ar, vn) == 0 {
+            let _c: u32 = bad(mem);
+        } else if eq_lit(ptr_add(mem, M_SB1), kl, "total_sites") == 0 {
+            sum = sum + ju32(js, ar, vn);
+        }
+        m = jsib(ar, m);
+    }
+    let want: u32 = 5;
+    if ver >= 19 {
+        want = 6;
+    }
+    if n != want {
+        let _d: u32 = bad(mem);
+    }
+    let tot: u32 = jget(js, ar, lad, "total_sites");
+    if jnonneg(js, ar, tot) == 0 || ju32(js, ar, tot) != sum {
+        let _e: u32 = bad(mem);
+    }
+    return sum;
+}
+
+fn chk_lspe(mem: ptr, js: ptr, ar: ptr, root: u32) -> u32 {
+    let lp: u32 = jget(js, ar, root, "lspe");
+    if lp == NOTFOUND || jkind(ar, lp) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let st: u32 = jget(js, ar, lp, "state");
+    if st == NOTFOUND || jkind(ar, st) != K_STR {
+        let _b: u32 = bad(mem);
+    }
+    let si: u32 = jget(js, ar, lp, "sites");
+    if jnonneg(js, ar, si) == 0 {
+        let _c: u32 = bad(mem);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------- 站点表
+
+fn op_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "load") == 1 { return 1; }
+    if eq_lit(p, l, "store") == 1 { return 1; }
+    if eq_lit(p, l, "atomicrmw") == 1 { return 1; }
+    return 0;
+}
+
+fn grade_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "proven") == 1 { return 1; }
+    if eq_lit(p, l, "checked") == 1 { return 1; }
+    if eq_lit(p, l, "unsafe") == 1 { return 1; }
+    return 0;
+}
+
+fn rule_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "R1") == 1 { return 1; }
+    if eq_lit(p, l, "R2") == 1 { return 1; }
+    if eq_lit(p, l, "R3") == 1 { return 1; }
+    if eq_lit(p, l, "R4") == 1 { return 1; }
+    return 0;
+}
+
+fn edge_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "fault") == 1 { return 1; }
+    if eq_lit(p, l, "abort") == 1 { return 1; }
+    if eq_lit(p, l, "skip") == 1 { return 1; }
+    return 0;
+}
+
+fn kind_ok(p: ptr, l: u32) -> u32 {
+    if eq_lit(p, l, "F01") == 1 { return 1; }
+    if eq_lit(p, l, "F02") == 1 { return 1; }
+    if eq_lit(p, l, "F03") == 1 { return 1; }
+    return 0;
+}
+
+fn key_seen(mem: ptr, n: u32, slot: u32, fl: u32, bl: u32, idx: u32) -> u32 {
+    let j: u32 = 0;
+    while j < n {
+        let off: u32 = M_KT + j * 24;
+        let f0: u32 = ld32(mem, off);
+        let fo: u32 = ld32(mem, off + 4);
+        let b0: u32 = ld32(mem, off + 8);
+        let bo: u32 = ld32(mem, off + 12);
+        let i0: u32 = ld32(mem, off + 16);
+        if i0 == idx && f0 == fl && b0 == bl {
+            if same_bytes(ptr_add(mem, M_KS + fo), f0,
+                          ptr_add(mem, M_KS + slot * 256), fl) == 1 {
+                if same_bytes(ptr_add(mem, M_KS + bo), b0,
+                              ptr_add(mem, M_KS + slot * 256 + 128), bl) == 1 {
+                    return 1;
+                }
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn chk_sites(mem: ptr, js: ptr, ar: ptr, root: u32,
+             guard: u32, reject: u32, pangu: u32) -> u32 {
+    if root == NOTFOUND || jkind(ar, root) != K_OBJ {
+        let _a: u32 = bad(mem);
+        return 0;
+    }
+    let sc: u32 = jget(js, ar, root, "schema");
+    if jnonneg(js, ar, sc) == 0 || ju32(js, ar, sc) != 2 {
+        let _b: u32 = bad(mem);
+    }
+    let src: u32 = jget(js, ar, root, "source");
+    if src == NOTFOUND || jkind(ar, src) != K_OBJ {
+        let _c: u32 = bad(mem);
+    } else {
+        let h: u32 = jget(js, ar, src, "sha256");
+        let by: u32 = jget(js, ar, src, "bytes");
+        if h == NOTFOUND || jkind(ar, h) != K_STR || jnonneg(js, ar, by) == 0 {
+            let _d: u32 = bad(mem);
+        }
+    }
+    let arr: u32 = jget(js, ar, root, "sites");
+    if arr == NOTFOUND || jkind(ar, arr) != K_ARR {
+        let _e: u32 = bad(mem);
+        return 0;
+    }
+    let expect: u32 = 3;               // 0 abort / 1 skip / 2 fault
+    if pangu == 1 {
+        expect = 2;
+    } else if reject == 1 {
+        expect = 1;
+    }
+    let sites: u32 = 0;
+    let nproven: u32 = 0;
+    let nchecked: u32 = 0;
+    let nunsafe: u32 = 0;
+    let it: u32 = jfirst(ar, arr);
+    while it != NOTFOUND {
+        if jkind(ar, it) != K_OBJ {
+            let _f: u32 = bad(mem);
+        } else {
+            let fn: u32 = jget(js, ar, it, "fn");
+            let blk: u32 = jget(js, ar, it, "blk");
+            let ix: u32 = jget(js, ar, it, "idx");
+            let opn: u32 = jget(js, ar, it, "op");
+            let gr: u32 = jget(js, ar, it, "grade");
+            let okk: u32 = 1;
+            if fn == NOTFOUND || jkind(ar, fn) != K_STR {
+                let _g: u32 = bad(mem);
+                okk = 0;
+            }
+            if blk == NOTFOUND || jkind(ar, blk) != K_STR {
+                let _h: u32 = bad(mem);
+                okk = 0;
+            }
+            if jnonneg(js, ar, ix) == 0 {
+                let _i: u32 = bad(mem);
+                okk = 0;
+            }
+            if opn == NOTFOUND || jkind(ar, opn) != K_STR {
+                let _j: u32 = bad(mem);
+                okk = 0;
+            } else {
+                let ol: u32 = jstr(js, ar, opn, ptr_add(mem, M_SB1), 8192);
+                if op_ok(ptr_add(mem, M_SB1), ol) == 0 {
+                    let _k: u32 = bad(mem);
+                }
+            }
+            if gr == NOTFOUND || jkind(ar, gr) != K_STR {
+                let _l: u32 = bad(mem);
+                okk = 0;
+            }
+            if okk == 1 {
+                let gl: u32 = jstr(js, ar, gr, ptr_add(mem, M_SB2), 8192);
+                if sites < 64 {
+                    let fl: u32 = jstr(js, ar, fn, ptr_add(mem, M_KS + sites * 256), 120);
+                    let bl: u32 = jstr(js, ar, blk, ptr_add(mem, M_KS + sites * 256 + 128), 120);
+                    let iv: u32 = ju32(js, ar, ix);
+                    if key_seen(mem, sites, sites, fl, bl, iv) == 1 {
+                        let _m: u32 = bad(mem);
+                    }
+                    let _n: u32 = st32(mem, M_KT + sites * 24, fl);
+                    let _o: u32 = st32(mem, M_KT + sites * 24 + 4, sites * 256);
+                    let _p: u32 = st32(mem, M_KT + sites * 24 + 8, bl);
+                    let _q: u32 = st32(mem, M_KT + sites * 24 + 12, sites * 256 + 128);
+                    let _r: u32 = st32(mem, M_KT + sites * 24 + 16, iv);
+                }
+                let edn: u32 = jget(js, ar, it, "edge");
+                let ftn: u32 = jget(js, ar, it, "fault");
+                let rln: u32 = jget(js, ar, it, "rule");
+                if grade_ok(ptr_add(mem, M_SB2), gl) == 0 {
+                    let _s: u32 = bad(mem);
+                } else if eq_lit(ptr_add(mem, M_SB2), gl, "proven") == 1 {
+                    nproven = nproven + 1;
+                    if rln == NOTFOUND || jkind(ar, rln) != K_STR {
+                        let _t: u32 = bad(mem);
+                    } else {
+                        let rl: u32 = jstr(js, ar, rln, ptr_add(mem, M_SB1), 8192);
+                        if rule_ok(ptr_add(mem, M_SB1), rl) == 0 {
+                            let _u: u32 = bad(mem);
+                        }
+                    }
+                    if edn != NOTFOUND || ftn != NOTFOUND {
+                        let _v: u32 = bad(mem);
+                    }
+                } else if eq_lit(ptr_add(mem, M_SB2), gl, "checked") == 1 {
+                    nchecked = nchecked + 1;
+                    if edn == NOTFOUND || jkind(ar, edn) != K_STR {
+                        let _w: u32 = bad(mem);
+                    } else {
+                        let el: u32 = jstr(js, ar, edn, ptr_add(mem, M_SB1), 8192);
+                        if edge_ok(ptr_add(mem, M_SB1), el) == 0 {
+                            let _x: u32 = bad(mem);
+                        } else if eq_lit(ptr_add(mem, M_SB1), el, "fault") == 1 {
+                            if ftn == NOTFOUND || jkind(ar, ftn) != K_STR {
+                                let _y: u32 = bad(mem);
+                            } else {
+                                let fl2: u32 = jstr(js, ar, ftn, ptr_add(mem, M_SB1), 8192);
+                                if kind_ok(ptr_add(mem, M_SB1), fl2) == 0 {
+                                    let _z: u32 = bad(mem);
+                                }
+                            }
+                        } else if ftn != NOTFOUND {
+                            let _a2: u32 = bad(mem);
+                        }
+                        let got: u32 = 0;
+                        if eq_lit(ptr_add(mem, M_SB1), el, "fault") == 1 { got = 1; }
+                        if eq_lit(ptr_add(mem, M_SB1), el, "skip") == 1 { got = 2; }
+                        if eq_lit(ptr_add(mem, M_SB1), el, "abort") == 1 { got = 3; }
+                        let want: u32 = 0;
+                        if expect == 2 { want = 1; }
+                        if expect == 1 { want = 2; }
+                        if expect == 0 { want = 3; }
+                        if got != want {
+                            let _b2: u32 = bad(mem);
+                        }
+                    }
+                } else {
+                    nunsafe = nunsafe + 1;
+                    if edn != NOTFOUND || ftn != NOTFOUND {
+                        let _c2: u32 = bad(mem);
+                    }
+                }
+            }
+        }
+        sites = sites + 1;
+        it = jsib(ar, it);
+    }
+    if nchecked > 0 && guard != 1 {
+        let _d2: u32 = bad(mem);
+    }
+    let cnt: u32 = jget(js, ar, root, "counts");
+    if cnt == NOTFOUND || jkind(ar, cnt) != K_OBJ {
+        let _e2: u32 = bad(mem);
+    } else {
+        let a: u32 = jget(js, ar, cnt, "sites");
+        let b: u32 = jget(js, ar, cnt, "proven");
+        let c: u32 = jget(js, ar, cnt, "checked");
+        let d: u32 = jget(js, ar, cnt, "unsafe");
+        if jnonneg(js, ar, a) == 0 || ju32(js, ar, a) != sites {
+            let _f2: u32 = bad(mem);
+        }
+        if jnonneg(js, ar, b) == 0 || ju32(js, ar, b) != nproven {
+            let _g2: u32 = bad(mem);
+        }
+        if jnonneg(js, ar, c) == 0 || ju32(js, ar, c) != nchecked {
+            let _h2: u32 = bad(mem);
+        }
+        if jnonneg(js, ar, d) == 0 || ju32(js, ar, d) != nunsafe {
+            let _i2: u32 = bad(mem);
+        }
+    }
+    return sites;
+}
+
+// ---------------------------------------------------------------- 入口
+
+fn _start() -> u32 {
+    let mv: u64 = sys_alloc(M_CAP as u64);
+    if mv == 0 {
+        return die(2);
+    }
+    let mem: ptr = mv as ptr;
+    let _z0: u32 = st32(mem, M_ST + S_ERR, 0);
+    let _z1: u32 = st32(mem, M_ST + S_VER, 0);
+    let _z2: u32 = st32(mem, M_ST + S_GUARD, 0);
+    let _z3: u32 = st32(mem, M_ST + S_REJECT, 0);
+    let _z4: u32 = st32(mem, M_ST + S_PANGU, 0);
+    let fd: i64 = syscall4(257, (0 as u64) - 100, str_ptr("/proc/self/cmdline") as u64, 0);
+    if fd < 0 {
+        let _a: u64 = wstr(2, "lomlnotary: 读不到 argv\n");
+        return die(2);
+    }
+    let cb: ptr = ptr_add(mem, M_KT);
+    let cn: u64 = read_all(fd as u64, cb, 2048);
+    syscall4(3, fd as u64, 0, 0);
+    let tot: u32 = cn as u32;
+    let ap: ptr = ptr_add(mem, M_ST + 32);
+    let l1: u32 = arg_at(cb, tot, 1, ap);
+    let o1: u32 = ld32(ap, 0);
+    if l1 == 0 {
+        let _b: u64 = wstr(2, "lomlnotary: usage: lomlnotary <potato.json> [--sites TABLE.json]\n");
+        return die(2);
+    }
+    let pp: ptr = ptr_add(cb, o1);
+    store8(pp, l1, 0 as u8);
+    let jf: i64 = syscall4(257, (0 as u64) - 100, pp as u64, 0);
+    if jf < 0 {
+        let _c: u64 = wstr(2, "lomlnotary: 打不开 Potato\n");
+        return die(2);
+    }
+    let pn: u64 = read_all(jf as u64, ptr_add(mem, M_P), P_CAP as u64);
+    syscall4(3, jf as u64, 0, 0);
+    let root: u32 = json_parse(ptr_add(mem, M_P), pn as u32, ptr_add(mem, M_AP));
+    if root == NOTFOUND {
+        let _d: u64 = wstr(2, "lomlnotary: Potato 不是 JSON\n");
+        return die(2);
+    }
+    let ver: u32 = chk_version(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root);
+    let _l: u32 = chk_lvm(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root);
+    let ntrue: u32 = 0;
+    if ver >= 17 {
+        ntrue = chk_levels(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root);
+    }
+    if ver >= 18 {
+        let _bb: u32 = chk_budgets(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root);
+    }
+    let _sw: u32 = chk_switches(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root);
+    if ver >= 20 {
+        let _sy: u32 = chk_systems(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root, ver, ntrue);
+    }
+    if ver >= 10 {
+        let _gd: u32 = chk_ladder(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root, ver);
+    }
+    if ver >= 16 {
+        let _lp: u32 = chk_lspe(mem, ptr_add(mem, M_P), ptr_add(mem, M_AP), root);
+    }
+    let l2: u32 = arg_at(cb, tot, 2, ap);
+    if l2 >= 7 {
+        let o2: u32 = ld32(ap, 0);
+        let opt: ptr = ptr_add(cb, o2);
+        if eq_lit(opt, l2, "--sites") == 1 {
+            let l3: u32 = arg_at(cb, tot, 3, ap);
+            if l3 == 0 {
+                let _e: u64 = wstr(2, "lomlnotary: --sites 后面缺少文件\n");
+                return die(2);
+            }
+            let o3: u32 = ld32(ap, 0);
+            let sp: ptr = ptr_add(cb, o3);
+            store8(sp, l3, 0 as u8);
+            let sf: i64 = syscall4(257, (0 as u64) - 100, sp as u64, 0);
+            if sf < 0 {
+                let _f: u64 = wstr(2, "lomlnotary: 打不开站点表\n");
+                return die(2);
+            }
+            let sn: u64 = read_all(sf as u64, ptr_add(mem, M_S), S_CAP as u64);
+            syscall4(3, sf as u64, 0, 0);
+            let sroot: u32 = json_parse(ptr_add(mem, M_S), sn as u32, ptr_add(mem, M_AS));
+            if sroot == NOTFOUND {
+                let _g: u64 = wstr(2, "lomlnotary: 站点表不是 JSON\n");
+                return die(2);
+            }
+            let _st: u32 = chk_sites(mem, ptr_add(mem, M_S), ptr_add(mem, M_AS), sroot,
+                                     ld32(mem, M_ST + S_GUARD),
+                                     ld32(mem, M_ST + S_REJECT),
+                                     ld32(mem, M_ST + S_PANGU));
+        }
+    }
+    let e: u32 = ld32(mem, M_ST + S_ERR);
+    if e == 0 {
+        let _o: u64 = wstr(1, "ok\n");
+        return die(0);
+    }
+    let _p: u64 = wstr(1, "err ");
+    let _q: u64 = wdec(mem, 1, e);
+    let _r: u64 = wstr(1, "\n");
+    return die(1);
+}

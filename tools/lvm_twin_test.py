@@ -894,6 +894,8 @@ fn _start() {
     let v: u32 = load32(p, 0);
     free(p);
     print("dis twin\n");
+    print_num(v as i64);
+    print("\n");
     let b: ptr = alloc(2);
     store8(b, 0, 65);
     let w: i64 = syscall4p(1, 1, b, 1);

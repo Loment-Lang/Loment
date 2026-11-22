@@ -14219,6 +14219,101 @@ fn uses_str_num(s: ptr, src: ptr, toks: ptr) -> u32 {
 }
 
 /// `str_num` 的实现：十进制写进调用方给的 24 字节堆块（`docs/337`；i64 最长 20 位 + `-`）。
+/// `print_num` 的 dismemory 版（`docs/377`）：按**索引**倒着走缓冲，
+/// 不用 ptrtoint/inttoptr；asm 的指针槽是类型化 `ptr`。
+fn emit_print_num_dis(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "define internal i32 @__loment_print_num(i64 %v) {
+entry:
+  %buf = alloca [24 x i8]
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %negp, label %pos
+negp:
+  %m0 = sub i64 0, %v
+  br label %conv
+pos:
+  br label %conv
+conv:
+  %m = phi i64 [ %m0, %negp ], [ %v, %pos ]
+  br label %loop
+loop:
+  %i = phi i64 [ 24, %conv ], [ %i2, %loop ]
+  %x = phi i64 [ %m, %conv ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %i2 = sub i64 %i, 1
+  %slot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i2
+  store i8 %c2, ptr %slot
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  br i1 %neg, label %sign, label %wr
+sign:
+  %i3 = sub i64 %i2, 1
+  %sslot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i3
+  store i8 45, ptr %sslot
+  br label %wr
+wr:
+  %st = phi i64 [ %i2, %after ], [ %i3, %sign ]
+  %sp = getelementptr [24 x i8], ptr %buf, i64 0, i64 %st
+  %ln = sub i64 24, %st
+  %r = call i64 asm sideeffect \"syscall\", \"={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}\"(i64 1, i64 1, ptr %sp, i64 %ln)
+  %t = trunc i64 %r to i32
+  ret i32 %t
+}
+
+");
+}
+
+/// `str_num` 的 dismemory 版：同一段循环，但起点/长度都是索引。
+fn emit_num_to_dec_dis(s: ptr, out: ptr) -> u32 {
+    return emit_str(s, out, "define internal i32 @__loment_num_to_dec(ptr %out, i64 %v, i32 %sgn) {
+entry:
+  %buf = alloca [24 x i8]
+  %z1 = icmp slt i64 %v, 0
+  %z2 = icmp ne i32 %sgn, 0
+  %neg = and i1 %z1, %z2
+  %nv = sub i64 0, %v
+  br i1 %neg, label %negp, label %pos
+negp:
+  br label %conv
+pos:
+  br label %conv
+conv:
+  %x0 = phi i64 [ %nv, %negp ], [ %v, %pos ]
+  br label %loop
+loop:
+  %i = phi i64 [ 24, %conv ], [ %i2, %loop ]
+  %x = phi i64 [ %x0, %conv ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %i2 = sub i64 %i, 1
+  %slot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i2
+  store i8 %c2, ptr %slot
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  br i1 %neg, label %sign, label %copy
+sign:
+  %i3 = sub i64 %i2, 1
+  %sslot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i3
+  store i8 45, ptr %sslot
+  br label %copy
+copy:
+  %st = phi i64 [ %i2, %after ], [ %i3, %sign ]
+  %sp = getelementptr [24 x i8], ptr %buf, i64 0, i64 %st
+  %ln = sub i64 24, %st
+  %ln32 = trunc i64 %ln to i32
+  call void @__loment_memcpy(ptr %out, ptr %sp, i64 %ln)
+  ret i32 %ln32
+}
+
+");
+}
+
 fn emit_num_to_dec(s: ptr, out: ptr) -> u32 {
     return emit_str(s, out, "define internal i32 @__loment_num_to_dec(ptr %out, i64 %v, i32 %sgn) {\nentry:\n  %buf = alloca [24 x i8]\n  %end0 = getelementptr inbounds [24 x i8], ptr %buf, i64 0, i64 24\n  %z1 = icmp slt i64 %v, 0\n  %z2 = icmp ne i32 %sgn, 0\n  %neg = and i1 %z1, %z2\n  %nv = sub i64 0, %v\n  br i1 %neg, label %negp, label %pos\nnegp:\n  br label %conv\npos:\n  br label %conv\nconv:\n  %x0 = phi i64 [ %nv, %negp ], [ %v, %pos ]\n  br label %loop\nloop:\n  %p = phi ptr [ %end0, %conv ], [ %p2, %loop ]\n  %x = phi i64 [ %x0, %conv ], [ %q, %loop ]\n  %d = urem i64 %x, 10\n  %q = udiv i64 %x, 10\n  %c = trunc i64 %d to i8\n  %c2 = add i8 %c, 48\n  %pi = ptrtoint ptr %p to i64\n  %pj = sub i64 %pi, 1\n  %p2 = inttoptr i64 %pj to ptr\n  store i8 %c2, ptr %p2\n  %done = icmp eq i64 %q, 0\n  br i1 %done, label %after, label %loop\nafter:\n  br i1 %neg, label %sign, label %copy\nsign:\n  %si = ptrtoint ptr %p2 to i64\n  %sj = sub i64 %si, 1\n  %p3 = inttoptr i64 %sj to ptr\n  store i8 45, ptr %p3\n  br label %copy\ncopy:\n  %st = phi ptr [ %p2, %after ], [ %p3, %sign ]\n  %sp = ptrtoint ptr %st to i64\n  %ep = ptrtoint ptr %end0 to i64\n  %ln = sub i64 %ep, %sp\n  %ln32 = trunc i64 %ln to i32\n  call void @__loment_memcpy(ptr %out, ptr %st, i64 %ln)\n  ret i32 %ln32\n}\n\n");
 }
@@ -15220,10 +15315,18 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr, prof: u32, tickx: u32,
         // `print_num` 的实现**单独发**（`docs/296` §2.7）：那句 x86 的 `syscall` asm
         // 不能进目标无关的运行期块（aarch64 交叉编译会当非法汇编拒掉）。
         if uses_print_num(s, src, toks) == 1 {
-            emit_print_num(s, out);
+            if contains_ident(src, toks, "lvm_dismemory_true") == 1 {
+                emit_print_num_dis(s, out);
+            } else {
+                emit_print_num(s, out);
+            }
         }
         if uses_str_num(s, src, toks) == 1 {
-            emit_num_to_dec(s, out);
+            if contains_ident(src, toks, "lvm_dismemory_true") == 1 {
+                emit_num_to_dec_dis(s, out);
+            } else {
+                emit_num_to_dec(s, out);
+            }
         }
         if uses_show_helper(s, src, toks) == 1 {
             emit_bool_to_str(s, out);

@@ -10,6 +10,7 @@
 //
 // 2026-11-21.1: **契约升版** —— PE 垫片补全（`docs/374`）：`Syscall` 从 29 个号扩到
 //   146 个（file 70 / proc 43 / net 26 / mem 7），新增 117 条全部是本仓 PE 运行时
+//   **真的派发**的号（含 main 的 P0 四条 39/63/201/228）
 //   **真的派发**的号。下游影响：**只增不减** —— 依赖方（编译器/链接器/自举 checker/
 //   自举 potato）按本表逐条对账，新增枚举项不会让旧号挪位；compat 线不读这张表。
 // 2026-10-12.1: 联网面补完 —— `sendmsg`(46)/`recvmsg`(47)/`socketpair`(53)/
@@ -60,6 +61,7 @@ enum Syscall : u32 {
   poll         = 7   { surface = "net"  }
   brk          = 12  { surface = "mem"  }
   select       = 23  { surface = "net"  }
+  getpid       = 39  { surface = "proc" }
   socket       = 41  { surface = "net"  }
   connect      = 42  { surface = "net"  }
   accept       = 43  { surface = "net"  }
@@ -73,7 +75,10 @@ enum Syscall : u32 {
   setsockopt   = 54  { surface = "net"  }
   getsockopt   = 55  { surface = "net"  }
   exit         = 60  { surface = "proc" }
+  uname        = 63  { surface = "proc" }
+  time         = 201 { surface = "proc" }
   getdents64   = 217 { surface = "file" }
+  clock_gettime = 228 { surface = "proc" }
   openat       = 257 { surface = "file" }
   newfstatat   = 262 { surface = "file" }
   accept4      = 288 { surface = "net"  }
@@ -105,9 +110,7 @@ enum Syscall : u32 {
   dup               = 32   { surface = "file" }
   dup2              = 33   { surface = "file" }
   nanosleep         = 35   { surface = "proc" }
-  getpid            = 39   { surface = "proc" }
   sendfile          = 40   { surface = "file" }
-  uname             = 63   { surface = "proc" }
   fcntl             = 72   { surface = "file" }
   flock             = 73   { surface = "file" }
   fsync             = 74   { surface = "file" }
@@ -157,14 +160,12 @@ enum Syscall : u32 {
   mknod             = 133  { surface = "file" }
   sync              = 162  { surface = "file" }
   gettid            = 186  { surface = "proc" }
-  time              = 201  { surface = "proc" }
   futex             = 202  { surface = "proc" }
   sched_setaffinity = 203  { surface = "proc" }
   sched_getaffinity = 204  { surface = "proc" }
   epoll_create      = 213  { surface = "net" }
   set_tid_address   = 218  { surface = "proc" }
   fadvise64         = 221  { surface = "file" }
-  clock_gettime     = 228  { surface = "proc" }
   clock_getres      = 229  { surface = "proc" }
   clock_nanosleep   = 230  { surface = "proc" }
   exit_group        = 231  { surface = "proc" }

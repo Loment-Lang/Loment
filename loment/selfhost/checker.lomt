@@ -758,8 +758,9 @@ fn chk_core_dim(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "sealed") || chk_tok_is(src, t, k, "hosted") {
         return 3;
     }
-    // 第五维（`docs/231`）：`vm`。取值**只说"有没有"**，与 `runtime` 同一条纪律。
-    if chk_tok_is(src, t, k, "vm") || chk_tok_is(src, t, k, "no_vm") {
+    // 第五维（`docs/231`；v24 起由 `vm` 改名）：`lvm`。取值**只说"有没有"**，与 `runtime` 同一条纪律。
+    if chk_tok_is(src, t, k, "lvm") || chk_tok_is(src, t, k, "no_lvm")
+            || chk_tok_is(src, t, k, "lvm_dismemory_true") {
         return 4;
     }
     // 第六维（`docs/253`，用户 2026-10-15）：`lms`。与 `gc` **正交**。
@@ -947,11 +948,14 @@ fn chk_core_val(src: ptr, t: ptr, k: u32) -> u32 {
     if chk_tok_is(src, t, k, "hosted") {
         return 2;
     }
-    if chk_tok_is(src, t, k, "vm") {
+    if chk_tok_is(src, t, k, "lvm") {
         return 1;
     }
-    if chk_tok_is(src, t, k, "no_vm") {
+    if chk_tok_is(src, t, k, "no_lvm") {
         return 2;
+    }
+    if chk_tok_is(src, t, k, "lvm_dismemory_true") {
+        return 3;
     }
     // 第六维（`docs/253` §11.3）：四个档名。序号是**维内**的，只用来判"两档同时选"。
     if chk_tok_is(src, t, k, "lms_full") {
@@ -7268,7 +7272,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let nch_gc: u32 = 0;
     let nch_rt: u32 = 0;
     let nch_port: u32 = 0;
-    let nch_vm: u32 = 0;        // 第五维（`docs/231`）：执行模型
+    let nch_lvm: u32 = 0;        // 第五维（`docs/231`）：执行模型
     let nch_lms: u32 = 0;       // 第六维（`docs/253`）：内存安全 —— ⚠ **只数重复**：
                                 // `lms` 今天**没有冲突对**（它不引入运行期组件，`docs/253` §11.2），
                                 // 所以不像上面五维那样还要 `v_*` / `ln_*` 来判冲突。
@@ -7286,7 +7290,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let v_gc: u32 = 0;          // 1 = gc_manual, 2 = gc_auto, 3 = gc_auto_alpha
     let v_rt: u32 = 0;          // 1 = runtime, 2 = no_runtime
     let v_port: u32 = 0;        // 1 = sealed, 2 = hosted
-    let v_vm: u32 = 0;          // 1 = vm, 2 = no_vm
+    let v_lvm: u32 = 0;         // 1 = lvm, 2 = no_lvm, 3 = lvm_dismemory_true
     // 每一维**最后一次**出现的行号（0 = 这一维从没写过）。报冲突时锚在**这两维里较后**
     // 的那一行上 —— 与参考实现"取 choose_lines 里最后一个命中的"同口径。原先只有一个
     // 共享的 `ch_line`，第三维一进来它就不够了：写齐三维时它指的是**最后一条**，
@@ -7295,7 +7299,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     let ln_gc: u32 = 0;
     let ln_rt: u32 = 0;
     let ln_port: u32 = 0;
-    let ln_vm: u32 = 0;
+    let ln_lvm: u32 = 0;
     let ln_lifetime: u32 = 0;
     let v_lifetime: u32 = 0;   // 0 = 没写；1 = no, 2 = auto, 3 = manual
     let nch_flomtc: u32 = 0;    // 第十维（`docs/350`）：只数重复 —— 它没有冲突对。
@@ -7510,10 +7514,10 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                     o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 4 {
-                nch_vm = nch_vm + 1;
-                v_vm = chk_core_val(src, t, i + 1);
-                ln_vm = i;
-                if nch_vm > 1 {
+                nch_lvm = nch_lvm + 1;
+                v_lvm = chk_core_val(src, t, i + 1);
+                ln_lvm = i;
+                if nch_lvm > 1 {
                     o = sym_pub(src, t, out, o, 159, i);
                 }
             } else if dim == 5 {
@@ -7607,9 +7611,9 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     if v_port != 0 {
         eff_port = v_port;
     }
-    let eff_vm: u32 = 2;            // 2 = no_vm（默认档）
-    if v_vm != 0 {
-        eff_vm = v_vm;
+    let eff_lvm: u32 = 2;           // 2 = no_lvm（默认档）
+    if v_lvm != 0 {
+        eff_lvm = v_lvm;
     }
     // **两两查**，顺序照参考实现的 `CORE_DIM_ORDER`（mode, gc, runtime, port）走 ——
     // 门禁比的是码集、不比文本，但顺序仍照抄：将来真去比文本时，这里不该是第一个要改的

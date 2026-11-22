@@ -127,16 +127,14 @@ def test(fn):
 #: 2026-11-20（`docs/350` §12.6）：检查器加名字表哈希索引，多一个真上界
 #: `CHK_HASH_SLOTS`（越界由 `declare` 的容量判据在更早处拒）。条数 270 → **271**，
 #: 沉默数不变（这一处有话）。
-#: 2026-11-21（`docs/361`）：自举侧 `lspe_main` 在跳过引擎时清 16 格输出，多一个
-#: `while qe < 16` ⇒ `lspe.lomt` 的 `literal:16` 1 → 2；字面量 68 → **69**、
-#: 沉默 67 → **68**。
-#: 2026-11-21（`docs/368`）：热更新原生更新器 `update.lomt` 带三处容量 —— `SCR_CAP`
-#: （路径暂存，`cstr` 到界返回 1、调用方点名）与 `NAME_CAP`（索引名格 48 B，`name_ok`
-#: 先拒）是沉默的两处，`PAYLOAD_CAP` 附近有 `fail(`。条数 271 -> **274**、沉默
-#: 178 -> **180**；字面量多一处 SHA-512 的 64（68 -> **69**、沉默 67 -> **68**）。
-#: 与 `docs/361` 那一笔合并后：两处各加一个沉默字面量 ⇒ 总共 **70 / 69**。
-CAPACITY_SITES = 274
-SILENT_SITES = 180
+#: 2026-11-21（`docs/362`–`docs/371`）：`loment/tools/lvm.lomt` 的对象表 / 归还窗口 /
+#: 续延栈、段错误详细化的五条、dismemory 的三张定长表、`sw_tag` 的两处（`CAP_SLOTS` /
+#: `SH_CAP`）先后进了口径；本侧从 271 走到 **287**、沉默 179 → **181**。
+#: 同日 main 的两条线又加了：原生更新器 `update.lomt` 三处（`SCR_CAP` / `NAME_CAP`
+#: 两处沉默、`PAYLOAD_CAP` 有话）与 LSPE SDK 的一处字面量。合并后条数 **290**、
+#: 沉默 **183**（以本机 `loment_caps.scan()` 实测为准）。
+CAPACITY_SITES = 290
+SILENT_SITES = 183
 
 #: 第二类：字面量上界（`#770`）。`[T; N]` 与 `literal:<N>` 各自钉住总数与沉默的那一份。
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
@@ -153,6 +151,7 @@ SILENT_NAMES = frozenset((
     "FILE_CAP",
     "FIX_STRIDE",
     "PAT_CAP",
+    "SH_CAP",
     "TXT_CAP",
     "CHK_ENV_MAX",
     "CASES_CAP",
@@ -168,6 +167,7 @@ SILENT_NAMES = frozenset((
     "CACHE_DIR_CAP",
     "CACHE_PATH_CAP",
     "CW",
+    "CAP_SLOTS",
     "C_CAND",
     "DECL_KW",
     "DELIM_CAP",
@@ -226,6 +226,7 @@ SILENT_NAMES = frozenset((
     "MAXW",
     "MAX_DIALECT",
     "MAX_LANG",
+    "MAX_RET",
     "MEM_CAP",
     "MIN_RECLEN",
     "MMAX",

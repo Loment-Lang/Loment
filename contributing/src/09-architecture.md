@@ -54,10 +54,10 @@ today; a v16 ledger is in flight for LSPE).
 
 ## The LVM
 
-LVM is a bytecode VM. The interpreter (`lvm IN.ll`) exists and is part of the twin criteria, but
-`choose vm` is **closed in release builds** — the dimension is a development switch until the
-engine ships. Tiers T0–T3 and a compact encoding live under `loment/`; `0.1.5` is the
-stabilisation release.
+LVM executes the program's IR. The interpreter (`lvm IN.ll`) is part of the twin criteria, and
+`choose lvm` (spelled `choose vm` before Potato v24) is accepted by both channels; the dimension
+is still a declaration, not a guarantee. Tiers T0–T3 and a compact form live under `loment/`;
+`0.1.5` is the stabilisation release.
 
 ## Memory
 

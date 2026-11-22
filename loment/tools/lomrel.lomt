@@ -301,6 +301,13 @@ tools/lvm_t3.py
 tools/lvm_t3_test.py
 tools/lvm_stability_test.py
 tools/lvm_a0_test.py
+tools/lvm_cap_test.py
+tools/lvm_seal.py
+tools/lvm_cp_test.py
+tools/lvm_seal_test.py
+tools/lvm_dismemory_test.py
+tools/loment_segv.py
+tools/loment_segv_test.py
 tools/lvm_perf_test.py
 tools/loment_net_test.py
 tools/lomt_from.py

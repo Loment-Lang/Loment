@@ -5458,6 +5458,81 @@ def test_a_nested_array_gep_steps_by_the_element_type():
     print("      嵌套数组 GEP：首下标按 pointee 步进（两份链接器都得到 67）")
 
 
+@test
+def test_mirror_fault_report_matches_reference():
+    """`--fault-report`（`docs/367` stage 2）：镜像的产物与参考**逐字节相同**。
+
+    这比"报告形状一样"更强：四张表（站点 / 函数区间 / 块名 / 名字池）都是**发射后
+    回填**的，任何一个地址差一个字节都说明两边对"哪条指令是站点"或"哪个块属于哪一段"
+    的判断分叉了。两个入口各一份 —— `_start` 与 `main`（后者在 stage 1 里发的是
+    `call i32 @main`，少了括号，`fn main` 的产物根本编不出来；`loment_segv_test` 判据 I
+    在参考侧钉住它）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    cases = {
+        "start": """define i32 @_start() {
+entry:
+  %p = alloca i32
+  store i32 7, ptr %p
+  %v = load i32, ptr %p
+  ret i32 %v
+}
+""",
+        "main": """define i32 @main() {
+entry:
+  %p = alloca i32
+  store i32 7, ptr %p
+  %v = load i32, ptr %p
+  ret i32 %v
+}
+""",
+    }
+    for name, ir in cases.items():
+        llrepo = ROOT / "loment" / "build" / f"_fault_twin_{name}.ll"
+        elfrepo = ROOT / "loment" / "build" / f"_fault_twin_{name}.elf"
+        try:
+            ref, _meta = lomelf.compile_ll(ir, fault_report=True)
+            llrepo.write_text(ir, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, f"loment/build/_fault_twin_{name}.ll",
+                                  f"loment/build/_fault_twin_{name}.elf",
+                                  flags=" --fault-report")
+            assert rc == 0, f"{name}: 镜像退出 {rc}: {err[-300:]}"
+            got = elfrepo.read_bytes()
+        finally:
+            llrepo.unlink(missing_ok=True)
+            elfrepo.unlink(missing_ok=True)
+        assert got == ref, (name, len(got), len(ref))
+    # 可恢复故障（`docs/367` §4.3）：同一段运行期 + 新的 shim 尾巴，两边仍须逐字节同。
+    heal_ir = """define i32 @_start() {
+entry:
+  %z = alloca i64
+  store i64 65536, ptr %z
+  %v = load i64, ptr %z
+  %p = inttoptr i64 %v to ptr
+  %x = load i32, ptr %p
+  ret i32 9
+}
+"""
+    llrepo = ROOT / "loment" / "build" / "_fault_twin_heal.ll"
+    elfrepo = ROOT / "loment" / "build" / "_fault_twin_heal.elf"
+    try:
+        ref, _meta = lomelf.compile_ll(heal_ir, fault_heal=2)
+        llrepo.write_text(heal_ir, encoding="utf-8", newline="\n")
+        rc, err = _mirror_run(mir, "loment/build/_fault_twin_heal.ll",
+                              "loment/build/_fault_twin_heal.elf",
+                              flags=" --fault-heal 2")
+        assert rc == 0, f"heal: 镜像退出 {rc}: {err[-300:]}"
+        got = elfrepo.read_bytes()
+    finally:
+        llrepo.unlink(missing_ok=True)
+        elfrepo.unlink(missing_ok=True)
+    assert got == ref, ("heal", len(got), len(ref))
+    print("      --fault-report / --fault-heal：镜像与参考逐字节相同")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_elf_test")
 

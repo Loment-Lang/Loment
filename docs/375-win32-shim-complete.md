@@ -1,4 +1,4 @@
-# 374 · PE 垫片补全：385 个 Linux 号，每个都有处置
+# 375 · PE 垫片补全：385 个 Linux 号，每个都有处置
 
 > 状态：**已落地**（2026-11-21）
 > 上游：`docs/217`（socket 面）、`docs/221`（poll/select）、`docs/234`（sendmsg/epoll）、

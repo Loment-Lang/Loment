@@ -767,5 +767,9 @@ fn test_mathf_tan_is_sin_over_cos() -> bool {
 fn test_mathf_exp_negative() -> bool {
     // e^-1 = 0.36787944117144233
     let d: u64 = f64_abs(f64_sub(mathf_exp(f64_neg(F64_ONE)), 0x3FD78B56362CEF38));
-    return f64_lt(d, 0x3D719799812DEA11); // 1e-12
+    // 边界: -700 仍是规格化数, -746 才真下溢 —— 下溢出口不能把两者之间也吞掉
+    let b: u64 = mathf_exp(f64_neg(mf_i(700)));
+    let c: u64 = mathf_exp(f64_neg(mf_i(746)));
+    return f64_lt(d, 0x3D719799812DEA11) // 1e-12
+        && f64_gt(b, F64_POS_ZERO) && c == F64_POS_ZERO;
 }

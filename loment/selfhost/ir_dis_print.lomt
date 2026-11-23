@@ -1,0 +1,23 @@
+module ir_dis_print
+choose runtime
+choose lvm_dismemory_true
+
+// M108 (docs/377)：dismemory 下 print_num / str_num 的运行期助手按**索引**走缓冲，
+// 不用 ptrtoint。这份单元只用来把两份 codegen 的 IR 逐字节对拍（不链接 ELF ——
+// 原生链接器点名拒 dismemory）。
+
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    let s: u32 = 0;
+    let i: u32 = 0;
+    while i < 4 {
+        s = s + a[i];
+        i = i + 1;
+    }
+    print("sum=");
+    print_num(s as i64);
+    let t: str = str_num(s);
+    print(t);
+    print("\n");
+    syscall4(60, s as u64, 0, 0);
+}

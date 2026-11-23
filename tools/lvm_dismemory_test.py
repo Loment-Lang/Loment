@@ -564,6 +564,120 @@ def test_byte_reinterpretation_of_an_element_is_refused() -> None:
         raise AssertionError("把 i32 元素当字节串重新解释了")
     print("      i32 元素上用 i8 去指：F04；根上的字节指针仍合法")
 
+
+#: V（`docs/377` §4）：深度 4 的**形状语料**。只放语言面**接受**的形状；
+#: 嵌套聚合在编译期就被拒，另有一条判据把那条边界钉住。
+_SHAPE_BASE = """module shape_{name}
+choose runtime
+use bytes
+
+{body}
+"""
+
+_SHAPES = {
+    "struct_fields": r'''
+struct P { a: u32, b: u32 }
+fn _start() {
+    let p: P = P { a: 3, b: 5 };
+    p.a = p.a + 1;
+    syscall4(60, (p.a * 10 + p.b) as u64, 0, 0);
+}
+''',
+    "agg_param_ret": r'''
+struct P { a: u32, b: u32 }
+fn mk(a: u32, b: u32) -> P { return P { a: a, b: b }; }
+fn score(p: P) -> u32 { return p.a * 10 + p.b; }
+fn _start() {
+    let p: P = mk(3, 4);
+    syscall4(60, score(p) as u64, 0, 0);
+}
+''',
+    "slice_arg": r'''
+fn sum(xs: [u32]) -> u32 {
+    let acc: u32 = 0;
+    let i: u32 = 0;
+    while i < slice_len(xs) {
+        acc = acc + xs[i];
+        i = i + 1;
+    }
+    return acc;
+}
+fn _start() {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    syscall4(60, sum(&a) as u64, 0, 0);
+}
+''',
+    "ptr_field": r'''
+struct Node { v: u32, next: ptr }
+fn _start() {
+    let q: ptr = alloc(4);
+    store32(q, 0, 5);
+    let n: Node = Node { v: 2, next: q };
+    let x: u32 = load32(n.next, 0);
+    free(q);
+    syscall4(60, (n.v * 10 + x) as u64, 0, 0);
+}
+''',
+    "print_num": r'''
+fn _start() {
+    print_num(4321 as i64);
+    print("\n");
+    syscall4(60, 7, 0, 0);
+}
+''',
+    "str_num": r'''
+fn _start() {
+    let s: str = str_num(1234);
+    print(s);
+    print("\n");
+    syscall4(60, 5, 0, 0);
+}
+''',
+    "struct_print": r'''
+struct Msg { n: u32 }
+fn _start() {
+    let m: Msg = Msg { n: 7 };
+    print("msg=");
+    print_num(m.n);
+    print("\n");
+    syscall4(60, m.n as u64, 0, 0);
+}
+''',
+}
+
+
+def test_deep_shapes_match_plain() -> None:
+    """判 V（`docs/377` §4）：形状语料在普通档与深度 4 档下同答。"""
+    n = 0
+    for name, body in _SHAPES.items():
+        plain = _ir(_SHAPE_BASE.format(name=name, body=body))
+        dis = _ir(_SHAPE_BASE.format(name=name, body=body)
+                  .replace("choose runtime", "choose runtime\nchoose lvm_dismemory_true"))
+        a = _run(plain)
+        b = _run(dis)
+        assert (a[0], a[1]) == (b[0], b[1]), (name, a, b)
+        n = n + 1
+    print(f"      {n} 份形状语料：普通档与深度 4 档 rc/stdout 逐字节同")
+
+
+def test_nested_aggregates_are_a_language_boundary() -> None:
+    """嵌套聚合目前**编不过**（语言面），这一档不为它背锅。"""
+    bad = r'''
+struct In { x: u32 }
+struct Out { i: In, z: u32 }
+fn _start() {
+    let o: Out = Out { i: In { x: 1 }, z: 2 };
+    syscall4(60, 0, 0, 0);
+}
+'''
+    try:
+        _ir(_SHAPE_BASE.format(name="nested", body=bad))
+    except Exception as e:                       # noqa: BLE001
+        assert "只支持标量" in str(e), str(e)[:200]
+    else:
+        raise AssertionError("嵌套聚合已被支持 —— 把它挪进 `_SHAPES` 并删掉这条")
+    print("      嵌套聚合：编译器点名拒（只支持标量）—— 语言面边界，不是深度 4 的")
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":

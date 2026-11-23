@@ -617,6 +617,92 @@ wr:
 
 #: `str_num` 的十进制转换（`docs/337`）。与 `print_num` 同一段循环，但写进调用方给的
 #: 缓冲区、返回长度 —— 因此不带 `syscall`，只在真调用 `str_num` 时发。
+_IR_PRINT_NUM_DIS = '''define internal i32 @__loment_print_num(i64 %v) {
+entry:
+  %buf = alloca [24 x i8]
+  %neg = icmp slt i64 %v, 0
+  br i1 %neg, label %negp, label %pos
+negp:
+  %m0 = sub i64 0, %v
+  br label %conv
+pos:
+  br label %conv
+conv:
+  %m = phi i64 [ %m0, %negp ], [ %v, %pos ]
+  br label %loop
+loop:
+  %i = phi i64 [ 24, %conv ], [ %i2, %loop ]
+  %x = phi i64 [ %m, %conv ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %i2 = sub i64 %i, 1
+  %slot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i2
+  store i8 %c2, ptr %slot
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  br i1 %neg, label %sign, label %wr
+sign:
+  %i3 = sub i64 %i2, 1
+  %sslot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i3
+  store i8 45, ptr %sslot
+  br label %wr
+wr:
+  %st = phi i64 [ %i2, %after ], [ %i3, %sign ]
+  %sp = getelementptr [24 x i8], ptr %buf, i64 0, i64 %st
+  %ln = sub i64 24, %st
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 1, i64 1, ptr %sp, i64 %ln)
+  %t = trunc i64 %r to i32
+  ret i32 %t
+}
+'''
+
+_IR_NUM_TO_DEC_DIS = '''define internal i32 @__loment_num_to_dec(ptr %out, i64 %v, i32 %sgn) {
+entry:
+  %buf = alloca [24 x i8]
+  %z1 = icmp slt i64 %v, 0
+  %z2 = icmp ne i32 %sgn, 0
+  %neg = and i1 %z1, %z2
+  %nv = sub i64 0, %v
+  br i1 %neg, label %negp, label %pos
+negp:
+  br label %conv
+pos:
+  br label %conv
+conv:
+  %x0 = phi i64 [ %nv, %negp ], [ %v, %pos ]
+  br label %loop
+loop:
+  %i = phi i64 [ 24, %conv ], [ %i2, %loop ]
+  %x = phi i64 [ %x0, %conv ], [ %q, %loop ]
+  %d = urem i64 %x, 10
+  %q = udiv i64 %x, 10
+  %c = trunc i64 %d to i8
+  %c2 = add i8 %c, 48
+  %i2 = sub i64 %i, 1
+  %slot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i2
+  store i8 %c2, ptr %slot
+  %done = icmp eq i64 %q, 0
+  br i1 %done, label %after, label %loop
+after:
+  br i1 %neg, label %sign, label %copy
+sign:
+  %i3 = sub i64 %i2, 1
+  %sslot = getelementptr [24 x i8], ptr %buf, i64 0, i64 %i3
+  store i8 45, ptr %sslot
+  br label %copy
+copy:
+  %st = phi i64 [ %i2, %after ], [ %i3, %sign ]
+  %sp = getelementptr [24 x i8], ptr %buf, i64 0, i64 %st
+  %ln = sub i64 24, %st
+  %ln32 = trunc i64 %ln to i32
+  call void @__loment_memcpy(ptr %out, ptr %sp, i64 %ln)
+  ret i32 %ln32
+}
+'''
+
 _IR_NUM_TO_DEC = '''define internal i32 @__loment_num_to_dec(ptr %out, i64 %v, i32 %sgn) {
 entry:
   %buf = alloca [24 x i8]
@@ -17813,12 +17899,12 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # `print_num` 的那段**单独发**（`docs/296` §2.7）：它与 `_IR_RUNTIME` 同处运行时区、
     # 但只在真的调用了它时才出现 —— 它带一句 x86 的 `syscall` asm。
     if "@__loment_print_num" in text_all:
-        out.append(_IR_PRINT_NUM)
+        out.append(_IR_PRINT_NUM_DIS if mod.chooses.get("lvm", CORE_DEFAULTS["lvm"]) == "lvm_dismemory_true" else _IR_PRINT_NUM)
     # `str_num` 与插值里的整型取值（`str_show` / `str_repr` 的整型分支）共用同一段
     # 十进制转换。判据同样是**源里的名字**（`docs/341`）—— 自举侧要在函数体之前
     # 决定发不发，它那时不知道实参类型。多发的代价是一段没人调用的 internal 函数。
     if _calls_named(mods, ("str_num", "str_show", "str_repr")):
-        out.append(_IR_NUM_TO_DEC)
+        out.append(_IR_NUM_TO_DEC_DIS if mod.chooses.get("lvm", CORE_DEFAULTS["lvm"]) == "lvm_dismemory_true" else _IR_NUM_TO_DEC)
     # 插值的两个 helper（`docs/341`）。判据是**源里有没有这两个调用**，不是产物文本里
     # 有没有那两条 call —— 自举侧的运行期块写在函数体**之前**，它那时还不知道实参类型；
     # 两边用同一条 token 判据（名字 + 紧跟 `(`、且不是 `fn` 后面的声明），产物才逐字节同。

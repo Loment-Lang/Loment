@@ -142,8 +142,8 @@ SILENT_SITES = 185
 #: 2026-11-12 `docs/348`：间接调用那一支也走同一张 20 格实参类型槽表 ⇒ 多一处 literal:20。
 LITERAL_SITES = 70
 LITERAL_SILENT = 69
-ARRAY_SITES = 20
-ARRAY_SILENT = 19
+ARRAY_SITES = 21
+ARRAY_SILENT = 20
 
 #: 越界时**说不出话**的那些具名常量（`--silent` 去重、按字节序）。133 个。
 #: ⚠ 这里按**筛子**的口径（`not speaks`），所以那些"来路已写明"的也在内 ——
@@ -368,6 +368,7 @@ SILENT_LITERALS = {
 
 #: 定长数组里**沉默**的那一份，键是 `(文件, array:[T;N])`，值是条数。
 SILENT_ARRAYS = {
+    ("loment/selfhost/ir_dis_print.lomt", "array:[u32;4]"): 1,
     ("loment/ct/loops.lomt", "array:[u64;8]"): 1,
     ("loment/examples/demo.lomt", "array:[u32;4]"): 2,
     ("loment/examples/domains/borrow_lifetimes.lomt", "array:[u32;4]"): 1,

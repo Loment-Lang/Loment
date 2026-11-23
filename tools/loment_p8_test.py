@@ -1090,7 +1090,9 @@ def test_m82_loment_codegen_byte_identical():
                        # `docs/353` §4：GC alpha + 遮蔽（按名字保守退出，E12 站点）。
                        ROOT / "loment" / "selfhost" / "ir_scope_gc.lomt",
                        # `docs/353` §4 + `docs/309`：alpha 里的 `lgc` 三种窗口各一层作用域。
-                       ROOT / "loment" / "selfhost" / "lgc_alpha.lomt"):
+                       ROOT / "loment" / "selfhost" / "lgc_alpha.lomt",
+                       # `docs/377`：dismemory 下 print_num/str_num 的**索引版**助手。
+                       ROOT / "loment" / "selfhost" / "ir_dis_print.lomt"):
             want = _unit_ll(target)
             got = _run_codegen(exe, target, td)
             if got != want:

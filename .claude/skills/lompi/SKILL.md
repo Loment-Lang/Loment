@@ -72,9 +72,11 @@ identity).
 ## 3. Commands
 
 ```
-lompi install <name> [--into DIR] [--registry URL]  fetch -> validate -> install a library
+lompi install <name> [--into DIR] [--registry URL] [--lock-sha256 HEX]
+                                                     fetch -> validate -> install a library
 lompi check   <dir>                                 is this a valid Loment library?
-lompi fetch   [--registry URL]                      plan the registry download
+lompi fetch   [--registry URL] [--registry-sha256 H] [--foreign-index-sha256 H] [--insecure]
+                                                     fetch the registry (H = index sha256)
 lompi config                                        show global root + registry (and the rule)
 lompi version                                       print the version
 lompi list    [<store>]                             list packages in the store
@@ -103,7 +105,8 @@ you retype on every call — that is something the machine should remember, not 
 `<store>/obj-<sha256>.o` (its own content address), `get` pulls the bytes back. The point
 (`docs/212` §5 B): the heavy kernel is compiled **once** on a machine that has clang, and every
 other machine fetches the bytes and links them (`loment build app.lomt --link obj-….o`) **without
-a compiler**. Flat layout on purpose — `sys_mkdir` does not exist on the PE side.
+a compiler**. Flat layout on purpose — lompi never creates directories (`sys_can_mkdir()` is
+pinned `false` in `lpi_sys.lomt`).
 
 `<name[@version]>`: `mathutil` means "highest version", `mathutil@0.1.0` pins one.
 
@@ -303,6 +306,13 @@ write failure it prints the exact `mkdir -p` (the same PE gap as §5.6) rather t
 leaving you with a partial cache. Run the printed command, then `lompi install <name>`
 will find the package in the cache.
 
+**Out-of-band pins (`docs/236` §7.1, `docs/283` §7).** `--registry-sha256 HEX` pins the
+registry index hash, and `--foreign-index-sha256 HEX` pins a **foreign** index (Java packages
+and other non-Loment sources) separately; each must be exactly 64 hex characters (case folded
+to lower). A mismatch is a hard refusal, not a warning. `--insecure` accepts an **unpinned**
+foreign index only from `127.0.0.1`; it is for a local test registry. `install` has the
+matching `--lock-sha256 HEX` for pinning the lock out of band.
+
 ### 5.0.3 `config` and `version`
 
 ```
@@ -425,12 +435,12 @@ It resolves the **closure** (which instances are needed) and each instance's **s
 directory**, and prints the one `mkdir` that is required (`--into` sets the target,
 defaulting to `deps`).
 
-**Why a plan instead of writing files directly**: the Windows PE target has no `mkdir` /
-`unlink` in its syscall surface — it can write into directories that already exist, but
-cannot create one. Installing a package means creating
-`deps/<name>/`, so that step is handed to the caller (a shell, CI, or the reference
-toolchain). On ELF targets `mkdir` is available and the same plan can be executed
-directly. **The boundary belongs to the target platform, not to lompi.**
+**Why a plan instead of writing files directly**: lompi's policy layer reports `mkdir` as
+unavailable on PE (`sys_can_mkdir()` is pinned `false` in `lpi_sys.lomt`, with a criterion),
+so `install` hands that step to the caller (a shell, CI, or the reference toolchain).
+Installing a package means creating `deps/<name>/`. The **PE syscall shim now dispatches
+`mkdir`**, but the lompi binary still keeps the plan/first-check flow; on ELF targets the plan
+can be executed directly. **The boundary is lompi's policy, not the target platform's.**
 
 Every plan line starting with `#` is a comment, so the whole output can be piped straight
 into a shell.
@@ -451,6 +461,13 @@ dependencies (§8). Use this command to see whether the package body itself chan
 
 The entry point for "which Loment libraries are available here", "what is in the store",
 "where is the source for X".
+
+**The store that ships with Loment (2026-11-22)** is **13 packages / about 332 `.lomt`
+files**: `std` (148), `host` (8), `os` (44), `system` (41), `world` (22), `dev` (15),
+`lowlevel` (12), `internet` (11), `math` (9), `science` (6), `baremetal` (6), `windows` (6),
+`engineering` (4). Counts move as packages grow - use `ls` on the store. Every package
+manifest carries the `LomentItem` mark, and `LOMENT_NO_STORE=1` makes the compiler ignore the
+packaged store entirely for that build (the bare-metal escape hatch, `docs/331`).
 
 **Step 1 — locate the store. Ask, do not guess.**
 
@@ -649,10 +666,12 @@ around one
   toolchain gaps, not design positions** — do not design a workflow around them being
   permanent. Note this list is about the *toolchain*: what lompi itself will never do is
   the "By design" list above.
-- **No `mkdir`.** `install --apply` writes files into directories that already exist; it
-  checks them all up front and lists the `mkdir` commands you need instead of leaving a
-  partial install. The PE runtime still does not offer it. On ELF targets it *is* available
-  (see 5.6), which is the tell that this is the PE shim speaking, not lompi.
+- **No `mkdir` from lompi.** `install --apply` writes files into directories that already
+  exist; it checks them all up front and lists the `mkdir` commands you need instead of leaving
+  a partial install. This is **lompi's policy**, not a statement about the target: the PE
+  syscall shim now dispatches `mkdir`, but lompi's `sys_can_mkdir()` is deliberately pinned
+  `false` (`lpi_sys.lomt`, with a criterion), so the CLI keeps the plan/first-check flow. On
+  ELF targets `mkdir` is available.
 
 **Behaviour you should know** (settled, and these are not limitations)
 

@@ -1,6 +1,6 @@
 ---
 name: loment
-description: Entry point of the LomentSkill suite for Loment (FujoOS's own systems language - Tur grammar plus capability domains, native ELF/PE, no Python runtime). Start here for the toolchain check, hello world, the whole-language tour, and the map of the suite. The deep material lives in sibling skills - `loment-syntax` (cheat sheet, builtins, E001-E038), `loment-tur` (editions and full grammar), `loment-traps` (measured traps), `loment-safety` (capabilities, LGC, LMS, LSPE), `loment-runtime` (LVM, Potato, hot update, optimizers, DGT), `loment-ffi` (C ABI, LibL, Java, network, threads), `loment-toolchain` (CLI, editors, L0/LLS, packaging, libraries). Use for writing, reading or debugging Loment source (.lomt / .lom / .lomp) with the toolchain installed. For libraries and dependencies read the lompi guide first (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md`), because a library is a directory, its identity is a content hash, and its dependencies are the `use` lines in its source.
+description: Entry point of the LomentSkill suite for Loment (FujoOS's own systems language - Tur grammar plus capability domains, 11 choose dimensions, native ELF/PE, no Python runtime), describing the 0.1.6 generation. Start here for the toolchain check, hello world, the whole-language tour, and the map of the suite. The deep material lives in sibling skills - `loment-syntax` (cheat sheet, builtins, E001-E041 + 241 fine codes), `loment-tur` (editions including 2026.3 and opt-in 2027.1Alpha, full grammar, effects/classes/fp), `loment-traps` (measured traps), `loment-safety` (capabilities, borrows, LGC, LMS, LSPE SDK 1.0), `loment-runtime` (LVM/LVM-A, Potato, LNotary, hot update, Flomtc, optimizers, DGT), `loment-ffi` (C ABI, LibL, Java, network, threads, PE shim), `loment-toolchain` (CLI, editors, L0/LLS, packaging, libraries). Use for writing, reading or debugging Loment source (.lomt / .lom / .lomp) with the toolchain installed. For libraries and dependencies read the lompi guide first (`~/.claude/skills/lompi/SKILL.md`, or `<prefix>/share/lompi/skill/SKILL.md`), because a library is a directory, its identity is a content hash, and its dependencies are the `use` lines in its source.
 ---
 
 # Loment: the language you write programs in
@@ -70,6 +70,23 @@ Its third feature is **struct literal shorthand**: in 2026.3, `S { a, b }` means
 `S { a: a, b: b }` (explicit and shorthand fields may be mixed; `docs/329`). It is a spelling
 only - the artifact is identical to the explicit form.
 
+**The rest of the 2026.3 surface** (all landed between 2026-11-13 and 2026-11-22; details in
+`loment-tur` 2.0.5): inferred locals (`let n := p.a;` / `let x: auto = e;` - the initialiser
+must spell a type), interpolated strings (`f"n={n}"` / `rf"…"`, single line), `const NAME: str
+= "…"` (inlined at each use), `catch |e| { expr }` and `catch return`, `if` / `match` as a
+`let` initialiser, `for i, x in xs`, and `for x in <call>` (a call returning an array/slice,
+evaluated once).
+
+**Four more surfaces are opt-in and off by default** - do not assume them because the edition
+is new (section 2.0.5b of `loment-tur`):
+
+| Surface | Switch | Today |
+|---|---|---|
+| **Algebraic effects** (`effect` / `effects` / `perform` / `handle` / `resume`) | `choose lspe_effects_true` (a slot) | **reference compiler only**, tail-resumptive inlining; the self-hosted compiler refuses with E0217 |
+| **Classes** (`class` / `extends` / `virtual` / `override` / `abstract` / `super`) | `choose class_on` | reference C1-C3; self-hosted C4a (non-virtual only) |
+| **Function values and closures** | `choose fp` | both implementations; `no_fp` is the default and every entry is E0222 |
+| **Block-scoped `let`** | `choose write grammar tur2027.1Alpha` | alpha edition only; the default 2026.3 still has the function-level `let` leak |
+
 The same program can also be written with C / C++ / Java / C# / Go / Python spelling, **changing
 the spelling and nothing else** - recognised **by extension** (`.c` / `.cpp` / `.java` / `.cs` /
 `.py` / `.go`), or with an explicit declaration at the top of the file:
@@ -125,9 +142,9 @@ round trip):
 | **`loment-syntax`** | 2, 3, 4 | the cheat sheet, a builtin signature, an error code |
 | **`loment-tur`** | 2.0 | grammar, editions, syntax details, surface spellings |
 | **`loment-traps`** | 6 | measured traps before writing or debugging |
-| **`loment-safety`** | 5, 5.1, 8.1-8.2 | capabilities, GC, LMS, LSPE |
-| **`loment-runtime`** | 8.3-8.8 | LVM, Potato, hot update, optimizers, DGT |
-| **`loment-ffi`** | 7.3, 8.9-8.10 | C ABI, LibL, Java, network, threads |
+| **`loment-safety`** | 5, 5.1, 8.1-8.2 | capabilities and domains, borrow lifetimes, GC, LMS, LSPE, effects as an LSPE engine |
+| **`loment-runtime`** | 8.3-8.8 | LVM and LVM-A, Potato, LNotary/replay trust, hot update, Flomtc, optimizers, DGT |
+| **`loment-ffi`** | 7.3, 8.9-8.10 | C ABI, LibL, Java, network, threads, the PE syscall shim |
 | **`loment-toolchain`** | 8.11-8.13, 10 | CLI, editors, L0/LLS, packaging, libraries, repo paths |
 
 **Read the program in section 1 first, then come back to the reference skills.** It walks the whole
@@ -144,15 +161,17 @@ loment version
 You get two lines, for example:
 
 ```
-Loment 0.1.5 (0.1.5)
-commit edda7d4e (2026-11-04)
+Loment 0.1.6 (0.1.6)
+commit <sha> (2026-11-22)
 ```
 
 **The commit is what counts**: different checkouts can do different things (this suite
-describes the 0.1.5 generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3`
-/ `0.1.4 Pre2`).
+describes the **0.1.6** generation, `standard/LLS.md` Edition 2; older packages print `0.1.5`,
+`0.1.4`, `0.1.4 Alpha` / `0.1.4 Alpha2.3` / `0.1.4 Pre2`). 0.1.6 is in the tree and the
+release tooling but was **not tagged** at the time of writing - the newest tag is
+`v0.1.5.1-hot.1`.
 
-**There are 38 commands; `loment help` lists all of them** (grouped, aligned, coloured) and
+**There are 39 commands; `loment help` lists all of them** (grouped, aligned, coloured) and
 `loment help <command>` documents one. The ones used most:
 
 | Command | What it does |
@@ -163,7 +182,8 @@ describes the 0.1.5 generation; older packages print `0.1.4`, `0.1.4 Alpha` / `0
 | `loment run FILE` | Compile and run |
 | `loment fmt FILE` | Format (prints the result) |
 | `loment doc FILE` | Generate API docs |
-| `loment lsp` | Language server (LSP over stdio) |
+| `loment lsp` | Language server (LSP over stdio). The packaged self-hosted LSP does **not** format; the reference LSP (`tools/loment_lsp.py`, what the VS Code extension uses) does |
+| `loment hotupdate ...` | Install / `--check` / `--rollback` / `--status` a signed toolchain generation (a hot update; `loment-runtime` 8.5) |
 | `loment skill [--print]` | Print the path to **this suite's entry** / its whole text - depends on no directory convention |
 
 **With no copy of this suite to hand, the language reference is still one command away** (that is
@@ -175,7 +195,7 @@ what self-contained means here):
 | `loment syntax` | The syntax cheat sheet |
 | `loment builtins` | The builtin table (all of them, there are no others) |
 | `loment types` / `keywords` / `caps` | Type table / keywords / capability domains |
-| `loment codes` / `loment explain E4` | The code table / one code in detail (the packaged banner still says "E1-E23"; the reporter knows E001–E038) |
+| `loment codes` / `loment explain E4` | The code table / one code in detail (the packaged banner may lag; the reporter knows E001–E041 + 241 fine `E0xxx` codes) |
 | `loment new NAME` | Write a skeleton that `loment run` accepts immediately |
 | `loment stat` / `fns` / `grep` / `hash` / `cat` | Read source (lines, signatures, search, sha256, numbered print) |
 | `loment ls` / `tree` / `examples` / `example tour` | Directory and examples |
@@ -445,8 +465,9 @@ Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 
 ## 2-4. Syntax, builtins, error codes
 
-The cheat sheet, the complete builtin table and the E001-E038 code table are the subject of the
-**`loment-syntax`** skill. Read it when you need a signature, a piece of syntax, or a code.
+The cheat sheet, the complete builtin table and the diagnostic table (the `E001`–`E041` family
+codes plus the **241** fine `E0xxx` codes) are the subject of the **`loment-syntax`** skill.
+Read it when you need a signature, a piece of syntax, or a code.
 
 ## 5. Capability domains and the safety stack
 

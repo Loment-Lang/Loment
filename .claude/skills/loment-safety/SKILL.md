@@ -1,6 +1,6 @@
 ---
 name: loment-safety
-description: Loment's safety stack - capability domains (capability/guard/excluded/revocable), LGC's reclamation ladder and gc tiers, LMS's seven memory-safety levels, and LSPE's audit ledger (obligations, evidence, levels, lspe pass, Potato v16, E034-E038). Read when choosing gc/lms/lspe, debugging memory behavior, or reading a safety ledger. Part of the LomentSkill suite; section numbers are global.
+description: Loment's safety stack - capability domains (capability/guard/domain/excluded/revocable, trees, walking, revocation), borrow lifetimes and the borrow checker, LGC's reclamation ladder and gc tiers (including ReclaimScoped), LMS's seven memory-safety levels, and LSPE's audit ledger (20 obligations, evidence, levels, lspe pass, Potato v16, E034-E038) plus the LSPE SDK 1.0 and its engines (domains E9, borrows E10, effects E11, GC E12). Read when choosing gc/lms/lspe/lifetime, debugging memory behavior, or reading a safety ledger. Part of the LomentSkill suite; section numbers are global.
 ---
 
 ## 5. Capability domains and the safety stack
@@ -123,6 +123,9 @@ fn pump(a: [u32; 16] in disk) -> u32 {
 - `couple A, B, …` makes one renewal unit: a guard on any member also (silently) checks the
   others at the same position, and a `quality` write goes to every adaptive member.
 - `mutex A, B` is a compile-time promise (finite, non-danger, disjoint shapes); it emits no code.
+- `sibling A, B;` records an explicit **sibling edge** between two domains under the same
+  parent (the horizontal tree edge; both must be in scope and share a parent). A `domain:for`
+  over an empty range is a **compile error**, not a silent no-op (`docs/315` §4.2, #1649).
 - `solid name : A, B, …;` names a body: `guard name(x)` judges the root member and checks the
   rest silently, `quality name = q;` writes the whole group. A body's audit entry lands on its
   root member; coupling components are per function.
@@ -170,7 +173,7 @@ actually do things**. `syscall4` / `syscall6` are raw builtins, `alloc` / `load8
 reads a file and writes through a raw pointer with **no declaration, no audit entry, and nothing
 in the diagnostics that shows it**. `capability` says what a domain is; it does not stop anyone.
 
-### 5.1 LSPE: the audit layer (0.1.5)
+### 5.1 LSPE: the audit layer (0.1.6, SDK 1.0)
 
 **LSPE = Loment Safety Police Espace** (`docs/262`). It is **not a seventh checker**: the
 enforcers stay exactly as they are (LGC for lifetime, LMS for legality, `capability` / `guard`
@@ -213,14 +216,15 @@ A **site** is one allowance point - `guard cap(i)`, an array/slice index, a `fre
 (`unit:kind:fnv8(text#occurrence)`), not line numbers, so formatting a file or inserting an
 unrelated site does not renumber the rest.
 
-The **14 obligations** (`loment/lspe/registry.py`), each naming its semantic owner and the
-evidence that may discharge it:
+The **20 obligations** (`loment/lspe/registry.py`, `LSPE_OBLIGATIONS`), each naming its
+semantic owner and the evidence that may discharge it. The table is **frozen** at SDK 1.0:
+adding, removing or changing an accept set is a version bump (`docs/361` §4).
 
 | Obligation | Owner | Accepted evidence |
 |---|---|---|
 | `InBounds` | docs/146 / E028 | Syntactic, Typed, LocalFlow, Interproc, GlobalInvariant, Assumed |
 | `Alive` | docs/210 / E029 | LocalFlow, Interproc, Assumed |
-| `InDomain` | docs/146 | Typed, GlobalInvariant, Assumed |
+| `InDomain` | docs/146 | Syntactic, Typed, GlobalInvariant, Assumed |
 | `Exclusive` | docs/206 / E007 | LocalFlow, Interproc, Assumed |
 | `Initialized` | docs/206 / E006 | Syntactic, LocalFlow, Interproc, Assumed |
 | `NotDangling` | docs/206 / E012 | LocalFlow, Interproc, Assumed |
@@ -229,9 +233,15 @@ evidence that may discharge it:
 | `LadderLiability` | docs/210 | Typed, Interproc, GlobalInvariant, Assumed |
 | `CapabilityLive` | docs/146 | Typed, GlobalInvariant, Assumed |
 | `TypeWellFormed` | docs/158 / docs/147 | Axiom, Typed, Interproc, Assumed |
-| `DropHonest` | docs/253 §1.2 | **Assumed only** (the floor) |
+| `DropHonest` | docs/253 §1.2 | Assumed (the floor), or Syntactic with a hand-written `drop:<type>=prove` |
 | `GuardHolds` | docs/146 | Syntactic, Typed, GlobalInvariant, Assumed |
 | `SummaryContract` | docs/210 §7 | Axiom, Interproc, Assumed |
+| `ReclaimScoped` | docs/210 §7 / docs/353 §5 (**E12 GC**) | Syntactic, LocalFlow - a shadowed name is left undecided, **not** proved |
+| `EffectAllowed` | docs/341 (**E11 effects**) | Syntactic, Typed, Interproc, Assumed |
+| `HandlerExhaustive` | docs/341 | Syntactic, Typed, Assumed |
+| `ResumeLinear` | docs/341 | LocalFlow, Syntactic, Assumed |
+| `EffectBounded` | docs/341 | Axiom (effects do not cross a C boundary), Typed, Assumed |
+| `CaptureReclaim` | docs/341 | LocalFlow, Interproc, Assumed |
 
 The **eight evidence kinds** are `Axiom`, `Syntactic`, `Typed`, `LocalFlow`, `Interproc`,
 `GlobalInvariant`, `Assumed`, `Differential`. They form a finite lattice by inclusion.
@@ -262,6 +272,7 @@ green light with a low level" is visible.
   "state": "lspe_open_admin",
   "set_by": "default",
   "mode": "full",
+  "aicheck": false,
   "level": 3,
   "sites": 1234,
   "obligations": 1234,
@@ -270,32 +281,45 @@ green light with a low level" is visible.
   "deferred": 0,
   "refused": 0,
   "floors": 0,
-  "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0, "drop_honest": 0, "pass": 0},
+  "floor_detail": {"assumed": 0, "stale_wf": 0, "budget": 0, "depth": 0,
+                   "drop_honest": 0, "pass": 0},
   "per_kind": {"InBounds": "400/410", "Alive": "390/400"},
+  "interrogations": {"provenance": 1200, "falsification": 30, "cross_exam": 1234},
+  "lspc": "full",
   "passes": [{"id": "unit:pass:…", "line": 12, "end_line": 15, "reason": "caller checked", "sites": 2}],
   "pass_sites": 0,
   "passed_sites": 0,
   "pass_ratio": "0/1234",
-  "invariants": {"i1": "ok", "i2": "not_run", "i3": "not_run", "i4": "not_run", "i5": "not_run"},
+  "invariants": {"i1": "ok", "i2": "ok", "i3": "ok", "i4": "ok", "i5": "ok"},
   "acked": 0
 }
 ```
 
-What is **actually implemented today** (0.1.5, `loment/lspe/`):
+What is **actually implemented today** (0.1.6, `lspe-sdk/1.0`, `loment/lspe/`):
 
+- one top-level **`MainChecker`**; the scheduler lives on `LspeSdk.scheduler`, and the compiler
+  calls `lspe.audit(...)` - it no longer assembles a "plan + census" pair itself. The public
+  surface is the frozen `SDK_SURFACE` (`loment/lspe/sdk.py`): **adding a name is a version
+  bump**, not an incidental export.
 - the site census for `guard` / `index` / `bounds` / `free` / `alive` / `init` / `exclusive` /
-  `call` (`census.py`, 623 lines, mirrored in `lspe.lomt`);
-- the 14-obligation registry and the evidence lattice (`registry.py`);
-- a worklist solver whose only current edge is "one obligation per site"; the provenance /
-  falsification / cross-examination engines (E1–E4) are **partially** wired;
-- the ledger, `per_kind`, `pass_ratio`, and **I1 only** (every site kind is registered). **I2–I5
-  report `not_run`**; `deferred` / `refused` / `acked` are 0; `floor_detail` is 0 except `pass`;
+  `call` / effect sites, mirrored in `lspe.lomt`;
+- the **20-obligation** registry and the evidence lattice (`registry.py`), including
+  `ReclaimScoped` (E12 GC), the five effect obligations (E11), and the domain/borrow engines
+  (E9/E10);
+- the questioner's verdicts (E1-E8), the counter-asker's Q codes and answer channel, and the
+  LSPC pre-flight sheet with its modes (`loment/lspe/lspc.py`);
+- the ledger, `per_kind`, `pass_ratio`, `interrogations`, `lspc`, proof trees / `proof_root`,
+  and **all five invariants I1-I5** under `lspe_open_admin`; under `lspe_close_admin` they
+  report `not_run` because there is no ledger to audit;
 - `lspe pass` blocks (below);
-- `lspe_close_admin` zeroes the counts but still records `state` and `set_by`.
+- the `lspe_aicheck_true` slot, which adds Q014 questions but **never adds evidence** to an
+  obligation.
 
-So the honest summary is: **the ledger exists and is checkable; the full proof search is the
-0.1.6+ work.** Do not read `"proved"` as "the compiler proved my program safe" - read it as
-"this many sites had at least one accepted evidence item at this level".
+The honest summary: **the ledger and the proof search are landed**; the remaining gaps are
+specific (general non-tail effects handlers and cross-function `perform`, NLL, the
+`loop`/`depth` floors), not "the proof search is a stub". Do not read `"proved"` as "the
+compiler proved my program safe" - read it as "this many sites had at least one accepted
+evidence item at this level".
 
 #### 5.1.5 `lspe pass "reason" { … }`
 
@@ -329,10 +353,11 @@ fn f(a: [u32; 4], i: u32) -> u32 {
 | Surface | Today |
 |---|---|
 | `loment lspe state FILE [--lspe-level 0..4]` | **works** (checkout launcher): prints the ledger of one unit |
-| `loment lspe why SITE` | prints "lands in 0.1.6" - derivation trees are not shipped |
-| `loment lspe verify ARTIFACT [SIDECAR]` | same - proof hashes and the `.lspe` sidecar are not shipped |
-| `--lspe-mode=full\|quiet\|strict` | designed as a build knob; the driver has the parameter, **the CLI does not expose it yet**, so E034 (undecided under strict) is not reachable from the command line |
-| `--lspc=full\|quiet\|strict\|off` | **designed, not implemented**; the LSPC pre-flight sheet does not exist yet |
+| `loment lspe why SITE` | **works** in 0.1.6: prints the derivation chain of one site (not a stub) |
+| `loment lspe verify ARTIFACT [SIDECAR]` | **works** in 0.1.6: checks the proof hashes and the `.lspe` sidecar |
+| `loment lspe effects FILE` | **works**: reads the effect sites (`perform` / `handle` / `resume`) from the token stream |
+| `--lspe-mode=full\|quiet\|strict` | the driver has the parameter; the packaged CLI still does not expose it, so E034 (undecided under strict) is mainly reachable from the reference CLI |
+| `--lspc=full\|quiet\|strict\|off` | the LSPC sheet and modes exist in `loment/lspe/lspc.py`; `loment lspe state` records the mode as `lspe.lspc` |
 | `E37` policy lock | reserved; the policy layer does not exist and the code never emits it |
 
 #### 5.1.7 The question space and the five invariants (design; mostly not shipped)
@@ -355,20 +380,48 @@ When the questioner cannot close a hole, the design hands over a **question** in
 | `Q011` | a runtime leak |
 | `Q012` | an assumption has expired (the source changed) |
 
-The ledger's **five invariants** are how LSPE audits itself. Only **I1** is evaluated today;
-**I2–I5 are emitted as `"not_run"`** (`loment/lspe/ledger.py`):
+The ledger's **five invariants** are how LSPE audits itself. From 0.1.6 / SDK 1.0 all five are
+computed (`loment/lspe/ledger.py`); the only values set to `"not_run"` are the ones for a
+`lspe_close_admin` unit, which has no ledger to audit.
 
 | # | Invariant | Violation | Today |
 |---|---|---|---|
-| **I1** | every site kind is registered (no ghost, no missing kind) | E35 | **checked** |
-| **I2** | every allowance has a Q1 source or an `assumption(id)` label | E34 | not run |
-| **I3** | the dimensions do not contradict (`no_runtime` has no runtime site, `gc_manual` has no unrecorded `free`, `sealed` has no hosted call) | E35 | not run |
-| **I4** | the floor is countable (`floors == assumed + stale_wf + budget + drop_honest`; no UNDECIDED that is neither answered nor defaulted) | E36 | not run |
-| **I5** | twin sameness: the same site gets the same verdict and source from both implementations | E35 | not run |
+| **I1** | every site kind is registered (no ghost, no missing kind) | E35 | checked |
+| **I2** | every allowance has a Q1 source or an `assumption(id)` label | E34 | checked |
+| **I3** | the dimensions do not contradict (`no_runtime` has no runtime site, `gc_manual` has no unrecorded `free`, `sealed` has no hosted call) | E35 | checked |
+| **I4** | the floor is countable (`floors == assumed + stale_wf + budget + depth + drop_honest + pass`; no UNDECIDED that is neither answered nor defaulted) | E36 | checked |
+| **I5** | twin sameness: the same site gets the same verdict and source from both implementations | E35 | checked |
 
-**What the seven `choose` dimensions do not do**: `lspe` is orthogonal to all of them. It never
+**What the `choose` dimensions do not do**: `lspe` is orthogonal to all of them. It never
 changes a verdict, never changes the IR, and two artifacts that differ only in `lspe` are
 byte-identical (only the Potato ledger differs).
+
+### 5.2 Borrow lifetimes: the eighth dimension (`docs/299`, `docs/351`)
+
+`lifetime` is orthogonal to `gc` and `lms`: `gc` reclaims at run time, `lms` guards access at
+run time, and `lifetime` proves at **compile time** that a borrow cannot outlive its source.
+
+- `lifetime_auto` (the default from `tur2026.3`): `&T` / `&mut T` are first-class types with
+  **zero annotations**. Elision: one reference parameter → every reference output borrows
+  from it; several → the shortest; methods borrow from `self`. A genuine fork needs the
+  `&a T` source marker, which exists only in `lifetime_manual`.
+- `lifetime_no` is the pre-2026.3 shape (`&` in a type position is a parse error); it is still
+  selectable and remains the default for older editions.
+- A borrow is a `ptr` in the artifact. Slice borrows normalise to the existing `[T]` / `mut
+  [T]` views and can be struct fields (`Cursor { data: &[u32] }` is a `{ ptr, i64 }` zero-copy
+  view). `*r` dereferences one borrow; `r.field`, `*r = v` and `r[i]` auto-deref.
+- Diagnostics: a returned borrow that does not come from a parameter is **E041**; a borrow
+  outliving its source, or a returned local borrow, is **E012**; `free(p)` while `p` is
+  borrowed is E041; a **stored** `&mut` excludes later borrows (**E007**, judged per place, so
+  `v.x` and `v.y` are separate). Composite generic arguments (`Box<&T>`, `Box<[T]>`) are
+  refused by name (E041).
+- **Reference-side extensions (2026-11):** a borrow returned by a call enters the exclusive
+  table (a `&mut` local is usable once); field-level partial moves are tracked by **path key**
+  (`let a = o.i;` followed by `g(&o.i)` is **E0240**, while sibling fields and `Copy` fields are
+  fine). The self-hosted side is still name-level for partial moves.
+- **Not done:** NLL. A stored borrow lives to the end of the function; an inline borrow lives
+  for one call. The `safe_borrow` joint domain (runtime loan ledger, E041) is **design-only**
+  (`docs/351`).
 
 ### 8.1 LGC: reclamation (`docs/210`)
 
@@ -413,6 +466,18 @@ Facts that change how you write code:
 - **`no_gc` is a claim checked in the linker.** It says "no collector in the artifact", not "no
   allocation"; the IR carries `; loment-gc: no_gc` and both linkers refuse an artifact that
   contradicts the claim.
+- **Block scope and per-declaration accounting (`docs/353`).** Under `tur2027.1Alpha` a
+  function can declare the same name twice. LGC is conservative: if a name has more than one
+  declaration, that **name's** L0/L1/L2 and L0.5/slot-mask decisions opt out. The E12
+  `ReclaimScoped` site is `Syntactic` only when the allocation's name is declared once;
+  otherwise it stays undecided (not proved), so `--lspe-mode=strict` can surface it. A true
+  per-declaration ladder is the next step.
+- **alpha L0 stack regions (2026-11-19, #1655).** alpha registers a promoted buffer as **one**
+  `(start, words)` entry in a 256-entry stack-region table, not one root-table slot per word;
+  an 8 KiB buffer no longer overflows the 1024-slot root table (the old failure was rc=132/139).
+- **PE LGC (2026-11-22).** The collector, root table and stack-region table are in the IR on
+  PE too; the PE-native run agrees with ELF/WSL (8/16 KiB buffers, `gc_auto` control), and the
+  mirror PE matches the reference PE byte for byte.
 
 **What the artifact records**: Potato `gc` (the tier) and `gc_ladder` (the rung counts). From
 **v19** the ladder has **five** components - `l0`, `l0_5`, `l1`, `l2`, `l3`, `total_sites` - and
